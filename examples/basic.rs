@@ -34,18 +34,22 @@ impl <K: Hash + Eq, V> MyCache<K, V> {
     }
 }
 impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
-    fn get(&mut self, k: &K) -> Option<&V> {
+    fn cache_get(&mut self, k: &K) -> Option<&V> {
         self.store.get(k)
     }
-    fn set(&mut self, k: K, v: V) {
+    fn cache_set(&mut self, k: K, v: V) {
         self.store.insert(k, v);
     }
-    fn size(&self) -> usize {
+    fn cache_size(&self) -> usize {
         self.store.len()
     }
 }
 
-cached!{ FIB_CUSTOM: MyCache >>
+//cached!{ FIB_CUSTOM: MyCache >>
+// ^^ this expects a method `new` on MyCache and will automatically call MyCache::new()
+//
+// To provide an instantiated cache use:
+cached!{ FIB_CUSTOM: MyCache = MyCache::new(); >>
 fib_custom(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
     fib_custom(n-1) + fib_custom(n-2)
@@ -57,8 +61,8 @@ pub fn main() {
     fib(3);
     {
         let cache = FIB.lock().unwrap();
-        println!("hits: {:?}", cache.hits());
-        println!("misses: {:?}", cache.misses());
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
         // make sure lock is dropped
     }
     fib(10);
@@ -68,8 +72,8 @@ pub fn main() {
     fib_specific(20);
     {
         let cache = FIB_SPECIFIC.lock().unwrap();
-        println!("hits: {:?}", cache.hits());
-        println!("misses: {:?}", cache.misses());
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
         // make sure lock is dropped
     }
     fib_specific(20);
@@ -78,8 +82,8 @@ pub fn main() {
     fib_custom(25);
     {
         let cache = FIB_CUSTOM.lock().unwrap();
-        println!("hits: {:?}", cache.hits());
-        println!("misses: {:?}", cache.misses());
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
         // make sure lock is dropped
     }
 }
