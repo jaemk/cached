@@ -1,38 +1,43 @@
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
-use cached::{Cache};
+use cached::{Cache, Cached};
 
 
-fn fib(n: u32) -> u32 {
-    let (mut a, mut b) = (0, 1);
-    let mut sum = 0;
-    for _ in 0..n {
-        sum += a;
-        let hold = a;
-        a = b;
-        b = hold + b;
-    }
-    sum
-}
-cached_with!{ CachedFib ; Cache<u32, u32>; fib ; n: u32; u32}
-
-
-
-cached!{ FC ; rec_fib(n: u32) -> u32 ; {
+cached!{ FIB >>
+fib(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
-    rec_fib(n-1) + rec_fib(n-2)
+    fib(n-1) + fib(n-2)
+}}
+
+
+cached!{ FIB_CUSTOM: Cache >>
+fib_custom(n: u32) -> u32 = {
+    if n == 0 || n == 1 { return n; }
+    fib_custom(n-1) + fib_custom(n-2)
 }}
 
 
 pub fn main() {
-    let mut f = CachedFib::new(Cache::new());
-    let _ = f.call(5);
-    let res = f.call(5);
-    println!("cached fib: {}", res);
+    fib(3);
+    fib(3);
+    {
+        let cache = FIB.lock().unwrap();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
+        // make sure lock is dropped
+    }
+    fib(10);
+    fib(10);
 
-    rec_fib(5);
-    rec_fib(5);
-    rec_fib(10);
-    rec_fib(10);
+    fib_custom(20);
+    fib_custom(20);
+    {
+        let cache = FIB_CUSTOM.lock().unwrap();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
+        // make sure lock is dropped
+    }
+    fib_custom(20);
+    fib_custom(20);
 }

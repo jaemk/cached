@@ -1,61 +1,62 @@
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::cmp::Eq;
+
 
 #[macro_export]
 macro_rules! cached {
-    ($cachename:ident ; $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty ; $body:expr) => {
+    ($cachename:ident >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<::std::collections::HashMap<($($argtype),*), $ret>> = {
-                ::std::sync::Mutex::new(::std::collections::HashMap::new())
+            static ref $cachename: ::std::sync::Mutex<Cache<($($argtype),*), $ret>> = {
+                ::std::sync::Mutex::new(Cache::new())
             };
         }
+        #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = ($($arg.clone()),*);
             {
-                let cache = $cachename.lock().unwrap();
+                let mut cache = $cachename.lock().unwrap();
                 let res = cache.get(&key);
                 if let Some(res) = res { return res.clone(); }
             }
-            let val = $body;
+            let val = (||$body)();
             let mut cache = $cachename.lock().unwrap();
-            cache.insert(key, val.clone());
+            cache.set(key, val.clone());
+            val
+        }
+    };
+    ($cachename:ident : $cachetype:ident >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+        lazy_static! {
+            static ref $cachename: ::std::sync::Mutex<$cachetype<($($argtype),*), $ret>> = {
+                ::std::sync::Mutex::new($cachetype::new())
+            };
+        }
+        #[allow(unused_parens)]
+        pub fn $name($($arg: $argtype),*) -> $ret {
+            let key = ($($arg.clone()),*);
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = cache.get(&key);
+                if let Some(res) = res { return res.clone(); }
+            }
+            let val = (||$body)();
+            let mut cache = $cachename.lock().unwrap();
+            cache.set(key, val.clone());
             val
         }
     };
 }
 
 
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::cmp::Eq;
-
-#[macro_export]
-macro_rules! cached_with {
-    ($cached:ident ; $cachetype:ty ; $wrapped:ident ; $($arg:ident : $argtype:ty),* ; $ret:ty) => {
-        pub struct $cached {
-            pub cache: $cachetype,
-        }
-        impl $cached {
-            pub fn new(cache: $cachetype) -> $cached {
-                $cached { cache: cache }
-            }
-            pub fn call(&mut self, $($arg: $argtype),*) -> $ret {
-                let key = ($($arg.clone()),*);
-                {
-                    let res = self.cache.get(&key);
-                    if let Some(res) = res { println!("hit!"); return res.clone(); }
-                }
-                let val = $wrapped($($arg),*);
-                self.cache.set(key, val.clone());
-                val
-            }
-        }
-    }
+pub trait Cached<K, V> {
+    fn get(&mut self, k: &K) -> Option<&V>;
+    fn set(&mut self, k: K, v: V);
+    fn size(&self) -> usize;
+    fn hits(&self) -> Option<u32> { None }
+    fn misses(&self) -> Option<u32> { None }
+    fn capacity(&self) -> Option<u32> { None }
+    fn seconds(&self) -> Option<u64> { None }
 }
-
-
-//pub trait Cached<K, V> {
-//    fn get(&mut self, k: &K) -> Option<&V>;
-//    fn set(&mut self, k: K, v: V);
-//}
 
 
 pub struct Cache<K: Hash + Eq, V> {
@@ -72,9 +73,9 @@ impl <K: Hash + Eq, V> Cache<K, V> {
             misses: 0,
         }
     }
-//}
-//impl <K: Hash + Eq, V> Cached<K, V> for Cache<K, V> {
-    pub fn get(&mut self, k: &K) -> Option<&V> {
+}
+impl <K: Hash + Eq, V> Cached<K, V> for Cache<K, V> {
+    fn get(&mut self, k: &K) -> Option<&V> {
         match self.store.get(k) {
             Some(v) => {
                 self.hits += 1;
@@ -86,9 +87,12 @@ impl <K: Hash + Eq, V> Cache<K, V> {
             }
         }
     }
-    pub fn set(&mut self, k: K, v: V) {
+    fn set(&mut self, k: K, v: V) {
         self.store.insert(k, v);
     }
+    fn size(&self) -> usize { self.store.len() }
+    fn hits(&self) -> Option<u32> { Some(self.hits) }
+    fn misses(&self) -> Option<u32> { Some(self.misses) }
 }
 
 
