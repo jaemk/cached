@@ -10,6 +10,8 @@ Easy to use caching inspired by python decorators.
 
 ```rust
 #[macro_use] extern crate cached;
+#[macro_use] extern crate lazy_static;
+
 
 cached!{ FIB >>
 fib(n: u32) -> u32 = {
@@ -22,8 +24,8 @@ pub fn main() {
     fib(20);
     {
         let cache = FIB.lock().unwrap();
-        println!("hits: {:?}", cache.hits());
-        println!("misses: {:?}", cache.misses());
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
         // make sure the cache-lock is dropped
     }
     println!("fib(20) = {}", fib(20));
