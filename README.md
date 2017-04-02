@@ -1,8 +1,6 @@
-# cached
+# cached [![Build Status](https://travis-ci.org/jaemk/cached.svg?branch=master)](https://travis-ci.org/jaemk/cached)
 
 > simple rust caching macro
-
-### wip!
 
 ## Usage
 
@@ -10,6 +8,7 @@ Easy to use caching inspired by python decorators.
 
 ```rust
 #[macro_use] extern crate cached;
+// `cached` requires the `lazy_static!` macro
 #[macro_use] extern crate lazy_static;
 
 
