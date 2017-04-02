@@ -4,6 +4,17 @@ use std::cmp::Eq;
 
 
 #[macro_export]
+/// Creates a function wrapping a cache. `SpecificCacheType` is optional.
+/// If `SpecificCacheType` is not provided, a default cache (`cached::Cache`) will be used.
+/// `SpecificCacheType` must implement `cached::Cached`
+///
+/// Example:
+/// ```rust,ignore
+/// cached!{CACHE_NAME: SpecificCacheType >>
+/// func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
+///     <regular function body>
+/// }}
+/// ```
 macro_rules! cached {
     ($cachename:ident >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
