@@ -2,8 +2,15 @@
 name = "cached"
 version = "0.1.0"
 authors = ["James Kominick <james.kominick@gmail.com>"]
-description = "Simple function caching"
+description = "Simple function caching/memoization"
+repository = "https://github.com/jaemk/cached"
+readme = "README.md"
+categories = ["caching"]
+keywords = ["caching", "cache", "cached", "memoize", "memoization"]
 license = "MIT"
+
+[badges]
+travis-ci = { repository = "https://travis-ci.org/jaemk/cached", branch = "master" }
 
 [dependencies]
 lazy_static = "*"
