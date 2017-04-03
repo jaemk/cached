@@ -1,12 +1,12 @@
 [package]
 name = "cached"
-version = "0.2.4"
+version = "0.3.0"
 authors = ["James Kominick <james.kominick@gmail.com>"]
 description = "Simple function caching/memoization"
 repository = "https://github.com/jaemk/cached"
 readme = "README.md"
 categories = ["caching"]
-keywords = ["caching", "cache", "cached", "memoize", "memoization"]
+keywords = ["caching", "cache", "cached", "memoize", "memoization", "lru", "lru_cache"]
 license = "MIT"
 
 [badges]
