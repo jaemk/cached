@@ -1,4 +1,4 @@
-# cached [![Build Status](https://travis-ci.org/jaemk/cached.svg?branch=master)](https://travis-ci.org/jaemk/cached)
+# cached [![Build Status](https://travis-ci.org/jaemk/cached.svg?branch=master)](https://travis-ci.org/jaemk/cached) [![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached)
 
 > simple rust caching macro
 
