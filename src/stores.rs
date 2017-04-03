@@ -12,25 +12,25 @@ use super::Cached;
 
 
 /// Default unbounded cache
-pub struct Cache<K: Hash + Eq, V> {
+pub struct UnboundCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
     hits: u32,
     misses: u32,
 }
 
-impl <K: Hash + Eq, V> Cache<K, V> {
-    /// Creates an empty `Cache`
-    pub fn new() -> Cache<K, V> {
-        Cache {
+impl <K: Hash + Eq, V> UnboundCache<K, V> {
+    /// Creates an empty `UnboundCache`
+    pub fn new() -> UnboundCache<K, V> {
+        UnboundCache {
             store: HashMap::new(),
             hits: 0,
             misses: 0,
         }
     }
 
-    /// Creates an empty `Cache` with a given pre-allocated capacity
-    pub fn with_capacity(size: usize) -> Cache<K, V> {
-        Cache {
+    /// Creates an empty `UnboundCache` with a given pre-allocated capacity
+    pub fn with_capacity(size: usize) -> UnboundCache<K, V> {
+        UnboundCache {
             store: HashMap::with_capacity(size),
             hits: 0,
             misses: 0,
@@ -38,7 +38,7 @@ impl <K: Hash + Eq, V> Cache<K, V> {
     }
 }
 
-impl <K: Hash + Eq, V> Cached<K, V> for Cache<K, V> {
+impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         match self.store.get(key) {
             Some(v) => {
@@ -213,13 +213,13 @@ mod tests {
 
     use super::Cached;
 
-    use super::Cache;
+    use super::UnboundCache;
     use super::SizedCache;
     use super::TimedCache;
 
     #[test]
     fn basic_cache() {
-        let mut c = Cache::new();
+        let mut c = UnboundCache::new();
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);

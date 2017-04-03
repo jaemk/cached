@@ -7,8 +7,8 @@ macro_rules! cached {
     // Use default cached::Cache
     ($cachename:ident >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<cached::Cache<($($argtype),*), $ret>> = {
-                ::std::sync::Mutex::new(cached::Cache::new())
+            static ref $cachename: ::std::sync::Mutex<cached::UnboundCache<($($argtype),*), $ret>> = {
+                ::std::sync::Mutex::new(cached::UnboundCache::new())
             };
         }
         #[allow(unused_parens)]
