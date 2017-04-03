@@ -30,9 +30,6 @@ struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
 }
 impl <K: Hash + Eq, V> MyCache<K, V> {
-    pub fn new() -> MyCache<K, V> {
-        MyCache{ store: HashMap::new() }
-    }
     pub fn with_capacity(size: usize) -> MyCache<K, V> {
         MyCache { store: HashMap::with_capacity(size) }
     }
