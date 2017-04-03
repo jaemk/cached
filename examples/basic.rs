@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::cmp::Eq;
 
-use cached::{Cache, Cached};
+use std::time::Duration;
+use std::thread::sleep;
+
+use cached::{UnboundCache, Cached};
 
 
 /// Use the default unbounded cache, `Cache`.
@@ -18,7 +21,7 @@ fib(n: u32) -> u32 = {
 
 
 /// Specify the cache type.
-cached!{ FIB_SPECIFIC: Cache >>
+cached!{ FIB_SPECIFIC: UnboundCache >>
 fib_specific(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
     fib_specific(n-1) + fib_specific(n-2)
@@ -47,19 +50,29 @@ impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 }
 
 
-//cached!{ FIB_CUSTOM: MyCache >>
+//cached!{ CUSTOM: MyCache >>
 // ^^ this expects a method `new` on MyCache and will automatically call MyCache::new()
 //
 // To provide an instantiated cache use the following:
 /// Specify our custom cache and supply an instance to use
-cached!{ FIB_CUSTOM: MyCache = MyCache::with_capacity(50); >>
-fib_custom(n: u32) -> u32 = {
-    if n == 0 || n == 1 { return n; }
-    fib_custom(n-1) + fib_custom(n-2)
+cached!{ CUSTOM: MyCache = MyCache::with_capacity(50); >>
+custom(n: u32) -> () = {
+    if n == 0 { return; }
+    custom(n-1)
+}}
+
+
+
+cached!{ SLOW >>
+slow(n: u32) -> u32 = {
+    if n == 0 || n == 1 { return n }
+    sleep(Duration::new(1, 0));
+    slow(n-1) + slow(n-2)
 }}
 
 
 pub fn main() {
+    println!("\n ** default cache **");
     fib(3);
     fib(3);
     {
@@ -71,6 +84,7 @@ pub fn main() {
     fib(10);
     fib(10);
 
+    println!("\n ** specific cache **");
     fib_specific(20);
     fib_specific(20);
     {
@@ -82,11 +96,24 @@ pub fn main() {
     fib_specific(20);
     fib_specific(20);
 
-    fib_custom(25);
+    println!("\n ** custom cache **");
+    custom(25);
     {
-        let cache = FIB_CUSTOM.lock().unwrap();
+        let cache = CUSTOM.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
         println!("misses: {:?}", cache.cache_misses());
         // make sure lock is dropped
+    }
+
+    println!("\n ** slow func **");
+    println!(" - first run `slow(10)`");
+    slow(10);
+    println!(" - second run `slow(10)`");
+    slow(10);
+    {
+        let cache = SLOW.lock().unwrap();
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
+        // make sure the cache-lock is dropped
     }
 }
