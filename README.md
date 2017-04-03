@@ -4,7 +4,7 @@
 
 ## Usage
 
-Easy to use caching inspired by python decorators.
+Easy to use caching inspired by python decorators. See `examples` for examples of using a specific cache-store.
 
 ```rust
 #[macro_use] extern crate cached;
