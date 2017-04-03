@@ -22,9 +22,10 @@ Macro(s) for defining functions that wrap a static-ref cache object.
 /// }}
 ///
 /// 3.) Use an explicitly specified cache-type and provide the instantiated cache struct.
-///     This would allow using caches that require args in their constructor.
+///     This would allow using caches that require args in their constructor or has a constructor
+///     method other than a simple `new`.
 /// ```rust,ignore
-/// cached!{CACHE_NAME: MyCache = MyCache::new(arg); >>
+/// cached!{CACHE_NAME: MyCache = MyCache::with_capacity(arg); >>
 /// func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
 ///     <regular function body>
 /// }}
