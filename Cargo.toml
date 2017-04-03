@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["James Kominick <james.kominick@gmail.com>"]
 description = "Simple function caching/memoization"
 repository = "https://github.com/jaemk/cached"
@@ -10,7 +10,7 @@ keywords = ["caching", "cache", "cached", "memoize", "memoization"]
 license = "MIT"
 
 [badges]
-travis-ci = { repository = "https://travis-ci.org/jaemk/cached.svg?branch=master", branch = "master" }
+travis-ci = { repository = "jaemk/cached", branch = "master" }
 
 [dev-dependencies]
 lazy_static = "0.2"
