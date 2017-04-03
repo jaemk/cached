@@ -4,6 +4,8 @@ A macro for defining functions that wrap a static-ref cache object.
 # Options:
 
 1.) Use the default unbounded cache
+
+
 ```rust,ignore
 cached!{CACHE_NAME >>
 func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
@@ -11,8 +13,11 @@ func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
 }}
 ```
 
+
 2.) Use an explicitly specified cache-type, but let the macro instantiate it.
     The cache-type is expected to have a `new` method that takes no arguments.
+
+
 ```rust,ignore
 cached!{CACHE_NAME: SpecificCacheType >>
 func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
@@ -20,15 +25,19 @@ func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
 }}
 ```
 
+
 3.) Use an explicitly specified cache-type and provide the instantiated cache struct.
     This allows using caches that require args in their constructor or have a constructor
     method other than a simple `new`.
+
+
 ```rust,ignore
 cached!{CACHE_NAME: MyCache = MyCache::with_capacity(arg); >>
 func_name(arg1: arg1_type, arg2: arg2_type) -> return_type = {
     <regular function body>
 }}
 ```
+
 
 Custom cache types must implement `cached::Cached`
 
