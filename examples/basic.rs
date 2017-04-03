@@ -8,7 +8,8 @@ use std::cmp::Eq;
 use cached::{Cache, Cached};
 
 
-/// use the default cache
+/// Use the default unbounded cache, `Cache`.
+/// Equivalent to specifying `FIB: Cache`
 cached!{ FIB >>
 fib(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
@@ -16,7 +17,7 @@ fib(n: u32) -> u32 = {
 }}
 
 
-/// use a specific cache
+/// Specify the cache type.
 cached!{ FIB_SPECIFIC: Cache >>
 fib_specific(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
@@ -24,13 +25,16 @@ fib_specific(n: u32) -> u32 = {
 }}
 
 
-/// implement our own cache
+/// Implement our own cache type
 struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
 }
 impl <K: Hash + Eq, V> MyCache<K, V> {
     pub fn new() -> MyCache<K, V> {
-        MyCache{store: HashMap::new()}
+        MyCache{ store: HashMap::new() }
+    }
+    pub fn with_capacity(size: usize) -> MyCache<K, V> {
+        MyCache { store: HashMap::with_capacity(size) }
     }
 }
 impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
@@ -45,11 +49,13 @@ impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     }
 }
 
+
 //cached!{ FIB_CUSTOM: MyCache >>
 // ^^ this expects a method `new` on MyCache and will automatically call MyCache::new()
 //
-// To provide an instantiated cache use:
-cached!{ FIB_CUSTOM: MyCache = MyCache::new(); >>
+// To provide an instantiated cache use the following:
+/// Specify our custom cache and supply an instance to use
+cached!{ FIB_CUSTOM: MyCache = MyCache::with_capacity(50); >>
 fib_custom(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
     fib_custom(n-1) + fib_custom(n-2)
