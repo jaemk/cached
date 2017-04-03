@@ -9,6 +9,23 @@ use std::thread::sleep;
 use cached::{Cached, SizedCache, TimedCache};
 
 
+cached!{ UNBOUND_FIB >>
+fib0(n: u32) -> u32 = {
+    if n == 0 || n == 1 { return n }
+    fib0(n-1) + fib0(n-2)
+}}
+
+
+#[test]
+fn test_unbound_cache() {
+    fib0(20);
+    {
+        let cache = UNBOUND_FIB.lock().unwrap();
+        assert_eq!(21, cache.cache_size());
+    }
+}
+
+
 cached!{ SIZED_FIB: SizedCache = SizedCache::with_capacity(3); >>
 fib1(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n }
