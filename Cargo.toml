@@ -13,4 +13,4 @@ license = "MIT"
 travis-ci = { repository = "https://travis-ci.org/jaemk/cached", branch = "master" }
 
 [dev-dependencies]
-lazy_static = "*"
+lazy_static = "0.2"
