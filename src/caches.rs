@@ -16,16 +16,27 @@ pub struct Cache<K: Hash + Eq, V> {
     hits: u32,
     misses: u32,
 }
+
 impl <K: Hash + Eq, V> Cache<K, V> {
+    /// Creates an empty `Cache`
     pub fn new() -> Cache<K, V> {
-        let store = HashMap::new();
         Cache {
-            store: store,
+            store: HashMap::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Creates an empty `Cache` with a given pre-allocated capacity
+    pub fn with_capacity(size: usize) -> Cache<K, V> {
+        Cache {
+            store: HashMap::with_capacity(size),
             hits: 0,
             misses: 0,
         }
     }
 }
+
 impl <K: Hash + Eq, V> Cached<K, V> for Cache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         match self.store.get(key) {
@@ -50,7 +61,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for Cache<K, V> {
 
 /// Least Recently Used / `Sized` Cache
 /// - Stores up to a specified sized before beginning
-///   to evict the least recently used values
+///   to evict the least recently used keys
 pub struct SizedCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
     order: LinkedList<K>,
@@ -58,8 +69,10 @@ pub struct SizedCache<K: Hash + Eq, V> {
     hits: u32,
     misses: u32,
 }
+
 impl<K: Hash + Eq, V> SizedCache<K, V> {
-    pub fn new(size: usize) -> SizedCache<K, V> {
+    /// Creates a new `SizedCache` with a given capacity
+    pub fn with_capacity(size: usize) -> SizedCache<K, V> {
         if size == 0 { panic!("`size` of `SizedCache` must be greater than zero.") }
         SizedCache {
             store: HashMap::with_capacity(size),
@@ -69,10 +82,13 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
             misses: 0,
         }
     }
+
+    /// Returns the max capacity of the cache-store
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 }
+
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         let val = self.store.get(key);
@@ -109,6 +125,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
 
 
 #[cfg(test)]
+/// Cache store tests
 mod tests {
     use super::Cached;
 
@@ -132,7 +149,7 @@ mod tests {
 
     #[test]
     fn sized_cache() {
-        let mut c = SizedCache::new(5);
+        let mut c = SizedCache::with_capacity(5);
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
