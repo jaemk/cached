@@ -4,6 +4,7 @@ Implementation of various caches
 */
 
 use std::collections::{HashMap, LinkedList};
+use std::time::{Instant};
 use std::hash::Hash;
 use std::cmp::Eq;
 
@@ -82,11 +83,6 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
             misses: 0,
         }
     }
-
-    /// Returns the max capacity of the cache-store
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
@@ -121,16 +117,105 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
     fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
+    fn cache_capacity(&self) -> Option<usize> { Some(self.capacity) }
+}
+
+
+/// Enum used for defining the status of time-cached values
+enum Status {
+    NotFound,
+    Found,
+    Expired,
+}
+
+
+/// Cache store bound by time
+/// - Values are timestamped when inserted and are
+///   expired on attempted retrieval.
+pub struct TimedCache<K: Hash + Eq, V> {
+    store: HashMap<K, (Instant, V)>,
+    seconds: u64,
+    hits: u32,
+    misses: u32,
+}
+
+impl<K: Hash + Eq, V> TimedCache<K, V> {
+    /// Creates a new `TimedCache` with a specified lifespan
+    pub fn with_lifespan(seconds: u64) -> TimedCache<K, V> {
+        TimedCache {
+            store: HashMap::new(),
+            seconds: seconds,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Creates a new `TimedCache` with a specified lifespan and
+    /// cache-store with the specified pre-allocated capacity
+    pub fn with_lifespan_and_capacity(seconds: u64, size: usize) -> TimedCache<K, V> {
+        TimedCache {
+            store: HashMap::with_capacity(size),
+            seconds: seconds,
+            hits: 0,
+            misses: 0,
+        }
+    }
+}
+
+impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
+    fn cache_get(&mut self, key: &K) -> Option<&V> {
+        let status = {
+            let val = self.store.get(key);
+            if let Some(&(instant, _)) = val {
+                if instant.elapsed().as_secs() < self.seconds {
+                    Status::Found
+                } else {
+                    Status::Expired
+                }
+            } else {
+                 Status::NotFound
+            }
+        };
+        match status {
+            Status::NotFound => {
+                self.misses += 1;
+                None
+            }
+            Status::Found    => {
+                self.hits += 1;
+                self.store.get(key).map(|stamped| &stamped.1)
+            }
+            Status::Expired  => {
+                self.misses += 1;
+                self.store.remove(key).unwrap();
+                None
+            }
+        }
+    }
+    fn cache_set(&mut self, key: K, val: V) {
+        let stamped = (Instant::now(), val);
+        self.store.insert(key, stamped);
+    }
+    fn cache_size(&self) -> usize {
+        self.store.len()
+    }
+    fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
+    fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
+    fn cache_lifespan(&self) -> Option<u64> { Some(self.seconds) }
 }
 
 
 #[cfg(test)]
 /// Cache store tests
 mod tests {
+    use std::time::Duration;
+    use std::thread::sleep;
+
     use super::Cached;
 
     use super::Cache;
     use super::SizedCache;
+    use super::TimedCache;
 
     #[test]
     fn basic_cache() {
@@ -169,5 +254,25 @@ mod tests {
         c.cache_set(7, 100);
         let size = c.cache_size();
         assert_eq!(5, size);
+    }
+
+    #[test]
+    fn timed_cache() {
+        let mut c = TimedCache::with_lifespan(2);
+        assert!(c.cache_get(&1).is_none());
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, misses);
+
+        c.cache_set(1, 100);
+        assert!(c.cache_get(&1).is_some());
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, hits);
+        assert_eq!(1, misses);
+
+        sleep(Duration::new(2, 0));
+        assert!(c.cache_get(&1).is_none());
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(2, misses);
     }
 }

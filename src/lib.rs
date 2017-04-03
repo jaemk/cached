@@ -2,9 +2,9 @@ use std::hash::Hash;
 use std::cmp::Eq;
 
 pub mod macros;
-pub mod caches;
+pub mod stores;
 
-pub use caches::*;
+pub use stores::*;
 
 
 /// Blank `marker` function to help enforce the `cached::Cached` trait on any
@@ -18,8 +18,8 @@ pub trait Cached<K, V> {
     fn cache_size(&self) -> usize;
     fn cache_hits(&self) -> Option<u32> { None }
     fn cache_misses(&self) -> Option<u32> { None }
-    fn cache_capacity(&self) -> Option<u32> { None }
-    fn cache_seconds(&self) -> Option<u64> { None }
+    fn cache_capacity(&self) -> Option<usize> { None }
+    fn cache_lifespan(&self) -> Option<u64> { None }
 }
 
 
