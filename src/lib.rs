@@ -16,7 +16,7 @@ There's several option depending on how explicit you want to be. See below for f
 use cached::SizedCache;
 
 cached!{FIB: SizedCache = SizedCache::with_capacity(50); >>
-fib(n: u64) -> u64 = {
+fn fib(n: u64) -> u64 = {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }}
@@ -36,7 +36,7 @@ pub fn main() { }
 use cached::UnboundCache;
 
 cached!{FIB: UnboundCache >>
-fib(n: u64) -> u64 = {
+fn fib(n: u64) -> u64 = {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }}
@@ -53,7 +53,7 @@ pub fn main() { }
 #[macro_use] extern crate lazy_static;
 
 cached!{FIB >>
-fib(n: u64) -> u64 = {
+fn fib(n: u64) -> u64 = {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }}
@@ -79,7 +79,7 @@ The complete macro syntax is:
 
 ```rust,ignore
 cached!{CACHE_NAME: CacheType = CacheType::constructor(arg); >>
-func_name(arg1: arg_type, arg2: arg_type) -> return_type = {
+fn func_name(arg1: arg_type, arg2: arg_type) -> return_type = {
     // do stuff like normal
     return_type
 }}
@@ -93,8 +93,8 @@ Where:
    directly)
 - `CacheType::constructor(arg)` is any expression that yields an instance of `CacheType` to be used
   as the cache-store, followed by `; >>`
-- `func_name(arg1: arg_type) -> return_type` is the same form as a regular function signature, with the exception
-  that functions with no return value must be explicitly stated (e.g. `fn(arg: arg_type) -> ()`)
+- `fn func_name(arg1: arg_type) -> return_type` is the same form as a regular function signature, with the exception
+  that functions with no return value must be explicitly stated (e.g. `fn func_name(arg: arg_type) -> ()`)
 - The expression following `=` is the function body assigned to `func_name`. Note, the function
   body can make recursive calls to its cached-self (`func_name`).
 

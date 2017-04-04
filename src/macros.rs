@@ -5,7 +5,7 @@ Macro for defining functions that wrap a static-ref cache object.
 #[macro_export]
 macro_rules! cached {
     // Use default cached::Cache
-    ($cachename:ident >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+    ($cachename:ident >> fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
             static ref $cachename: ::std::sync::Mutex<cached::UnboundCache<($($argtype),*), $ret>> = {
                 ::std::sync::Mutex::new(cached::UnboundCache::new())
@@ -27,7 +27,7 @@ macro_rules! cached {
     };
 
     // Use specified cache-type, implicitly create the cache (expect there to be a `new` method)
-    ($cachename:ident : $cachetype:ident >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+    ($cachename:ident : $cachetype:ident >> fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
             static ref $cachename: ::std::sync::Mutex<$cachetype<($($argtype),*), $ret>> = {
                 ::std::sync::Mutex::new($cachetype::new())
@@ -50,7 +50,7 @@ macro_rules! cached {
     };
 
     // Use a specified cache-type and an explicitly created cache-instance
-    ($cachename:ident : $cachetype:ident = $cacheinstance:expr ; >> $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+    ($cachename:ident : $cachetype:ident = $cacheinstance:expr ; >> fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
             static ref $cachename: ::std::sync::Mutex<$cachetype<($($argtype),*), $ret>> = {
                 ::std::sync::Mutex::new($cacheinstance)
