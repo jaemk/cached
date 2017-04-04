@@ -252,6 +252,9 @@ mod tests {
         c.cache_set(5, 100);
         c.cache_set(6, 100);
         c.cache_set(7, 100);
+        assert!(c.cache_get(&2).is_none());
+        assert!(c.cache_get(&3).is_some());
+        assert_eq!(2, c.cache_misses().unwrap());
         let size = c.cache_size();
         assert_eq!(5, size);
     }

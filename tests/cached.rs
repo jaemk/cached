@@ -10,7 +10,7 @@ use cached::{Cached, SizedCache, TimedCache};
 
 
 cached!{ UNBOUND_FIB >>
-fib0(n: u32) -> u32 = {
+fn fib0(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n }
     fib0(n-1) + fib0(n-2)
 }}
@@ -27,7 +27,7 @@ fn test_unbound_cache() {
 
 
 cached!{ SIZED_FIB: SizedCache = SizedCache::with_capacity(3); >>
-fib1(n: u32) -> u32 = {
+fn fib1(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n }
     fib1(n-1) + fib1(n-2)
 }}
@@ -44,7 +44,7 @@ fn test_sized_cache() {
 
 
 cached!{ TIMED_FIB: TimedCache = TimedCache::with_lifespan_and_capacity(2, 5); >>
-fib2(n: u32) -> u32 = {
+fn fib2(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n }
     fib2(n-1) + fib2(n-2)
 }}
