@@ -1,19 +1,3 @@
-# cached [![Build Status](https://travis-ci.org/jaemk/cached.svg?branch=master)](https://travis-ci.org/jaemk/cached) [![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached) [![docs](https://docs.rs/cached/badge.svg)](https://docs.rs/cached)
-
-> simple rust caching macro
-
-Easy to use function caching/memoization inspired by python decorators.
-
-Function results are cached using the function's arguments as a key. All function arguments must implement `Hash + Eq` in order to cache. When a `cached!` defined function is called, the function's cache is first checked for an already computed (and still valid) value before evaluating the function body. `cached!` functions should not be used to produce side-effectual results!
-
-[Documentation](https://docs.rs/cached)
-
-See `examples` for example of implementing a custom cache-store.
-
-## Usage
-
-
-```rust
 #[macro_use] extern crate cached;
 // `cached!` macro requires the `lazy_static!` macro
 #[macro_use] extern crate lazy_static;
@@ -52,5 +36,3 @@ pub fn main() {
         // make sure the cache-lock is dropped
     }
 }
-```
-
