@@ -13,7 +13,7 @@ There's several option depending on how explicit you want to be. See below for f
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
-use cached::{Cached, SizedCache};
+use cached::SizedCache;
 
 cached!{FIB: SizedCache = SizedCache::with_capacity(50); >>
 fib(n: u64) -> u64 = {

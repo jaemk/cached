@@ -33,6 +33,7 @@ pub fn main() {
     slow(10);
     slow(10);
     {
+        use cached::Cached;  // must be in scope to access cache
         let cache = SLOW.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
         println!("misses: {:?}", cache.cache_misses());
