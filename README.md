@@ -19,7 +19,7 @@ See `examples` for example of implementing a custom cache-store.
 use std::time::Duration;
 use std::thread::sleep;
 
-use cached::{Cached, SizedCache}; // trait must be in scope
+use cached::SizedCache;
 
 
 cached!{ SLOW: SizedCache = SizedCache::with_capacity(50); >>

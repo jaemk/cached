@@ -16,12 +16,12 @@ macro_rules! cached {
             let key = ($($arg.clone()),*);
             {
                 let mut cache = $cachename.lock().unwrap();
-                let res = cache.cache_get(&key);
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return res.clone(); }
             }
             let val = (||$body)();
             let mut cache = $cachename.lock().unwrap();
-            cache.cache_set(key, val.clone());
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
             val
         }
     };
@@ -39,12 +39,12 @@ macro_rules! cached {
             {
                 let mut cache = $cachename.lock().unwrap();
                 cached::enforce_cached_impl(&cache);
-                let res = cache.cache_get(&key);
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return res.clone(); }
             }
             let val = (||$body)();
             let mut cache = $cachename.lock().unwrap();
-            cache.cache_set(key, val.clone());
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
             val
         }
     };
@@ -62,12 +62,12 @@ macro_rules! cached {
             {
                 let mut cache = $cachename.lock().unwrap();
                 cached::enforce_cached_impl(&cache);
-                let res = cache.cache_get(&key);
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return res.clone(); }
             }
             let val = (||$body)();
             let mut cache = $cachename.lock().unwrap();
-            cache.cache_set(key, val.clone());
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
             val
         }
     };

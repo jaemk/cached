@@ -33,7 +33,7 @@ pub fn main() { }
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
-use cached::{Cached, UnboundCache};
+use cached::UnboundCache;
 
 cached!{FIB: UnboundCache >>
 fib(n: u64) -> u64 = {
@@ -51,8 +51,6 @@ pub fn main() { }
 ```rust
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
-
-use cached::{Cached};
 
 cached!{FIB >>
 fib(n: u64) -> u64 = {
