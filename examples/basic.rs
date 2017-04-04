@@ -14,7 +14,7 @@ use cached::{UnboundCache, Cached};
 /// Use the default unbounded cache, `Cache`.
 /// Equivalent to specifying `FIB: Cache`
 cached!{ FIB >>
-fib(n: u32) -> u32 = {
+fn fib(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
     fib(n-1) + fib(n-2)
 }}
@@ -22,7 +22,7 @@ fib(n: u32) -> u32 = {
 
 /// Specify the cache type.
 cached!{ FIB_SPECIFIC: UnboundCache >>
-fib_specific(n: u32) -> u32 = {
+fn fib_specific(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n; }
     fib_specific(n-1) + fib_specific(n-2)
 }}
@@ -56,7 +56,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 // To provide an instantiated cache use the following:
 /// Specify our custom cache and supply an instance to use
 cached!{ CUSTOM: MyCache = MyCache::with_capacity(50); >>
-custom(n: u32) -> () = {
+fn custom(n: u32) -> () = {
     if n == 0 { return; }
     custom(n-1)
 }}
@@ -64,7 +64,7 @@ custom(n: u32) -> () = {
 
 
 cached!{ SLOW >>
-slow(n: u32) -> u32 = {
+fn slow(n: u32) -> u32 = {
     if n == 0 || n == 1 { return n }
     sleep(Duration::new(1, 0));
     slow(n-1) + slow(n-2)
