@@ -1,9 +1,10 @@
 [package]
 name = "cached"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["James Kominick <james.kominick@gmail.com>"]
 description = "Simple function caching/memoization"
 repository = "https://github.com/jaemk/cached"
+documentation = "https://docs.rs/cached"
 readme = "README.md"
 categories = ["caching"]
 keywords = ["caching", "cache", "cached", "memoize", "lru"]
