@@ -6,7 +6,7 @@ description = "Simple function caching/memoization"
 repository = "https://github.com/jaemk/cached"
 readme = "README.md"
 categories = ["caching"]
-keywords = ["caching", "cache", "cached", "memoize", "memoization", "lru", "lru_cache"]
+keywords = ["caching", "cache", "cached", "memoize", "lru"]
 license = "MIT"
 
 [badges]
