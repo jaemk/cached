@@ -101,18 +101,10 @@ Where:
 
 */
 
-use std::hash::Hash;
-use std::cmp::Eq;
-
 pub mod macros;
 pub mod stores;
 
 pub use stores::*;
-
-
-/// Blank marker function to help enforce the `cached::Cached` trait on any
-/// explicitly specified cache types
-pub fn enforce_cached_impl<K: Hash + Eq, V, T: Cached<K, V>>(_: &::std::sync::MutexGuard<T>) {}
 
 
 pub trait Cached<K, V> {

@@ -38,7 +38,6 @@ macro_rules! cached {
             let key = ($($arg.clone()),*);
             {
                 let mut cache = $cachename.lock().unwrap();
-                cached::enforce_cached_impl(&cache);
                 let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return res.clone(); }
             }
@@ -61,7 +60,6 @@ macro_rules! cached {
             let key = ($($arg.clone()),*);
             {
                 let mut cache = $cachename.lock().unwrap();
-                cached::enforce_cached_impl(&cache);
                 let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return res.clone(); }
             }
