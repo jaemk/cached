@@ -4,6 +4,7 @@ Implementation of various caches
 */
 
 use std::collections::{HashMap, LinkedList};
+use std::collections::linked_list::Iter;
 use std::time::{Instant};
 use std::hash::Hash;
 use std::cmp::Eq;
@@ -82,6 +83,9 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
             hits: 0,
             misses: 0,
         }
+    }
+    pub fn key_order(&self) -> Iter<K> {
+        self.order.iter()
     }
 }
 
@@ -250,10 +254,19 @@ mod tests {
         c.cache_set(3, 100);
         c.cache_set(4, 100);
         c.cache_set(5, 100);
+
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
+
         c.cache_set(6, 100);
         c.cache_set(7, 100);
+
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
+
         assert!(c.cache_get(&2).is_none());
         assert!(c.cache_get(&3).is_some());
+
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [3, 7, 6, 5, 4]);
+
         assert_eq!(2, c.cache_misses().unwrap());
         let size = c.cache_size();
         assert_eq!(5, size);
