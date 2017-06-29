@@ -9,8 +9,8 @@ use cached::SizedCache;
 
 
 cached!{ SLOW: SizedCache = SizedCache::with_capacity(50); >>
-fn slow(n: u32) -> () = {
-    if n == 0 { return; }
+fn slow(n: u32) -> String = {
+    if n == 0 { return "done".to_string(); }
     sleep(Duration::new(1, 0));
     slow(n-1)
 }}
@@ -18,12 +18,12 @@ fn slow(n: u32) -> () = {
 pub fn main() {
     println!("running fresh...");
     let now = Instant::now();
-    slow(10);
+    let _ = slow(10);
     println!("fresh! elapsed: {}", now.elapsed().as_secs());
 
     println!("running cached...");
     let now = Instant::now();
-    slow(10);
+    let _ = slow(10);
     println!("cached!! elapsed: {}", now.elapsed().as_secs());
 
     {

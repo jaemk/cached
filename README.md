@@ -4,7 +4,14 @@
 
 Easy to use function caching/memoization inspired by python decorators.
 
-Function results are cached using the function's arguments as a key. All function arguments must implement `Hash + Eq` in order to cache. When a `cached!` defined function is called, the function's cache is first checked for an already computed (and still valid) value before evaluating the function body. `cached!` functions should not be used to produce side-effectual results!
+Function results are cached using the function's arguments as a key.
+When a `cached!` defined function is called, the function's cache is first checked for an already
+computed (and still valid) value before evaluating the function body.
+Due to the requirements of storing arguments and return values in a global cache,
+function arguments and return types must be owned and the function's signature must
+follow `fn<T: Hash + Eq + Clone, U: Clone>(arg: T) -> U`.
+Arguments and return values will be `cloned` in the process of insertion and retrieval.
+`cached!` functions should not be used to produce side-effectual results!
 
 [Documentation](https://docs.rs/cached)
 
@@ -25,8 +32,8 @@ use cached::SizedCache;
 
 
 cached!{ SLOW: SizedCache = SizedCache::with_capacity(50); >>
-fn slow(n: u32) -> () = {
-    if n == 0 { return; }
+fn slow(n: u32) -> String = {
+    if n == 0 { return "done".to_string(); }
     sleep(Duration::new(1, 0));
     slow(n-1)
 }}
@@ -34,12 +41,12 @@ fn slow(n: u32) -> () = {
 pub fn main() {
     println!("running fresh...");
     let now = Instant::now();
-    slow(10);
+    let _ = slow(10);
     println!("fresh! elapsed: {}", now.elapsed().as_secs());
 
     println!("running cached...");
     let now = Instant::now();
-    slow(10);
+    let _ = slow(10);
     println!("cached!! elapsed: {}", now.elapsed().as_secs());
 
     {
