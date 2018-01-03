@@ -1,15 +1,21 @@
 /*!
 A macro for defining cached/memoized functions that wrap a static-ref cache object.
 
+**Note:** Due to the requirements of storing arguments and return values in a global cache,
+function arguments and return types must be owned, function arguments must implement `Hash + Eq + Clone`,
+and function return types must implement `Clone`.
+Arguments and return values will be cloned in the process of insertion and retrieval.
+`cached!` functions should not be used to produce side-effectual results!
+
 # Usage & Options:
 
-There's several option depending on how explicit you want to be. See below for full syntax breakdown.
+There's several options depending on how explicit you want to be. See below for full syntax breakdown.
 
 1.) Use an explicitly specified cache-type and provide the instantiated cache struct.
     For example, a `SizedCache` (LRU).
 
 
-```rust
+```rust,no_run
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
@@ -20,8 +26,7 @@ fn fib(n: u64) -> u64 = {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }}
-
-pub fn main() { }
+# pub fn main() { }
 ```
 
 
@@ -29,7 +34,7 @@ pub fn main() { }
     The cache-type is expected to have a `new` method that takes no arguments.
 
 
-```rust
+```rust,no_run
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
@@ -40,15 +45,14 @@ fn fib(n: u64) -> u64 = {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }}
-
-pub fn main() { }
+# pub fn main() { }
 ```
 
 
 3.) Use the default unbounded cache.
 
 
-```rust
+```rust,no_run
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
@@ -57,8 +61,7 @@ fn fib(n: u64) -> u64 = {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }}
-
-pub fn main() { }
+# pub fn main() { }
 ```
 
 
