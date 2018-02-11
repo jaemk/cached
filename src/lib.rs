@@ -121,16 +121,16 @@ pub trait Cached<K, V> {
     /// Return the current cache size (number of elements)
     fn cache_size(&self) -> usize;
 
-    /// _Optional_: Return the number of times a cached value was successfully retrieved
+    /// Return the number of times a cached value was successfully retrieved
     fn cache_hits(&self) -> Option<u32> { None }
 
-    /// _Optional_: Return the number of times a cached value was unable to be retrieved
+    /// Return the number of times a cached value was unable to be retrieved
     fn cache_misses(&self) -> Option<u32> { None }
 
-    /// _Optional_: Return the cache capacity
+    /// Return the cache capacity
     fn cache_capacity(&self) -> Option<usize> { None }
 
-    /// _Optional_: Return the lifespan of cached values (time to eviction)
+    /// Return the lifespan of cached values (time to eviction)
     fn cache_lifespan(&self) -> Option<u64> { None }
 }
 
