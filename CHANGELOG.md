@@ -1,10 +1,11 @@
 # Changelog
 
 
-## [Unreleased]
+## [0.4.4]
 ## Added
 
 ## Changed
+- Update trait docs
 
 ## Removed
 
