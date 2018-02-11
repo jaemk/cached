@@ -110,13 +110,27 @@ pub mod stores;
 pub use stores::*;
 
 
+/// Cache operations
 pub trait Cached<K, V> {
+    /// Attempt to retrieve a cached value
     fn cache_get(&mut self, k: &K) -> Option<&V>;
+
+    /// Insert a key, value pair
     fn cache_set(&mut self, k: K, v: V);
+
+    /// Return the current cache size (number of elements)
     fn cache_size(&self) -> usize;
+
+    /// _Optional_: Return the number of times a cached value was successfully retrieved
     fn cache_hits(&self) -> Option<u32> { None }
+
+    /// _Optional_: Return the number of times a cached value was unable to be retrieved
     fn cache_misses(&self) -> Option<u32> { None }
+
+    /// _Optional_: Return the cache capacity
     fn cache_capacity(&self) -> Option<usize> { None }
+
+    /// _Optional_: Return the lifespan of cached values (time to eviction)
     fn cache_lifespan(&self) -> Option<u64> { None }
 }
 
