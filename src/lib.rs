@@ -1,15 +1,36 @@
 /*!
-A macro for defining cached/memoized functions that wrap a static-ref cache object.
+[![Build Status](https://travis-ci.org/jaemk/cached.svg?branch=master)](https://travis-ci.org/jaemk/cached)
+[![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached)
+[![docs](https://docs.rs/cached/badge.svg)](https://docs.rs/cached)
 
-**Note:** Due to the requirements of storing arguments and return values in a global cache,
+> Caching structures and simplified function memoization
+
+`cached` provides implementations of several caching structures as well as a handy macro
+for defining memoized functions.
+
+
+## Defining memoized functions using `cached!`
+
+`cached!` defined functions will have their results cached using the function's arguments as a key.
+When a `cached!` defined function is called, the function's cache is first checked for an already
+computed (and still valid) value before evaluating the function body.
+
+Due to the requirements of storing arguments and return values in a global cache,
 function arguments and return types must be owned, function arguments must implement `Hash + Eq + Clone`,
 and function return types must implement `Clone`.
-Arguments and return values will be cloned in the process of insertion and retrieval.
+Arguments and return values will be `cloned` in the process of insertion and retrieval.
 `cached!` functions should not be used to produce side-effectual results!
 
-# Usage & Options:
+**NOTE**: Any custom cache that implements `cached::Cached` can be used with the `cached!` macro in place of the built-ins.
 
-There's several options depending on how explicit you want to be. See below for full syntax breakdown.
+See [`examples`](https://github.com/jaemk/cached/tree/master/examples) for basic usage and
+an example of implementing a custom cache-store.
+
+
+### `cached!` Usage & Options:
+
+There are several options depending on how explicit you want to be. See below for full syntax breakdown.
+
 
 1.) Use an explicitly specified cache-type and provide the instantiated cache struct.
     For example, a `SizedCache` (LRU).
@@ -65,17 +86,7 @@ fn fib(n: u64) -> u64 = {
 ```
 
 
-# Cache Types
-
-Several caches are available in this crate:
-
-- `cached::UnboundCache`
-- `cached::SizedCache`
-- `cached::TimedCache`
-
-Any custom cache that implements `cached::Cached` can be used in place of the built-ins.
-
-# Syntax:
+## Syntax
 
 The complete macro syntax is:
 
