@@ -5,7 +5,7 @@ Implementation of various caches
 
 use std::collections::{HashMap, LinkedList};
 use std::collections::linked_list::Iter;
-use std::time::{Instant};
+use std::time::Instant;
 use std::hash::Hash;
 use std::cmp::Eq;
 
@@ -13,7 +13,7 @@ use super::Cached;
 
 
 /// Default unbounded cache
-pub struct UnboundCache<K: Hash + Eq, V> {
+pub struct UnboundCache<K, V> {
     store: HashMap<K, V>,
     hits: u32,
     misses: u32,
@@ -64,7 +64,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
 /// Least Recently Used / `Sized` Cache
 /// - Stores up to a specified sized before beginning
 ///   to evict the least recently used keys
-pub struct SizedCache<K: Hash + Eq, V> {
+pub struct SizedCache<K, V> {
     store: HashMap<K, V>,
     order: LinkedList<K>,
     capacity: usize,
@@ -136,7 +136,7 @@ enum Status {
 /// Cache store bound by time
 /// - Values are timestamped when inserted and are
 ///   expired on attempted retrieval.
-pub struct TimedCache<K: Hash + Eq, V> {
+pub struct TimedCache<K, V> {
     store: HashMap<K, (Instant, V)>,
     seconds: u64,
     hits: u32,
