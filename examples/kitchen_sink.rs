@@ -44,6 +44,19 @@ cached!{
 }
 
 
+/// Specify a specific cache type and an explicit key expression
+/// Note that the cache key type is a `String` created from the borrow arguments
+cached_key!{
+    KEYED: SizedCache<String, usize> = SizedCache::with_capacity(100);
+    Key = { format!("{}{}", a, b) };
+    fn keyed(a: &str, b: &str) -> usize = {
+        let size = a.len() + b.len();
+        sleep(Duration::new(size as u64, 0));
+        size
+    }
+}
+
+
 /// Implement our own cache type
 struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,

@@ -92,3 +92,60 @@ fn test_string_cache() {
     }
 }
 
+
+cached_key!{
+    TIMED_CACHE: TimedCache<(u32), u32> = TimedCache::with_lifespan_and_capacity(2, 5);
+    Key = { n };
+    fn timed_2(n: u32) -> u32 = {
+        sleep(Duration::new(3, 0));
+        n
+    }
+}
+
+
+#[test]
+fn test_timed_cache_key() {
+    timed_2(1);
+    timed_2(1);
+    {
+        let cache = TIMED_CACHE.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    sleep(Duration::new(3, 0));
+    timed_2(1);
+    {
+        let cache = TIMED_CACHE.lock().unwrap();
+        assert_eq!(2, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+}
+
+
+cached_key!{
+    SIZED_CACHE: SizedCache<String, usize> = SizedCache::with_capacity(2);
+    Key = { format!("{}{}", a, b) };
+    fn sized_key(a: &str, b: &str) -> usize = {
+        let size = a.len() + b.len();
+        sleep(Duration::new(size as u64, 0));
+        size
+    }
+}
+
+
+#[test]
+fn test_sized_cache_key() {
+    sized_key("a", "b");
+    sized_key("a", "b");
+    {
+        let cache = SIZED_CACHE.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    sized_key("a", "b");
+    {
+        let cache = SIZED_CACHE.lock().unwrap();
+        assert_eq!(2, cache.cache_hits().unwrap());
+    }
+}
+
