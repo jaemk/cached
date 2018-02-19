@@ -62,8 +62,9 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
 
 
 /// Least Recently Used / `Sized` Cache
-/// - Stores up to a specified sized before beginning
-///   to evict the least recently used keys
+///
+/// Stores up to a specified size before beginning
+/// to evict the least recently used keys
 pub struct SizedCache<K, V> {
     store: HashMap<K, V>,
     order: LinkedList<K>,
@@ -73,7 +74,7 @@ pub struct SizedCache<K, V> {
 }
 
 impl<K: Hash + Eq, V> SizedCache<K, V> {
-    /// Creates a new `SizedCache` with a given capacity
+    #[deprecated(since="0.5.1", "method renamed to `with_size`")]
     pub fn with_capacity(size: usize) -> SizedCache<K, V> {
         if size == 0 { panic!("`size` of `SizedCache` must be greater than zero.") }
         SizedCache {
@@ -84,6 +85,21 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
             misses: 0,
         }
     }
+
+    /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    pub fn with_size(size: usize) -> SizedCache<K, V> {
+        if size == 0 { panic!("`size` of `SizedCache` must be greater than zero.") }
+        SizedCache {
+            store: HashMap::with_capacity(size),
+            order: LinkedList::new(),
+            capacity: size,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Return an iterator of keys in the current order from most
+    /// to least recently used.
     pub fn key_order(&self) -> Iter<K> {
         self.order.iter()
     }
@@ -134,8 +150,9 @@ enum Status {
 
 
 /// Cache store bound by time
-/// - Values are timestamped when inserted and are
-///   expired on attempted retrieval.
+///
+/// Values are timestamped when inserted and are
+/// expired on attempted retrieval.
 pub struct TimedCache<K, V> {
     store: HashMap<K, (Instant, V)>,
     seconds: u64,
