@@ -29,7 +29,7 @@ fn test_unbound_cache() {
 
 
 cached!{
-    SIZED_FIB: SizedCache<(u32), u32> = SizedCache::with_capacity(3);
+    SIZED_FIB: SizedCache<(u32), u32> = SizedCache::with_size(3);
     fn fib1(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n }
         fib1(n-1) + fib1(n-2)
@@ -76,7 +76,7 @@ fn test_timed_cache() {
 
 
 cached!{
-    STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_capacity(1);
+    STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_size(1);
     fn string_1(a: String, b: String) -> String = {
         return a + &b;
     }
@@ -123,7 +123,7 @@ fn test_timed_cache_key() {
 
 
 cached_key!{
-    SIZED_CACHE: SizedCache<String, usize> = SizedCache::with_capacity(2);
+    SIZED_CACHE: SizedCache<String, usize> = SizedCache::with_size(2);
     Key = { format!("{}{}", a, b) };
     fn sized_key(a: &str, b: &str) -> usize = {
         let size = a.len() + b.len();

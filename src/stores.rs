@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn sized_cache() {
-        let mut c = SizedCache::with_capacity(5);
+        let mut c = SizedCache::with_size(5);
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);

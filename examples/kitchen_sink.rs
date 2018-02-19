@@ -36,7 +36,7 @@ cached!{
 /// Specify a specific cache type
 /// Note that the cache key type is a tuple of function argument types.
 cached!{
-    SLOW: SizedCache<(u32, u32), u32> = SizedCache::with_capacity(100);
+    SLOW: SizedCache<(u32, u32), u32> = SizedCache::with_size(100);
     fn slow(a: u32, b: u32) -> u32 = {
         sleep(Duration::new(2, 0));
         return a * b;
@@ -47,7 +47,7 @@ cached!{
 /// Specify a specific cache type and an explicit key expression
 /// Note that the cache key type is a `String` created from the borrow arguments
 cached_key!{
-    KEYED: SizedCache<String, usize> = SizedCache::with_capacity(100);
+    KEYED: SizedCache<String, usize> = SizedCache::with_size(100);
     Key = { format!("{}{}", a, b) };
     fn keyed(a: &str, b: &str) -> usize = {
         let size = a.len() + b.len();

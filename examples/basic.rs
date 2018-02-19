@@ -9,7 +9,7 @@ use cached::SizedCache;
 
 
 cached! {
-    SLOW_FN: SizedCache<(u32), String> = SizedCache::with_capacity(50);
+    SLOW_FN: SizedCache<(u32), String> = SizedCache::with_size(50);
     fn slow_fn(n: u32) -> String = {
         if n == 0 { return "done".to_string(); }
         sleep(Duration::new(1, 0));
