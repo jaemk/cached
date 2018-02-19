@@ -30,57 +30,45 @@ an example of implementing a custom cache-store.
 
 ### `cached!` Usage & Options:
 
-There are several options depending on how explicit you want to be. See below for full syntax breakdown.
+There are two options depending on how explicit you want to be. See below for a full syntax breakdown.
 
 
-1.) Use an explicitly specified cache-type and provide the instantiated cache struct.
-    For example, a `SizedCache` (LRU).
+1.) Using the shorthand will use an unbounded cache.
 
 
 ```rust
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
+cached!{
+    FIB;
+    fn fib(n: u64) -> u64 = {
+        if n == 0 || n == 1 { return n }
+        fib(n-1) + fib(n-2)
+    }
+}
+```
+
+
+2.) Using the full syntax requires specifying the full cache type and providing
+    an instance of the cache to use. Note that the cache's key-type is a tuple
+    of the function argument types. For example, a `SizedCache` (LRU):
+
+```rust
+#[macro_use] extern crate cached;
+#[macro_use] extern crate lazy_static;
+
+use std::thread::sleep;
+use std::time::Duration;
 use cached::SizedCache;
 
-cached!{FIB: SizedCache = SizedCache::with_capacity(50); >>
-fn fib(n: u64) -> u64 = {
-    if n == 0 || n == 1 { return n }
-    fib(n-1) + fib(n-2)
-}}
-```
-
-
-2.) Use an explicitly specified cache-type, but let the macro instantiate it.
-    The cache-type is expected to have a `new` method that takes no arguments.
-
-
-```rust
-#[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
-
-use cached::UnboundCache;
-
-cached!{FIB: UnboundCache >>
-fn fib(n: u64) -> u64 = {
-    if n == 0 || n == 1 { return n }
-    fib(n-1) + fib(n-2)
-}}
-```
-
-
-3.) Use the default unbounded cache.
-
-
-```rust
-#[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
-
-cached!{FIB >>
-fn fib(n: u64) -> u64 = {
-    if n == 0 || n == 1 { return n }
-    fib(n-1) + fib(n-2)
-}}
+cached!{
+    FIB: SizedCache<(u64, u64), u64> = SizedCache::with_capacity(50);
+    fn fib(a: u64, b: u64) -> u64 = {
+        sleep(Duration::new(2, 0));
+        return a * b;
+    }
+}
 ```
 
 
@@ -90,21 +78,21 @@ The complete macro syntax is:
 
 
 ```rust
-cached!{CACHE_NAME: CacheType = CacheType::constructor(arg); >>
-fn func_name(arg1: arg_type, arg2: arg_type) -> return_type = {
-    // do stuff like normal
-    return_type
-}}
+cached!{
+    CACHE_NAME: CacheType = CacheInstance;
+    fn func_name(arg1: arg_type, arg2: arg_type) -> return_type = {
+        // do stuff like normal
+        return_type
+    }
+}
 ```
 
 Where:
 
 - `CACHE_NAME` is the unique name used to hold a `static ref` to the cache
-- `CacheType` is the struct type to use for the cache (Note, this cannot be namespaced, e.g.
-  `cached::SizedCache` will not be accepted by the macro. `SizedCache` must be imported and passed
-   directly)
-- `CacheType::constructor(arg)` is any expression that yields an instance of `CacheType` to be used
-  as the cache-store, followed by `; >>`
+- `CacheType` is the full type of the cache
+- `CacheInstance` is any expression that yields an instance of `CacheType` to be used
+  as the cache-store, followed by `;`
 - `fn func_name(arg1: arg_type) -> return_type` is the same form as a regular function signature, with the exception
   that functions with no return value must be explicitly stated (e.g. `fn func_name(arg: arg_type) -> ()`)
 - The expression following `=` is the function body assigned to `func_name`. Note, the function
