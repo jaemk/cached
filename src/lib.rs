@@ -110,7 +110,7 @@ pub use stores::{
 
 
 /// Cache operations
-pub trait Cached<K: std::hash::Hash + Eq, V> {
+pub trait Cached<K, V> {
     /// Attempt to retrieve a cached value
     fn cache_get(&mut self, k: &K) -> Option<&V>;
 
