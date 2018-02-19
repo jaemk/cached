@@ -74,16 +74,9 @@ pub struct SizedCache<K, V> {
 }
 
 impl<K: Hash + Eq, V> SizedCache<K, V> {
-    #[deprecated(since="0.5.1", "method renamed to `with_size`")]
+    #[deprecated(since="0.5.1", note="method renamed to `with_size`")]
     pub fn with_capacity(size: usize) -> SizedCache<K, V> {
-        if size == 0 { panic!("`size` of `SizedCache` must be greater than zero.") }
-        SizedCache {
-            store: HashMap::with_capacity(size),
-            order: LinkedList::new(),
-            capacity: size,
-            hits: 0,
-            misses: 0,
-        }
+        Self::with_size(size)
     }
 
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
