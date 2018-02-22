@@ -42,6 +42,7 @@ There are several options depending on how explicit you want to be. See below fo
 #[macro_use] extern crate cached;
 #[macro_use] extern crate lazy_static;
 
+/// Defines a function named `fib` that uses a cache named `FIB`
 cached!{
     FIB;
     fn fib(n: u64) -> u64 = {
@@ -57,7 +58,7 @@ cached!{
     an instance of the cache to use. Note that the cache's key-type is a tuple
     of the function argument types. If you would like fine grained control over
     the key, you can use the `cached_key!` macro.
-    For example, a `SizedCache` (LRU):
+    The follow example uses a `SizedCache` (LRU):
 
 ```rust,no_run
 #[macro_use] extern crate cached;
@@ -67,8 +68,11 @@ use std::thread::sleep;
 use std::time::Duration;
 use cached::SizedCache;
 
+/// Defines a function `fib` that uses an LRU cache named `FIB` which has a
+/// size limit of 50 items. The `cached!` macro will implicitly combine
+/// the function arguments into a tuple to be used as the cache key.
 cached!{
-    FIB: SizedCache<(u64, u64), u64> = SizedCache::with_capacity(50);
+    FIB: SizedCache<(u64, u64), u64> = SizedCache::with_size(50);
     fn fib(a: u64, b: u64) -> u64 = {
         sleep(Duration::new(2, 0));
         return a * b;
@@ -89,8 +93,12 @@ use std::thread::sleep;
 use std::time::Duration;
 use cached::SizedCache;
 
+/// Defines a function named `fib` that uses an LRU cache named `FIB`.
+/// The `Key = ` expression is used to explicitly define the value that
+/// should be used as the cache key. Here the borrowed arguments are converted
+/// to an owned string that can be stored in the global function cache.
 cached_key!{
-    FIB: SizedCache<String, usize> = SizedCache::with_capacity(50);
+    FIB: SizedCache<String, usize> = SizedCache::with_size(50);
     Key = { format!("{}{}", a, b) };
     fn fib(a: &str, b: &str) -> usize = {
         let size = a.len() + b.len();
