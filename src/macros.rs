@@ -65,3 +65,31 @@ macro_rules! cached_key {
     };
 }
 
+#[macro_export]
+macro_rules! cached_key_result {
+    // Use a specified cache-type and an explicitly created cache-instance
+    ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     Key = $key:expr;
+     fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+        lazy_static! {
+            static ref $cachename: ::std::sync::Mutex<$cachetype> = {
+                ::std::sync::Mutex::new($cacheinstance)
+            };
+        }
+        #[allow(unused_parens)]
+        pub fn $name($($arg: $argtype),*) -> $ret {
+            let key = $key;
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
+                if let Some(res) = res { return Ok(res.clone()); }
+            }
+            let val = (||$body)()?;
+            let mut cache = $cachename.lock().unwrap();
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
+            Ok(val)
+        }
+    };
+}
+
+
