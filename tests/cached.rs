@@ -150,21 +150,44 @@ fn test_sized_cache_key() {
 }
 
 cached_key_result!{
-    RESULT_CACHE: UnboundCache<(u32), u32> = UnboundCache::new();
+    RESULT_CACHE_KEY: UnboundCache<(u32), u32> = UnboundCache::new();
     Key = { n };
-    fn test_result(n: u32) -> Result<u32, ()> = {
+    fn test_result_key(n: u32) -> Result<u32, ()> = {
         if n < 5 { Ok(n) } else { Err(()) }
     }
 }
 
 #[test]
-fn cache_result() {
-    assert!(test_result(2).is_ok());
-    assert!(test_result(4).is_ok());
-    assert!(test_result(6).is_err());
-    assert!(test_result(6).is_err());
-    assert!(test_result(2).is_ok());
-    assert!(test_result(4).is_ok());
+fn cache_result_key() {
+    assert!(test_result_key(2).is_ok());
+    assert!(test_result_key(4).is_ok());
+    assert!(test_result_key(6).is_err());
+    assert!(test_result_key(6).is_err());
+    assert!(test_result_key(2).is_ok());
+    assert!(test_result_key(4).is_ok());
+    {
+        let cache = RESULT_CACHE_KEY.lock().unwrap();
+        assert_eq!(2, cache.cache_size());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(4, cache.cache_misses().unwrap());
+    }
+}
+
+cached_result!{
+    RESULT_CACHE: UnboundCache<(u32), u32> = UnboundCache::new();
+    fn test_result_no_default(n: u32) -> Result<u32, ()> = {
+        if n < 5 { Ok(n) } else { Err(()) }
+    }
+}
+
+#[test]
+fn cache_result_no_default() {
+    assert!(test_result_no_default(2).is_ok());
+    assert!(test_result_no_default(4).is_ok());
+    assert!(test_result_no_default(6).is_err());
+    assert!(test_result_no_default(6).is_err());
+    assert!(test_result_no_default(2).is_ok());
+    assert!(test_result_no_default(4).is_ok());
     {
         let cache = RESULT_CACHE.lock().unwrap();
         assert_eq!(2, cache.cache_size());
