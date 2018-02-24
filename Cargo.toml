@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["James Kominick <james.kominick@gmail.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -10,7 +10,7 @@ categories = ["caching"]
 keywords = ["caching", "cache", "memoize", "lru"]
 license = "MIT"
 
-[badges]
+[badges]    
 travis-ci = { repository = "jaemk/cached", branch = "master" }
 
 [dev-dependencies]
