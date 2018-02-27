@@ -113,13 +113,13 @@ cached_key!{
    is cached, but errors are not. Note that the error type does _not_ need to implement `Clone`,
    only the success type however the cache type cannot be derived and must always be
    explicitly specified.
-   
+
 ```rust
    #[macro_use] extern crate cached;
    #[macro_use] extern crate lazy_static;
-   
+
    use cached::UnboundCache;
-   
+
    /// Cache the successes of a function.
    /// To use `cached_key_result` add a key function as in `cached_key`.
    cached_result!{
@@ -140,7 +140,7 @@ cached_key!{
 The complete macro syntax is:
 
 
-```rust
+```rust,ignore
 cached_key!{
     CACHE_NAME: CacheType = CacheInstance;
     Key = KeyExpression;

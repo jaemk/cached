@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.0]
+## [Unreleased]
 ## Added
 -- Add `cached_result` and `cached_key_result` to allow the caching of success for a function that returns `Result`.
 

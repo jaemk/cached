@@ -109,6 +109,33 @@ cached_key!{
 # pub fn main() { }
 ```
 
+4. The `cached_result` and `cached_key_result` macros function similarly to `cached`
+   and `cached_key` respectively but the cached function needs to return `Result`
+   (or some type alias like `io::Result`). If the function returns `Ok(val)` then `val`
+   is cached, but errors are not. Note that the error type does _not_ need to implement `Clone`,
+   only the success type however the cache type cannot be derived and must always be
+   explicitly specified.
+
+```rust,no_run
+   #[macro_use] extern crate cached;
+   #[macro_use] extern crate lazy_static;
+
+   use cached::UnboundCache;
+
+   /// Cache the successes of a function.
+   /// To use `cached_key_result` add a key function as in `cached_key`.
+   cached_result!{
+       FIB: UnboundCache<(u64, u64), u64> = UnboundCache::new(); // Type must always be specified
+       fn fib(a: u64, b: u64) -> Result<u64, ()> = {
+            if a == 0 || b == 0 {
+                return Err(());
+            } else {
+                return Ok(a * b);
+            }
+       }
+   }
+   ```
+
 
 ## Syntax
 
