@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+## Added
+-- Add `cached_result` and `cached_key_result` to allow the caching of success for a function that returns `Result`.
+
 ## [0.5.0]
 ## Added
 - Add `cached_key` macro to allow defining the caching key
