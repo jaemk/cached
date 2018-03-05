@@ -195,3 +195,43 @@ fn cache_result_no_default() {
         assert_eq!(4, cache.cache_misses().unwrap());
     }
 }
+
+
+cached_control!{
+    CONTROL_CACHE: UnboundCache<(String), String> = UnboundCache::new();
+    Key = { input.to_owned() };
+    PostGet(cached_val) = { return Ok(cached_val.clone()) };
+    PostExec(body_result) = {
+        match body_result {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    };
+    PreSet(set_value) = { set_value.clone() };
+    Return(return_value) = {
+        println!("{}", return_value);
+        Ok(return_value)
+    };
+    fn can_fail(input: &str) -> Result<String, String> = {
+        let len = input.len();
+        if len < 3 { Ok(format!("{}-{}", input, len)) }
+        else { Err("too big".to_string()) }
+    }
+}
+
+
+#[test]
+fn test_can_fail() {
+    assert_eq!(can_fail("ab"), Ok("ab-2".to_string()));
+    assert_eq!(can_fail("abc"), Err("too big".to_string()));
+    {
+        let cache = CONTROL_CACHE.lock().unwrap();
+        assert_eq!(2, cache.cache_misses().unwrap());
+    }
+    assert_eq!(can_fail("ab"), Ok("ab-2".to_string()));
+    {
+        let cache = CONTROL_CACHE.lock().unwrap();
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+}
+
