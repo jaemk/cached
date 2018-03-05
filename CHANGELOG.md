@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 ## Added
--- Add `cached_result` and `cached_key_result` to allow the caching of success for a function that returns `Result`.
+- Add `cached_result` and `cached_key_result` to allow the caching of success for a function that returns `Result`.
+- Add `cached_control` macro to allow specifying functionality
+  at key points of the macro
 
 ## [0.5.0]
 ## Added
