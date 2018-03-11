@@ -58,7 +58,7 @@ cached!{
     an instance of the cache to use. Note that the cache's key-type is a tuple
     of the function argument types. If you would like fine grained control over
     the key, you can use the `cached_key!` macro.
-    The follow example uses a `SizedCache` (LRU):
+    The following example uses a `SizedCache` (LRU):
 
 ```rust
 #[macro_use] extern crate cached;
@@ -68,12 +68,12 @@ use std::thread::sleep;
 use std::time::Duration;
 use cached::SizedCache;
 
-/// Defines a function `fib` that uses an LRU cache named `FIB` which has a
+/// Defines a function `compute` that uses an LRU cache named `COMPUTE` which has a
 /// size limit of 50 items. The `cached!` macro will implicitly combine
 /// the function arguments into a tuple to be used as the cache key.
 cached!{
-    FIB: SizedCache<(u64, u64), u64> = SizedCache::with_size(50);
-    fn fib(a: u64, b: u64) -> u64 = {
+    COMPUTE: SizedCache<(u64, u64), u64> = SizedCache::with_size(50);
+    fn compute(a: u64, b: u64) -> u64 = {
         sleep(Duration::new(2, 0));
         return a * b;
     }
@@ -81,7 +81,7 @@ cached!{
 ```
 
 
-3.) The `cached_key` macro functions identically, but allows you define the
+3.) The `cached_key` macro functions identically, but allows you to define the
     cache key as an expression.
 
 ```rust
@@ -92,14 +92,14 @@ use std::thread::sleep;
 use std::time::Duration;
 use cached::SizedCache;
 
-/// Defines a function named `fib` that uses an LRU cache named `FIB`.
+/// Defines a function named `length` that uses an LRU cache named `LENGTH`.
 /// The `Key = ` expression is used to explicitly define the value that
 /// should be used as the cache key. Here the borrowed arguments are converted
 /// to an owned string that can be stored in the global function cache.
 cached_key!{
-    FIB: SizedCache<String, usize> = SizedCache::with_size(50);
+    LENGTH: SizedCache<String, usize> = SizedCache::with_size(50);
     Key = { format!("{}{}", a, b) };
-    fn fib(a: &str, b: &str) -> usize = {
+    fn length(a: &str, b: &str) -> usize = {
         let size = a.len() + b.len();
         sleep(Duration::new(size as u64, 0));
         size
@@ -110,29 +110,29 @@ cached_key!{
 4. The `cached_result` and `cached_key_result` macros function similarly to `cached`
    and `cached_key` respectively but the cached function needs to return `Result`
    (or some type alias like `io::Result`). If the function returns `Ok(val)` then `val`
-   is cached, but errors are not. Note that the error type does _not_ need to implement `Clone`,
-   only the success type however the cache type cannot be derived and must always be
-   explicitly specified.
+   is cached, but errors are not. Note that only the success type needs to implement
+   `Clone`, _not_ the error type. When using `cached_key_result`, the cache type
+   cannot be derived and must always be explicitly specified.
 
 ```rust
-   #[macro_use] extern crate cached;
-   #[macro_use] extern crate lazy_static;
+#[macro_use] extern crate cached;
+#[macro_use] extern crate lazy_static;
 
-   use cached::UnboundCache;
+use cached::UnboundCache;
 
-   /// Cache the successes of a function.
-   /// To use `cached_key_result` add a key function as in `cached_key`.
-   cached_result!{
-       FIB: UnboundCache<(u64, u64), u64> = UnboundCache::new(); // Type must always be specified
-       fn fib(a: u64, b: u64) -> Result<u64, ()> = {
-            if a == 0 || b == 0 {
-                return Err(());
-            } else {
-                return Ok(a * b);
-            }
-       }
+/// Cache the successes of a function.
+/// To use `cached_key_result` add a key function as in `cached_key`.
+cached_result!{
+   MULT: UnboundCache<(u64, u64), u64> = UnboundCache::new(); // Type must always be specified
+   fn mult(a: u64, b: u64) -> Result<u64, ()> = {
+        if a == 0 || b == 0 {
+            return Err(());
+        } else {
+            return Ok(a * b);
+        }
    }
-   ```
+}
+```
 
 
 ## Syntax
@@ -140,7 +140,7 @@ cached_key!{
 The complete macro syntax is:
 
 
-```rust,ignore
+```rust
 cached_key!{
     CACHE_NAME: CacheType = CacheInstance;
     Key = KeyExpression;
