@@ -198,7 +198,7 @@ fn cache_result_no_default() {
 
 
 cached_control!{
-    CONTROL_CACHE: UnboundCache<(String), String> = UnboundCache::new();
+    CONTROL_CACHE: UnboundCache<String, String> = UnboundCache::new();
     Key = { input.to_owned() };
     PostGet(cached_val) = { return Ok(cached_val.clone()) };
     PostExec(body_result) = {
@@ -207,7 +207,7 @@ cached_control!{
             Err(e) => return Err(e),
         }
     };
-    PreSet(set_value) = { set_value.clone() };
+    Set(set_value) = { set_value.clone() };
     Return(return_value) = {
         println!("{}", return_value);
         Ok(return_value)
