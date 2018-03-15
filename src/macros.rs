@@ -128,7 +128,7 @@ macro_rules! cached_control {
      Key = $key:expr;
      PostGet($cached_value:ident) = $post_get:expr;
      PostExec($body_value:ident) = $post_exec:expr;
-     PreSet($set_value:ident) = $pre_set:expr;
+     Set($set_value:ident) = $pre_set:expr;
      Return($ret_value:ident) = $return:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         lazy_static! {
