@@ -109,12 +109,12 @@ cached_key!{
 # pub fn main() { }
 ```
 
-4. The `cached_result` and `cached_key_result` macros function similarly to `cached`
-   and `cached_key` respectively but the cached function needs to return `Result`
-   (or some type alias like `io::Result`). If the function returns `Ok(val)` then `val`
-   is cached, but errors are not. Note that only the success type needs to implement
-   `Clone`, _not_ the error type. When using `cached_key_result`, the cache type
-   cannot be derived and must always be explicitly specified.
+4.) The `cached_result` and `cached_key_result` macros function similarly to `cached`
+    and `cached_key` respectively but the cached function needs to return `Result`
+    (or some type alias like `io::Result`). If the function returns `Ok(val)` then `val`
+    is cached, but errors are not. Note that only the success type needs to implement
+    `Clone`, _not_ the error type. When using `cached_result` and `cached_key_result`,
+    the cache type cannot be derived and must always be explicitly specified.
 
 ```rust,no_run
 #[macro_use] extern crate cached;
@@ -140,7 +140,7 @@ cached_result!{
 
 ## Syntax
 
-The complete macro syntax is:
+The common macro syntax is:
 
 
 ```rust,ignore
@@ -166,6 +166,64 @@ Where:
   that functions with no return value must be explicitly stated (e.g. `fn func_name(arg: arg_type) -> ()`)
 - The expression following `=` is the function body assigned to `func_name`. Note, the function
   body can make recursive calls to its cached-self (`func_name`).
+
+
+# Fine grained control using `cached_control!`
+
+The `cached_control!` macro allows you to provide expressions that get plugged into key areas
+of the memoized function. While the `cached` and `cached_result` variants are adequate for most
+scenarios, it can be useful to have the ability to customize the macro's functionality.
+
+```rust,no_run
+#[macro_use] extern crate cached;
+#[macro_use] extern crate lazy_static;
+
+use cached::UnboundCache;
+
+/// The following usage plugs in expressions to make the macro behave like
+/// the `cached_result!` macro.
+cached_control!{
+    CACHE: UnboundCache<String, String> = UnboundCache::new();
+
+    // Use an owned copy of the argument `input` as the cache key
+    Key = { input.to_owned() };
+
+    // If a cached value exists, it will bind to `cached_val` and
+    // a `Result` will be returned containing a copy of the cached
+    // evaluated body. This will return before the function body
+    // is executed.
+    PostGet(cached_val) = { return Ok(cached_val.clone()) };
+
+    // The result of executing the function body will be bound to
+    // `body_result`. In this case, the function body returns a `Result`.
+    // We match on the `Result`, returning an early `Err` if the function errored.
+    // Otherwise, we pass on the function's result to be cached.
+    PostExec(body_result) = {
+        match body_result {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    };
+
+    // When inserting the value into the cache we bind
+    // the to-be-set-value to `set_value` and give back a copy
+    // of it to be inserted into the cache
+    Set(set_value) = { set_value.clone() };
+
+    // Before returning, print the value that will be returned
+    Return(return_value) = {
+        println!("{}", return_value);
+        Ok(return_value)
+    };
+
+    fn can_fail(input: &str) -> Result<String, String> = {
+        let len = input.len();
+        if len < 3 { Ok(format!("{}-{}", input, len)) }
+        else { Err("too big".to_string()) }
+    }
+}
+# pub fn main() {}
+```
 
 */
 
