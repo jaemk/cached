@@ -116,16 +116,13 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         val
     }
     fn cache_set(&mut self, key: K, val: V) {
-        if self.store.len() < self.capacity {
-            self.store.insert(key.clone(), val);
-            self.order.push_front(key);
-        } else {
-            // store capacity cannot be zero, so there must be content in `self.order`
-            let lru_key = self.order.pop_back().unwrap();
-            self.store.remove(&lru_key).unwrap();
-            self.store.insert(key.clone(), val);
-            self.order.push_front(key);
+        let current_size = self.store.len();
+        if current_size > 0 && current_size >= self.capacity {
+            let lru_key = self.order.pop_back().expect("Bad order size 0");
+            self.store.remove(&lru_key).expect("lru_key missing in store");
         }
+        self.store.insert(key.clone(), val);
+        self.order.push_front(key);
     }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
