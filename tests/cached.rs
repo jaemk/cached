@@ -5,7 +5,7 @@ Full tests of macro-defined functions
 #[macro_use] extern crate lazy_static;
 
 use std::time::Duration;
-use std::thread::sleep;
+use std::thread::{self, sleep};
 use cached::{UnboundCache, Cached, SizedCache, TimedCache};
 
 
@@ -235,3 +235,31 @@ fn test_can_fail() {
     }
 }
 
+
+cached_key!{
+    SIZED_KEY_RESULT_CACHE: SizedCache<String, String> = SizedCache::with_size(2);
+    Key = { format!("{}/{}", a, b) };
+    fn slow_small_cache(a: &str, b: &str) -> String = {
+        sleep(Duration::new(1, 0));
+        format!("{}:{}", a, b)
+    }
+}
+
+
+#[test]
+/// This is a regression test to confirm that racing cache sets on a SizedCache
+/// do not cause duplicates to exist in the internal `order`. See issue #7
+fn test_racing_duplicate_keys_do_not_duplicate_sized_cache_ordering() {
+    let a = thread::spawn(|| slow_small_cache("a", "b"));
+    sleep(Duration::new(0, 500000));
+    let b = thread::spawn(|| slow_small_cache("a", "b"));
+    a.join().unwrap();
+    b.join().unwrap();
+    // at this point, the cache should have a size of one since the keys are the same
+    // and the internal `order` list should also have one item.
+    // Since the method's cache has a capacity of 2, caching two more unique keys should
+    // force the full eviction of the original values.
+    slow_small_cache("c", "d");
+    slow_small_cache("e", "f");
+    slow_small_cache("g", "h");
+}

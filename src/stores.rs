@@ -61,12 +61,26 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
 }
 
 
+enum Slot<T> {
+    Occupied(T),
+    Empty,
+}
+impl<T> Slot<T> {
+    fn get(&self) -> Option<&T> {
+        match self {
+            &Slot::Occupied(ref v) => Some(v),
+            &Slot::Empty => None,
+        }
+    }
+}
+
+
 /// Least Recently Used / `Sized` Cache
 ///
 /// Stores up to a specified size before beginning
 /// to evict the least recently used keys
 pub struct SizedCache<K, V> {
-    store: HashMap<K, V>,
+    store: HashMap<K, Slot<V>>,
     order: LinkedList<K>,
     capacity: usize,
     hits: u32,
@@ -101,31 +115,39 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         let val = self.store.get(key);
-        if val.is_some() {
-            // if there's something in `self.store`, then `self.order`
-            // cannot be empty, and `key` must be present
-            let index = self.order.iter().enumerate()
-                            .find(|&(_, e)| { key == e })
-                            .unwrap().0;
-            let mut tail = self.order.split_off(index);
-            let used = tail.pop_front().unwrap();
-            self.order.push_front(used);
-            self.order.append(&mut tail);
-            self.hits += 1;
-        } else { self.misses += 1; }
-        val
+        match val {
+            Some(slot) => {
+                // if there's something in `self.store`, then `self.order`
+                // cannot be empty, and `key` must be present
+                let index = self.order.iter().enumerate()
+                                .find(|&(_, e)| { key == e })
+                                .expect("SizedCache::cache_get key not found in ordering").0;
+                let mut tail = self.order.split_off(index);
+                let used = tail.pop_front().expect("SizedCache::cache_get ordering is empty");
+                self.order.push_front(used);
+                self.order.append(&mut tail);
+                self.hits += 1;
+                Some(slot.get().expect("SizedCache::cache_get slots should never be empty"))
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
     }
     fn cache_set(&mut self, key: K, val: V) {
-        if self.store.len() < self.capacity {
-            self.store.insert(key.clone(), val);
-            self.order.push_front(key);
-        } else {
-            // store capacity cannot be zero, so there must be content in `self.order`
-            let lru_key = self.order.pop_back().unwrap();
-            self.store.remove(&lru_key).unwrap();
-            self.store.insert(key.clone(), val);
-            self.order.push_front(key);
+        if self.store.len() >= self.capacity {
+            // store has reached capacity, evict the oldest item.
+            // store capacity cannot be zero, so there must be content in `self.order`.
+            let lru_key = self.order.pop_back().expect("SizedCache::cache_set ordering is empty");
+            self.store.remove(&lru_key).expect("SizedCache::cache_set failed evicting cache key");
         }
+        let slot = self.store.entry(key.clone()).or_insert(Slot::Empty);
+        match slot {
+            Slot::Empty => self.order.push_front(key),
+            _ => (),
+        }
+        *slot = Slot::Occupied(val);
     }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
@@ -280,6 +302,20 @@ mod tests {
         assert_eq!(2, c.cache_misses().unwrap());
         let size = c.cache_size();
         assert_eq!(5, size);
+    }
+
+    #[test]
+    /// This is a regression test to confirm that racing cache sets on a SizedCache
+    /// do not cause duplicates to exist in the internal `order`. See issue #7
+    fn size_cache_racing_keys_eviction_regression() {
+        let mut c = SizedCache::with_size(2);
+        c.cache_set(1, 100);
+        c.cache_set(1, 100);
+        // size would be 1, but internal ordered would be [1, 1]
+        c.cache_set(2, 100);
+        c.cache_set(3, 100);
+        // this next set would fail because a duplicate key would be evicted
+        c.cache_set(4, 100);
     }
 
     #[test]
