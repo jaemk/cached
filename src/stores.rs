@@ -13,6 +13,10 @@ use super::Cached;
 
 
 /// Default unbounded cache
+///
+/// This cache has no size limit or eviction policy.
+///
+/// Note: This cache is in-memory only
 pub struct UnboundCache<K, V> {
     store: HashMap<K, V>,
     hits: u32,
@@ -79,6 +83,8 @@ impl<T> Slot<T> {
 ///
 /// Stores up to a specified size before beginning
 /// to evict the least recently used keys
+///
+/// Note: This cache is in-memory only
 pub struct SizedCache<K, V> {
     store: HashMap<K, Slot<V>>,
     order: LinkedList<K>,
@@ -167,7 +173,9 @@ enum Status {
 /// Cache store bound by time
 ///
 /// Values are timestamped when inserted and are
-/// expired on attempted retrieval.
+/// evicted if expired at time of retrieval.
+///
+/// Note: This cache is in-memory only
 pub struct TimedCache<K, V> {
     store: HashMap<K, (Instant, V)>,
     seconds: u64,

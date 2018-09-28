@@ -7,6 +7,15 @@
 
 ## removed
 
+## [0.6.2]
+## Added
+
+## Changed
+- Update documentation
+  - Note the in-memory nature of cache stores
+  - Note the behavior of memoized functions under concurrent access
+
+## removed
 
 ## [0.6.1]
 ## Added
