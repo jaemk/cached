@@ -250,7 +250,10 @@ pub trait Cached<K, V> {
     /// Insert a key, value pair
     fn cache_set(&mut self, k: K, v: V);
 
-    /// Remove all cached entries
+    /// Remove a cached value
+    fn cache_remove(&mut self, k: &K);
+
+    /// Remove all cached values
     fn cache_clear(&mut self);
 
     /// Return the current cache size (number of elements)

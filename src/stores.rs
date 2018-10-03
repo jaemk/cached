@@ -59,6 +59,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_set(&mut self, key: K, val: V) {
         self.store.insert(key, val);
     }
+    fn cache_remove(&mut self, k: &K) { self.store.remove(k); }
     fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
@@ -156,6 +157,18 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         }
         *slot = Slot::Occupied(val);
     }
+    fn cache_remove(&mut self, k: &K) {
+        // try and remove item from mapping, and then from order list if it was in mapping
+        if self.store.remove(k).is_some() {
+            // need to remove the key in the order list
+            let index = self.order.iter().enumerate()
+                    .find(|&(_, e)| { k == e })
+                    .expect("SizedCache::cache_remove key not found in ordering").0;
+            let mut tail = self.order.split_off(index);
+            tail.pop_front().expect("SizedCache::cache_remove ordering is empty");
+            self.order.append(&mut tail);
+        }
+    }
     fn cache_clear(&mut self) {
         // clear both the store and the order list
         self.store.clear();
@@ -246,6 +259,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         let stamped = (Instant::now(), val);
         self.store.insert(key, stamped);
     }
+    fn cache_remove(&mut self, k: &K) { self.store.remove(k); }
     fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize {
         self.store.len()
@@ -398,5 +412,70 @@ mod tests {
         c.cache_clear();
 
         assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn remove() {
+        let mut c = UnboundCache::new();
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+
+        // register some hits and misses
+        c.cache_get(&1);
+        c.cache_get(&2);
+        c.cache_get(&3);
+        c.cache_get(&10);
+        c.cache_get(&20);
+        c.cache_get(&30);
+
+        assert_eq!(3, c.cache_size());
+        assert_eq!(3, c.cache_hits().unwrap());
+        assert_eq!(3, c.cache_misses().unwrap());
+
+        // remove some items from cache
+        // hits and misses will still be kept
+        c.cache_remove(&1);
+
+        assert_eq!(2, c.cache_size());
+        assert_eq!(3, c.cache_hits().unwrap());
+        assert_eq!(3, c.cache_misses().unwrap());
+
+        c.cache_remove(&2);
+
+        assert_eq!(1, c.cache_size());
+
+        // removing extra is ok
+        c.cache_remove(&2);
+
+        assert_eq!(1, c.cache_size());
+
+        let mut c = SizedCache::with_size(3);
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+
+        c.cache_remove(&1);
+        assert_eq!(2, c.cache_size());
+
+        c.cache_remove(&2);
+        assert_eq!(1, c.cache_size());
+
+        c.cache_remove(&2);
+        assert_eq!(1, c.cache_size());
+
+        c.cache_remove(&3);
+        assert_eq!(0, c.cache_size());
+
+        let mut c = TimedCache::with_lifespan(3600);
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+
+        c.cache_remove(&1);
+        assert_eq!(2, c.cache_size());
     }
 }
