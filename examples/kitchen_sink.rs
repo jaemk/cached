@@ -73,6 +73,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     fn cache_set(&mut self, k: K, v: V) {
         self.store.insert(k, v);
     }
+    fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize {
         self.store.len()
     }

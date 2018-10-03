@@ -59,6 +59,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_set(&mut self, key: K, val: V) {
         self.store.insert(key, val);
     }
+    fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
     fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
@@ -155,6 +156,11 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         }
         *slot = Slot::Occupied(val);
     }
+    fn cache_clear(&mut self) {
+        // clear both the store and the order list
+        self.store.clear();
+        self.order.clear();
+    }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
     fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
@@ -240,6 +246,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         let stamped = (Instant::now(), val);
         self.store.insert(key, stamped);
     }
+    fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
@@ -344,5 +351,52 @@ mod tests {
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(2, misses);
+    }
+
+    #[test]
+    fn clear() {
+        let mut c = UnboundCache::new();
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+
+        // register some hits and misses
+        c.cache_get(&1);
+        c.cache_get(&2);
+        c.cache_get(&3);
+        c.cache_get(&10);
+        c.cache_get(&20);
+        c.cache_get(&30);
+
+        assert_eq!(3, c.cache_size());
+        assert_eq!(3, c.cache_hits().unwrap());
+        assert_eq!(3, c.cache_misses().unwrap());
+
+        // clear the cache, should have no more elements
+        // hits and misses will still be kept
+        c.cache_clear();
+
+        assert_eq!(0, c.cache_size());
+        assert_eq!(3, c.cache_hits().unwrap());
+        assert_eq!(3, c.cache_misses().unwrap());
+
+        let mut c = SizedCache::with_size(3);
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        c.cache_clear();
+
+        assert_eq!(0, c.cache_size());
+
+        let mut c = TimedCache::with_lifespan(3600);
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        c.cache_clear();
+
+        assert_eq!(0, c.cache_size());
     }
 }

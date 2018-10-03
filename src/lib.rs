@@ -250,6 +250,9 @@ pub trait Cached<K, V> {
     /// Insert a key, value pair
     fn cache_set(&mut self, k: K, v: V);
 
+    /// Remove all cached entries
+    fn cache_clear(&mut self);
+
     /// Return the current cache size (number of elements)
     fn cache_size(&self) -> usize;
 
@@ -265,4 +268,3 @@ pub trait Cached<K, V> {
     /// Return the lifespan of cached values (time to eviction)
     fn cache_lifespan(&self) -> Option<u64> { None }
 }
-
