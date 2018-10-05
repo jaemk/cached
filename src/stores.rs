@@ -59,7 +59,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_set(&mut self, key: K, val: V) {
         self.store.insert(key, val);
     }
-    fn cache_remove(&mut self, k: &K) { self.store.remove(k); }
+    fn cache_remove(&mut self, k: &K) -> Option<V> { self.store.remove(k) }
     fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
@@ -164,9 +164,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         }
         *slot = Slot::Occupied(val);
     }
-    fn cache_remove(&mut self, k: &K) {
+    fn cache_remove(&mut self, k: &K) -> Option<V> {
         // try and remove item from mapping, and then from order list if it was in mapping
-        if self.store.remove(k).is_some() {
+        let removed = self.store.remove(k);
+        if removed.is_some() {
             // need to remove the key in the order list
             let index = self.order.iter().enumerate()
                     .find(|&(_, e)| { k == e })
@@ -174,6 +175,13 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
             let mut tail = self.order.split_off(index);
             tail.pop_front().expect("SizedCache::cache_remove ordering is empty");
             self.order.append(&mut tail);
+
+            let slot = removed.expect("SizedCache::cache_remove slot is empty");
+
+            slot.take()
+        }
+        else {
+            None
         }
     }
     fn cache_clear(&mut self) {
@@ -266,7 +274,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         let stamped = (Instant::now(), val);
         self.store.insert(key, stamped);
     }
-    fn cache_remove(&mut self, k: &K) { self.store.remove(k); }
+    fn cache_remove(&mut self, k: &K) -> Option<V> { self.store.remove(k).map(|(_, v)| v) }
     fn cache_clear(&mut self) { self.store.clear(); }
     fn cache_size(&self) -> usize {
         self.store.len()

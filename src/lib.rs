@@ -251,7 +251,7 @@ pub trait Cached<K, V> {
     fn cache_set(&mut self, k: K, v: V);
 
     /// Remove a cached value
-    fn cache_remove(&mut self, k: &K);
+    fn cache_remove(&mut self, k: &K) -> Option<V>;
 
     /// Remove all cached values
     fn cache_clear(&mut self);
