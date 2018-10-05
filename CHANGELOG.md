@@ -5,7 +5,16 @@
 
 ## Changed
 
-## removed
+## Removed
+
+## [0.6.3]
+## Added
+- Add `cache_clear` and `cache_result` to `Cached` trait
+  - Allows for defeating cache entries if desired
+
+## Changed
+
+## Removed
 
 ## [0.6.2]
 ## Added
@@ -15,7 +24,7 @@
   - Note the in-memory nature of cache stores
   - Note the behavior of memoized functions under concurrent access
 
-## removed
+## Removed
 
 ## [0.6.1]
 ## Added
@@ -62,4 +71,3 @@
 - Update crate documentation and examples
 
 ## Removed
-
