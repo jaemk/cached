@@ -7,7 +7,7 @@
 
 ## Removed
 
-## [0.6.3]
+## [0.7.0]
 ## Added
 - Add `cache_clear` and `cache_result` to `Cached` trait
   - Allows for defeating cache entries if desired
