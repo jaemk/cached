@@ -78,6 +78,13 @@ impl<T> Slot<T> {
             &Slot::Empty => None,
         }
     }
+
+    fn take(self) -> Option<T> {
+        match self {
+            Slot::Occupied(v) => Some(v),
+            Slot::Empty => None,
+        }
+    }
 }
 
 
