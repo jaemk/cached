@@ -451,18 +451,18 @@ mod tests {
 
         // remove some items from cache
         // hits and misses will still be kept
-        c.cache_remove(&1);
+        assert_eq!(Some(100), c.cache_remove(&1));
 
         assert_eq!(2, c.cache_size());
         assert_eq!(3, c.cache_hits().unwrap());
         assert_eq!(3, c.cache_misses().unwrap());
 
-        c.cache_remove(&2);
+        assert_eq!(Some(200), c.cache_remove(&2));
 
         assert_eq!(1, c.cache_size());
 
         // removing extra is ok
-        c.cache_remove(&2);
+        assert_eq!(None, c.cache_remove(&2));
 
         assert_eq!(1, c.cache_size());
 
@@ -472,16 +472,16 @@ mod tests {
         c.cache_set(2, 200);
         c.cache_set(3, 300);
 
-        c.cache_remove(&1);
+        assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
 
-        c.cache_remove(&2);
+        assert_eq!(Some(200), c.cache_remove(&2));
         assert_eq!(1, c.cache_size());
 
-        c.cache_remove(&2);
+        assert_eq!(None, c.cache_remove(&2));
         assert_eq!(1, c.cache_size());
 
-        c.cache_remove(&3);
+        assert_eq!(Some(300), c.cache_remove(&3));
         assert_eq!(0, c.cache_size());
 
         let mut c = TimedCache::with_lifespan(3600);
@@ -490,7 +490,7 @@ mod tests {
         c.cache_set(2, 200);
         c.cache_set(3, 300);
 
-        c.cache_remove(&1);
+        assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
     }
 }
