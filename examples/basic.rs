@@ -1,6 +1,4 @@
 #[macro_use] extern crate cached;
-// `cached!` macro requires the `lazy_static!` macro
-#[macro_use] extern crate lazy_static;
 
 use std::time::{Instant, Duration};
 use std::thread::sleep;
