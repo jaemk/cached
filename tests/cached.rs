@@ -2,7 +2,6 @@
 Full tests of macro-defined functions
 */
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use std::time::Duration;
 use std::thread::{self, sleep};

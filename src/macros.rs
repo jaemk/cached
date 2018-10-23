@@ -16,11 +16,14 @@ macro_rules! cached {
     // Use a specified cache-type and an explicitly created cache-instance
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
-        lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<$cachetype> = {
-                ::std::sync::Mutex::new($cacheinstance)
-            };
-        }
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy {
+                __cell: $crate::once_cell::sync::OnceCell::INIT,
+                __init: || {
+                    ::std::sync::Mutex::new($cacheinstance)
+                },
+        };
+
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = ($($arg.clone()),*);
@@ -44,11 +47,14 @@ macro_rules! cached_key {
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      Key = $key:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
-        lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<$cachetype> = {
-                ::std::sync::Mutex::new($cacheinstance)
-            };
-        }
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy {
+                __cell: $crate::once_cell::sync::OnceCell::INIT,
+                __init: || {
+                    ::std::sync::Mutex::new($cacheinstance)
+                },
+        };
+
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = $key;
@@ -71,11 +77,14 @@ macro_rules! cached_result {
     // Unfortunately it's impossible to infer the cache type because it's not the function return type
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
-        lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<$cachetype> = {
-                ::std::sync::Mutex::new($cacheinstance)
-            };
-        }
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy {
+                __cell: $crate::once_cell::sync::OnceCell::INIT,
+                __init: || {
+                    ::std::sync::Mutex::new($cacheinstance)
+                },
+        };
+
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = ($($arg.clone()),*);
@@ -99,11 +108,14 @@ macro_rules! cached_key_result {
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      Key = $key:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
-        lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<$cachetype> = {
-                ::std::sync::Mutex::new($cacheinstance)
-            };
-        }
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy {
+                __cell: $crate::once_cell::sync::OnceCell::INIT,
+                __init: || {
+                    ::std::sync::Mutex::new($cacheinstance)
+                },
+        };
+
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = $key;
@@ -131,11 +143,14 @@ macro_rules! cached_control {
      Set($set_value:ident) = $pre_set:expr;
      Return($ret_value:ident) = $return:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
-        lazy_static! {
-            static ref $cachename: ::std::sync::Mutex<$cachetype> = {
-                ::std::sync::Mutex::new($cacheinstance)
-            };
-        }
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy {
+                __cell: $crate::once_cell::sync::OnceCell::INIT,
+                __init: || {
+                    ::std::sync::Mutex::new($cacheinstance)
+                },
+        };
+
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = $key;

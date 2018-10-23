@@ -13,5 +13,5 @@ license = "MIT"
 [badges]
 travis-ci = { repository = "jaemk/cached", branch = "master" }
 
-[dev-dependencies]
-lazy_static = "1"
+[dependencies]
+once_cell = "0.1.6"

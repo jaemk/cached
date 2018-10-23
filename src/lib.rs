@@ -49,7 +49,6 @@ There are several options depending on how explicit you want to be. See below fo
 
 ```rust,no_run
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 /// Defines a function named `fib` that uses a cache named `FIB`
 cached!{
@@ -71,7 +70,6 @@ cached!{
 
 ```rust,no_run
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -96,7 +94,6 @@ cached!{
 
 ```rust,no_run
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -127,7 +124,6 @@ cached_key!{
 
 ```rust,no_run
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use cached::UnboundCache;
 
@@ -185,7 +181,6 @@ scenarios, it can be useful to have the ability to customize the macro's functio
 
 ```rust,no_run
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use cached::UnboundCache;
 
@@ -235,6 +230,8 @@ cached_control!{
 ```
 
 */
+
+pub extern crate once_cell;
 
 pub mod macros;
 pub mod stores;
