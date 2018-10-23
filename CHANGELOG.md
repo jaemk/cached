@@ -7,6 +7,14 @@
 
 ## Removed
 
+## [0.8.0]
+## Added
+
+## Changed
+- Switch to `once_cell`. Library users no longer need to import `lazy_static`
+
+## Removed
+
 ## [0.7.0]
 ## Added
 - Add `cache_clear` and `cache_result` to `Cached` trait
