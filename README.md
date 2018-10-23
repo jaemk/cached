@@ -33,8 +33,8 @@ Due to the requirements of storing arguments and return values in a global cache
   macro must be used to convert arguments into an owned + `Hash + Eq + Clone` type.
 - Arguments and return values will be `cloned` in the process of insertion and retrieval.
 - `cached!` functions should not be used to produce side-effectual results!
-- `cached!` functions cannot live directly under `impl` blocks since `cached!` expands to a `lazy_static` block
-  (which can't live directly in the `impl`) and a function definition.
+- `cached!` functions cannot live directly under `impl` blocks since `cached!` expands to a
+  `once_cell` initialization and a funtion definition.
 
 **NOTE**: Any custom cache that implements `cached::Cached` can be used with the `cached` macros in place of the built-ins.
 
@@ -52,7 +52,6 @@ There are several options depending on how explicit you want to be. See below fo
 
 ```rust
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 /// Defines a function named `fib` that uses a cache named `FIB`
 cached!{
@@ -73,7 +72,6 @@ cached!{
 
 ```rust
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -97,7 +95,6 @@ cached!{
 
 ```rust
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -127,7 +124,6 @@ cached_key!{
 
 ```rust
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use cached::UnboundCache;
 
@@ -184,7 +180,6 @@ scenarios, it can be useful to have the ability to customize the macro's functio
 
 ```rust
 #[macro_use] extern crate cached;
-#[macro_use] extern crate lazy_static;
 
 use cached::UnboundCache;
 
