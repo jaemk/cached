@@ -3,14 +3,12 @@ Implementation of various caches
 
 */
 
-use std::collections::{HashMap, LinkedList};
-use std::collections::linked_list::Iter;
-use std::time::Instant;
-use std::hash::Hash;
 use std::cmp::Eq;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::time::Instant;
 
 use super::Cached;
-
 
 /// Default unbounded cache
 ///
@@ -23,7 +21,7 @@ pub struct UnboundCache<K, V> {
     misses: u32,
 }
 
-impl <K: Hash + Eq, V> UnboundCache<K, V> {
+impl<K: Hash + Eq, V> UnboundCache<K, V> {
     /// Creates an empty `UnboundCache`
     pub fn new() -> UnboundCache<K, V> {
         UnboundCache {
@@ -43,14 +41,14 @@ impl <K: Hash + Eq, V> UnboundCache<K, V> {
     }
 }
 
-impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
+impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         match self.store.get(key) {
             Some(v) => {
                 self.hits += 1;
                 Some(v)
             }
-            None =>  {
+            None => {
                 self.misses += 1;
                 None
             }
@@ -59,34 +57,155 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_set(&mut self, key: K, val: V) {
         self.store.insert(key, val);
     }
-    fn cache_remove(&mut self, k: &K) -> Option<V> { self.store.remove(k) }
-    fn cache_clear(&mut self) { self.store.clear(); }
-    fn cache_size(&self) -> usize { self.store.len() }
-    fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
-    fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
-}
-
-
-enum Slot<T> {
-    Occupied(T),
-    Empty,
-}
-impl<T> Slot<T> {
-    fn get(&self) -> Option<&T> {
-        match self {
-            &Slot::Occupied(ref v) => Some(v),
-            &Slot::Empty => None,
-        }
+    fn cache_remove(&mut self, k: &K) -> Option<V> {
+        self.store.remove(k)
     }
-
-    fn take(self) -> Option<T> {
-        match self {
-            Slot::Occupied(v) => Some(v),
-            Slot::Empty => None,
-        }
+    fn cache_clear(&mut self) {
+        self.store.clear();
+    }
+    fn cache_size(&self) -> usize {
+        self.store.len()
+    }
+    fn cache_hits(&self) -> Option<u32> {
+        Some(self.hits)
+    }
+    fn cache_misses(&self) -> Option<u32> {
+        Some(self.misses)
     }
 }
 
+/// Limited functionality doubly linked list using Vec as storage.
+struct LRUList<T> {
+    values: Vec<ListEntry<T>>,
+}
+
+struct ListEntry<T> {
+    value: Option<T>,
+    next: usize,
+    prev: usize,
+}
+
+/// Free and occupied cells are each linked into a cyclic list with one auxiliary cell.
+/// Cell #0 is on the list of free cells, element #1 is on the list of occupied cells.
+///
+impl<T> LRUList<T> {
+    const FREE: usize = 0;
+    const OCCUPIED: usize = 1;
+
+    fn with_capacity(capacity: usize) -> LRUList<T> {
+        let mut values = Vec::with_capacity(capacity + 2);
+        values.push(ListEntry::<T> {
+            value: None,
+            next: 0,
+            prev: 0,
+        });
+        values.push(ListEntry::<T> {
+            value: None,
+            next: 1,
+            prev: 1,
+        });
+        LRUList { values }
+    }
+
+    fn unlink(&mut self, index: usize) {
+        let prev = self.values[index].prev;
+        let next = self.values[index].next;
+        self.values[prev].next = next;
+        self.values[next].prev = prev;
+    }
+
+    fn link_after(&mut self, index: usize, prev: usize) {
+        let next = self.values[prev].next;
+        self.values[index].prev = prev;
+        self.values[index].next = next;
+        self.values[prev].next = index;
+        self.values[next].prev = index;
+    }
+
+    fn move_to_front(&mut self, index: usize) {
+        self.unlink(index);
+        self.link_after(index, Self::OCCUPIED);
+    }
+
+    fn push_front(&mut self, value: Option<T>) -> usize {
+        if self.values[Self::FREE].next == Self::FREE {
+            self.values.push(ListEntry::<T> {
+                value: None,
+                next: Self::FREE,
+                prev: Self::FREE,
+            });
+            self.values[Self::FREE].next = self.values.len() - 1;
+        }
+        let index = self.values[Self::FREE].next;
+        self.values[index].value = value;
+        self.unlink(index);
+        self.link_after(index, Self::OCCUPIED);
+        index
+    }
+
+    fn remove(&mut self, index: usize) -> T {
+        self.unlink(index);
+        self.link_after(index, Self::FREE);
+        self.values[index].value.take().expect("invalid index")
+    }
+
+    fn back(&self) -> usize {
+        self.values[Self::OCCUPIED].prev
+    }
+
+    fn pop_back(&mut self) -> T {
+        self.remove(self.back())
+    }
+
+    fn get(&self, index: usize) -> &T {
+        self.values[index].value.as_ref().expect("invalid index")
+    }
+
+    fn set(&mut self, index: usize, value: T) {
+        self.values[index].value = Some(value);
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.values.push(ListEntry::<T> {
+            value: None,
+            next: 0,
+            prev: 0,
+        });
+        self.values.push(ListEntry::<T> {
+            value: None,
+            next: 1,
+            prev: 1,
+        });
+    }
+
+    fn iter(&self) -> LRUListIterator<T> {
+        LRUListIterator::<T> {
+            list: self,
+            index: Self::OCCUPIED,
+        }
+    }
+}
+
+struct LRUListIterator<'a, T> {
+    list: &'a LRUList<T>,
+    index: usize,
+}
+
+impl<'a, T> Iterator for LRUListIterator<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.list.values[self.index].next;
+        if next == LRUList::<T>::OCCUPIED {
+            None
+        } else {
+            let value = self.list.values[next].value.as_ref();
+            self.index = next;
+            value
+        }
+    }
+}
 
 /// Least Recently Used / `Sized` Cache
 ///
@@ -95,25 +214,27 @@ impl<T> Slot<T> {
 ///
 /// Note: This cache is in-memory only
 pub struct SizedCache<K, V> {
-    store: HashMap<K, Slot<V>>,
-    order: LinkedList<K>,
+    store: HashMap<K, usize>,
+    order: LRUList<(K, V)>,
     capacity: usize,
     hits: u32,
     misses: u32,
 }
 
 impl<K: Hash + Eq, V> SizedCache<K, V> {
-    #[deprecated(since="0.5.1", note="method renamed to `with_size`")]
+    #[deprecated(since = "0.5.1", note = "method renamed to `with_size`")]
     pub fn with_capacity(size: usize) -> SizedCache<K, V> {
         Self::with_size(size)
     }
 
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
     pub fn with_size(size: usize) -> SizedCache<K, V> {
-        if size == 0 { panic!("`size` of `SizedCache` must be greater than zero.") }
+        if size == 0 {
+            panic!("`size` of `SizedCache` must be greater than zero.")
+        }
         SizedCache {
             store: HashMap::with_capacity(size),
-            order: LinkedList::new(),
+            order: LRUList::<(K, V)>::with_capacity(size),
             capacity: size,
             hits: 0,
             misses: 0,
@@ -122,8 +243,8 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
 
     /// Return an iterator of keys in the current order from most
     /// to least recently used.
-    pub fn key_order(&self) -> Iter<K> {
-        self.order.iter()
+    pub fn key_order(&self) -> impl Iterator<Item = &K> {
+        self.order.iter().map(|(k, _v)| k)
     }
 }
 
@@ -131,18 +252,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         let val = self.store.get(key);
         match val {
-            Some(slot) => {
-                // if there's something in `self.store`, then `self.order`
-                // cannot be empty, and `key` must be present
-                let index = self.order.iter().enumerate()
-                                .find(|&(_, e)| { key == e })
-                                .expect("SizedCache::cache_get key not found in ordering").0;
-                let mut tail = self.order.split_off(index);
-                let used = tail.pop_front().expect("SizedCache::cache_get ordering is empty");
-                self.order.push_front(used);
-                self.order.append(&mut tail);
+            Some(&index) => {
+                self.order.move_to_front(index);
                 self.hits += 1;
-                Some(slot.get().expect("SizedCache::cache_get slots should never be empty"))
+                Some(&self.order.get(index).1)
             }
             None => {
                 self.misses += 1;
@@ -154,33 +267,25 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         if self.store.len() >= self.capacity {
             // store has reached capacity, evict the oldest item.
             // store capacity cannot be zero, so there must be content in `self.order`.
-            let lru_key = self.order.pop_back().expect("SizedCache::cache_set ordering is empty");
-            self.store.remove(&lru_key).expect("SizedCache::cache_set failed evicting cache key");
+            let (key, _value) = self.order.pop_back();
+            self.store
+                .remove(&key)
+                .expect("SizedCache::cache_set failed evicting cache key");
         }
-        let slot = self.store.entry(key.clone()).or_insert(Slot::Empty);
-        match slot {
-            Slot::Empty => self.order.push_front(key),
-            _ => (),
-        }
-        *slot = Slot::Occupied(val);
+        let Self { store, order, .. } = self;
+        let index = *store
+            .entry(key.clone())
+            .or_insert_with(|| order.push_front(None));
+        order.set(index, (key, val));
     }
+
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         // try and remove item from mapping, and then from order list if it was in mapping
-        let removed = self.store.remove(k);
-        if removed.is_some() {
+        if let Some(index) = self.store.remove(k) {
             // need to remove the key in the order list
-            let index = self.order.iter().enumerate()
-                    .find(|&(_, e)| { k == e })
-                    .expect("SizedCache::cache_remove key not found in ordering").0;
-            let mut tail = self.order.split_off(index);
-            tail.pop_front().expect("SizedCache::cache_remove ordering is empty");
-            self.order.append(&mut tail);
-
-            let slot = removed.expect("SizedCache::cache_remove slot is empty");
-
-            slot.take()
-        }
-        else {
+            let (_key, value) = self.order.remove(index);
+            Some(value)
+        } else {
             None
         }
     }
@@ -189,12 +294,19 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         self.store.clear();
         self.order.clear();
     }
-    fn cache_size(&self) -> usize { self.store.len() }
-    fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
-    fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
-    fn cache_capacity(&self) -> Option<usize> { Some(self.capacity) }
+    fn cache_size(&self) -> usize {
+        self.store.len()
+    }
+    fn cache_hits(&self) -> Option<u32> {
+        Some(self.hits)
+    }
+    fn cache_misses(&self) -> Option<u32> {
+        Some(self.misses)
+    }
+    fn cache_capacity(&self) -> Option<usize> {
+        Some(self.capacity)
+    }
 }
-
 
 /// Enum used for defining the status of time-cached values
 enum Status {
@@ -202,7 +314,6 @@ enum Status {
     Found,
     Expired,
 }
-
 
 /// Cache store bound by time
 ///
@@ -251,7 +362,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
                     Status::Expired
                 }
             } else {
-                 Status::NotFound
+                Status::NotFound
             }
         };
         match status {
@@ -259,11 +370,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
                 self.misses += 1;
                 None
             }
-            Status::Found    => {
+            Status::Found => {
                 self.hits += 1;
                 self.store.get(key).map(|stamped| &stamped.1)
             }
-            Status::Expired  => {
+            Status::Expired => {
                 self.misses += 1;
                 self.store.remove(key).unwrap();
                 None
@@ -274,28 +385,37 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         let stamped = (Instant::now(), val);
         self.store.insert(key, stamped);
     }
-    fn cache_remove(&mut self, k: &K) -> Option<V> { self.store.remove(k).map(|(_, v)| v) }
-    fn cache_clear(&mut self) { self.store.clear(); }
+    fn cache_remove(&mut self, k: &K) -> Option<V> {
+        self.store.remove(k).map(|(_, v)| v)
+    }
+    fn cache_clear(&mut self) {
+        self.store.clear();
+    }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
-    fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
-    fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
-    fn cache_lifespan(&self) -> Option<u64> { Some(self.seconds) }
+    fn cache_hits(&self) -> Option<u32> {
+        Some(self.hits)
+    }
+    fn cache_misses(&self) -> Option<u32> {
+        Some(self.misses)
+    }
+    fn cache_lifespan(&self) -> Option<u64> {
+        Some(self.seconds)
+    }
 }
-
 
 #[cfg(test)]
 /// Cache store tests
 mod tests {
-    use std::time::Duration;
     use std::thread::sleep;
+    use std::time::Duration;
 
     use super::Cached;
 
-    use super::UnboundCache;
     use super::SizedCache;
     use super::TimedCache;
+    use super::UnboundCache;
 
     #[test]
     fn basic_cache() {
