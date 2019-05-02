@@ -154,7 +154,8 @@ impl<T> LRUList<T> {
     }
 
     fn pop_back(&mut self) -> T {
-        self.remove(self.back())
+        let index = self.back();
+        self.remove(index)
     }
 
     fn get(&self, index: usize) -> &T {
