@@ -7,6 +7,15 @@
 
 ## Removed
 
+## [0.8.1]
+## Added
+
+## Changed
+- Replace inner cache when "clearing" unbounded cache
+
+## Removed
+
+
 ## [0.8.0]
 ## Added
 
