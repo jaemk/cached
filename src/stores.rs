@@ -60,7 +60,7 @@ impl <K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         self.store.insert(key, val);
     }
     fn cache_remove(&mut self, k: &K) -> Option<V> { self.store.remove(k) }
-    fn cache_clear(&mut self) { self.store.clear(); }
+    fn cache_clear(&mut self) { self.store = HashMap::new(); }
     fn cache_size(&self) -> usize { self.store.len() }
     fn cache_hits(&self) -> Option<u32> { Some(self.hits) }
     fn cache_misses(&self) -> Option<u32> { Some(self.misses) }
