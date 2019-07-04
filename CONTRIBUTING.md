@@ -11,7 +11,7 @@ Thanks for contributing!
 
 ## Making Changes
 
-- After making changes, be sure to run the tests (see below)!
+- After making changes, be sure to run the tests (see below) and run `cargo fmt`!
 - Add an entry to the CHANGELOG
 - This crate makes use of [`cargo-readme`](https://github.com/livioribeiro/cargo-readme) (`cargo install cargo-readme`)
   to generate the `README.md` from the crate level documentation in `src/lib.rs`.
