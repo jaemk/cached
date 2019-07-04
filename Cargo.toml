@@ -9,6 +9,7 @@ readme = "README.md"
 categories = ["caching"]
 keywords = ["caching", "cache", "memoize", "lru"]
 license = "MIT"
+edition = "2018"
 
 [badges]
 travis-ci = { repository = "jaemk/cached", branch = "master" }
