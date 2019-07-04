@@ -123,17 +123,40 @@ cached_key! {
 
 #[test]
 fn test_sized_cache_key() {
-    sized_key("a", "b");
-    sized_key("a", "b");
+    sized_key("a", "1");
+    sized_key("a", "1");
     {
         let cache = SIZED_CACHE.lock().unwrap();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
+        assert_eq!(1, cache.cache_size());
     }
-    sized_key("a", "b");
+    sized_key("a", "1");
+    {
+        let cache = SIZED_CACHE.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(1, cache.cache_size());
+    }
+    sized_key("a", "2");
     {
         let cache = SIZED_CACHE.lock().unwrap();
         assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(2, cache.cache_size());
+        assert_eq!(vec!["a2", "a1"], cache.key_order().collect::<Vec<_>>());
+    }
+    sized_key("a", "3");
+    {
+        let cache = SIZED_CACHE.lock().unwrap();
+        assert_eq!(2, cache.cache_size());
+        assert_eq!(vec!["a3", "a2"], cache.key_order().collect::<Vec<_>>());
+    }
+    sized_key("a", "4");
+    sized_key("a", "5");
+    {
+        let cache = SIZED_CACHE.lock().unwrap();
+        assert_eq!(2, cache.cache_size());
+        assert_eq!(vec!["a5", "a4"], cache.key_order().collect::<Vec<_>>());
     }
 }
 
