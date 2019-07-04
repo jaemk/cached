@@ -7,6 +7,17 @@
 
 ## Removed
 
+## [0.9.0]
+## Added
+
+## Changed
+- Replace SizedCache implementation to avoid O(n) lookup on cache-get
+- Update to Rust-2018 edition
+- cargo fmt everything
+
+## Removed
+
+
 ## [0.8.1]
 ## Added
 
