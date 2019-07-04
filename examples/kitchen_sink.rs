@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use cached::{Cached, SizedCache, UnboundCache};
 
-/// cached shorthand, uses the default unbounded cache.
-/// Equivalent to specifying `FIB: UnboundCache<(u32), u32> = UnboundCache::new();`
+// cached shorthand, uses the default unbounded cache.
+// Equivalent to specifying `FIB: UnboundCache<(u32), u32> = UnboundCache::new();`
 cached! {
     FIB;
     fn fib(n: u32) -> u32 = {
@@ -20,8 +20,8 @@ cached! {
     }
 }
 
-/// Same as above, but preallocates some space.
-/// Note that the cache key type is a tuple of function argument types.
+// Same as above, but preallocates some space.
+// Note that the cache key type is a tuple of function argument types.
 cached! {
     FIB_SPECIFIC: UnboundCache<(u32), u32> = UnboundCache::with_capacity(50);
     fn fib_specific(n: u32) -> u32 = {
@@ -30,8 +30,8 @@ cached! {
     }
 }
 
-/// Specify a specific cache type
-/// Note that the cache key type is a tuple of function argument types.
+// Specify a specific cache type
+// Note that the cache key type is a tuple of function argument types.
 cached! {
     SLOW: SizedCache<(u32, u32), u32> = SizedCache::with_size(100);
     fn slow(a: u32, b: u32) -> u32 = {
@@ -40,8 +40,8 @@ cached! {
     }
 }
 
-/// Specify a specific cache type and an explicit key expression
-/// Note that the cache key type is a `String` created from the borrow arguments
+// Specify a specific cache type and an explicit key expression
+// Note that the cache key type is a `String` created from the borrow arguments
 cached_key! {
     KEYED: SizedCache<String, usize> = SizedCache::with_size(100);
     Key = { format!("{}{}", a, b) };
@@ -52,7 +52,7 @@ cached_key! {
     }
 }
 
-/// Implement our own cache type
+// Implement our own cache type
 struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
 }
@@ -81,7 +81,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     }
 }
 
-/// Specify our custom cache and supply an instance to use
+// Specify our custom cache and supply an instance to use
 cached! {
     CUSTOM: MyCache<(u32), ()> = MyCache::with_capacity(50);
     fn custom(n: u32) -> () = {
