@@ -1,21 +1,20 @@
 /*!
 Full tests of macro-defined functions
 */
-#[macro_use] extern crate cached;
+#[macro_use]
+extern crate cached;
 
-use std::time::Duration;
+use cached::{Cached, SizedCache, TimedCache, UnboundCache};
 use std::thread::{self, sleep};
-use cached::{UnboundCache, Cached, SizedCache, TimedCache};
+use std::time::Duration;
 
-
-cached!{
+cached! {
     UNBOUND_FIB;
     fn fib0(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n }
         fib0(n-1) + fib0(n-2)
     }
 }
-
 
 #[test]
 fn test_unbound_cache() {
@@ -26,15 +25,13 @@ fn test_unbound_cache() {
     }
 }
 
-
-cached!{
+cached! {
     SIZED_FIB: SizedCache<(u32), u32> = SizedCache::with_size(3);
     fn fib1(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n }
         fib1(n-1) + fib1(n-2)
     }
 }
-
 
 #[test]
 fn test_sized_cache() {
@@ -45,15 +42,13 @@ fn test_sized_cache() {
     }
 }
 
-
-cached!{
+cached! {
     TIMED: TimedCache<(u32), u32> = TimedCache::with_lifespan_and_capacity(2, 5);
     fn timed(n: u32) -> u32 = {
         sleep(Duration::new(3, 0));
         n
     }
 }
-
 
 #[test]
 fn test_timed_cache() {
@@ -73,14 +68,12 @@ fn test_timed_cache() {
     }
 }
 
-
-cached!{
+cached! {
     STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_size(1);
     fn string_1(a: String, b: String) -> String = {
         return a + &b;
     }
 }
-
 
 #[test]
 fn test_string_cache() {
@@ -91,8 +84,7 @@ fn test_string_cache() {
     }
 }
 
-
-cached_key!{
+cached_key! {
     TIMED_CACHE: TimedCache<(u32), u32> = TimedCache::with_lifespan_and_capacity(2, 5);
     Key = { n };
     fn timed_2(n: u32) -> u32 = {
@@ -100,7 +92,6 @@ cached_key!{
         n
     }
 }
-
 
 #[test]
 fn test_timed_cache_key() {
@@ -120,8 +111,7 @@ fn test_timed_cache_key() {
     }
 }
 
-
-cached_key!{
+cached_key! {
     SIZED_CACHE: SizedCache<String, usize> = SizedCache::with_size(2);
     Key = { format!("{}{}", a, b) };
     fn sized_key(a: &str, b: &str) -> usize = {
@@ -130,7 +120,6 @@ cached_key!{
         size
     }
 }
-
 
 #[test]
 fn test_sized_cache_key() {
@@ -148,7 +137,7 @@ fn test_sized_cache_key() {
     }
 }
 
-cached_key_result!{
+cached_key_result! {
     RESULT_CACHE_KEY: UnboundCache<(u32), u32> = UnboundCache::new();
     Key = { n };
     fn test_result_key(n: u32) -> Result<u32, ()> = {
@@ -172,7 +161,7 @@ fn cache_result_key() {
     }
 }
 
-cached_result!{
+cached_result! {
     RESULT_CACHE: UnboundCache<(u32), u32> = UnboundCache::new();
     fn test_result_no_default(n: u32) -> Result<u32, ()> = {
         if n < 5 { Ok(n) } else { Err(()) }
@@ -195,8 +184,7 @@ fn cache_result_no_default() {
     }
 }
 
-
-cached_control!{
+cached_control! {
     CONTROL_CACHE: UnboundCache<String, String> = UnboundCache::new();
     Key = { input.to_owned() };
     PostGet(cached_val) = { return Ok(cached_val.clone()) };
@@ -218,7 +206,6 @@ cached_control!{
     }
 }
 
-
 #[test]
 fn test_can_fail() {
     assert_eq!(can_fail("ab"), Ok("ab-2".to_string()));
@@ -234,8 +221,7 @@ fn test_can_fail() {
     }
 }
 
-
-cached_key!{
+cached_key! {
     SIZED_KEY_RESULT_CACHE: SizedCache<String, String> = SizedCache::with_size(2);
     Key = { format!("{}/{}", a, b) };
     fn slow_small_cache(a: &str, b: &str) -> String = {
@@ -243,7 +229,6 @@ cached_key!{
         format!("{}:{}", a, b)
     }
 }
-
 
 #[test]
 /// This is a regression test to confirm that racing cache sets on a SizedCache

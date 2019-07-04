@@ -1,10 +1,10 @@
-#[macro_use] extern crate cached;
+#[macro_use]
+extern crate cached;
 
-use std::time::{Instant, Duration};
 use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use cached::SizedCache;
-
 
 cached! {
     SLOW_FN: SizedCache<(u32), String> = SizedCache::with_size(50);
@@ -14,7 +14,6 @@ cached! {
         slow_fn(n-1)
     }
 }
-
 
 pub fn main() {
     println!("Initial run...");
@@ -29,7 +28,7 @@ pub fn main() {
 
     // Inspect the cache
     {
-        use cached::Cached;  // must be in scope to access cache
+        use cached::Cached; // must be in scope to access cache
 
         println!(" ** Cache info **");
         let cache = SLOW_FN.lock().unwrap();
@@ -38,4 +37,3 @@ pub fn main() {
         // make sure the cache-lock is dropped
     }
 }
-

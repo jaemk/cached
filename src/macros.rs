@@ -40,7 +40,6 @@ macro_rules! cached {
     };
 }
 
-
 #[macro_export]
 macro_rules! cached_key {
     // Use a specified cache-type and an explicitly created cache-instance
@@ -71,7 +70,6 @@ macro_rules! cached_key {
     };
 }
 
-
 #[macro_export]
 macro_rules! cached_result {
     // Unfortunately it's impossible to infer the cache type because it's not the function return type
@@ -100,7 +98,6 @@ macro_rules! cached_result {
         }
     };
 }
-
 
 #[macro_export]
 macro_rules! cached_key_result {
@@ -131,7 +128,6 @@ macro_rules! cached_key_result {
         }
     };
 }
-
 
 #[macro_export]
 macro_rules! cached_control {
@@ -170,4 +166,3 @@ macro_rules! cached_control {
         }
     };
 }
-

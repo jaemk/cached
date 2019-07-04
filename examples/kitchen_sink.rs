@@ -1,18 +1,18 @@
-#[macro_use] extern crate cached;
+#[macro_use]
+extern crate cached;
 
+use std::cmp::Eq;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::cmp::Eq;
 
-use std::time::Duration;
 use std::thread::sleep;
+use std::time::Duration;
 
-use cached::{Cached, UnboundCache, SizedCache};
-
+use cached::{Cached, SizedCache, UnboundCache};
 
 /// cached shorthand, uses the default unbounded cache.
 /// Equivalent to specifying `FIB: UnboundCache<(u32), u32> = UnboundCache::new();`
-cached!{
+cached! {
     FIB;
     fn fib(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n; }
@@ -20,10 +20,9 @@ cached!{
     }
 }
 
-
 /// Same as above, but preallocates some space.
 /// Note that the cache key type is a tuple of function argument types.
-cached!{
+cached! {
     FIB_SPECIFIC: UnboundCache<(u32), u32> = UnboundCache::with_capacity(50);
     fn fib_specific(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n; }
@@ -31,10 +30,9 @@ cached!{
     }
 }
 
-
 /// Specify a specific cache type
 /// Note that the cache key type is a tuple of function argument types.
-cached!{
+cached! {
     SLOW: SizedCache<(u32, u32), u32> = SizedCache::with_size(100);
     fn slow(a: u32, b: u32) -> u32 = {
         sleep(Duration::new(2, 0));
@@ -42,10 +40,9 @@ cached!{
     }
 }
 
-
 /// Specify a specific cache type and an explicit key expression
 /// Note that the cache key type is a `String` created from the borrow arguments
-cached_key!{
+cached_key! {
     KEYED: SizedCache<String, usize> = SizedCache::with_size(100);
     Key = { format!("{}{}", a, b) };
     fn keyed(a: &str, b: &str) -> usize = {
@@ -55,17 +52,18 @@ cached_key!{
     }
 }
 
-
 /// Implement our own cache type
 struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
 }
-impl <K: Hash + Eq, V> MyCache<K, V> {
+impl<K: Hash + Eq, V> MyCache<K, V> {
     pub fn with_capacity(size: usize) -> MyCache<K, V> {
-        MyCache { store: HashMap::with_capacity(size) }
+        MyCache {
+            store: HashMap::with_capacity(size),
+        }
     }
 }
-impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
+impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     fn cache_get(&mut self, k: &K) -> Option<&V> {
         self.store.get(k)
     }
@@ -75,22 +73,22 @@ impl <K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         self.store.remove(k)
     }
-    fn cache_clear(&mut self) { self.store.clear(); }
+    fn cache_clear(&mut self) {
+        self.store.clear();
+    }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
 }
 
-
 /// Specify our custom cache and supply an instance to use
-cached!{
+cached! {
     CUSTOM: MyCache<(u32), ()> = MyCache::with_capacity(50);
     fn custom(n: u32) -> () = {
         if n == 0 { return; }
         custom(n-1)
     }
 }
-
 
 pub fn main() {
     println!("\n ** default cache **");

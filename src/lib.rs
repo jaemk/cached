@@ -236,10 +236,7 @@ pub extern crate once_cell;
 pub mod macros;
 pub mod stores;
 
-pub use stores::{
-    UnboundCache, SizedCache, TimedCache,
-};
-
+pub use stores::{SizedCache, TimedCache, UnboundCache};
 
 /// Cache operations
 pub trait Cached<K, V> {
@@ -259,14 +256,22 @@ pub trait Cached<K, V> {
     fn cache_size(&self) -> usize;
 
     /// Return the number of times a cached value was successfully retrieved
-    fn cache_hits(&self) -> Option<u32> { None }
+    fn cache_hits(&self) -> Option<u32> {
+        None
+    }
 
     /// Return the number of times a cached value was unable to be retrieved
-    fn cache_misses(&self) -> Option<u32> { None }
+    fn cache_misses(&self) -> Option<u32> {
+        None
+    }
 
     /// Return the cache capacity
-    fn cache_capacity(&self) -> Option<usize> { None }
+    fn cache_capacity(&self) -> Option<usize> {
+        None
+    }
 
     /// Return the lifespan of cached values (time to eviction)
-    fn cache_lifespan(&self) -> Option<u64> { None }
+    fn cache_lifespan(&self) -> Option<u64> {
+        None
+    }
 }
