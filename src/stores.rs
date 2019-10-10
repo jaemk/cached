@@ -19,6 +19,7 @@ pub struct UnboundCache<K, V> {
     store: HashMap<K, V>,
     hits: u32,
     misses: u32,
+    initial_capacity: Option<usize>,
 }
 
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
@@ -28,6 +29,7 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
             store: HashMap::new(),
             hits: 0,
             misses: 0,
+            initial_capacity: None,
         }
     }
 
@@ -37,6 +39,7 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
             store: HashMap::with_capacity(size),
             hits: 0,
             misses: 0,
+            initial_capacity: Some(size),
         }
     }
 }
@@ -61,7 +64,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         self.store.remove(k)
     }
     fn cache_clear(&mut self) {
-        self.store.clear();
+        self.store = self.initial_capacity.map_or_else(
+            || HashMap::new(),
+            |capacity| HashMap::with_capacity(capacity),
+        );
     }
     fn cache_size(&self) -> usize {
         self.store.len()
@@ -522,6 +528,7 @@ mod tests {
         assert_eq!(3, c.cache_size());
         assert_eq!(3, c.cache_hits().unwrap());
         assert_eq!(3, c.cache_misses().unwrap());
+        assert_eq!(3, c.store.capacity());
 
         // clear the cache, should have no more elements
         // hits and misses will still be kept
@@ -530,6 +537,21 @@ mod tests {
         assert_eq!(0, c.cache_size());
         assert_eq!(3, c.cache_hits().unwrap());
         assert_eq!(3, c.cache_misses().unwrap());
+        assert_eq!(0, c.store.capacity());
+
+        let capacity = 1;
+        let mut c = UnboundCache::with_capacity(capacity);
+        assert_eq!(capacity, c.store.capacity());
+
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+
+        assert_eq!(3, c.store.capacity());
+
+        c.cache_clear();
+
+        assert_eq!(capacity, c.store.capacity());
 
         let mut c = SizedCache::with_size(3);
 
