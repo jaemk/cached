@@ -55,11 +55,13 @@ cached_key! {
 // Implement our own cache type
 struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
+    capacity: usize,
 }
 impl<K: Hash + Eq, V> MyCache<K, V> {
     pub fn with_capacity(size: usize) -> MyCache<K, V> {
         MyCache {
             store: HashMap::with_capacity(size),
+            capacity: size,
         }
     }
 }
@@ -75,6 +77,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     }
     fn cache_clear(&mut self) {
         self.store.clear();
+    }
+    fn cache_reset(&mut self) {
+        self.store = HashMap::with_capacity(self.capacity);
     }
     fn cache_size(&self) -> usize {
         self.store.len()

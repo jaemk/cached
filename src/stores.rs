@@ -26,7 +26,7 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     /// Creates an empty `UnboundCache`
     pub fn new() -> UnboundCache<K, V> {
         UnboundCache {
-            store: HashMap::new(),
+            store: Self::new_store(None),
             hits: 0,
             misses: 0,
             initial_capacity: None,
@@ -36,11 +36,18 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     /// Creates an empty `UnboundCache` with a given pre-allocated capacity
     pub fn with_capacity(size: usize) -> UnboundCache<K, V> {
         UnboundCache {
-            store: HashMap::with_capacity(size),
+            store: Self::new_store(Some(size)),
             hits: 0,
             misses: 0,
             initial_capacity: Some(size),
         }
+    }
+
+    fn new_store(capacity: Option<usize>) -> HashMap<K, V> {
+        capacity.map_or_else(
+            || HashMap::new(),
+            |size| HashMap::with_capacity(size),
+        )
     }
 }
 
@@ -64,10 +71,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         self.store.remove(k)
     }
     fn cache_clear(&mut self) {
-        self.store = self.initial_capacity.map_or_else(
-            || HashMap::new(),
-            |capacity| HashMap::with_capacity(capacity),
-        );
+        self.store.clear();
+    }
+    fn cache_reset(&mut self) {
+        self.store = Self::new_store(self.initial_capacity);
     }
     fn cache_size(&self) -> usize {
         self.store.len()
@@ -301,6 +308,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         self.store.clear();
         self.order.clear();
     }
+    fn cache_reset(&mut self) {
+        // SizedCache uses cache_clear because capacity is fixed.
+        self.cache_clear();
+    }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
@@ -333,16 +344,18 @@ pub struct TimedCache<K, V> {
     seconds: u64,
     hits: u32,
     misses: u32,
+    initial_capacity: Option<usize>,
 }
 
 impl<K: Hash + Eq, V> TimedCache<K, V> {
     /// Creates a new `TimedCache` with a specified lifespan
     pub fn with_lifespan(seconds: u64) -> TimedCache<K, V> {
         TimedCache {
-            store: HashMap::new(),
+            store: Self::new_store(None),
             seconds: seconds,
             hits: 0,
             misses: 0,
+            initial_capacity: None,
         }
     }
 
@@ -350,11 +363,19 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     /// cache-store with the specified pre-allocated capacity
     pub fn with_lifespan_and_capacity(seconds: u64, size: usize) -> TimedCache<K, V> {
         TimedCache {
-            store: HashMap::with_capacity(size),
+            store: Self::new_store(Some(size)),
             seconds: seconds,
             hits: 0,
             misses: 0,
+            initial_capacity: Some(size),
         }
+    }
+
+    fn new_store(capacity: Option<usize>) -> HashMap<K, (Instant, V)> {
+        capacity.map_or_else(
+            || HashMap::new(),
+            |size| HashMap::with_capacity(size),
+        )
     }
 }
 
@@ -397,6 +418,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     }
     fn cache_clear(&mut self) {
         self.store.clear();
+    }
+    fn cache_reset(&mut self) {
+        self.store = Self::new_store(self.initial_capacity);
     }
     fn cache_size(&self) -> usize {
         self.store.len()
@@ -537,7 +561,7 @@ mod tests {
         assert_eq!(0, c.cache_size());
         assert_eq!(3, c.cache_hits().unwrap());
         assert_eq!(3, c.cache_misses().unwrap());
-        assert_eq!(0, c.store.capacity());
+        assert_eq!(3, c.store.capacity()); // Keeps the allocated memory for reuse.
 
         let capacity = 1;
         let mut c = UnboundCache::with_capacity(capacity);
@@ -551,7 +575,7 @@ mod tests {
 
         c.cache_clear();
 
-        assert_eq!(capacity, c.store.capacity());
+        assert_eq!(3, c.store.capacity()); // Keeps the allocated memory for reuse.
 
         let mut c = SizedCache::with_size(3);
 
@@ -571,6 +595,60 @@ mod tests {
 
         assert_eq!(0, c.cache_size());
     }
+
+    #[test]
+    fn reset() {
+        let mut c = UnboundCache::new();
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        assert_eq!(3, c.store.capacity());
+
+        c.cache_reset();
+
+        assert_eq!(0, c.store.capacity());
+
+        let init_capacity = 1;
+        let mut c = UnboundCache::with_capacity(init_capacity);
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        assert_eq!(3, c.store.capacity());
+
+        c.cache_reset();
+
+        assert_eq!(init_capacity, c.store.capacity());
+
+        let mut c = SizedCache::with_size(init_capacity);
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        assert_eq!(init_capacity, c.store.capacity());
+
+        c.cache_reset();
+
+        assert_eq!(init_capacity, c.store.capacity());
+
+        let mut c = TimedCache::with_lifespan(100);
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        assert_eq!(3, c.store.capacity());
+
+        c.cache_reset();
+
+        assert_eq!(0, c.store.capacity());
+
+        let mut c = TimedCache::with_lifespan_and_capacity(100, init_capacity);
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+        c.cache_set(3, 300);
+        assert_eq!(3, c.store.capacity());
+
+        c.cache_reset();
+
+        assert_eq!(init_capacity, c.store.capacity());
+}
 
     #[test]
     fn remove() {

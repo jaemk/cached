@@ -249,8 +249,11 @@ pub trait Cached<K, V> {
     /// Remove a cached value
     fn cache_remove(&mut self, k: &K) -> Option<V>;
 
-    /// Remove all cached values
+    /// Remove all cached values. Keeps the allocated memory for reuse.
     fn cache_clear(&mut self);
+
+    /// Remove all cached values. Free memory and return to initial state
+    fn cache_reset(&mut self);
 
     /// Return the current cache size (number of elements)
     fn cache_size(&self) -> usize;
