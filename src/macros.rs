@@ -17,12 +17,7 @@ macro_rules! cached {
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
-            = $crate::once_cell::sync::Lazy {
-                __cell: $crate::once_cell::sync::OnceCell::INIT,
-                __init: || {
-                    ::std::sync::Mutex::new($cacheinstance)
-                },
-        };
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
@@ -47,12 +42,7 @@ macro_rules! cached_key {
      Key = $key:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
-            = $crate::once_cell::sync::Lazy {
-                __cell: $crate::once_cell::sync::OnceCell::INIT,
-                __init: || {
-                    ::std::sync::Mutex::new($cacheinstance)
-                },
-        };
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
@@ -76,12 +66,7 @@ macro_rules! cached_result {
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
-            = $crate::once_cell::sync::Lazy {
-                __cell: $crate::once_cell::sync::OnceCell::INIT,
-                __init: || {
-                    ::std::sync::Mutex::new($cacheinstance)
-                },
-        };
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
@@ -106,12 +91,7 @@ macro_rules! cached_key_result {
      Key = $key:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
-            = $crate::once_cell::sync::Lazy {
-                __cell: $crate::once_cell::sync::OnceCell::INIT,
-                __init: || {
-                    ::std::sync::Mutex::new($cacheinstance)
-                },
-        };
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
@@ -140,12 +120,7 @@ macro_rules! cached_control {
      Return($ret_value:ident) = $return:expr;
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
-            = $crate::once_cell::sync::Lazy {
-                __cell: $crate::once_cell::sync::OnceCell::INIT,
-                __init: || {
-                    ::std::sync::Mutex::new($cacheinstance)
-                },
-        };
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
         pub fn $name($($arg: $argtype),*) -> $ret {
