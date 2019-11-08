@@ -7,6 +7,16 @@
 
 ## Removed
 
+## [0.10.0]
+## Added
+- add `cache_reset` trait method for resetting cache collections to
+  their initial state
+
+## Changed
+- Update `once_cell` to 1.x
+
+## Removed
+
 ## [0.9.0]
 ## Added
 
