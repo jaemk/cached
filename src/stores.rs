@@ -260,6 +260,12 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
     pub fn key_order(&self) -> impl Iterator<Item = &K> {
         self.order.iter().map(|(k, _v)| k)
     }
+
+    /// Return an iterator of values in the current order from most
+    /// to least recently used.
+    pub fn value_order(&self) -> impl Iterator<Item = &V> {
+        self.order.iter().map(|(_k, v)| v)
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
