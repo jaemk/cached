@@ -7,6 +7,14 @@
 
 ## Removed
 
+## [0.11.0]
+## Added
+- Add `value_order` method to SizedCache, similar to `key_order`
+
+## Changed
+
+## Removed
+
 ## [0.10.0]
 ## Added
 - add `cache_reset` trait method for resetting cache collections to
