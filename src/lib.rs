@@ -243,6 +243,9 @@ pub trait Cached<K, V> {
     /// Attempt to retrieve a cached value
     fn cache_get(&mut self, k: &K) -> Option<&V>;
 
+    /// Attempt to retrieve a cached value with mutable access
+    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V>;
+
     /// Insert a key, value pair
     fn cache_set(&mut self, k: K, v: V);
 
