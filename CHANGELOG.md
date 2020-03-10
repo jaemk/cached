@@ -7,6 +7,14 @@
 
 ## Removed
 
+## [0.12.0]
+## Added
+- Add `cache_get_mut` to `Cached` trait, to allow mutable access for values in the cache.
+
+## Changed
+
+## Removed
+
 ## [0.11.0]
 ## Added
 - Add `value_order` method to SizedCache, similar to `key_order`
