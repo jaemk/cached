@@ -26,7 +26,7 @@ fn test_unbound_cache() {
 }
 
 cached! {
-    SIZED_FIB: SizedCache<(u32), u32> = SizedCache::with_size(3);
+    SIZED_FIB: SizedCache<u32, u32> = SizedCache::with_size(3);
     fn fib1(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n }
         fib1(n-1) + fib1(n-2)
@@ -43,7 +43,7 @@ fn test_sized_cache() {
 }
 
 cached! {
-    TIMED: TimedCache<(u32), u32> = TimedCache::with_lifespan_and_capacity(2, 5);
+    TIMED: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(2, 5);
     fn timed(n: u32) -> u32 = {
         sleep(Duration::new(3, 0));
         n
@@ -85,7 +85,7 @@ fn test_string_cache() {
 }
 
 cached_key! {
-    TIMED_CACHE: TimedCache<(u32), u32> = TimedCache::with_lifespan_and_capacity(2, 5);
+    TIMED_CACHE: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(2, 5);
     Key = { n };
     fn timed_2(n: u32) -> u32 = {
         sleep(Duration::new(3, 0));
@@ -172,7 +172,7 @@ fn test_sized_cache_key() {
 }
 
 cached_key_result! {
-    RESULT_CACHE_KEY: UnboundCache<(u32), u32> = UnboundCache::new();
+    RESULT_CACHE_KEY: UnboundCache<u32, u32> = UnboundCache::new();
     Key = { n };
     fn test_result_key(n: u32) -> Result<u32, ()> = {
         if n < 5 { Ok(n) } else { Err(()) }
@@ -196,7 +196,7 @@ fn cache_result_key() {
 }
 
 cached_result! {
-    RESULT_CACHE: UnboundCache<(u32), u32> = UnboundCache::new();
+    RESULT_CACHE: UnboundCache<u32, u32> = UnboundCache::new();
     fn test_result_no_default(n: u32) -> Result<u32, ()> = {
         if n < 5 { Ok(n) } else { Err(()) }
     }
