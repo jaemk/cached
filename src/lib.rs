@@ -259,12 +259,12 @@ pub trait Cached<K, V> {
     fn cache_size(&self) -> usize;
 
     /// Return the number of times a cached value was successfully retrieved
-    fn cache_hits(&self) -> Option<u32> {
+    fn cache_hits(&self) -> Option<u64> {
         None
     }
 
     /// Return the number of times a cached value was unable to be retrieved
-    fn cache_misses(&self) -> Option<u32> {
+    fn cache_misses(&self) -> Option<u64> {
         None
     }
 

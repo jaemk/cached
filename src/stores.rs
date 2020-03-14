@@ -17,8 +17,8 @@ use super::Cached;
 /// Note: This cache is in-memory only
 pub struct UnboundCache<K, V> {
     store: HashMap<K, V>,
-    hits: u32,
-    misses: u32,
+    hits: u64,
+    misses: u64,
     initial_capacity: Option<usize>,
 }
 
@@ -79,10 +79,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_size(&self) -> usize {
         self.store.len()
     }
-    fn cache_hits(&self) -> Option<u32> {
+    fn cache_hits(&self) -> Option<u64> {
         Some(self.hits)
     }
-    fn cache_misses(&self) -> Option<u32> {
+    fn cache_misses(&self) -> Option<u64> {
         Some(self.misses)
     }
 }
@@ -231,8 +231,8 @@ pub struct SizedCache<K, V> {
     store: HashMap<K, usize>,
     order: LRUList<(K, V)>,
     capacity: usize,
-    hits: u32,
-    misses: u32,
+    hits: u64,
+    misses: u64,
 }
 
 impl<K: Hash + Eq, V> SizedCache<K, V> {
@@ -321,10 +321,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_size(&self) -> usize {
         self.store.len()
     }
-    fn cache_hits(&self) -> Option<u32> {
+    fn cache_hits(&self) -> Option<u64> {
         Some(self.hits)
     }
-    fn cache_misses(&self) -> Option<u32> {
+    fn cache_misses(&self) -> Option<u64> {
         Some(self.misses)
     }
     fn cache_capacity(&self) -> Option<usize> {
@@ -348,8 +348,8 @@ enum Status {
 pub struct TimedCache<K, V> {
     store: HashMap<K, (Instant, V)>,
     seconds: u64,
-    hits: u32,
-    misses: u32,
+    hits: u64,
+    misses: u64,
     initial_capacity: Option<usize>,
 }
 
@@ -431,10 +431,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     fn cache_size(&self) -> usize {
         self.store.len()
     }
-    fn cache_hits(&self) -> Option<u32> {
+    fn cache_hits(&self) -> Option<u64> {
         Some(self.hits)
     }
-    fn cache_misses(&self) -> Option<u32> {
+    fn cache_misses(&self) -> Option<u64> {
         Some(self.misses)
     }
     fn cache_lifespan(&self) -> Option<u64> {

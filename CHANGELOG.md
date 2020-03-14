@@ -4,7 +4,8 @@
 ## Added
 
 ## Changed
-
+- Change the type of `hits` and `misses` to be `u64`.
+ 
 ## Removed
 
 ## [0.11.0]
