@@ -4,13 +4,13 @@
 ## Added
 
 ## Changed
-- Change the type of `hits` and `misses` to be `u64`.
  
 ## Removed
 
 ## [0.12.0]
 ## Added
 - Add `cache_get_mut` to `Cached` trait, to allow mutable access for values in the cache.
+- Change the type of `hits` and `misses` to be `u64`.
 
 ## Changed
 

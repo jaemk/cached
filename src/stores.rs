@@ -24,6 +24,7 @@ pub struct UnboundCache<K, V> {
 
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
     /// Creates an empty `UnboundCache`
+    #[allow(clippy::new_without_default)]
     pub fn new() -> UnboundCache<K, V> {
         UnboundCache {
             store: Self::new_store(None),
@@ -44,7 +45,7 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, V> {
-        capacity.map_or_else(|| HashMap::new(), |size| HashMap::with_capacity(size))
+        capacity.map_or_else(HashMap::new, HashMap::with_capacity)
     }
 }
 
@@ -387,7 +388,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     pub fn with_lifespan(seconds: u64) -> TimedCache<K, V> {
         TimedCache {
             store: Self::new_store(None),
-            seconds: seconds,
+            seconds,
             hits: 0,
             misses: 0,
             initial_capacity: None,
@@ -399,7 +400,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     pub fn with_lifespan_and_capacity(seconds: u64, size: usize) -> TimedCache<K, V> {
         TimedCache {
             store: Self::new_store(Some(size)),
-            seconds: seconds,
+            seconds,
             hits: 0,
             misses: 0,
             initial_capacity: Some(size),
@@ -407,7 +408,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, (Instant, V)> {
-        capacity.map_or_else(|| HashMap::new(), |size| HashMap::with_capacity(size))
+        capacity.map_or_else(HashMap::new, HashMap::with_capacity)
     }
 }
 

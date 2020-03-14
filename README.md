@@ -34,7 +34,7 @@ Due to the requirements of storing arguments and return values in a global cache
 - Arguments and return values will be `cloned` in the process of insertion and retrieval.
 - `cached!` functions should not be used to produce side-effectual results!
 - `cached!` functions cannot live directly under `impl` blocks since `cached!` expands to a
-  `once_cell` initialization and a funtion definition.
+  `once_cell` initialization and a function definition.
 
 **NOTE**: Any custom cache that implements `cached::Cached` can be used with the `cached` macros in place of the built-ins.
 
