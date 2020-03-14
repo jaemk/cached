@@ -23,7 +23,7 @@ cached! {
 // Same as above, but preallocates some space.
 // Note that the cache key type is a tuple of function argument types.
 cached! {
-    FIB_SPECIFIC: UnboundCache<(u32), u32> = UnboundCache::with_capacity(50);
+    FIB_SPECIFIC: UnboundCache<u32, u32> = UnboundCache::with_capacity(50);
     fn fib_specific(n: u32) -> u32 = {
         if n == 0 || n == 1 { return n; }
         fib_specific(n-1) + fib_specific(n-2)
@@ -69,6 +69,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     fn cache_get(&mut self, k: &K) -> Option<&V> {
         self.store.get(k)
     }
+    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
+        self.store.get_mut(k)
+    }
     fn cache_set(&mut self, k: K, v: V) {
         self.store.insert(k, v);
     }
@@ -88,7 +91,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 
 // Specify our custom cache and supply an instance to use
 cached! {
-    CUSTOM: MyCache<(u32), ()> = MyCache::with_capacity(50);
+    CUSTOM: MyCache<u32, ()> = MyCache::with_capacity(50);
     fn custom(n: u32) -> () = {
         if n == 0 { return; }
         custom(n-1)

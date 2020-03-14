@@ -44,16 +44,25 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, V> {
-        capacity.map_or_else(
-            || HashMap::new(),
-            |size| HashMap::with_capacity(size),
-        )
+        capacity.map_or_else(|| HashMap::new(), |size| HashMap::with_capacity(size))
     }
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         match self.store.get(key) {
+            Some(v) => {
+                self.hits += 1;
+                Some(v)
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+    fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
+        match self.store.get_mut(key) {
             Some(v) => {
                 self.hits += 1;
                 Some(v)
@@ -175,6 +184,10 @@ impl<T> LRUList<T> {
         self.values[index].value.as_ref().expect("invalid index")
     }
 
+    fn get_mut(&mut self, index: usize) -> &mut T {
+        self.values[index].value.as_mut().expect("invalid index")
+    }
+
     fn set(&mut self, index: usize, value: T) {
         self.values[index].value = Some(value);
     }
@@ -283,6 +296,22 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
             }
         }
     }
+
+    fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
+        let val = self.store.get(key);
+        match val {
+            Some(&index) => {
+                self.order.move_to_front(index);
+                self.hits += 1;
+                Some(&mut self.order.get_mut(index).1)
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+
     fn cache_set(&mut self, key: K, val: V) {
         if self.store.len() >= self.capacity {
             // store has reached capacity, evict the oldest item.
@@ -378,10 +407,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, (Instant, V)> {
-        capacity.map_or_else(
-            || HashMap::new(),
-            |size| HashMap::with_capacity(size),
-        )
+        capacity.map_or_else(|| HashMap::new(), |size| HashMap::with_capacity(size))
     }
 }
 
@@ -407,6 +433,36 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
             Status::Found => {
                 self.hits += 1;
                 self.store.get(key).map(|stamped| &stamped.1)
+            }
+            Status::Expired => {
+                self.misses += 1;
+                self.store.remove(key).unwrap();
+                None
+            }
+        }
+    }
+
+    fn cache_get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let status = {
+            let val = self.store.get(key);
+            if let Some(&(instant, _)) = val {
+                if instant.elapsed().as_secs() < self.seconds {
+                    Status::Found
+                } else {
+                    Status::Expired
+                }
+            } else {
+                Status::NotFound
+            }
+        };
+        match status {
+            Status::NotFound => {
+                self.misses += 1;
+                None
+            }
+            Status::Found => {
+                self.hits += 1;
+                self.store.get_mut(key).map(|stamped| &mut stamped.1)
             }
             Status::Expired => {
                 self.misses += 1;
@@ -654,7 +710,7 @@ mod tests {
         c.cache_reset();
 
         assert_eq!(init_capacity, c.store.capacity());
-}
+    }
 
     #[test]
     fn remove() {
@@ -719,5 +775,29 @@ mod tests {
 
         assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
+    }
+
+    #[test]
+    fn sized_cache_get_mut() {
+        let mut c = SizedCache::with_size(5);
+        assert!(c.cache_get_mut(&1).is_none());
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, misses);
+
+        c.cache_set(1, 100);
+        assert_eq!(*c.cache_get_mut(&1).unwrap(), 100);
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, hits);
+        assert_eq!(1, misses);
+
+        let value = c.cache_get_mut(&1).unwrap();
+        *value = 10;
+
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(2, hits);
+        assert_eq!(1, misses);
+        assert_eq!(*c.cache_get_mut(&1).unwrap(), 10);
     }
 }
