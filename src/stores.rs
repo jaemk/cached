@@ -6,6 +6,12 @@ Implementation of various caches
 use std::cmp::Eq;
 use std::collections::HashMap;
 use std::hash::Hash;
+
+#[cfg(feature = "wasm-bindgen")]
+use instant_wasm_bindgen::Instant;
+#[cfg(feature = "stdweb")]
+use instant_stdweb::Instant;
+#[cfg(all(not(feature = "stdweb"), not(feature = "wasm-bindgen")))]
 use std::time::Instant;
 
 use super::Cached;

@@ -6,20 +6,24 @@ Macro for defining functions that wrap a static-ref cache object.
 macro_rules! cached {
     // Use default cached::Cache
     ($cachename:ident;
+     $($($meta:meta)+)*
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         cached!(
             $cachename : $crate::UnboundCache<($($argtype),*), $ret> = $crate::UnboundCache::new();
+            $($($meta)+)*
             fn $name($($arg : $argtype),*) -> $ret = $body
         );
     };
 
     // Use a specified cache-type and an explicitly created cache-instance
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     $($($meta:meta)+)*
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
             = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
+        $($($meta)+)*
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = ($($arg.clone()),*);
             {
@@ -40,11 +44,13 @@ macro_rules! cached_key {
     // Use a specified cache-type and an explicitly created cache-instance
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      Key = $key:expr;
+     $($($meta:meta)+)*
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
             = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
+        $($($meta)+)*
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = $key;
             {
@@ -64,11 +70,13 @@ macro_rules! cached_key {
 macro_rules! cached_result {
     // Unfortunately it's impossible to infer the cache type because it's not the function return type
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     $($($meta:meta)+)*
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
             = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
+        $($($meta)+)*
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = ($($arg.clone()),*);
             {
@@ -89,11 +97,13 @@ macro_rules! cached_key_result {
     // Use a specified cache-type and an explicitly created cache-instance
     ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
      Key = $key:expr;
+     $($($meta:meta)+)*
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
             = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
+        $($($meta)+)*
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = $key;
             {
@@ -118,11 +128,13 @@ macro_rules! cached_control {
      PostExec($body_value:ident) = $post_exec:expr;
      Set($set_value:ident) = $pre_set:expr;
      Return($ret_value:ident) = $return:expr;
+     $($($meta:meta)+)*
      fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
         static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
             = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
 
         #[allow(unused_parens)]
+        $($($meta)+)*
         pub fn $name($($arg: $argtype),*) -> $ret {
             let key = $key;
             {
