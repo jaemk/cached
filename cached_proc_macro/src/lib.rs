@@ -138,7 +138,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // put it all together
     let expanded = quote! {
-        #visibility static #cache_ident: once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
+        #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
         #visibility #signature {
             use cached::Cached;
             let key = #key_convert_block;
