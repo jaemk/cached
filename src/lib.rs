@@ -238,6 +238,10 @@ pub mod stores;
 
 pub use stores::{SizedCache, TimedCache, UnboundCache};
 
+pub mod proc_macro {
+    pub use cached_proc_macro::cached;
+}
+
 /// Cache operations
 pub trait Cached<K, V> {
     /// Attempt to retrieve a cached value
