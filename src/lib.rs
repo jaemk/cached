@@ -242,6 +242,8 @@ pub use stores::{SizedCache, TimedCache, UnboundCache};
 pub mod proc_macro {
     pub use cached_proc_macro::cached;
 }
+#[cfg(feature = "proc_macro")]
+pub use async_std;
 
 /// Cache operations
 pub trait Cached<K, V> {

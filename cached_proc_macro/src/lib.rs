@@ -67,6 +67,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let fn_ident = signature.ident.clone();
     let inputs = signature.inputs.clone();
     let output = signature.output.clone();
+    let asyncness = signature.asyncness.clone();
 
     // pull out the names and types of the function inputs
     let input_tys = inputs
@@ -181,28 +182,53 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // put it all together
-    let expanded = quote! {
-        #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
-        #visibility #signature {
-            use cached::Cached;
-            let key = #key_convert_block;
-            {
-                // check if the result is cached
-                let mut cache = #cache_ident.lock().unwrap();
-                if let Some(result) = cache.cache_get(&key) {
-                    return result.clone();
+    let expanded = if asyncness.is_some() {
+        quote! {
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_std::sync::Mutex::new(#cache_create));
+            #visibility #signature {
+                use cached::Cached;
+                let key = #key_convert_block;
+                {
+                    // check if the result is cached
+                    let mut cache = #cache_ident.lock().await;
+                    if let Some(result) = cache.cache_get(&key) {
+                        return result.clone();
+                    }
                 }
+
+                // run the function and cache the result
+                async fn inner(#inputs) #output #body;
+                let result = inner(#(#input_names),*).await;
+
+                let mut cache = #cache_ident.lock().await;
+                #set_cache_block
+
+                result
             }
+        }
+    } else {
+        quote! {
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
+            #visibility #signature {
+                use cached::Cached;
+                let key = #key_convert_block;
+                {
+                    // check if the result is cached
+                    let mut cache = #cache_ident.lock().unwrap();
+                    if let Some(result) = cache.cache_get(&key) {
+                        return result.clone();
+                    }
+                }
 
-            // run the function and cache the result
-            fn inner(#inputs) #output #body;
-            let result = inner(#(#input_names),*);
+                // run the function and cache the result
+                fn inner(#inputs) #output #body;
+                let result = inner(#(#input_names),*);
 
-            let mut cache = #cache_ident.lock().unwrap();
-            // cache.cache_set(key, result.clone());
-            #set_cache_block
+                let mut cache = #cache_ident.lock().unwrap();
+                #set_cache_block
 
-            result
+                result
+            }
         }
     };
 
