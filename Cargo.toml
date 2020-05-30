@@ -14,5 +14,13 @@ edition = "2018"
 [badges]
 travis-ci = { repository = "jaemk/cached", branch = "master" }
 
+[features]
+default = ["proc_macro"]
+proc_macro = []
+
 [dependencies]
 once_cell = "1"
+cached_proc_macro = { path = "cached_proc_macro"}
+
+[workspace]
+members = ["cached_proc_macro"]
