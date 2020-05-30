@@ -105,7 +105,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the cache type and create statement
-    let (cache_ty, cache_create) = match (&args.unbound, &args.size, &args.time, &args.cache_type, &args.cache_create) {
+    let (cache_ty, cache_create) = match (
+        &args.unbound,
+        &args.size,
+        &args.time,
+        &args.cache_type,
+        &args.cache_create,
+    ) {
         (true, None, None, None, None) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #output_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
@@ -125,7 +131,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #output_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
-        },
+        }
         (false, None, None, Some(type_str), Some(create_str)) => {
             let cache_type = parse_str::<Type>(type_str).expect("unable to parse cache type");
 
@@ -133,10 +139,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 parse_str::<Block>(create_str).expect("unable to parse cache create block");
 
             (quote! { #cache_type }, quote! { #cache_create })
-        },
+        }
         (false, None, None, Some(_), None) => panic!("type requires create to also be set"),
         (false, None, None, None, Some(_)) => panic!("create requires type to also be set"),
-        _ => panic!("cache types (unbound, size, time, or cache_type and cache_create) are mutually exclusive"),
+        _ => panic!("cache types (unbound, size, time, or type and create) are mutually exclusive"),
     };
 
     // make the set cache block
