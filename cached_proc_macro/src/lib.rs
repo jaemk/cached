@@ -23,6 +23,10 @@ struct MacroArgs {
     result: bool,
     #[darling(default)]
     option: bool,
+    #[darling(default, rename = "type")]
+    cache_type: Option<String>,
+    #[darling(default, rename = "create")]
+    cache_create: Option<String>,
 }
 
 #[proc_macro_attribute]
@@ -77,8 +81,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the cache key type and block that converts the inputs into the key type
-    let (cache_key_ty, key_convert_block) = match (&args.key, &args.convert) {
-        (Some(key_str), Some(convert_str)) => {
+    let (cache_key_ty, key_convert_block) = match (&args.key, &args.convert, &args.cache_type) {
+        (Some(key_str), Some(convert_str), _) => {
             let cache_key_ty = parse_str::<Type>(key_str).expect("unable to parse cache key type");
 
             let key_convert_block =
@@ -86,36 +90,53 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
             (quote! {#cache_key_ty}, quote! {#key_convert_block})
         }
-        (None, None) => (
+        (None, Some(convert_str), Some(_)) => {
+            let key_convert_block =
+                parse_str::<Block>(convert_str).expect("unable to parse key convert block");
+
+            (quote! {}, quote! {#key_convert_block})
+        }
+        (None, None, _) => (
             quote! {(#(#input_tys),*)},
             quote! {(#(#input_names.clone()),*)},
         ),
-        (_, _) => panic!("key and convert arguments must be used together or not at all"),
+        (Some(_), None, _) => panic!("key requires convert to be set"),
+        (None, Some(_), None) => panic!("convert requires key or type to be set"),
     };
 
     // make the cache type and create statement
-    let (cache_ty, cache_create) = match (&args.unbound, &args.size, &args.time) {
-        (true, None, None) => {
+    let (cache_ty, cache_create) = match (&args.unbound, &args.size, &args.time, &args.cache_type, &args.cache_create) {
+        (true, None, None, None, None) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #output_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
         }
-        (false, Some(size), None) => {
+        (false, Some(size), None, None, None) => {
             let cache_ty = quote! {cached::SizedCache<#cache_key_ty, #output_ty>};
             let cache_create = quote! {cached::SizedCache::with_size(#size)};
             (cache_ty, cache_create)
         }
-        (false, None, Some(time)) => {
+        (false, None, Some(time), None, None) => {
             let cache_ty = quote! {cached::TimedCache<#cache_key_ty, #output_ty>};
             let cache_create = quote! {cached::TimedCache::with_lifespan(#time)};
             (cache_ty, cache_create)
         }
-        (false, None, None) => {
+        (false, None, None, None, None) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #output_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
-        }
-        _ => panic!("cache types (unbound, size, or time) are mutually exclusive"),
+        },
+        (false, None, None, Some(type_str), Some(create_str)) => {
+            let cache_type = parse_str::<Type>(type_str).expect("unable to parse cache type");
+
+            let cache_create =
+                parse_str::<Block>(create_str).expect("unable to parse cache create block");
+
+            (quote! { #cache_type }, quote! { #cache_create })
+        },
+        (false, None, None, Some(_), None) => panic!("type requires create to also be set"),
+        (false, None, None, None, Some(_)) => panic!("create requires type to also be set"),
+        _ => panic!("cache types (unbound, size, time, or cache_type and cache_create) are mutually exclusive"),
     };
 
     // make the set cache block
