@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 ## Added
+## Changed
+## Removed
+
+## [0.13.0]
+## Added
+- proc macro version
+- async support when using the new proc macro version
 
 ## Changed
  

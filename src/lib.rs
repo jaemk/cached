@@ -8,7 +8,7 @@
 `cached` provides implementations of several caching structures as well as a handy macro
 for defining memoized functions.
 
-Memoized functions defined using `cached!` macros are thread-safe with the backing function-cache wrapped in mutex.
+Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in mutex.
 The function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
 the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`.
@@ -16,9 +16,60 @@ the memoized value as they complete. This mirrors the behavior of Python's `func
 See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for details about the
 cache stores available.
 
-## Defining memoized functions using `cached!`
+## Defining memoized functions using macros, `#[cached]` & `cached!`
 
-`cached!` defined functions will have their results cached using the function's arguments as a key
+**Notes on the proc-macro version #[cached]**
+
+- enabled by default, but can be disabled by specifying `default-features = false`
+  (if you aren't using it and don't want to have to compile `syn`)
+- supports most of the configuration params that the original `cached!` macros does
+- works with async functions
+- see `cached_proc_macro/src/lib.rs` for more details on macro arguments
+- see `examples/kitchen_sink_proc_macro.rs` for basic usage
+- relatively new so docs and tests need to be updated with details
+
+The basic usage looks like:
+
+
+```rust,no_run
+use cached::proc_macro::cached;
+
+/// Defines a function named `fib` that uses a cache explicitly named `FIB`.
+/// By default this will be the function in all caps.
+/// The following line is equivalent to #[cached(name = "FIB")]
+#[cached]
+fn fib(n: u64) -> u64 {
+    if n == 0 || n == 1 { return n }
+    fib(n-1) + fib(n-2)
+}
+# pub fn main() { }
+```
+
+```rust,no_run
+use std::thread::sleep;
+use std::time::Duration;
+
+use cached::proc_macro::cached;
+use cached::SizedCache;
+
+/// Use an lru cache with a custom cache-key generating block
+#[cached(
+    type = "SizedCache<String, usize>",
+    create = "{ SizedCache::with_size(100) }",
+    convert = r#"{ format!("{}{}", a, b) }"#
+)]
+fn keyed(a: &str, b: &str) -> usize {
+    let size = a.len() + b.len();
+    sleep(Duration::new(size as u64, 0));
+    size
+}
+# pub fn main() { }
+```
+
+----
+
+
+`#[cached]`/`cached!` defined functions will have their results cached using the function's arguments as a key
 (or a specific expression when using `cached_key!`).
 When a `cached!` defined function is called, the function's cache is first checked for an already
 computed (and still valid) value before evaluating the function body.
@@ -29,14 +80,15 @@ Due to the requirements of storing arguments and return values in a global cache
 - Function arguments must either be owned and implement `Hash + Eq + Clone` OR the `cached_key!`
   macro must be used to convert arguments into an owned + `Hash + Eq + Clone` type.
 - Arguments and return values will be `cloned` in the process of insertion and retrieval.
-- `cached!` functions should not be used to produce side-effectual results!
-- `cached!` functions cannot live directly under `impl` blocks since `cached!` expands to a
+- `#[cached]`/`cached!` functions should not be used to produce side-effectual results!
+- `#[cached]`/`cached!` functions cannot live directly under `impl` blocks since `cached!` expands to a
   `once_cell` initialization and a function definition.
+- `#[cached]`/`cached!` functions cannot accept `Self` types as a parameter.
 
 **NOTE**: Any custom cache that implements `cached::Cached` can be used with the `cached` macros in place of the built-ins.
 
-See [`examples`](https://github.com/jaemk/cached/tree/master/examples) for basic usage and
-an example of implementing a custom cache-store.
+See [`examples`](https://github.com/jaemk/cached/tree/master/examples) for basic usage of proc-macro &
+macro-rules macros and an example of implementing a custom cache-store.
 
 
 ### `cached!` and `cached_key!` Usage & Options:

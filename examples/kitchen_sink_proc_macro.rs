@@ -18,6 +18,14 @@ fn fib(n: u32) -> u32 {
     fib(n - 1) + fib(n - 2)
 }
 
+#[cached(name = "FLIB")]
+fn fib_2(n: u32) -> u32 {
+    if n == 0 || n == 1 {
+        return n;
+    }
+    fib(n - 1) + fib(n - 2)
+}
+
 // Same as above, but preallocates some space.
 #[cached(
     type = "UnboundCache<u32, u32>",
@@ -102,7 +110,7 @@ fn custom(n: u32) -> () {
 }
 
 pub fn main() {
-    println!("\n ** default cache **");
+    println!("\n ** default cache with default name **");
     fib(3);
     fib(3);
     {
@@ -113,6 +121,16 @@ pub fn main() {
     }
     fib(10);
     fib(10);
+
+    println!("\n ** default cache with explicit name **");
+    fib_2(3);
+    fib_2(3);
+    {
+        let cache = FLIB.lock().unwrap();
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
+        // make sure lock is dropped
+    }
 
     println!("\n ** specific cache **");
     fib_specific(20);
