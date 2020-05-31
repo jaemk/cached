@@ -46,6 +46,8 @@ fn fib(n: u64) -> u64 {
 ```
 
 ```rust,no_run
+use std::thread::sleep;
+use std::time::Duration;
 use cached::proc_macro::cached;
 
 /// Use an lru cache with size 100 and a `(String, String)` cache key
@@ -61,7 +63,6 @@ fn keyed(a: String, b: String) -> usize {
 ```rust,no_run
 use std::thread::sleep;
 use std::time::Duration;
-
 use cached::proc_macro::cached;
 use cached::SizedCache;
 
