@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.13.1]
+## Added
+
+## Changed
+- fix proc macro documentation
+ 
+## Removed
+
 ## [0.13.0]
 ## Added
 - proc macro version
