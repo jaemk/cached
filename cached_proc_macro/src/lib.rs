@@ -1,20 +1,3 @@
-//! # Attributes
-//! - **Cache Name:** Use `name = "CACHE_NAME"` to specify the name for the generated cache.
-//! - **Cache Type:** The default cache type is `UnboundCache`.
-//! You specify which of the built-in cache types to use with `unbound`, `size = cache_size`, or `time = lifetime_in_seconds`
-//! - **Cache Create:** You can specify the cache creation with `create = "{ CacheType::new() }"`.
-//! - **Custom Cache Type:** You can use `type = "CacheType"` to specify the type of cache to use.
-//! This requires create to also be set.
-//! - **Cache Key:** Use `key = "KeyType"` to specify what type to use for the cache key.
-//! This requires convert to also be set.
-//! - **Cache Key Convert:** Use `convert = "{ convert_inputs_to_key }"`.
-//! This requires either key or type to also be set.
-//! - **Caching Result/Option:** If your function returns a `Result` or `Option`
-//! you may want to use `result` or `option` to only cache when the output is `Ok` or `Some`
-//! ## Note
-//! The `type`, `create`, `key`, and `convert` attributes must be in a `String`
-//! This is because darling, which is used for parsing the attributes, does not support parsing attributes into `Type` or `Block`.
-
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
@@ -46,6 +29,22 @@ struct MacroArgs {
     cache_create: Option<String>,
 }
 
+/// # Attributes
+/// - **Cache Name:** Use `name = "CACHE_NAME"` to specify the name for the generated cache.
+/// - **Cache Type:** The default cache type is `UnboundCache`.
+/// You specify which of the built-in cache types to use with `unbound`, `size = cache_size`, or `time = lifetime_in_seconds`
+/// - **Cache Create:** You can specify the cache creation with `create = "{ CacheType::new() }"`.
+/// - **Custom Cache Type:** You can use `type = "CacheType"` to specify the type of cache to use.
+/// This requires create to also be set.
+/// - **Cache Key:** Use `key = "KeyType"` to specify what type to use for the cache key.
+/// This requires convert to also be set.
+/// - **Cache Key Convert:** Use `convert = "{ convert_inputs_to_key }"`.
+/// This requires either key or type to also be set.
+/// - **Caching Result/Option:** If your function returns a `Result` or `Option`
+/// you may want to use `result` or `option` to only cache when the output is `Ok` or `Some`
+/// ## Note
+/// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
+/// This is because darling, which is used for parsing the attributes, does not support parsing attributes into `Type` or `Block`.
 #[proc_macro_attribute]
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let attr_args = parse_macro_input!(args as AttributeArgs);
