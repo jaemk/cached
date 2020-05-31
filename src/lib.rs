@@ -36,11 +36,24 @@ use cached::proc_macro::cached;
 
 /// Defines a function named `fib` that uses a cache explicitly named `FIB`.
 /// By default this will be the function in all caps.
-/// The following line is equivalent to #[cached(name = "FIB")]
+/// The following line is equivalent to #[cached(name = "FIB", unbound)]
 #[cached]
 fn fib(n: u64) -> u64 {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
+}
+# pub fn main() { }
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
+
+/// Use an lru cache with size 100 and a `(String, String)` cache key
+#[cached(size=100)]
+fn keyed(a: String, b: String) -> usize {
+    let size = a.len() + b.len();
+    sleep(Duration::new(size as u64, 0));
+    size
 }
 # pub fn main() { }
 ```
@@ -52,7 +65,7 @@ use std::time::Duration;
 use cached::proc_macro::cached;
 use cached::SizedCache;
 
-/// Use an lru cache with a custom cache-key generating block
+/// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
     type = "SizedCache<String, usize>",
     create = "{ SizedCache::with_size(100) }",
