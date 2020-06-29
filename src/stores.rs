@@ -23,6 +23,23 @@ pub struct UnboundCache<K, V> {
     initial_capacity: Option<usize>,
 }
 
+impl<K, V> PartialEq for UnboundCache<K, V>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+{
+    fn eq(&self, other: &UnboundCache<K, V>) -> bool {
+        self.store.eq(&other.store)
+    }
+}
+
+impl<K, V> Eq for UnboundCache<K, V>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+{
+}
+
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
     /// Creates an empty `UnboundCache`
     #[allow(clippy::new_without_default)]
@@ -252,6 +269,23 @@ pub struct SizedCache<K, V> {
     capacity: usize,
     hits: u64,
     misses: u64,
+}
+
+impl<K, V> PartialEq for SizedCache<K, V>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+{
+    fn eq(&self, other: &SizedCache<K, V>) -> bool {
+        self.store.eq(&other.store)
+    }
+}
+
+impl<K, V> Eq for SizedCache<K, V>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+{
 }
 
 impl<K: Hash + Eq, V> SizedCache<K, V> {
