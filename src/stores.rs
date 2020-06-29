@@ -15,6 +15,7 @@ use super::Cached;
 /// This cache has no size limit or eviction policy.
 ///
 /// Note: This cache is in-memory only
+#[derive(Clone, Debug)]
 pub struct UnboundCache<K, V> {
     store: HashMap<K, V>,
     hits: u64,
@@ -98,10 +99,12 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
 }
 
 /// Limited functionality doubly linked list using Vec as storage.
+#[derive(Clone, Debug)]
 struct LRUList<T> {
     values: Vec<ListEntry<T>>,
 }
 
+#[derive(Clone, Debug)]
 struct ListEntry<T> {
     value: Option<T>,
     next: usize,
@@ -215,6 +218,7 @@ impl<T> LRUList<T> {
     }
 }
 
+#[derive(Debug)]
 struct LRUListIterator<'a, T> {
     list: &'a LRUList<T>,
     index: usize,
@@ -241,6 +245,7 @@ impl<'a, T> Iterator for LRUListIterator<'a, T> {
 /// to evict the least recently used keys
 ///
 /// Note: This cache is in-memory only
+#[derive(Clone, Debug)]
 pub struct SizedCache<K, V> {
     store: HashMap<K, usize>,
     order: LRUList<(K, V)>,
@@ -363,6 +368,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
 }
 
 /// Enum used for defining the status of time-cached values
+#[derive(Debug)]
 enum Status {
     NotFound,
     Found,
@@ -375,6 +381,7 @@ enum Status {
 /// evicted if expired at time of retrieval.
 ///
 /// Note: This cache is in-memory only
+#[derive(Clone, Debug)]
 pub struct TimedCache<K, V> {
     store: HashMap<K, (Instant, V)>,
     seconds: u64,
