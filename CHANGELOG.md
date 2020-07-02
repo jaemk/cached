@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.14.0]
+## Added
+- add Clone, Debug trait derives on pub types
+
+## Changed
+
+## Removed
+
 ## [0.13.1]
 ## Added
 
