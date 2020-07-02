@@ -322,6 +322,9 @@ pub trait Cached<K, V> {
     /// Insert a key, value pair
     fn cache_set(&mut self, k: K, v: V);
 
+    /// Get or insert a key, value pair
+    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V;
+
     /// Remove a cached value
     fn cache_remove(&mut self, k: &K) -> Option<V>;
 

@@ -83,6 +83,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
         self.store.get_mut(k)
     }
+    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
+        self.store.entry(k).or_insert_with(f)
+    }
     fn cache_set(&mut self, k: K, v: V) {
         self.store.insert(k, v);
     }
