@@ -335,7 +335,7 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
         self.order.iter().map(|(_k, v)| v)
     }
 
-    fn check_capasity(&mut self) {
+    fn check_capacity(&mut self) {
         if self.store.len() >= self.capacity {
             // store has reached capacity, evict the oldest item.
             // store capacity cannot be zero, so there must be content in `self.order`.
@@ -379,7 +379,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     }
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
-        self.check_capasity();
+        self.check_capacity();
         let Self { store, order, .. } = self;
         let index = *store
             .entry(key.clone())
@@ -388,7 +388,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     }
 
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
-        self.check_capasity();
+        self.check_capacity();
         let val = self.store.entry(key);
         let Self { order, .. } = self;
         match val {
