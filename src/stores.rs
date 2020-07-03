@@ -94,8 +94,8 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
             }
         }
     }
-    fn cache_set(&mut self, key: K, val: V) {
-        self.store.insert(key, val);
+    fn cache_set(&mut self, key: K, val: V) -> Option<V> {
+        self.store.insert(key, val)
     }
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
@@ -224,8 +224,8 @@ impl<T> LRUList<T> {
         self.values[index].value.as_mut().expect("invalid index")
     }
 
-    fn set(&mut self, index: usize, value: T) {
-        self.values[index].value = Some(value);
+    fn set(&mut self, index: usize, value: T) -> Option<T> {
+        std::mem::replace(&mut self.values[index].value, Some(value))
     }
 
     fn clear(&mut self) {
@@ -378,13 +378,13 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         }
     }
 
-    fn cache_set(&mut self, key: K, val: V) {
+    fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         self.check_capasity();
         let Self { store, order, .. } = self;
         let index = *store
             .entry(key.clone())
             .or_insert_with(|| order.push_front(None));
-        order.set(index, (key, val));
+        order.set(index, (key, val)).map(|(_, v)| v)
     }
 
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
@@ -574,9 +574,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         }
     }
 
-    fn cache_set(&mut self, key: K, val: V) {
+    fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let stamped = (Instant::now(), val);
-        self.store.insert(key, stamped);
+        self.store.insert(key, stamped).map(|(_, v)| v)
     }
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         self.store.remove(k).map(|(_, v)| v)
@@ -611,8 +611,8 @@ impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         self.entry(key).or_insert_with(f)
     }
-    fn cache_set(&mut self, k: K, v: V) {
-        self.insert(k, v);
+    fn cache_set(&mut self, k: K, v: V) -> Option<V> {
+        self.insert(k, v)
     }
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         self.remove(k)
@@ -647,7 +647,7 @@ mod tests {
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
 
-        c.cache_set(1, 100);
+        assert_eq!(c.cache_set(1, 100), None);
         assert!(c.cache_get(&1).is_some());
         let hits = c.cache_hits().unwrap();
         let misses = c.cache_misses().unwrap();
@@ -662,22 +662,22 @@ mod tests {
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
 
-        c.cache_set(1, 100);
+        assert_eq!(c.cache_set(1, 100), None);
         assert!(c.cache_get(&1).is_some());
         let hits = c.cache_hits().unwrap();
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, hits);
         assert_eq!(1, misses);
 
-        c.cache_set(2, 100);
-        c.cache_set(3, 100);
-        c.cache_set(4, 100);
-        c.cache_set(5, 100);
+        assert_eq!(c.cache_set(2, 100), None);
+        assert_eq!(c.cache_set(3, 100), None);
+        assert_eq!(c.cache_set(4, 100), None);
+        assert_eq!(c.cache_set(5, 100), None);
 
         assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
 
-        c.cache_set(6, 100);
-        c.cache_set(7, 100);
+        assert_eq!(c.cache_set(6, 100), None);
+        assert_eq!(c.cache_set(7, 100), None);
 
         assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
 
@@ -696,13 +696,13 @@ mod tests {
     /// do not cause duplicates to exist in the internal `order`. See issue #7
     fn size_cache_racing_keys_eviction_regression() {
         let mut c = SizedCache::with_size(2);
-        c.cache_set(1, 100);
-        c.cache_set(1, 100);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 100), Some(100));
         // size would be 1, but internal ordered would be [1, 1]
-        c.cache_set(2, 100);
-        c.cache_set(3, 100);
+        assert_eq!(c.cache_set(2, 100), None);
+        assert_eq!(c.cache_set(3, 100), None);
         // this next set would fail because a duplicate key would be evicted
-        c.cache_set(4, 100);
+        assert_eq!(c.cache_set(4, 100), None);
     }
 
     #[test]
@@ -712,7 +712,7 @@ mod tests {
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
 
-        c.cache_set(1, 100);
+        assert_eq!(c.cache_set(1, 100), None);
         assert!(c.cache_get(&1).is_some());
         let hits = c.cache_hits().unwrap();
         let misses = c.cache_misses().unwrap();
@@ -729,9 +729,9 @@ mod tests {
     fn clear() {
         let mut c = UnboundCache::new();
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
 
         // register some hits and misses
         c.cache_get(&1);
@@ -759,9 +759,9 @@ mod tests {
         let mut c = UnboundCache::with_capacity(capacity);
         assert_eq!(capacity, c.store.capacity());
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
 
         assert_eq!(3, c.store.capacity());
 
@@ -771,18 +771,18 @@ mod tests {
 
         let mut c = SizedCache::with_size(3);
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         c.cache_clear();
 
         assert_eq!(0, c.cache_size());
 
         let mut c = TimedCache::with_lifespan(3600);
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         c.cache_clear();
 
         assert_eq!(0, c.cache_size());
@@ -791,9 +791,9 @@ mod tests {
     #[test]
     fn reset() {
         let mut c = UnboundCache::new();
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         assert_eq!(3, c.store.capacity());
 
         c.cache_reset();
@@ -802,9 +802,9 @@ mod tests {
 
         let init_capacity = 1;
         let mut c = UnboundCache::with_capacity(init_capacity);
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         assert_eq!(3, c.store.capacity());
 
         c.cache_reset();
@@ -812,9 +812,9 @@ mod tests {
         assert_eq!(init_capacity, c.store.capacity());
 
         let mut c = SizedCache::with_size(init_capacity);
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         assert_eq!(init_capacity, c.store.capacity());
 
         c.cache_reset();
@@ -822,9 +822,9 @@ mod tests {
         assert_eq!(init_capacity, c.store.capacity());
 
         let mut c = TimedCache::with_lifespan(100);
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         assert_eq!(3, c.store.capacity());
 
         c.cache_reset();
@@ -832,9 +832,9 @@ mod tests {
         assert_eq!(0, c.store.capacity());
 
         let mut c = TimedCache::with_lifespan_and_capacity(100, init_capacity);
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
         assert_eq!(3, c.store.capacity());
 
         c.cache_reset();
@@ -846,9 +846,9 @@ mod tests {
     fn remove() {
         let mut c = UnboundCache::new();
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
 
         // register some hits and misses
         c.cache_get(&1);
@@ -881,9 +881,9 @@ mod tests {
 
         let mut c = SizedCache::with_size(3);
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
 
         assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
@@ -899,9 +899,9 @@ mod tests {
 
         let mut c = TimedCache::with_lifespan(3600);
 
-        c.cache_set(1, 100);
-        c.cache_set(2, 200);
-        c.cache_set(3, 300);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
 
         assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
@@ -914,7 +914,7 @@ mod tests {
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
 
-        c.cache_set(1, 100);
+        assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(*c.cache_get_mut(&1).unwrap(), 100);
         let hits = c.cache_hits().unwrap();
         let misses = c.cache_misses().unwrap();
@@ -937,7 +937,7 @@ mod tests {
         assert!(c.cache_get(&1).is_none());
         assert_eq!(c.cache_misses(), None);
 
-        c.cache_set(1, 100);
+        assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_get(&1), Some(&100));
         assert_eq!(c.cache_hits(), None);
         assert_eq!(c.cache_misses(), None);
