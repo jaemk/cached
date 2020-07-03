@@ -4,6 +4,7 @@
 ## Added
 - add Cached implementation for std HashMap
 ## Changed
+- trait Cached have a new method cache_get_or_set_with
 ## Removed
 
 ## [0.14.0]
