@@ -540,6 +540,30 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     }
 }
 
+impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
+    fn cache_get(&mut self, k: &K) -> Option<&V> {
+        self.get(k)
+    }
+    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
+        self.get_mut(k)
+    }
+    fn cache_set(&mut self, k: K, v: V) {
+        self.insert(k, v);
+    }
+    fn cache_remove(&mut self, k: &K) -> Option<V> {
+        self.remove(k)
+    }
+    fn cache_clear(&mut self) {
+        self.clear();
+    }
+    fn cache_reset(&mut self) {
+        std::mem::replace(self, HashMap::new());
+    }
+    fn cache_size(&self) -> usize {
+        self.len()
+    }
+}
+
 #[cfg(test)]
 /// Cache store tests
 mod tests {
@@ -841,5 +865,17 @@ mod tests {
         assert_eq!(2, hits);
         assert_eq!(1, misses);
         assert_eq!(*c.cache_get_mut(&1).unwrap(), 10);
+    }
+
+    #[test]
+    fn hashmap() {
+        let mut c = std::collections::HashMap::new();
+        assert!(c.cache_get(&1).is_none());
+        assert_eq!(c.cache_misses(), None);
+
+        c.cache_set(1, 100);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_hits(), None);
+        assert_eq!(c.cache_misses(), None);
     }
 }

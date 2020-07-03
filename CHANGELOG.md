@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- add Cached implementation for std HashMap
 ## Changed
 ## Removed
 
@@ -18,7 +19,7 @@
 
 ## Changed
 - fix proc macro documentation
- 
+
 ## Removed
 
 ## [0.13.0]
@@ -27,7 +28,7 @@
 - async support when using the new proc macro version
 
 ## Changed
- 
+
 ## Removed
 
 ## [0.12.0]
