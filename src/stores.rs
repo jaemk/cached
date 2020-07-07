@@ -599,6 +599,12 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     fn cache_lifespan(&self) -> Option<u64> {
         Some(self.seconds)
     }
+
+    fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
+        let old = self.seconds;
+        self.seconds = seconds;
+        Some(old)
+    }
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
@@ -723,6 +729,20 @@ mod tests {
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(2, misses);
+
+        let old = c.cache_set_lifespan(1).unwrap();
+        assert_eq!(2, old);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert!(c.cache_get(&1).is_some());
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(2, hits);
+        assert_eq!(2, misses);
+
+        sleep(Duration::new(1, 0));
+        assert!(c.cache_get(&1).is_none());
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(3, misses);
     }
 
     #[test]

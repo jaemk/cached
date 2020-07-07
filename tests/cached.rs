@@ -66,6 +66,18 @@ fn test_timed_cache() {
         assert_eq!(2, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
+    {
+        let mut cache = TIMED.lock().unwrap();
+        assert_eq!(2, cache.cache_set_lifespan(1).unwrap());
+    }
+    timed(1);
+    sleep(Duration::new(1, 0));
+    timed(1);
+    {
+        let cache = TIMED.lock().unwrap();
+        assert_eq!(3, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+    }
 }
 
 cached! {
