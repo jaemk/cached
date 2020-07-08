@@ -112,7 +112,6 @@ fn custom(n: u32) -> () {
     custom(n - 1)
 }
 
-
 #[cached(result = true)]
 fn slow_result(a: u32, b: u32) -> Result<u32, ()> {
     sleep(Duration::new(2, 0));
