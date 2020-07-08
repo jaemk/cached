@@ -4,7 +4,7 @@ Full tests of macro-defined functions
 #[macro_use]
 extern crate cached;
 
-use cached::{Cached, SizedCache, TimedCache, UnboundCache};
+use cached::{Cached, SizedCache, TimedCache, UnboundCache, proc_macro::cached};
 use std::thread::{self, sleep};
 use std::time::Duration;
 
@@ -280,4 +280,26 @@ fn test_racing_duplicate_keys_do_not_duplicate_sized_cache_ordering() {
     slow_small_cache("c", "d");
     slow_small_cache("e", "f");
     slow_small_cache("g", "h");
+}
+
+#[cached(result = true)]
+fn proc_cached_result(n: u32) -> Result<u32, ()> {
+    if n < 5 { Ok(n) } else { Err(()) }
+}
+
+
+#[test]
+fn test_proc_cached_result() {
+    assert!(proc_cached_result(2).is_ok());
+    assert!(proc_cached_result(4).is_ok());
+    assert!(proc_cached_result(6).is_err());
+    assert!(proc_cached_result(6).is_err());
+    assert!(proc_cached_result(2).is_ok());
+    assert!(proc_cached_result(4).is_ok());
+    {
+        let cache = PROC_CACHED_RESULT.lock().unwrap();
+        assert_eq!(2, cache.cache_size());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(4, cache.cache_misses().unwrap());
+    }
 }

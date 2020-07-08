@@ -112,6 +112,13 @@ fn custom(n: u32) -> () {
     custom(n - 1)
 }
 
+
+#[cached(result = true)]
+fn slow_result(a: u32, b: u32) -> Result<u32, ()> {
+    sleep(Duration::new(2, 0));
+    return Ok(a * b);
+}
+
 pub fn main() {
     println!("\n ** default cache with default name **");
     fib(3);
@@ -163,6 +170,18 @@ pub fn main() {
     slow(10, 10);
     {
         let cache = SLOW.lock().unwrap();
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
+        // make sure the cache-lock is dropped
+    }
+
+    println!("\n ** slow result func **");
+    println!(" - first run `slow_result(10)`");
+    let _ = slow_result(10, 10);
+    println!(" - second run `slow_result(10)`");
+    let _ = slow_result(10, 10);
+    {
+        let cache = SLOW_RESULT.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
         println!("misses: {:?}", cache.cache_misses());
         // make sure the cache-lock is dropped
