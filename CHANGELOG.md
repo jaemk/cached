@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- add `cache_set_lifespan` to change the cache lifespace, old value returned.
 ## Changed
 ## Removed
 

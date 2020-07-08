@@ -356,4 +356,9 @@ pub trait Cached<K, V> {
     fn cache_lifespan(&self) -> Option<u64> {
         None
     }
+
+    /// Set the lifespan of cached values, returns the old value
+    fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
+        None
+    }
 }
