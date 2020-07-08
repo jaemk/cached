@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.15.0"
+version = "0.15.1"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -27,7 +27,7 @@ optional = true
 features = ["attributes"]
 
 [dependencies.cached_proc_macro]
-version = "0.1.1"
+version = "0.1.2"
 path = "cached_proc_macro"
 optional = true
 

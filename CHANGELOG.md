@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.15.1]
+## Added
+## Changed
+- fix proc macro when result=true, regression from changing `cache_set` to return the previous value
+## Removed
+
 ## [0.15.0]
 ## Added
 - add `Cached` implementation for std `HashMap`
