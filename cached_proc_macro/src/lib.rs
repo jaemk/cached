@@ -167,13 +167,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (false, false) => quote! { cache.cache_set(key, result.clone()); },
         (true, false) => quote! {
             match result.clone() {
-                Ok(result) => cache.cache_set(key, Ok(result)),
+                Ok(result) => { cache.cache_set(key, Ok(result)); },
                 _ => {},
             }
         },
         (false, true) => quote! {
             match result.clone() {
-                Some(result) => cache.cache_set(key, Some(result)),
+                Some(result) => { cache.cache_set(key, Some(result)); },
                 _ => {},
             }
         },
