@@ -162,21 +162,31 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("cache types (unbound, size, time, or type and create) are mutually exclusive"),
     };
 
-    // make the set cache block
-    let set_cache_block = match (&args.result, &args.option) {
-        (false, false) => quote! { cache.cache_set(key, result.clone()); },
-        (true, false) => quote! {
-            match result.clone() {
-                Ok(result) => { cache.cache_set(key, Ok(result)); },
-                _ => {},
-            }
-        },
-        (false, true) => quote! {
-            match result.clone() {
-                Some(result) => { cache.cache_set(key, Some(result)); },
-                _ => {},
-            }
-        },
+    // make the set cache and return cache blocks
+    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+        (false, false) => {
+            let set_cache_block = quote! { cache.cache_set(key, result.clone()); };
+            let return_cache_block = quote! { return result.clone(); };
+            (set_cache_block, return_cache_block)
+        }
+        (true, false) => {
+            let set_cache_block = quote! {
+                if let Ok(result) = &result {
+                    cache.cache_set(key, Ok(result.clone()));
+                }
+            };
+            let return_cache_block = quote! { return Ok(result.as_ref().unwrap().clone()); };
+            (set_cache_block, return_cache_block)
+        }
+        (false, true) => {
+            let set_cache_block = quote! {
+                if let Some(result) = &result {
+                    cache.cache_set(key, Some(result.clone()));
+                }
+            };
+            let return_cache_block = quote! { return result.clone(); };
+            (set_cache_block, return_cache_block)
+        }
         _ => panic!("the result and option attributes are mutually exclusive"),
     };
 
@@ -191,7 +201,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     // check if the result is cached
                     let mut cache = #cache_ident.lock().await;
                     if let Some(result) = cache.cache_get(&key) {
-                        return result.clone();
+                        #return_cache_block
                     }
                 }
 
@@ -215,7 +225,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     // check if the result is cached
                     let mut cache = #cache_ident.lock().unwrap();
                     if let Some(result) = cache.cache_get(&key) {
-                        return result.clone();
+                        #return_cache_block
                     }
                 }
 

@@ -294,12 +294,16 @@ fn test_racing_duplicate_keys_do_not_duplicate_sized_cache_ordering() {
     slow_small_cache("g", "h");
 }
 
+// String is not cloneable. So this also tests that the Result type
+// itself does not have to be cloneable, just the type for the Ok
+// value.
+// Vec has Clone, but not Copy, to make sure Copy isn't required.
 #[cached(result = true)]
-fn proc_cached_result(n: u32) -> Result<u32, ()> {
+fn proc_cached_result(n: u32) -> Result<Vec<u32>, String> {
     if n < 5 {
-        Ok(n)
+        Ok(vec![n])
     } else {
-        Err(())
+        Err("5 or higher".to_string())
     }
 }
 
@@ -316,5 +320,32 @@ fn test_proc_cached_result() {
         assert_eq!(2, cache.cache_size());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(4, cache.cache_misses().unwrap());
+    }
+}
+
+#[cached(option = true)]
+fn proc_cached_option(n: u32) -> Option<Vec<u32>> {
+    if n < 5 {
+        Some(vec![n])
+    } else {
+        None
+    }
+}
+
+#[test]
+fn test_proc_cached_option() {
+    assert!(proc_cached_option(2).is_some());
+    assert!(proc_cached_option(4).is_some());
+    assert!(proc_cached_option(1).is_some());
+    assert!(proc_cached_option(6).is_none());
+    assert!(proc_cached_option(6).is_none());
+    assert!(proc_cached_option(2).is_some());
+    assert!(proc_cached_option(1).is_some());
+    assert!(proc_cached_option(4).is_some());
+    {
+        let cache = PROC_CACHED_OPTION.lock().unwrap();
+        assert_eq!(3, cache.cache_size());
+        assert_eq!(3, cache.cache_hits().unwrap());
+        assert_eq!(5, cache.cache_misses().unwrap());
     }
 }
