@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 ## Added
+## Changed
+- Store inner values when `result=true` or `option=true`. The `Error` type in the
+`Result` now no longer needs to implement `Clone`.
+## Removed
+
+## [Unreleased]
+## Added
 - add `cache_set_lifespan` to change the cache lifespace, old value returned.
 ## Changed
 ## Removed
