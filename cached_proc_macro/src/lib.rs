@@ -2,7 +2,8 @@ use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, parse_str, AttributeArgs, Block, FnArg, Ident, ItemFn, Pat, ReturnType, Type,
+    parse_macro_input, parse_str, AttributeArgs, Block, FnArg, Ident, ItemFn, Pat, PathArguments,
+    ReturnType, Type,
 };
 
 #[derive(FromMeta)]
@@ -91,6 +92,35 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         ReturnType::Type(_, ty) => quote! {#ty},
     };
 
+    // Find the type of the value to store.
+    // Normally it's the same as the return type of the functions, but
+    // for Options and Results it's the (first) inner type. So for
+    // Option<u32>, store u32, for Result<i32, String>, store i32, etc.
+    let cache_value_ty = match (&args.result, &args.option) {
+        (false, false) => output_ty.clone(),
+        (true, true) => panic!("the result and option attributes are mutually exclusive"),
+        _ => match output.clone() {
+            ReturnType::Default => {
+                panic!("function must return something for result or option attributes")
+            }
+            ReturnType::Type(_, ty) => {
+                if let Type::Path(typepath) = *ty {
+                    let segments = typepath.path.segments;
+                    if let PathArguments::AngleBracketed(brackets) =
+                        &segments.last().unwrap().arguments
+                    {
+                        let inner_ty = brackets.args.first().unwrap();
+                        quote! {#inner_ty}
+                    } else {
+                        panic!("function return type has no inner type")
+                    }
+                } else {
+                    panic!("function return type too complex")
+                }
+            }
+        },
+    };
+
     // make the cache identifier
     let cache_ident = match args.name {
         Some(name) => Ident::new(&name, fn_ident.span()),
@@ -130,22 +160,22 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.cache_create,
     ) {
         (true, None, None, None, None) => {
-            let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #output_ty>};
+            let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
         }
         (false, Some(size), None, None, None) => {
-            let cache_ty = quote! {cached::SizedCache<#cache_key_ty, #output_ty>};
+            let cache_ty = quote! {cached::SizedCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::SizedCache::with_size(#size)};
             (cache_ty, cache_create)
         }
         (false, None, Some(time), None, None) => {
-            let cache_ty = quote! {cached::TimedCache<#cache_key_ty, #output_ty>};
+            let cache_ty = quote! {cached::TimedCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::TimedCache::with_lifespan(#time)};
             (cache_ty, cache_create)
         }
         (false, None, None, None, None) => {
-            let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #output_ty>};
+            let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
         }
@@ -162,21 +192,31 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("cache types (unbound, size, time, or type and create) are mutually exclusive"),
     };
 
-    // make the set cache block
-    let set_cache_block = match (&args.result, &args.option) {
-        (false, false) => quote! { cache.cache_set(key, result.clone()); },
-        (true, false) => quote! {
-            match result.clone() {
-                Ok(result) => { cache.cache_set(key, Ok(result)); },
-                _ => {},
-            }
-        },
-        (false, true) => quote! {
-            match result.clone() {
-                Some(result) => { cache.cache_set(key, Some(result)); },
-                _ => {},
-            }
-        },
+    // make the set cache and return cache blocks
+    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+        (false, false) => {
+            let set_cache_block = quote! { cache.cache_set(key, result.clone()); };
+            let return_cache_block = quote! { return result.clone(); };
+            (set_cache_block, return_cache_block)
+        }
+        (true, false) => {
+            let set_cache_block = quote! {
+                if let Ok(result) = &result {
+                    cache.cache_set(key, result.clone());
+                }
+            };
+            let return_cache_block = quote! { return Ok(result.clone()); };
+            (set_cache_block, return_cache_block)
+        }
+        (false, true) => {
+            let set_cache_block = quote! {
+                if let Some(result) = &result {
+                    cache.cache_set(key, result.clone());
+                }
+            };
+            let return_cache_block = quote! { return Some(result.clone()); };
+            (set_cache_block, return_cache_block)
+        }
         _ => panic!("the result and option attributes are mutually exclusive"),
     };
 
@@ -191,7 +231,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     // check if the result is cached
                     let mut cache = #cache_ident.lock().await;
                     if let Some(result) = cache.cache_get(&key) {
-                        return result.clone();
+                        #return_cache_block
                     }
                 }
 
@@ -215,7 +255,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     // check if the result is cached
                     let mut cache = #cache_ident.lock().unwrap();
                     if let Some(result) = cache.cache_get(&key) {
-                        return result.clone();
+                        #return_cache_block
                     }
                 }
 
