@@ -294,16 +294,18 @@ fn test_racing_duplicate_keys_do_not_duplicate_sized_cache_ordering() {
     slow_small_cache("g", "h");
 }
 
-// String is not cloneable. So this also tests that the Result type
+// NoClone is not cloneable. So this also tests that the Result type
 // itself does not have to be cloneable, just the type for the Ok
 // value.
 // Vec has Clone, but not Copy, to make sure Copy isn't required.
+struct NoClone {}
+
 #[cached(result = true)]
-fn proc_cached_result(n: u32) -> Result<Vec<u32>, String> {
+fn proc_cached_result(n: u32) -> Result<Vec<u32>, NoClone> {
     if n < 5 {
         Ok(vec![n])
     } else {
-        Err("5 or higher".to_string())
+        Err(NoClone {})
     }
 }
 
