@@ -223,7 +223,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_std::sync::Mutex::new(#cache_create));
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_mutex::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_mutex::Mutex::new(#cache_create));
             #visibility #signature {
                 use cached::Cached;
                 let key = #key_convert_block;

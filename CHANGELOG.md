@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.18.0] / [0.3.0]
+## Added
+## Changed
+- use `async-mutex` instead of full `async-std`
+## Removed
+
 ## [0.17.0]
 ## Added
 ## Changed

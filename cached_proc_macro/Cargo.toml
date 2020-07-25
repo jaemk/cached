@@ -1,6 +1,6 @@
 [package]
 name = "cached_proc_macro"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["csos95 <csoscss@gmail.com>", "James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -19,7 +19,7 @@ proc-macro = true
 [dependencies]
 quote = "1.0.6"
 darling = "0.10.2"
-async-std = "1.6.0"
+async-mutex = "1.1.5"
 
 [dependencies.syn]
 version = "1.0.27"

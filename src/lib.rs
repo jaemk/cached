@@ -309,7 +309,7 @@ pub mod proc_macro {
     pub use cached_proc_macro::cached;
 }
 #[cfg(feature = "proc_macro")]
-pub use async_std;
+pub use async_mutex;
 
 /// Cache operations
 pub trait Cached<K, V> {
