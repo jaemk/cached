@@ -30,6 +30,11 @@ version = "0.3.0"
 path = "cached_proc_macro"
 optional = true
 
+[dependencies.serde]
+version = "1"
+optional = true
+features = ["derive"]
+
 [dev-dependencies.tokio]
 version = "0.2.21"
 features = ["macros", "time"]
@@ -37,6 +42,9 @@ features = ["macros", "time"]
 [dev-dependencies.async-std]
 version = "1.6.2"
 features = ["attributes"]
+
+[dev-dependencies.serde_json]
+version = "1"
 
 [workspace]
 members = ["cached_proc_macro"]
