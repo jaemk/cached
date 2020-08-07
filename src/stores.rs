@@ -12,6 +12,15 @@ use super::Cached;
 
 use std::collections::hash_map::Entry;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
+// #[cfg(feature = "serde")]
+// use serde::{
+//     de::SeqAccess, de::Visitor, ser::SerializeSeq, ser::SerializeStruct, Deserialize, Deserializer,
+//     Serialize, Serializer,
+// };
+
 /// Default unbounded cache
 ///
 /// This cache has no size limit or eviction policy.
@@ -132,16 +141,70 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
 
 /// Limited functionality doubly linked list using Vec as storage.
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Deserialize),
+    serde(bound(deserialize = "T: Deserialize<'de>"))
+)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize),
+    serde(bound(serialize = "T: Serialize"))
+)]
 struct LRUList<T> {
     values: Vec<ListEntry<T>>,
 }
 
+// #[cfg(feature = "serde")]
+// impl<T> Serialize for LRUList<T>
+// where
+//     T: Serialize,
+// {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         let mut seq = serializer.serialize_seq(Some(self.values.len()))?;
+//         for element in &self.values {
+//             seq.serialize_element(element)?;
+//         }
+//         seq.end()
+//     }
+// }
+
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Deserialize),
+    serde(bound(deserialize = "T: Deserialize<'de>"))
+)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize),
+    serde(bound(serialize = "T: Serialize"))
+)]
 struct ListEntry<T> {
     value: Option<T>,
     next: usize,
     prev: usize,
 }
+
+// #[cfg(feature = "serde")]
+// impl<T> Serialize for ListEntry<T>
+// where
+//     T: Serialize,
+// {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         let mut entry = serializer.serialize_struct("ListEntry", 3)?;
+//         entry.serialize_field("value", &self.value)?;
+//         entry.serialize_field("next", &self.next)?;
+//         entry.serialize_field("prev", &self.prev)?;
+//         entry.end()
+//     }
+// }
 
 /// Free and occupied cells are each linked into a cyclic list with one auxiliary cell.
 /// Cell #0 is on the list of free cells, element #1 is on the list of occupied cells.
@@ -278,6 +341,16 @@ impl<'a, T> Iterator for LRUListIterator<'a, T> {
 ///
 /// Note: This cache is in-memory only
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Deserialize),
+    serde(bound(deserialize = "K: Deserialize<'de> + Eq + Hash, V: Deserialize<'de>"))
+)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize),
+    serde(bound(serialize = "K: Serialize+ Eq + Hash, V: Serialize"))
+)]
 pub struct SizedCache<K, V> {
     store: HashMap<K, usize>,
     order: LRUList<(K, V)>,
@@ -285,6 +358,25 @@ pub struct SizedCache<K, V> {
     hits: u64,
     misses: u64,
 }
+
+// #[cfg(feature = "serde")]
+// impl<K, V> Serialize for SizedCache<K, V>
+// where
+//     K: Serialize,
+//     V: Serialize,
+// {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         let mut s = serializer.serialize_struct("SizedCache", 4)?;
+//         s.serialize_field("order", &self.order)?;
+//         s.serialize_field("capacity", &self.capacity)?;
+//         s.serialize_field("hits", &self.hits)?;
+//         s.serialize_field("misses", &self.misses)?;
+//         s.end()
+//     }
+// }
 
 impl<K, V> PartialEq for SizedCache<K, V>
 where
@@ -321,6 +413,10 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
             hits: 0,
             misses: 0,
         }
+    }
+
+    pub fn size(&self) -> usize {
+        self.capacity
     }
 
     /// Return an iterator of keys in the current order from most
@@ -627,7 +723,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
         self.clear();
     }
     fn cache_reset(&mut self) {
-        std::mem::replace(self, HashMap::new());
+        *self = HashMap::new();
     }
     fn cache_size(&self) -> usize {
         self.len()
@@ -1035,5 +1131,134 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 42), &42);
 
         assert_eq!(c.cache_misses(), Some(7));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serialize() {
+        let mut c = SizedCache::with_size(3);
+
+        assert_eq!(c.cache_set(0, 0), None);
+        assert_eq!(c.cache_set(1, 1), None);
+        assert_eq!(c.cache_set(2, 2), None);
+
+        let result = serde_json::to_value(&c).unwrap();
+
+        let expect = serde_json::json!({
+            "store": {
+                "0": 2,
+                "1": 3,
+                "2": 4
+            },
+            "order": {
+                "values": [
+                    {
+                        "value": null,
+                        "next": 0,
+                        "prev": 0
+                    },
+                    {
+                        "value": null,
+                        "next": 4,
+                        "prev": 2
+                    },
+                    {
+                        "value": [
+                            0,
+                            0
+                        ],
+                        "next": 1,
+                        "prev": 3
+                    },
+                    {
+                        "value": [
+                            1,
+                            1
+                        ],
+                        "next": 2,
+                        "prev": 4
+                    },
+                    {
+                        "value": [
+                            2,
+                            2
+                        ],
+                        "next": 3,
+                        "prev": 1
+                    }
+                ]
+            },
+            "capacity": 3,
+            "hits": 0,
+            "misses": 0
+        });
+
+        println!("{:#?}", result);
+        println!("{:#?}", expect);
+
+        assert_eq!(result, expect);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn deserialize() {
+        let value = serde_json::json!({
+            "store": {
+                "0": 2,
+                "1": 3,
+                "2": 4
+            },
+            "order": {
+                "values": [
+                    {
+                        "value": null,
+                        "next": 0,
+                        "prev": 0
+                    },
+                    {
+                        "value": null,
+                        "next": 4,
+                        "prev": 2
+                    },
+                    {
+                        "value": [
+                            0,
+                            0
+                        ],
+                        "next": 1,
+                        "prev": 3
+                    },
+                    {
+                        "value": [
+                            1,
+                            1
+                        ],
+                        "next": 2,
+                        "prev": 4
+                    },
+                    {
+                        "value": [
+                            2,
+                            2
+                        ],
+                        "next": 3,
+                        "prev": 1
+                    }
+                ]
+            },
+            "capacity": 3,
+            "hits": 0,
+            "misses": 0
+        });
+
+        let result: SizedCache<_, _> = serde_json::from_value(value).unwrap();
+
+        let mut expect = SizedCache::with_size(3);
+
+        assert_eq!(expect.cache_set(0, 0), None);
+        assert_eq!(expect.cache_set(1, 1), None);
+        assert_eq!(expect.cache_set(2, 2), None);
+
+        assert_eq!(result, expect);
     }
 }
