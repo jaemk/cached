@@ -369,29 +369,29 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
 impl<K, V> SizedCache<K, V> {
     /// Return an iterator of (key, value) in the current order from most
     /// to least recently used.
-    pub fn iter(&self) -> impl Iterator<Item = &(K, V)> {
-        self.order.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.into_iter()
     }
 
     /// Return an iterator of keys in the current order from most
     /// to least recently used.
     pub fn key_order(&self) -> impl Iterator<Item = &K> {
-        self.order.iter().map(|(k, _v)| k)
+        self.into_iter().map(|(k, _v)| k)
     }
 
     /// Return an iterator of values in the current order from most
     /// to least recently used.
     pub fn value_order(&self) -> impl Iterator<Item = &V> {
-        self.order.iter().map(|(_k, v)| v)
+        self.into_iter().map(|(_k, v)| v)
     }
 }
 
-pub struct SizedCacheIter<'a, T>(LRUListIterator<'a, T>);
-pub struct SizedCacheIntoIter<T>(LRUListIntoIterator<T>);
+pub struct SizedCacheIter<'a, K, V>(LRUListIterator<'a, (K, V)>);
+pub struct SizedCacheIntoIter<K, V>(LRUListIntoIterator<(K, V)>);
 
 impl<'a, K, V> IntoIterator for &'a SizedCache<K, V> {
-    type Item = &'a (K, V);
-    type IntoIter = SizedCacheIter<'a, (K, V)>;
+    type Item = (&'a K, &'a V);
+    type IntoIter = SizedCacheIter<'a, K, V>;
 
     fn into_iter(self) -> Self::IntoIter {
         SizedCacheIter(self.order.iter())
@@ -400,23 +400,23 @@ impl<'a, K, V> IntoIterator for &'a SizedCache<K, V> {
 
 impl<K, V> IntoIterator for SizedCache<K, V> {
     type Item = (K, V);
-    type IntoIter = SizedCacheIntoIter<(K, V)>;
+    type IntoIter = SizedCacheIntoIter<K, V>;
 
     fn into_iter(self) -> Self::IntoIter {
         SizedCacheIntoIter(self.order.into_iter())
     }
 }
 
-impl<'a, T> Iterator for SizedCacheIter<'a, T> {
-    type Item = &'a T;
+impl<'a, K, V> Iterator for SizedCacheIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+        self.0.next().map(|(k, v)| (k, v))
     }
 }
 
-impl<T> Iterator for SizedCacheIntoIter<T> {
-    type Item = T;
+impl<K, V> Iterator for SizedCacheIntoIter<K, V> {
+    type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
