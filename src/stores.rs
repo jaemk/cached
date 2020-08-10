@@ -211,6 +211,10 @@ impl<T> LRUList<T> {
         self.values[Self::OCCUPIED].prev
     }
 
+    fn front(&self) -> usize {
+        self.values[Self::OCCUPIED].next
+    }
+
     fn pop_back(&mut self) -> T {
         let index = self.back();
         self.remove(index)
@@ -250,6 +254,15 @@ impl<T> LRUList<T> {
     }
 }
 
+impl<T> IntoIterator for LRUList<T> {
+    type Item = <Self::IntoIter as Iterator>::Item;
+    type IntoIter = LRUListIntoIterator<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        LRUListIntoIterator::<T> { list: self }
+    }
+}
+
 #[derive(Debug)]
 struct LRUListIterator<'a, T> {
     list: &'a LRUList<T>,
@@ -267,6 +280,24 @@ impl<'a, T> Iterator for LRUListIterator<'a, T> {
             let value = self.list.values[next].value.as_ref();
             self.index = next;
             value
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LRUListIntoIterator<T> {
+    list: LRUList<T>,
+}
+
+impl<T> Iterator for LRUListIntoIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.list.front();
+        if next == LRUList::<T>::OCCUPIED {
+            None
+        } else {
+            Some(self.list.remove(next))
         }
     }
 }
@@ -323,6 +354,25 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
         }
     }
 
+    fn check_capacity(&mut self) {
+        if self.store.len() >= self.capacity {
+            // store has reached capacity, evict the oldest item.
+            // store capacity cannot be zero, so there must be content in `self.order`.
+            let (key, _value) = self.order.pop_back();
+            self.store
+                .remove(&key)
+                .expect("SizedCache::cache_set failed evicting cache key");
+        }
+    }
+}
+
+impl<K, V> SizedCache<K, V> {
+    /// Return an iterator of (key, value) in the current order from most
+    /// to least recently used.
+    pub fn iter(&self) -> impl Iterator<Item = &(K, V)> {
+        self.order.iter()
+    }
+
     /// Return an iterator of keys in the current order from most
     /// to least recently used.
     pub fn key_order(&self) -> impl Iterator<Item = &K> {
@@ -334,16 +384,42 @@ impl<K: Hash + Eq, V> SizedCache<K, V> {
     pub fn value_order(&self) -> impl Iterator<Item = &V> {
         self.order.iter().map(|(_k, v)| v)
     }
+}
 
-    fn check_capacity(&mut self) {
-        if self.store.len() >= self.capacity {
-            // store has reached capacity, evict the oldest item.
-            // store capacity cannot be zero, so there must be content in `self.order`.
-            let (key, _value) = self.order.pop_back();
-            self.store
-                .remove(&key)
-                .expect("SizedCache::cache_set failed evicting cache key");
-        }
+pub struct SizedCacheIter<'a, T>(LRUListIterator<'a, T>);
+pub struct SizedCacheIntoIter<T>(LRUListIntoIterator<T>);
+
+impl<'a, K, V> IntoIterator for &'a SizedCache<K, V> {
+    type Item = &'a (K, V);
+    type IntoIter = SizedCacheIter<'a, (K, V)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        SizedCacheIter(self.order.iter())
+    }
+}
+
+impl<K, V> IntoIterator for SizedCache<K, V> {
+    type Item = (K, V);
+    type IntoIter = SizedCacheIntoIter<(K, V)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        SizedCacheIntoIter(self.order.into_iter())
+    }
+}
+
+impl<'a, T> Iterator for SizedCacheIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+impl<T> Iterator for SizedCacheIntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
     }
 }
 
