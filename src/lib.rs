@@ -307,7 +307,7 @@ pub extern crate once_cell;
 pub mod macros;
 pub mod stores;
 
-pub use stores::{SizedCache, TimedCache, UnboundCache};
+pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro {

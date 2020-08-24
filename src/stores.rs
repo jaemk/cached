@@ -773,6 +773,196 @@ where
     }
 }
 
+/// Timed LRU Cache
+///
+/// Stores a limited number of values,
+/// evicting expired and least-used entries.
+///
+/// Note: This cache is in-memory only
+#[derive(Clone, Debug)]
+pub struct TimedSizedCache<K, V> {
+    store: HashMap<K, (Instant, usize)>,
+    order: LRUList<(K, V)>,
+    capacity: usize,
+    seconds: u64,
+    hits: u64,
+    misses: u64,
+}
+
+impl<K: Hash + Eq, V> TimedSizedCache<K, V> {
+    /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    pub fn with_size_and_lifespan(size: usize, seconds: u64) -> TimedSizedCache<K, V> {
+        if size == 0 {
+            panic!("`size` of `TimedSizedCache` must be greater than zero.")
+        }
+        TimedSizedCache {
+            store: HashMap::with_capacity(size),
+            order: LRUList::<(K, V)>::with_capacity(size),
+            capacity: size,
+            seconds,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    // TODO: Is it desired behavior to list expired elements in ordered lists?
+    /// Return an iterator of keys in the current order from most
+    /// to least recently used.
+    pub fn key_order(&self) -> impl Iterator<Item = &K> {
+        self.order.iter().map(|(k, _v)| k)
+    }
+
+    /// Return an iterator of timestamped values in the current order
+    /// from most to least recently used.
+    pub fn value_order(&self) -> impl Iterator<Item = &V> {
+        self.order.iter().map(|(_k, v)| v)
+    }
+
+    fn check_capacity(&mut self) {
+        if self.store.len() >= self.capacity {
+            // store has reached capacity, evict the oldest item.
+            // store capacity cannot be zero, so there must be content in `self.order`.
+            let (key, _value) = self.order.pop_back();
+            self.store
+                .remove(&key)
+                .expect("SizedCache::cache_set failed evicting cache key");
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
+    fn cache_get(&mut self, key: &K) -> Option<&V> {
+        let val = {
+            if let Some(&(instant, index)) = self.store.get(key) {
+                if instant.elapsed().as_secs() < self.seconds {
+                    Some(index)
+                } else {
+                    self.store.remove(key);
+                    self.order.remove(index);
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        match val {
+            Some(index) => {
+                self.order.move_to_front(index);
+                self.hits += 1;
+                Some(&self.order.get(index).1)
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+
+    fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
+        let val = {
+            if let Some(&(instant, index)) = self.store.get(key) {
+                if instant.elapsed().as_secs() < self.seconds {
+                    Some(index)
+                } else {
+                    self.store.remove(key);
+                    self.order.remove(index);
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        match val {
+            Some(index) => {
+                self.order.move_to_front(index);
+                self.hits += 1;
+                Some(&mut self.order.get_mut(index).1)
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+
+    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+        self.check_capacity();
+        let Self { store, order, .. } = self;
+        match store.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let &(instant, index) = occupied.get();
+                if instant.elapsed().as_secs() < self.seconds {
+                    self.hits += 1;
+                    order.move_to_front(index);
+                } else {
+                    let key = occupied.key().clone();
+                    self.misses += 1;
+                    occupied.insert((Instant::now(), index));
+                    order.set(index, (key, f()));
+                }
+                &mut self.order.get_mut(index).1
+            }
+            Entry::Vacant(vacant) => {
+                let key = vacant.key().clone();
+                self.misses += 1;
+                let index = vacant.insert((Instant::now(), order.push_front(None))).1;
+                order.set(index, (key, f()));
+                &mut self.order.get_mut(index).1
+            }
+        }
+    }
+
+    fn cache_set(&mut self, key: K, val: V) -> Option<V> {
+        self.check_capacity();
+        let Self { store, order, .. } = self;
+        let stamped_index = *store
+            .entry(key.clone())
+            .and_modify(|v| v.0 = Instant::now())
+            .or_insert_with(|| (Instant::now(), order.push_front(None)));
+        order.set(stamped_index.1, (key, val)).map(|(_, v)| v)
+    }
+
+    fn cache_remove(&mut self, k: &K) -> Option<V> {
+        // try and remove item from mapping, and then from order list if it was in mapping
+        if let Some((_instant, index)) = self.store.remove(k) {
+            // need to remove the key in the order list
+            let (_key, value) = self.order.remove(index);
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn cache_clear(&mut self) {
+        // clear both the store and the order list
+        self.store.clear();
+        self.order.clear();
+    }
+    fn cache_reset(&mut self) {
+        // SizedCache uses cache_clear because capacity is fixed.
+        self.cache_clear();
+    }
+    fn cache_size(&self) -> usize {
+        self.store.len()
+    }
+    fn cache_hits(&self) -> Option<u64> {
+        Some(self.hits)
+    }
+    fn cache_misses(&self) -> Option<u64> {
+        Some(self.misses)
+    }
+    fn cache_capacity(&self) -> Option<usize> {
+        Some(self.capacity)
+    }
+    fn cache_lifespan(&self) -> Option<u64> {
+        Some(self.seconds)
+    }
+    fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
+        let old = self.seconds;
+        self.seconds = seconds;
+        Some(old)
+    }
+}
+
 impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
     fn cache_get(&mut self, k: &K) -> Option<&V> {
         self.get(k)
@@ -843,6 +1033,7 @@ mod tests {
 
     use super::SizedCache;
     use super::TimedCache;
+    use super::TimedSizedCache;
     use super::UnboundCache;
 
     #[test]
@@ -945,6 +1136,72 @@ mod tests {
     }
 
     #[test]
+    fn timed_sized_cache() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(5, 2);
+        assert!(c.cache_get(&1).is_none());
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert!(c.cache_get(&1).is_some());
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, hits);
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(2, 100), None);
+        assert_eq!(c.cache_set(3, 100), None);
+        assert_eq!(c.cache_set(4, 100), None);
+        assert_eq!(c.cache_set(5, 100), None);
+
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
+
+        sleep(Duration::new(1, 0));
+
+        assert_eq!(c.cache_set(6, 100), None);
+        assert_eq!(c.cache_set(7, 100), None);
+
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
+
+        assert!(c.cache_get(&2).is_none());
+        assert!(c.cache_get(&3).is_some());
+
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [3, 7, 6, 5, 4]);
+
+        assert_eq!(2, c.cache_misses().unwrap());
+        assert_eq!(5, c.cache_size());
+
+        sleep(Duration::new(1, 0));
+
+        assert!(c.cache_get(&1).is_none());
+        assert!(c.cache_get(&2).is_none());
+        assert!(c.cache_get(&3).is_none());
+        assert!(c.cache_get(&4).is_none());
+        assert!(c.cache_get(&5).is_none());
+        assert!(c.cache_get(&6).is_some());
+        assert!(c.cache_get(&7).is_some());
+
+        assert_eq!(7, c.cache_misses().unwrap());
+
+        assert!(c.cache_set(1, 100).is_none());
+        assert!(c.cache_set(2, 100).is_none());
+        assert!(c.cache_set(3, 100).is_none());
+        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [3, 2, 1, 7, 6]);
+
+        sleep(Duration::new(1, 0));
+
+        assert!(c.cache_get(&1).is_some());
+        assert!(c.cache_get(&2).is_some());
+        assert!(c.cache_get(&3).is_some());
+        assert!(c.cache_get(&4).is_none());
+        assert!(c.cache_get(&5).is_none());
+        assert!(c.cache_get(&6).is_none());
+        assert!(c.cache_get(&7).is_none());
+
+        assert_eq!(11, c.cache_misses().unwrap());
+    }
+
+    #[test]
     fn clear() {
         let mut c = UnboundCache::new();
 
@@ -998,6 +1255,15 @@ mod tests {
         assert_eq!(0, c.cache_size());
 
         let mut c = TimedCache::with_lifespan(3600);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
+        c.cache_clear();
+
+        assert_eq!(0, c.cache_size());
+
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 3600);
 
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
@@ -1059,6 +1325,15 @@ mod tests {
         c.cache_reset();
 
         assert!(init_capacity <= c.store.capacity());
+
+        let mut c = TimedSizedCache::with_size_and_lifespan(init_capacity, 100);
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
+        assert_eq!(init_capacity, c.store.capacity());
+
+        c.cache_reset();
+        assert_eq!(init_capacity, c.store.capacity());
     }
 
     #[test]
@@ -1124,6 +1399,24 @@ mod tests {
 
         assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
+
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 3600);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_set(3, 300), None);
+
+        assert_eq!(Some(100), c.cache_remove(&1));
+        assert_eq!(2, c.cache_size());
+
+        assert_eq!(Some(200), c.cache_remove(&2));
+        assert_eq!(1, c.cache_size());
+
+        assert_eq!(None, c.cache_remove(&2));
+        assert_eq!(1, c.cache_size());
+
+        assert_eq!(Some(300), c.cache_remove(&3));
+        assert_eq!(0, c.cache_size());
     }
 
     #[test]
@@ -1234,6 +1527,47 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 42), &42);
 
         assert_eq!(c.cache_misses(), Some(7));
+
+        let mut c = TimedSizedCache::with_size_and_lifespan(5, 2);
+
+        assert_eq!(c.cache_get_or_set_with(0, || 0), &0);
+        assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
+        assert_eq!(c.cache_get_or_set_with(2, || 2), &2);
+        assert_eq!(c.cache_get_or_set_with(3, || 3), &3);
+        assert_eq!(c.cache_get_or_set_with(4, || 4), &4);
+        assert_eq!(c.cache_get_or_set_with(5, || 5), &5);
+
+        assert_eq!(c.cache_misses(), Some(6));
+
+        assert_eq!(c.cache_get_or_set_with(0, || 0), &0);
+
+        assert_eq!(c.cache_misses(), Some(7));
+
+        assert_eq!(c.cache_get_or_set_with(0, || 42), &0);
+
+        sleep(Duration::new(1, 0));
+
+        assert_eq!(c.cache_get_or_set_with(0, || 42), &0);
+
+        assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
+
+        assert_eq!(c.cache_get_or_set_with(4, || 42), &4);
+
+        assert_eq!(c.cache_get_or_set_with(5, || 42), &5);
+
+        assert_eq!(c.cache_get_or_set_with(6, || 6), &6);
+
+        assert_eq!(c.cache_misses(), Some(9));
+
+        sleep(Duration::new(1, 0));
+
+        assert_eq!(c.cache_get_or_set_with(4, || 42), &42);
+
+        assert_eq!(c.cache_get_or_set_with(5, || 42), &42);
+
+        assert_eq!(c.cache_get_or_set_with(6, || 42), &6);
+
+        assert_eq!(c.cache_misses(), Some(11));
     }
 
     #[cfg(feature = "async")]
