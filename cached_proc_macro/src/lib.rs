@@ -67,7 +67,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let fn_ident = signature.ident.clone();
     let inputs = signature.inputs.clone();
     let output = signature.output.clone();
-    let asyncness = signature.asyncness.clone();
+    let asyncness = signature.asyncness;
 
     // pull out the names and types of the function inputs
     let input_tys = inputs
@@ -97,7 +97,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // for Options and Results it's the (first) inner type. So for
     // Option<u32>, store u32, for Result<i32, String>, store i32, etc.
     let cache_value_ty = match (&args.result, &args.option) {
-        (false, false) => output_ty.clone(),
+        (false, false) => output_ty,
         (true, true) => panic!("the result and option attributes are mutually exclusive"),
         _ => match output.clone() {
             ReturnType::Default => {

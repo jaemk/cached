@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.19.0] / [0.4.0]
+## Added
+## Changed
+- Add type hint `_result!` macros
+- remove unnecessary transmute in cache reset
+- remove unnecessary clones in proc macro
+## Removed
+
 ## [0.18.0] / [0.3.0]
 ## Added
 ## Changed
