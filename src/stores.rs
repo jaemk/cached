@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(3, c.cache_size());
         assert_eq!(3, c.cache_hits().unwrap());
         assert_eq!(3, c.cache_misses().unwrap());
-        assert_eq!(3, c.store.capacity());
+        assert!(3 <= c.store.capacity());
 
         // clear the cache, should have no more elements
         // hits and misses will still be kept
@@ -773,21 +773,21 @@ mod tests {
         assert_eq!(0, c.cache_size());
         assert_eq!(3, c.cache_hits().unwrap());
         assert_eq!(3, c.cache_misses().unwrap());
-        assert_eq!(3, c.store.capacity()); // Keeps the allocated memory for reuse.
+        assert!(3 <= c.store.capacity()); // Keeps the allocated memory for reuse.
 
         let capacity = 1;
         let mut c = UnboundCache::with_capacity(capacity);
-        assert_eq!(capacity, c.store.capacity());
+        assert!(capacity <= c.store.capacity());
 
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
 
-        assert_eq!(3, c.store.capacity());
+        assert!(3 <= c.store.capacity());
 
         c.cache_clear();
 
-        assert_eq!(3, c.store.capacity()); // Keeps the allocated memory for reuse.
+        assert!(3 <= c.store.capacity()); // Keeps the allocated memory for reuse.
 
         let mut c = SizedCache::with_size(3);
 
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
-        assert_eq!(3, c.store.capacity());
+        assert!(3 <= c.store.capacity());
 
         c.cache_reset();
 
@@ -825,27 +825,27 @@ mod tests {
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
-        assert_eq!(3, c.store.capacity());
+        assert!(3 <= c.store.capacity());
 
         c.cache_reset();
 
-        assert_eq!(init_capacity, c.store.capacity());
+        assert!(init_capacity <= c.store.capacity());
 
         let mut c = SizedCache::with_size(init_capacity);
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
-        assert_eq!(init_capacity, c.store.capacity());
+        assert!(init_capacity <= c.store.capacity());
 
         c.cache_reset();
 
-        assert_eq!(init_capacity, c.store.capacity());
+        assert!(init_capacity <= c.store.capacity());
 
         let mut c = TimedCache::with_lifespan(100);
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
-        assert_eq!(3, c.store.capacity());
+        assert!(3 <= c.store.capacity());
 
         c.cache_reset();
 
@@ -855,11 +855,11 @@ mod tests {
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
-        assert_eq!(3, c.store.capacity());
+        assert!(3 <= c.store.capacity());
 
         c.cache_reset();
 
-        assert_eq!(init_capacity, c.store.capacity());
+        assert!(init_capacity <= c.store.capacity());
     }
 
     #[test]
