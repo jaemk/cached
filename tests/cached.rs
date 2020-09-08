@@ -351,3 +351,18 @@ fn test_proc_cached_option() {
         assert_eq!(5, cache.cache_misses().unwrap());
     }
 }
+
+cached_result! {
+    RESULT_CACHE_RETARM: UnboundCache<u32, u32> = UnboundCache::new();
+    fn test_result_missing_result_arm(n: u32) -> Result<u32, ()> = {
+        Ok(n)
+    }
+}
+
+cached_key_result! {
+    RESULT_CACHE_KEY_RETARM: UnboundCache<u32, u32> = UnboundCache::new();
+    Key = { n };
+    fn test_result_key_missing_result_arm(n: u32) -> Result<u32, ()> = {
+        Ok(n)
+    }
+}

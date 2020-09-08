@@ -76,7 +76,11 @@ macro_rules! cached_result {
                 let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return Ok(res.clone()); }
             }
-            let val = (||$body)()?;
+
+            // Store return in temporary typed variable in case type cannot be inferred
+            let ret : $ret = (||$body)();
+            let val = ret?;
+
             let mut cache = $cachename.lock().unwrap();
             $crate::Cached::cache_set(&mut *cache, key, val.clone());
             Ok(val)
@@ -101,7 +105,11 @@ macro_rules! cached_key_result {
                 let res = $crate::Cached::cache_get(&mut *cache, &key);
                 if let Some(res) = res { return Ok(res.clone()); }
             }
-            let val = (||$body)()?;
+
+            // Store return in temporary typed variable in case type cannot be inferred
+            let ret : $ret = (||$body)();
+            let val = ret?;
+
             let mut cache = $cachename.lock().unwrap();
             $crate::Cached::cache_set(&mut *cache, key, val.clone());
             Ok(val)
