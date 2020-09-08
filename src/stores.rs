@@ -627,7 +627,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
         self.clear();
     }
     fn cache_reset(&mut self) {
-        std::mem::replace(self, HashMap::new());
+        *self = HashMap::new();
     }
     fn cache_size(&self) -> usize {
         self.len()
