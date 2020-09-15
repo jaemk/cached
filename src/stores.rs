@@ -12,6 +12,9 @@ use super::Cached;
 
 use std::collections::hash_map::Entry;
 
+#[cfg(feature = "async")]
+use {super::CachedAsync, async_trait::async_trait, futures::Future};
+
 /// Default unbounded cache
 ///
 /// This cache has no size limit or eviction policy.
@@ -127,6 +130,31 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     }
     fn cache_misses(&self) -> Option<u64> {
         Some(self.misses)
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_trait]
+impl<K, V> CachedAsync<K, V> for UnboundCache<K, V>
+where
+    K: Hash + Eq + Clone + Send,
+{
+    async fn cache_get_or_set_with<F>(&mut self, key: K, f: F) -> &mut V
+    where
+        V: Send,
+        F: Future<Output = V> + Send,
+    {
+        match self.store.entry(key) {
+            Entry::Occupied(occupied) => {
+                self.hits += 1;
+                occupied.into_mut()
+            }
+
+            Entry::Vacant(vacant) => {
+                self.misses += 1;
+                vacant.insert(f.await)
+            }
+        }
     }
 }
 
@@ -441,6 +469,38 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     }
 }
 
+#[cfg(feature = "async")]
+#[async_trait]
+impl<K, V> CachedAsync<K, V> for SizedCache<K, V>
+where
+    K: Hash + Eq + Clone + Send,
+{
+    async fn cache_get_or_set_with<F>(&mut self, key: K, f: F) -> &mut V
+    where
+        V: Send,
+        F: Future<Output = V> + Send,
+    {
+        self.check_capacity();
+        let val = self.store.entry(key);
+        let Self { order, .. } = self;
+        match val {
+            Entry::Occupied(occupied) => {
+                let index = *occupied.get();
+                order.move_to_front(index);
+                self.hits += 1;
+                &mut order.get_mut(index).1
+            }
+            Entry::Vacant(vacant) => {
+                let key = vacant.key().clone();
+                self.misses += 1;
+                let index = *vacant.insert(order.push_front(None));
+                order.set(index, (key, f.await));
+                &mut order.get_mut(index).1
+            }
+        }
+    }
+}
+
 /// Enum used for defining the status of time-cached values
 #[derive(Debug)]
 enum Status {
@@ -607,6 +667,37 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     }
 }
 
+#[cfg(feature = "async")]
+#[async_trait]
+impl<K, V> CachedAsync<K, V> for TimedCache<K, V>
+where
+    K: Hash + Eq + Clone + Send,
+{
+    async fn cache_get_or_set_with<F>(&mut self, key: K, f: F) -> &mut V
+    where
+        V: Send,
+        F: Future<Output = V> + Send,
+    {
+        match self.store.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                if occupied.get().0.elapsed().as_secs() < self.seconds {
+                    self.hits += 1;
+                } else {
+                    self.misses += 1;
+                    let val = f.await;
+                    occupied.insert((Instant::now(), val));
+                }
+                &mut occupied.into_mut().1
+            }
+            Entry::Vacant(vacant) => {
+                self.misses += 1;
+                let val = f.await;
+                &mut vacant.insert((Instant::now(), val)).1
+            }
+        }
+    }
+}
+
 impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
     fn cache_get(&mut self, k: &K) -> Option<&V> {
         self.get(k)
@@ -631,6 +722,24 @@ impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
     }
     fn cache_size(&self) -> usize {
         self.len()
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_trait]
+impl<K, V> CachedAsync<K, V> for HashMap<K, V>
+where
+    K: Hash + Eq + Clone + Send,
+{
+    async fn cache_get_or_set_with<F>(&mut self, key: K, f: F) -> &mut V
+    where
+        V: Send,
+        F: Future<Output = V> + Send,
+    {
+        match self.entry(key) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => v.insert(f.await),
+        }
     }
 }
 

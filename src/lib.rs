@@ -311,6 +311,9 @@ pub mod proc_macro {
 #[cfg(feature = "proc_macro")]
 pub use async_mutex;
 
+#[cfg(feature = "async")]
+use {async_trait::async_trait, futures::Future};
+
 /// Cache operations
 pub trait Cached<K, V> {
     /// Attempt to retrieve a cached value
@@ -361,4 +364,13 @@ pub trait Cached<K, V> {
     fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
         None
     }
+}
+
+#[cfg(feature = "async")]
+#[async_trait]
+pub trait CachedAsync<K, V> {
+    async fn cache_get_or_set_with<F>(&mut self, k: K, f: F) -> &mut V
+    where
+        V: Send,
+        F: Future<Output = V> + Send;
 }
