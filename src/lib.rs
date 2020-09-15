@@ -369,8 +369,13 @@ pub trait Cached<K, V> {
 #[cfg(feature = "async")]
 #[async_trait]
 pub trait CachedAsync<K, V> {
-    async fn cache_get_or_set_with<F>(&mut self, k: K, f: F) -> &mut V
+    async fn get_or_set_with<F>(&mut self, k: K, f: F) -> &mut V
     where
         V: Send,
         F: Future<Output = V> + Send;
+
+    async fn try_get_or_set_with<F, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
+    where
+        V: Send,
+        F: Future<Output = Result<V, E>> + Send;
 }
