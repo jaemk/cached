@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- Add trait CachedAsync only present with async feature, this add two async function in the entry API style of HashMap
 ## Changed
 ## Removed
 
