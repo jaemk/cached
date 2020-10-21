@@ -535,10 +535,11 @@ where
                 &mut order.get_mut(index).1
             }
             Entry::Vacant(vacant) => {
-                let key = vacant.key().clone();
                 self.misses += 1;
+                let value = f.await?; // this need to be create before preventing unstable state
+                let key = vacant.key().clone();
                 let index = *vacant.insert(order.push_front(None));
-                order.set(index, (key, f.await?));
+                order.set(index, (key, value));
                 &mut order.get_mut(index).1
             }
         };
