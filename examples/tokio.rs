@@ -1,14 +1,14 @@
 use cached::proc_macro::cached;
 use std::time::Duration;
-use tokio::time::delay_for;
+use tokio::time::sleep;
 
 async fn sleep_secs(secs: u64) {
-    delay_for(Duration::from_secs(secs)).await;
+    sleep(Duration::from_secs(secs)).await;
 }
 
 #[cached]
 async fn cached_sleep_secs(secs: u64) {
-    delay_for(Duration::from_secs(secs)).await;
+    sleep(Duration::from_secs(secs)).await;
 }
 
 #[tokio::main]

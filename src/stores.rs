@@ -139,10 +139,11 @@ impl<K, V> CachedAsync<K, V> for UnboundCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    async fn get_or_set_with<F>(&mut self, key: K, f: F) -> &mut V
+    async fn get_or_set_with<F, Fut>(&mut self, key: K, f: F) -> &mut V
     where
         V: Send,
-        F: Future<Output = V> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
     {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
@@ -152,15 +153,16 @@ where
 
             Entry::Vacant(vacant) => {
                 self.misses += 1;
-                vacant.insert(f.await)
+                vacant.insert(f().await)
             }
         }
     }
 
-    async fn try_get_or_set_with<F, E>(&mut self, key: K, f: F) -> Result<&mut V, E>
+    async fn try_get_or_set_with<F, Fut, E>(&mut self, key: K, f: F) -> Result<&mut V, E>
     where
         V: Send,
-        F: Future<Output = Result<V, E>> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
     {
         let v = match self.store.entry(key) {
             Entry::Occupied(occupied) => {
@@ -170,7 +172,7 @@ where
 
             Entry::Vacant(vacant) => {
                 self.misses += 1;
-                vacant.insert(f.await?)
+                vacant.insert(f().await?)
             }
         };
         Ok(v)
@@ -494,10 +496,11 @@ impl<K, V> CachedAsync<K, V> for SizedCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    async fn get_or_set_with<F>(&mut self, k: K, f: F) -> &mut V
+    async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
     where
         V: Send,
-        F: Future<Output = V> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
     {
         self.check_capacity();
         let entry = self.store.entry(k);
@@ -513,16 +516,17 @@ where
                 let key = vacant.key().clone();
                 self.misses += 1;
                 let index = *vacant.insert(order.push_front(None));
-                order.set(index, (key, f.await));
+                order.set(index, (key, f().await));
                 &mut order.get_mut(index).1
             }
         }
     }
 
-    async fn try_get_or_set_with<F, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
+    async fn try_get_or_set_with<F, Fut, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
     where
         V: Send,
-        F: Future<Output = Result<V, E>> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
     {
         self.check_capacity();
         let entry = self.store.entry(k);
@@ -536,7 +540,7 @@ where
             }
             Entry::Vacant(vacant) => {
                 self.misses += 1;
-                let value = f.await?; // this need to be create before preventing unstable state
+                let value = f().await?;
                 let key = vacant.key().clone();
                 let index = *vacant.insert(order.push_front(None));
                 order.set(index, (key, value));
@@ -720,10 +724,11 @@ impl<K, V> CachedAsync<K, V> for TimedCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    async fn get_or_set_with<F>(&mut self, k: K, f: F) -> &mut V
+    async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
     where
         V: Send,
-        F: Future<Output = V> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
     {
         match self.store.entry(k) {
             Entry::Occupied(mut occupied) => {
@@ -731,21 +736,22 @@ where
                     self.hits += 1;
                 } else {
                     self.misses += 1;
-                    occupied.insert((Instant::now(), f.await));
+                    occupied.insert((Instant::now(), f().await));
                 }
                 &mut occupied.into_mut().1
             }
             Entry::Vacant(vacant) => {
                 self.misses += 1;
-                &mut vacant.insert((Instant::now(), f.await)).1
+                &mut vacant.insert((Instant::now(), f().await)).1
             }
         }
     }
 
-    async fn try_get_or_set_with<F, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
+    async fn try_get_or_set_with<F, Fut, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
     where
         V: Send,
-        F: Future<Output = Result<V, E>> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
     {
         let v = match self.store.entry(k) {
             Entry::Occupied(mut occupied) => {
@@ -753,13 +759,13 @@ where
                     self.hits += 1;
                 } else {
                     self.misses += 1;
-                    occupied.insert((Instant::now(), f.await?));
+                    occupied.insert((Instant::now(), f().await?));
                 }
                 &mut occupied.into_mut().1
             }
             Entry::Vacant(vacant) => {
                 self.misses += 1;
-                &mut vacant.insert((Instant::now(), f.await?)).1
+                &mut vacant.insert((Instant::now(), f().await?)).1
             }
         };
 
@@ -800,25 +806,27 @@ impl<K, V> CachedAsync<K, V> for HashMap<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    async fn get_or_set_with<F>(&mut self, k: K, f: F) -> &mut V
+    async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
     where
         V: Send,
-        F: Future<Output = V> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
     {
         match self.entry(k) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(f.await),
+            Entry::Vacant(v) => v.insert(f().await),
         }
     }
 
-    async fn try_get_or_set_with<F, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
+    async fn try_get_or_set_with<F, Fut, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
     where
         V: Send,
-        F: Future<Output = Result<V, E>> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
     {
         let v = match self.entry(k) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(f.await?),
+            Entry::Vacant(v) => v.insert(f().await?),
         };
 
         Ok(v)
@@ -1226,5 +1234,73 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 42), &42);
 
         assert_eq!(c.cache_misses(), Some(7));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_async_trait() {
+        use crate::CachedAsync;
+        assert!(1 == 1);
+        let mut c = SizedCache::with_size(5);
+
+        async fn _get(n: usize) -> usize {
+            n
+        }
+
+        assert_eq!(c.get_or_set_with(0, || async { _get(0).await }).await, &0);
+        assert_eq!(c.get_or_set_with(1, || async { _get(1).await }).await, &1);
+        assert_eq!(c.get_or_set_with(2, || async { _get(2).await }).await, &2);
+        assert_eq!(c.get_or_set_with(3, || async { _get(3).await }).await, &3);
+
+        assert_eq!(c.get_or_set_with(0, || async { _get(3).await }).await, &0);
+        assert_eq!(c.get_or_set_with(1, || async { _get(3).await }).await, &1);
+        assert_eq!(c.get_or_set_with(2, || async { _get(3).await }).await, &2);
+        assert_eq!(c.get_or_set_with(3, || async { _get(1).await }).await, &3);
+
+        c.cache_reset();
+        async fn _try_get(n: usize) -> Result<usize, String> {
+            if n < 10 {
+                Ok(n)
+            } else {
+                Err("dead".to_string())
+            }
+        }
+
+        assert_eq!(
+            c.try_get_or_set_with(0, || async {
+                match _try_get(0).await {
+                    Ok(n) => Ok(n),
+                    Err(_) => Err("err".to_string()),
+                }
+            })
+            .await
+            .unwrap(),
+            &0
+        );
+        assert_eq!(
+            c.try_get_or_set_with(0, || async {
+                match _try_get(5).await {
+                    Ok(n) => Ok(n),
+                    Err(_) => Err("err".to_string()),
+                }
+            })
+            .await
+            .unwrap(),
+            &0
+        );
+
+        c.cache_reset();
+        let res: Result<&mut usize, String> = c
+            .try_get_or_set_with(0, || async { Ok(_try_get(10).await?) })
+            .await;
+        assert!(res.is_err());
+        let res: Result<&mut usize, String> = c
+            .try_get_or_set_with(0, || async { Ok(_try_get(1).await?) })
+            .await;
+        assert_eq!(res.unwrap(), &1);
+        let res: Result<&mut usize, String> = c
+            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .await;
+        assert_eq!(res.unwrap(), &1);
     }
 }
