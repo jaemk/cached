@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.20.0]
+## Added
+- Add new CachedAsync trait. Only present with async feature. Adds two async function in the entry API style of HashMap
+## Changed
+## Removed
+
 ## [0.19.0] / [0.4.0]
 ## Added
 ## Changed

@@ -11,13 +11,18 @@
 `cached` provides implementations of several caching structures as well as a handy macro
 for defining memoized functions.
 
-Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in mutex.
+Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in a mutex.
 The function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
 the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`.
 
 See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for details about the
 cache stores available.
+
+**Features**
+
+- `proc_macro`: (default) pull in proc macro support
+- `async`: (default) Add `CachedAsync` trait
 
 ## Defining memoized functions using macros, `#[cached]` & `cached!`
 

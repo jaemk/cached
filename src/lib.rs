@@ -8,13 +8,18 @@
 `cached` provides implementations of several caching structures as well as a handy macro
 for defining memoized functions.
 
-Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in mutex.
+Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in a mutex.
 The function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
 the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`.
 
 See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for details about the
 cache stores available.
+
+**Features**
+
+- `proc_macro`: (default) pull in proc macro support
+- `async`: (default) Add `CachedAsync` trait
 
 ## Defining memoized functions using macros, `#[cached]` & `cached!`
 
@@ -311,6 +316,9 @@ pub mod proc_macro {
 #[cfg(feature = "proc_macro")]
 pub use async_mutex;
 
+#[cfg(feature = "async")]
+use {async_trait::async_trait, futures::Future};
+
 /// Cache operations
 pub trait Cached<K, V> {
     /// Attempt to retrieve a cached value
@@ -361,4 +369,20 @@ pub trait Cached<K, V> {
     fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
         None
     }
+}
+
+#[cfg(feature = "async")]
+#[async_trait]
+pub trait CachedAsync<K, V> {
+    async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
+    where
+        V: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send;
+
+    async fn try_get_or_set_with<F, Fut, E>(&mut self, k: K, f: F) -> Result<&mut V, E>
+    where
+        V: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send;
 }
