@@ -168,7 +168,7 @@ fn test_timed_sized_cache() {
 cached! {
     STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_size(1);
     fn string_1(a: String, b: String) -> String = {
-        return a + &b;
+        a + &b
     }
 }
 
@@ -449,5 +449,53 @@ cached_key_result! {
     Key = { n };
     fn test_result_key_missing_result_arm(n: u32) -> Result<u32, ()> = {
         Ok(n)
+    }
+}
+
+#[cached(size = 1, time = 1)]
+fn proc_timed_sized_sleeper(n: u64) -> u64 {
+    sleep(Duration::new(1, 0));
+    n
+}
+
+#[test]
+fn test_proc_timed_sized_cache() {
+    proc_timed_sized_sleeper(1);
+    proc_timed_sized_sleeper(1);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    // sleep to expire the one entry
+    sleep(Duration::new(1, 0));
+    proc_timed_sized_sleeper(1);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(2, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1])
+    }
+    // sleep to expire the one entry
+    sleep(Duration::new(1, 0));
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert!(cache.key_order().next().is_none())
+    }
+    proc_timed_sized_sleeper(1);
+    proc_timed_sized_sleeper(1);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(3, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1])
+    }
+    // lru size is 1, so this new thing evicts the existing key
+    proc_timed_sized_sleeper(2);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(4, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&2])
     }
 }

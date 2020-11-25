@@ -46,7 +46,7 @@ fn fib_specific(n: u32) -> u32 {
 )]
 fn slow(a: u32, b: u32) -> u32 {
     sleep(Duration::new(2, 0));
-    return a * b;
+    a * b
 }
 
 // Specify a specific cache type and an explicit key expression
@@ -115,7 +115,7 @@ fn custom(n: u32) -> () {
 #[cached(result = true)]
 fn slow_result(a: u32, b: u32) -> Result<u32, ()> {
     sleep(Duration::new(2, 0));
-    return Ok(a * b);
+    Ok(a * b)
 }
 
 pub fn main() {

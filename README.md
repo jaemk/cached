@@ -70,6 +70,53 @@ fn keyed(a: String, b: String) -> usize {
 use std::thread::sleep;
 use std::time::Duration;
 use cached::proc_macro::cached;
+
+/// Use a timed-lru cache with size 1, a TTL of 60s,
+/// and a `(usize, usize)` cache key
+#[cached(size=1, time=60)]
+fn keyed(a: usize, b: usize) -> usize {
+    let total = a + b;
+    sleep(Duration::new(total as u64, 0));
+    total
+}
+pub fn main() {
+    let val = keyed(1, 2);  // Not cached, will sleep (1+2)s
+
+    let val = keyed(1, 2);  // Cached, no sleep
+
+    sleep(Duration::new(60, 0));  // Sleep for the TTL
+
+    let val = keyed(1, 2);  // 60s TTL has passed so the cached
+                            // value has expired, will sleep (1+2)s
+
+    let val = keyed(1, 2);  // Cached, no sleep
+
+    let val = keyed(2, 1);  // New args, not cached, will sleep (2+1)s
+
+    let val = keyed(1, 2);  // Was evicted because of lru size of 1,
+                            // will sleep (1+2)s
+}
+```
+
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::cached;
+
+/// Use a timed cache with a TTL of 60s
+/// and a `(String, String)` cache key
+#[cached(time=60)]
+fn keyed(a: String, b: String) -> usize {
+    let size = a.len() + b.len();
+    sleep(Duration::new(size as u64, 0));
+    size
+}
+```
+
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::cached;
 use cached::SizedCache;
 
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block

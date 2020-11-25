@@ -195,7 +195,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
         (false, None, None, Some(_), None) => panic!("type requires create to also be set"),
         (false, None, None, None, Some(_)) => panic!("create requires type to also be set"),
-        _ => panic!("cache types (unbound, size and/or time, or type and create) are mutually exclusive"),
+        _ => panic!(
+            "cache types (unbound, size and/or time, or type and create) are mutually exclusive"
+        ),
     };
 
     // make the set cache and return cache blocks
