@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- Add a TimedSizedCache combining and LRU and a timed/ttl cache
 ## Changed
 ## Removed
 

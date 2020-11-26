@@ -4,7 +4,7 @@ Full tests of macro-defined functions
 #[macro_use]
 extern crate cached;
 
-use cached::{proc_macro::cached, Cached, SizedCache, TimedCache, UnboundCache};
+use cached::{proc_macro::cached, Cached, SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 use std::thread::{self, sleep};
 use std::time::Duration;
 
@@ -81,9 +81,94 @@ fn test_timed_cache() {
 }
 
 cached! {
+    TIMED_SIZED: TimedSizedCache<u32, u32> = TimedSizedCache::with_size_and_lifespan(3, 2);
+    fn timefac(n: u32) -> u32 = {
+        sleep(Duration::new(1, 0));
+        if n > 1 {
+            n * timefac(n - 1)
+        } else {
+            n
+        }
+    }
+}
+
+#[test]
+fn test_timed_sized_cache() {
+    timefac(1);
+    timefac(1);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    sleep(Duration::new(3, 0));
+    timefac(1);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(2, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    {
+        let mut cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(2, cache.cache_set_lifespan(1).unwrap());
+    }
+    timefac(1);
+    sleep(Duration::new(1, 0));
+    timefac(1);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(3, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+    }
+    {
+        let mut cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(1, cache.cache_set_lifespan(6).unwrap());
+    }
+    timefac(2);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(4, cache.cache_misses().unwrap());
+        assert_eq!(3, cache.cache_hits().unwrap());
+    }
+    timefac(3);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(5, cache.cache_misses().unwrap());
+        assert_eq!(4, cache.cache_hits().unwrap());
+    }
+    timefac(3);
+    timefac(2);
+    timefac(1);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(5, cache.cache_misses().unwrap());
+        assert_eq!(7, cache.cache_hits().unwrap());
+    }
+    timefac(4);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(6, cache.cache_misses().unwrap());
+        assert_eq!(8, cache.cache_hits().unwrap());
+    }
+    timefac(6);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(8, cache.cache_misses().unwrap());
+        assert_eq!(9, cache.cache_hits().unwrap());
+    }
+    timefac(1);
+    {
+        let cache = TIMED_SIZED.lock().unwrap();
+        assert_eq!(9, cache.cache_misses().unwrap());
+        assert_eq!(9, cache.cache_hits().unwrap());
+        assert_eq!(3, cache.cache_size());
+    }
+}
+
+cached! {
     STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_size(1);
     fn string_1(a: String, b: String) -> String = {
-        return a + &b;
+        a + &b
     }
 }
 
@@ -364,5 +449,53 @@ cached_key_result! {
     Key = { n };
     fn test_result_key_missing_result_arm(n: u32) -> Result<u32, ()> = {
         Ok(n)
+    }
+}
+
+#[cached(size = 1, time = 1)]
+fn proc_timed_sized_sleeper(n: u64) -> u64 {
+    sleep(Duration::new(1, 0));
+    n
+}
+
+#[test]
+fn test_proc_timed_sized_cache() {
+    proc_timed_sized_sleeper(1);
+    proc_timed_sized_sleeper(1);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    // sleep to expire the one entry
+    sleep(Duration::new(1, 0));
+    proc_timed_sized_sleeper(1);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(2, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1])
+    }
+    // sleep to expire the one entry
+    sleep(Duration::new(1, 0));
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert!(cache.key_order().next().is_none())
+    }
+    proc_timed_sized_sleeper(1);
+    proc_timed_sized_sleeper(1);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(3, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1])
+    }
+    // lru size is 1, so this new thing evicts the existing key
+    proc_timed_sized_sleeper(2);
+    {
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        assert_eq!(4, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&2])
     }
 }

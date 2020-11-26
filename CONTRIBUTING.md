@@ -19,10 +19,10 @@ Thanks for contributing!
   Changes should be made to the crate documentation in `src/lib.rs` and the `readme.sh` script run.
 
 
-## Running Tests
+## Running Lints/Formatting/Tests
 
 ```bash
-cargo test
+./lint-test.sh
 ```
 
 

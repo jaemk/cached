@@ -36,7 +36,7 @@ cached! {
     SLOW: SizedCache<(u32, u32), u32> = SizedCache::with_size(100);
     fn slow(a: u32, b: u32) -> u32 = {
         sleep(Duration::new(2, 0));
-        return a * b;
+        a * b
     }
 }
 

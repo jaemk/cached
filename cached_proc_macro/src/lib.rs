@@ -33,7 +33,7 @@ struct MacroArgs {
 /// # Attributes
 /// - **Cache Name:** Use `name = "CACHE_NAME"` to specify the name for the generated cache.
 /// - **Cache Type:** The default cache type is `UnboundCache`.
-/// You specify which of the built-in cache types to use with `unbound`, `size = cache_size`, or `time = lifetime_in_seconds`
+/// You specify which of the built-in cache types to use with `unbound`, `size = cache_size`, and `time = lifetime_in_seconds`
 /// - **Cache Create:** You can specify the cache creation with `create = "{ CacheType::new() }"`.
 /// - **Custom Cache Type:** You can use `type = "CacheType"` to specify the type of cache to use.
 /// This requires create to also be set.
@@ -174,6 +174,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let cache_create = quote! {cached::TimedCache::with_lifespan(#time)};
             (cache_ty, cache_create)
         }
+        (false, Some(size), Some(time), None, None) => {
+            let cache_ty = quote! {cached::TimedSizedCache<#cache_key_ty, #cache_value_ty>};
+            let cache_create =
+                quote! {cached::TimedSizedCache::with_size_and_lifespan(#size, #time)};
+            (cache_ty, cache_create)
+        }
         (false, None, None, None, None) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
@@ -189,7 +195,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
         (false, None, None, Some(_), None) => panic!("type requires create to also be set"),
         (false, None, None, None, Some(_)) => panic!("create requires type to also be set"),
-        _ => panic!("cache types (unbound, size, time, or type and create) are mutually exclusive"),
+        _ => panic!(
+            "cache types (unbound, size and/or time, or type and create) are mutually exclusive"
+        ),
     };
 
     // make the set cache and return cache blocks
