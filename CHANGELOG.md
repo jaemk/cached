@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 ## Added
-- Add a TimedSizedCache combining and LRU and a timed/ttl cache
+## Changed
+## Removed
+
+## [0.21.0]
+## Added
+- Add a TimedSizedCache combining LRU and timed/ttl logic
 ## Changed
 ## Removed
 
