@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.21.1] / [0.5.0]
+## Added
+- Support mutual `size` & `time` args in the cached proc macro.
+  Added when TimedSizedCache was added, but forgot to release
+  the cached_proc_macro crate update.
+## Changed
+## Removed
+
 ## [0.21.0]
 ## Added
 - Add a TimedSizedCache combining LRU and timed/ttl logic
