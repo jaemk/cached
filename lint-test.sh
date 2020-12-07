@@ -9,4 +9,3 @@ cargo fmt -- --check
 
 cargo clippy --all-features --all-targets --examples --tests
 cargo test --all-features
-

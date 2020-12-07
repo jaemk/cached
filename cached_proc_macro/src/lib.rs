@@ -114,24 +114,25 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // if `with_cached_flag = true`, then enforce that the return type
     // is something wrapped in `Return`. Either `Return<T>` or the
     // fully qualified `cached::Return<T>`
-    if args.with_cached_flag {
-        if !output_string.contains("Return") && !output_string.contains("cached::Return") {
-            return syn::Error::new(
-                output_span,
-                format!(
-                    "\nWhen specifying `with_cached_flag = true`, \
+    if args.with_cached_flag
+        && !output_string.contains("Return")
+        && !output_string.contains("cached::Return")
+    {
+        return syn::Error::new(
+            output_span,
+            format!(
+                "\nWhen specifying `with_cached_flag = true`, \
                     the return type must be wrapped in `cached::Return<T>`. \n\
                     The following return types are supported: \n\
                     |    `cached::Return<T>`\n\
                     |    `std::result::Result<cachedReturn<T>, E>`\n\
                     |    `std::option::Option<cachedReturn<T>>`\n\
                     Found type: {t}.",
-                    t = output_type_display
-                ),
-            )
-            .to_compile_error()
-            .into();
-        }
+                t = output_type_display
+            ),
+        )
+        .to_compile_error()
+        .into();
     }
 
     // Find the type of the value to store.
