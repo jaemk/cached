@@ -1,6 +1,7 @@
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::{
     parse_macro_input, parse_str, AttributeArgs, Block, FnArg, Ident, ItemFn, Pat, PathArguments,
     ReturnType, Type,
@@ -24,6 +25,8 @@ struct MacroArgs {
     result: bool,
     #[darling(default)]
     option: bool,
+    #[darling(default)]
+    with_cached_flag: bool,
     #[darling(default, rename = "type")]
     cache_type: Option<String>,
     #[darling(default, rename = "create")]
@@ -43,6 +46,9 @@ struct MacroArgs {
 /// This requires either key or type to also be set.
 /// - **Caching Result/Option:** If your function returns a `Result` or `Option`
 /// you may want to use `result` or `option` to only cache when the output is `Ok` or `Some`
+/// - ** Indicating whether a result was cached ** Use `with_cached_flag = true` with a
+/// `cached::Return<T>` return type to have the macro set the `was_cached` flag on the
+/// `cached::Return<T>` result.
 /// ## Note
 /// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
 /// This is because darling, which is used for parsing the attributes, does not support parsing attributes into `Type` or `Block`.
@@ -91,6 +97,42 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         ReturnType::Default => quote! {()},
         ReturnType::Type(_, ty) => quote! {#ty},
     };
+
+    let output_span = output_ty.span();
+    let output_ts = TokenStream::from(output_ty.clone());
+    let output_parts = output_ts
+        .clone()
+        .into_iter()
+        .filter_map(|tt| match tt {
+            proc_macro::TokenTree::Ident(ident) => Some(ident.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let output_string = output_parts.join("::");
+    let output_type_display = output_ts.to_string().replace(" ", "");
+
+    // if `with_cached_flag = true`, then enforce that the return type
+    // is something wrapped in `Return`. Either `Return<T>` or the
+    // fully qualified `cached::Return<T>`
+    if args.with_cached_flag {
+        if !output_string.contains("Return") && !output_string.contains("cached::Return") {
+            return syn::Error::new(
+                output_span,
+                format!(
+                    "\nWhen specifying `with_cached_flag = true`, \
+                    the return type must be wrapped in `cached::Return<T>`. \n\
+                    The following return types are supported: \n\
+                    |    `cached::Return<T>`\n\
+                    |    `std::result::Result<cachedReturn<T>, E>`\n\
+                    |    `std::option::Option<cachedReturn<T>>`\n\
+                    Found type: {t}.",
+                    t = output_type_display
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
 
     // Find the type of the value to store.
     // Normally it's the same as the return type of the functions, but
@@ -204,7 +246,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
         (false, false) => {
             let set_cache_block = quote! { cache.cache_set(key, result.clone()); };
-            let return_cache_block = quote! { return result.clone(); };
+            let return_cache_block = if args.with_cached_flag {
+                quote! { let mut r = result.clone(); r.was_cached = true; return r }
+            } else {
+                quote! { return result.clone() }
+            };
             (set_cache_block, return_cache_block)
         }
         (true, false) => {
@@ -213,7 +259,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     cache.cache_set(key, result.clone());
                 }
             };
-            let return_cache_block = quote! { return Ok(result.clone()); };
+            let return_cache_block = if args.with_cached_flag {
+                quote! { let mut r = result.clone(); r.was_cached = true; return Ok(r) }
+            } else {
+                quote! { return Ok(result.clone()) }
+            };
             (set_cache_block, return_cache_block)
         }
         (false, true) => {
@@ -222,7 +272,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     cache.cache_set(key, result.clone());
                 }
             };
-            let return_cache_block = quote! { return Some(result.clone()); };
+            let return_cache_block = if args.with_cached_flag {
+                quote! { let mut r = result.clone(); r.was_cached = true; return Some(r) }
+            } else {
+                quote! { return Some(result.clone()) }
+            };
             (set_cache_block, return_cache_block)
         }
         _ => panic!("the result and option attributes are mutually exclusive"),

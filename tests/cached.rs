@@ -499,3 +499,81 @@ fn test_proc_timed_sized_cache() {
         assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&2])
     }
 }
+
+#[cached(with_cached_flag = true)]
+fn cached_return_flag(n: i32) -> cached::Return<i32> {
+    cached::Return::new(n)
+}
+
+#[test]
+fn test_cached_return_flag() {
+    let r = cached_return_flag(1);
+    assert!(!r.was_cached);
+    assert_eq!(*r, 1);
+    let r = cached_return_flag(1);
+    assert!(r.was_cached);
+    // derefs to inner
+    assert_eq!(*r, 1);
+    assert!(r.is_positive());
+    {
+        let cache = CACHED_RETURN_FLAG.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[cached(result = true, with_cached_flag = true)]
+fn cached_return_flag_result(n: i32) -> Result<cached::Return<i32>, ()> {
+    if n == 10 {
+        return Err(());
+    }
+    Ok(cached::Return::new(n))
+}
+
+#[test]
+fn test_cached_return_flag_result() {
+    let r = cached_return_flag_result(1).unwrap();
+    assert!(!r.was_cached);
+    assert_eq!(*r, 1);
+    let r = cached_return_flag_result(1).unwrap();
+    assert!(r.was_cached);
+    // derefs to inner
+    assert_eq!(*r, 1);
+    assert!(r.is_positive());
+
+    let r = cached_return_flag_result(10);
+    assert!(r.is_err());
+    {
+        let cache = CACHED_RETURN_FLAG_RESULT.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(2));
+    }
+}
+
+#[cached(option = true, with_cached_flag = true)]
+fn cached_return_flag_option(n: i32) -> Option<cached::Return<i32>> {
+    if n == 10 {
+        return None;
+    }
+    Some(cached::Return::new(n))
+}
+
+#[test]
+fn test_cached_return_flag_option() {
+    let r = cached_return_flag_option(1).unwrap();
+    assert!(!r.was_cached);
+    assert_eq!(*r, 1);
+    let r = cached_return_flag_option(1).unwrap();
+    assert!(r.was_cached);
+    // derefs to inner
+    assert_eq!(*r, 1);
+    assert!(r.is_positive());
+
+    let r = cached_return_flag_option(10);
+    assert!(r.is_none());
+    {
+        let cache = CACHED_RETURN_FLAG_OPTION.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(2));
+    }
+}

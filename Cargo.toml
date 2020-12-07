@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.21.1"
+version = "0.22.0"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -16,7 +16,7 @@ travis-ci = { repository = "jaemk/cached", branch = "master" }
 
 [features]
 default = ["proc_macro", "async"]
-proc_macro = ["async-mutex", "cached_proc_macro"]
+proc_macro = ["async-mutex", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "async-trait"]
 
 [dependencies.once_cell]
@@ -27,8 +27,13 @@ version = "1.4"
 optional = true
 
 [dependencies.cached_proc_macro]
-version = "0.5.0"
+version = "0.6.0"
 path = "cached_proc_macro"
+optional = true
+
+[dependencies.cached_proc_macro_types]
+version = "0.1.0"
+path = "cached_proc_macro_types"
 optional = true
 
 [dependencies.futures]

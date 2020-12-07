@@ -6,6 +6,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use cached::proc_macro::cached;
+use cached::Return;
 use cached::{Cached, SizedCache, UnboundCache};
 
 // cached shorthand, uses the default unbounded cache.
@@ -112,11 +113,50 @@ fn custom(n: u32) -> () {
     custom(n - 1)
 }
 
+// handle results, don't cache errors
 #[cached(result = true)]
 fn slow_result(a: u32, b: u32) -> Result<u32, ()> {
     sleep(Duration::new(2, 0));
     Ok(a * b)
 }
+
+// return a flag indicated whether the result was cached
+#[cached(with_cached_flag = true)]
+fn with_cached_flag(a: String) -> Return<String> {
+    sleep(Duration::new(1, 0));
+    Return::new(a)
+}
+
+// return a flag indicated whether the result was cached, with a result type
+#[cached(result = true, with_cached_flag = true)]
+fn with_cached_flag_result(a: String) -> Result<cached::Return<String>, ()> {
+    sleep(Duration::new(1, 0));
+    Ok(Return::new(a))
+}
+
+// return a flag indicated whether the result was cached, with an option type
+#[cached(option = true, with_cached_flag = true)]
+fn with_cached_flag_option(a: String) -> Option<Return<String>> {
+    sleep(Duration::new(1, 0));
+    Some(Return::new(a))
+}
+
+// NOTE:
+// The following fails with compilation error
+// ```
+//   error:
+//   When specifying `with_cached_flag = true`, the return type must be wrapped in `cached::Return<T>`.
+//   The following return types are supported:
+//   |    `cached::Return<T>`
+//   |    `std::result::Result<cachedReturn<T>, E>`
+//   |    `std::option::Option<cachedReturn<T>>`
+//   Found type: std::result::Result<u32,()>.
+// ```
+//
+// #[cached(with_cached_flag = true)]
+// fn with_cached_flag_requires_return_type(a: u32) -> std::result::Result<u32, ()> {
+//     Ok(1)
+// }
 
 pub fn main() {
     println!("\n ** default cache with default name **");
@@ -181,6 +221,65 @@ pub fn main() {
     let _ = slow_result(10, 10);
     {
         let cache = SLOW_RESULT.lock().unwrap();
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
+        // make sure the cache-lock is dropped
+    }
+
+    println!("\n ** with cached flag func **");
+    println!(" - first run `with_cached_flag(\"a\")`");
+    let r = with_cached_flag("a".to_string());
+    println!("was cached: {}", r.was_cached);
+    println!(" - second run `with_cached_flag(\"a\")`");
+    let r = with_cached_flag("a".to_string());
+    println!("was cached: {}", r.was_cached);
+    println!("derefs to inner, *r == \"a\" : {}", *r == "a");
+    println!(
+        "derefs to inner, r.as_str() == \"a\" : {}",
+        r.as_str() == "a"
+    );
+    {
+        let cache = WITH_CACHED_FLAG.lock().unwrap();
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
+        // make sure the cache-lock is dropped
+    }
+
+    println!("\n ** with cached flag result func **");
+    println!(" - first run `with_cached_flag_result(\"a\")`");
+    let r = with_cached_flag_result("a".to_string()).expect("with_cached_flag_result failed");
+    println!("was cached: {}", r.was_cached);
+    println!(" - second run `with_cached_flag_result(\"a\")`");
+    let r = with_cached_flag_result("a".to_string()).expect("with_cached_flag_result failed");
+    println!("was cached: {}", r.was_cached);
+    println!("derefs to inner, *r : {:?}", *r);
+    println!("derefs to inner, *r == \"a\" : {}", *r == "a");
+    println!(
+        "derefs to inner, r.as_str() == \"a\" : {}",
+        r.as_str() == "a"
+    );
+    {
+        let cache = WITH_CACHED_FLAG_RESULT.lock().unwrap();
+        println!("hits: {:?}", cache.cache_hits());
+        println!("misses: {:?}", cache.cache_misses());
+        // make sure the cache-lock is dropped
+    }
+
+    println!("\n ** with cached flag option func **");
+    println!(" - first run `with_cached_flag_option(\"a\")`");
+    let r = with_cached_flag_option("a".to_string()).expect("with_cached_flag_result failed");
+    println!("was cached: {}", r.was_cached);
+    println!(" - second run `with_cached_flag_option(\"a\")`");
+    let r = with_cached_flag_option("a".to_string()).expect("with_cached_flag_result failed");
+    println!("was cached: {}", r.was_cached);
+    println!("derefs to inner, *r : {:?}", *r);
+    println!("derefs to inner, *r == \"a\" : {}", *r == "a");
+    println!(
+        "derefs to inner, r.as_str() == \"a\" : {}",
+        r.as_str() == "a"
+    );
+    {
+        let cache = WITH_CACHED_FLAG_OPTION.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
         println!("misses: {:?}", cache.cache_misses());
         // make sure the cache-lock is dropped

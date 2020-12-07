@@ -27,11 +27,10 @@ cache stores available.
 
 - enabled by default, but can be disabled by specifying `default-features = false`
   (if you aren't using it and don't want to have to compile `syn`)
-- supports most of the configuration params that the original `cached!` macros does
+- supports more features at this point than the original collection of `cached!` macros do
 - works with async functions
-- see `cached_proc_macro/src/lib.rs` for more details on macro arguments
+- see `cached_proc_macro/src/lib.rs` and examples below for more details on macro arguments
 - see `examples/kitchen_sink_proc_macro.rs` for basic usage
-- relatively new so docs and tests need to be updated with details
 
 The basic usage looks like:
 
@@ -39,8 +38,8 @@ The basic usage looks like:
 ```rust,no_run
 use cached::proc_macro::cached;
 
-/// Defines a function named `fib` that uses a cache explicitly named `FIB`.
-/// By default this will be the function in all caps.
+/// Defines a function named `fib` that uses a cache implicitly named `FIB`.
+/// By default, the cache will be the function's in all caps.
 /// The following line is equivalent to #[cached(name = "FIB", unbound)]
 #[cached]
 fn fib(n: u64) -> u64 {
@@ -79,21 +78,21 @@ fn keyed(a: usize, b: usize) -> usize {
     total
 }
 pub fn main() {
-    let val = keyed(1, 2);  // Not cached, will sleep (1+2)s
+    keyed(1, 2);  // Not cached, will sleep (1+2)s
 
-    let val = keyed(1, 2);  // Cached, no sleep
+    keyed(1, 2);  // Cached, no sleep
 
     sleep(Duration::new(60, 0));  // Sleep for the TTL
 
-    let val = keyed(1, 2);  // 60s TTL has passed so the cached
-                            // value has expired, will sleep (1+2)s
+    keyed(1, 2);  // 60s TTL has passed so the cached
+                  // value has expired, will sleep (1+2)s
 
-    let val = keyed(1, 2);  // Cached, no sleep
+    keyed(1, 2);  // Cached, no sleep
 
-    let val = keyed(2, 1);  // New args, not cached, will sleep (2+1)s
+    keyed(2, 1);  // New args, not cached, will sleep (2+1)s
 
-    let val = keyed(1, 2);  // Was evicted because of lru size of 1,
-                            // will sleep (1+2)s
+    keyed(1, 2);  // Was evicted because of lru size of 1,
+                  // will sleep (1+2)s
 }
 ```
 
@@ -111,6 +110,106 @@ fn keyed(a: String, b: String) -> usize {
     size
 }
 # pub fn main() { }
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
+
+# fn do_something_fallible() -> std::result::Result<(), ()> {
+#     Ok(())
+# }
+
+/// Cache a fallible function. Only `Ok` results are cached.
+#[cached(size=1, result = true)]
+fn keyed(a: String) -> Result<usize, ()> {
+    do_something_fallible()?;
+    Ok(a.len())
+}
+# pub fn main() { }
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
+
+/// Cache an optional function. Only `Some` results are cached.
+#[cached(size=1, option = true)]
+fn keyed(a: String) -> Option<usize> {
+    if a == "a" {
+        Some(a.len())
+    } else {
+        None
+    }
+}
+# pub fn main() { }
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
+use cached::Return;
+
+/// Get a `cached::Return` value that indicates
+/// whether the value returned came from the cache:
+/// `cached::Return.was_cached`.
+/// Use an LRU cache with a TTL of 60s
+/// and a `String` cache key.
+#[cached(size=1, with_cached_flag = true)]
+fn calculate(a: String) -> Return<String> {
+    Return::new(a)
+}
+pub fn main() {
+    let r = calculate("a".to_string());
+    assert!(!r.was_cached);
+    let r = calculate("a".to_string());
+    assert!(r.was_cached);
+    // Return<String> derefs to String
+    assert_eq!(r.to_uppercase(), "A");
+}
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
+use cached::Return;
+
+# fn do_something_fallible() -> std::result::Result<(), ()> {
+#     Ok(())
+# }
+
+/// Same as the previous, but returning a Result
+#[cached(size=1, result = true, with_cached_flag = true)]
+fn calculate(a: String) -> Result<Return<usize>, ()> {
+    do_something_fallible()?;
+    Ok(Return::new(a.len()))
+}
+pub fn main() {
+    match calculate("a".to_string()) {
+        Err(e) => eprintln!("error: {:?}", e),
+        Ok(r) => {
+            println!("value: {:?}, was cached: {}", *r, r.was_cached);
+            // value: "a", was cached: true
+        }
+    }
+}
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
+use cached::Return;
+
+/// Same as the previous, but returning an Option
+#[cached(size=1, option = true, with_cached_flag = true)]
+fn calculate(a: String) -> Option<Return<usize>> {
+    if a == "a" {
+        Some(Return::new(a.len()))
+    } else {
+        None
+    }
+}
+pub fn main() {
+    if let Some(a) = calculate("a".to_string()) {
+        println!("value: {:?}, was cached: {}", *a, a.was_cached);
+        // value: "a", was cached: true
+    }
+}
 ```
 
 ```rust,no_run
@@ -360,9 +459,12 @@ pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro {
     pub use cached_proc_macro::cached;
+    pub use cached_proc_macro_types::Return;
 }
 #[cfg(feature = "proc_macro")]
 pub use async_mutex;
+#[cfg(feature = "proc_macro")]
+pub use proc_macro::Return;
 
 #[cfg(feature = "async")]
 use {async_trait::async_trait, futures::Future};

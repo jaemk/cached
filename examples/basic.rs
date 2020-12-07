@@ -32,7 +32,9 @@ pub fn main() {
 
         println!(" ** Cache info **");
         let cache = SLOW_FN.lock().unwrap();
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("hits=1 -> {:?}", cache.cache_hits().unwrap() == 1);
+        assert_eq!(cache.cache_misses().unwrap(), 11);
         println!("misses=11 -> {:?}", cache.cache_misses().unwrap() == 11);
         // make sure the cache-lock is dropped
     }

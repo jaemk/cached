@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## cached[0.22.0] / cached_proc_macro[0.6.0] / cached_proc_macro_types[0.1.0]
+## Added
+- Add support for returning a `cached::Return` wrapper type that
+  indicates whether the result came from the function's cache. 
+## Changed
+## Removed
+
 ## [0.21.1] / [0.5.0]
 ## Added
 - Support mutual `size` & `time` args in the cached proc macro.
