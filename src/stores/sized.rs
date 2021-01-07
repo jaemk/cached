@@ -1,11 +1,10 @@
+use hashbrown::raw::RawTable;
 use std::cmp::Eq;
-use std::collections::HashMap;
-use std::hash::Hash;
+use std::collections::hash_map::RandomState;
+use std::fmt;
+use std::hash::{BuildHasher, Hash, Hasher};
 
-use super::Cached;
-use super::LRUList;
-
-use std::collections::hash_map::Entry;
+use super::{Cached, LRUList};
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
@@ -16,13 +15,29 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 /// to evict the least recently used keys
 ///
 /// Note: This cache is in-memory only
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SizedCache<K, V> {
-    pub(super) store: HashMap<K, usize>,
+    pub(super) store: RawTable<usize>,
+    pub(super) hash_builder: RandomState,
     pub(super) order: LRUList<(K, V)>,
     pub(super) capacity: usize,
     pub(super) hits: u64,
     pub(super) misses: u64,
+}
+
+impl<K, V> fmt::Debug for SizedCache<K, V>
+where
+    K: fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SizedCache")
+            .field("order", &self.order)
+            .field("capacity", &self.capacity)
+            .field("hits", &self.hits)
+            .field("misses", &self.misses)
+            .finish()
+    }
 }
 
 impl<K, V> PartialEq for SizedCache<K, V>
@@ -31,7 +46,14 @@ where
     V: PartialEq,
 {
     fn eq(&self, other: &SizedCache<K, V>) -> bool {
-        self.store.eq(&other.store)
+        self.store.len() == other.store.len() && {
+            self.order
+                .iter()
+                .all(|(key, value)| match other.get_index(other.hash(key), key) {
+                    Some(i) => value == &other.order.get(i).1,
+                    None => false,
+                })
+        }
     }
 }
 
@@ -54,7 +76,8 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             panic!("`size` of `SizedCache` must be greater than zero.")
         }
         SizedCache {
-            store: HashMap::with_capacity(size),
+            store: RawTable::with_capacity(size),
+            hash_builder: RandomState::new(),
             order: LRUList::<(K, V)>::with_capacity(size),
             capacity: size,
             hits: 0,
@@ -62,7 +85,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         }
     }
 
-    pub(crate) fn iter_order(&self) -> impl Iterator<Item = &(K, V)> {
+    pub(super) fn iter_order(&self) -> impl Iterator<Item = &(K, V)> {
         self.order.iter()
     }
 
@@ -78,71 +101,77 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         self.order.iter().map(|(_k, v)| v)
     }
 
+    fn hash(&self, key: &K) -> u64 {
+        let hasher = &mut self.hash_builder.build_hasher();
+        key.hash(hasher);
+        hasher.finish()
+    }
+
+    fn insert_index(&mut self, hash: u64, index: usize) {
+        let Self {
+            ref mut store,
+            ref order,
+            ref hash_builder,
+            ..
+        } = *self;
+        store.insert(hash, index, move |&i| {
+            let hasher = &mut hash_builder.build_hasher();
+            order.get(i).0.hash(hasher);
+            hasher.finish()
+        });
+    }
+
+    fn get_index(&self, hash: u64, key: &K) -> Option<usize> {
+        let Self { store, order, .. } = self;
+        store.get(hash, |&i| *key == order.get(i).0).copied()
+    }
+
+    fn remove_index(&mut self, hash: u64, key: &K) -> Option<usize> {
+        let Self { store, order, .. } = self;
+        store.remove_entry(hash, |&i| *key == order.get(i).0)
+    }
+
     fn check_capacity(&mut self) {
         if self.store.len() >= self.capacity {
             // store has reached capacity, evict the oldest item.
             // store capacity cannot be zero, so there must be content in `self.order`.
-            let (key, _value) = self.order.pop_back();
-            self.store
-                .remove(&key)
-                .expect("SizedCache::cache_set failed evicting cache key");
+            let index = self.order.back();
+            let key = &self.order.get(index).0;
+            let hash = self.hash(key);
+
+            let order = &self.order;
+            let erased = self.store.erase_entry(hash, |&i| *key == order.get(i).0);
+            assert!(erased, "SizedCache::cache_set failed evicting cache key");
+            self.order.remove(index);
         }
     }
 
-    pub(crate) fn get_if<F: FnOnce(&V) -> bool>(&mut self, key: &K, is_valid: F) -> Option<&V> {
-        let val = self.store.get(key);
-        let index = match val {
-            None => None,
-            Some(index) => {
-                let val = &self.order.get(*index).1;
-                if !is_valid(val) {
-                    None
-                } else {
-                    Some(index)
-                }
-            }
-        };
-        match index {
-            None => {
-                self.misses += 1;
-                None
-            }
-            Some(&index) => {
+    pub(super) fn get_if<F: FnOnce(&V) -> bool>(&mut self, key: &K, is_valid: F) -> Option<&V> {
+        if let Some(index) = self.get_index(self.hash(key), key) {
+            if is_valid(&self.order.get(index).1) {
                 self.order.move_to_front(index);
                 self.hits += 1;
-                Some(&self.order.get(index).1)
+                return Some(&self.order.get(index).1);
             }
         }
+        self.misses += 1;
+        None
     }
 
-    pub(crate) fn get_mut_if<F: FnOnce(&V) -> bool>(
+    pub(super) fn get_mut_if<F: FnOnce(&V) -> bool>(
         &mut self,
         key: &K,
         is_valid: F,
     ) -> Option<&mut V> {
-        let val = self.store.get(key);
-        let index = match val {
-            None => None,
-            Some(index) => {
-                let val = &self.order.get(*index).1;
-                if !is_valid(val) {
-                    None
-                } else {
-                    Some(index)
-                }
-            }
-        };
-        match index {
-            None => {
-                self.misses += 1;
-                None
-            }
-            Some(&index) => {
+        if let Some(index) = self.get_index(self.hash(key), key) {
+            if is_valid(&self.order.get(index).1) {
                 self.order.move_to_front(index);
                 self.hits += 1;
-                Some(&mut self.order.get_mut(index).1)
+                return Some(&mut self.order.get_mut(index).1);
             }
         }
+        self.misses += 1;
+        None
     }
 
     /// Get the cached value, or set it using `f` if the value
@@ -151,38 +180,31 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     ///
     /// Returns (was_present, was_valid, mut ref to set value)
     /// `was_valid` will be false when `was_present` is false
-    pub(crate) fn get_or_set_with_if<F: FnOnce() -> V, FC: FnOnce(&V) -> bool>(
+    pub(super) fn get_or_set_with_if<F: FnOnce() -> V, FC: FnOnce(&V) -> bool>(
         &mut self,
         key: K,
         f: F,
         is_valid: FC,
     ) -> (bool, bool, &mut V) {
-        self.check_capacity();
-        let val = self.store.entry(key);
-        let Self { order, .. } = self;
-        match val {
-            Entry::Occupied(occupied) => {
-                let index = *occupied.get();
-                self.hits += 1;
-                let replace_existing = {
-                    let v = &order.get_mut(index).1;
-                    !is_valid(v)
-                };
-                if replace_existing {
-                    let key = occupied.key().clone();
-                    order.set(index, (key, f()));
-                }
-                order.move_to_front(index);
-                (true, !replace_existing, &mut order.get_mut(index).1)
+        let hash = self.hash(&key);
+        let index = self.get_index(hash, &key);
+        if let Some(index) = index {
+            self.hits += 1;
+            let replace_existing = {
+                let v = &self.order.get(index).1;
+                !is_valid(v)
+            };
+            if replace_existing {
+                self.order.set(index, (key, f()));
             }
-            Entry::Vacant(vacant) => {
-                let key = vacant.key().clone();
-                let new_val = f();
-                self.misses += 1;
-                let index = *vacant.insert(order.push_front(None));
-                order.set(index, (key, new_val));
-                (false, false, &mut order.get_mut(index).1)
-            }
+            self.order.move_to_front(index);
+            (true, !replace_existing, &mut self.order.get_mut(index).1)
+        } else {
+            self.check_capacity();
+            self.misses += 1;
+            let index = self.order.push_front((key, f()));
+            self.insert_index(hash, index);
+            (false, false, &mut self.order.get_mut(index).1)
         }
     }
 
@@ -193,32 +215,25 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         f: F,
         is_valid: FC,
     ) -> Result<(bool, bool, &mut V), E> {
-        self.check_capacity();
-        let val = self.store.entry(key);
-        let Self { order, .. } = self;
-        match val {
-            Entry::Occupied(occupied) => {
-                let index = *occupied.get();
-                self.hits += 1;
-                let replace_existing = {
-                    let v = &order.get_mut(index).1;
-                    !is_valid(v)
-                };
-                if replace_existing {
-                    let key = occupied.key().clone();
-                    order.set(index, (key, f()?));
-                }
-                order.move_to_front(index);
-                Ok((true, !replace_existing, &mut order.get_mut(index).1))
+        let hash = self.hash(&key);
+        let index = self.get_index(hash, &key);
+        if let Some(index) = index {
+            self.hits += 1;
+            let replace_existing = {
+                let v = &self.order.get(index).1;
+                !is_valid(v)
+            };
+            if replace_existing {
+                self.order.set(index, (key, f()?));
             }
-            Entry::Vacant(vacant) => {
-                let key = vacant.key().clone();
-                let new_val = f()?;
-                self.misses += 1;
-                let index = *vacant.insert(order.push_front(None));
-                order.set(index, (key, new_val));
-                Ok((false, false, &mut order.get_mut(index).1))
-            }
+            self.order.move_to_front(index);
+            Ok((true, !replace_existing, &mut self.order.get_mut(index).1))
+        } else {
+            self.check_capacity();
+            self.misses += 1;
+            let index = self.order.push_front((key, f()?));
+            self.insert_index(hash, index);
+            Ok((false, false, &mut self.order.get_mut(index).1))
         }
     }
 }
@@ -234,7 +249,7 @@ where
     ///
     /// Returns (was_present, was_valid, mut ref to set value)
     /// `was_valid` will be false when `was_present` is false
-    pub(crate) async fn get_or_set_with_if_async<F, Fut, FC>(
+    pub(super) async fn get_or_set_with_if_async<F, Fut, FC>(
         &mut self,
         key: K,
         f: F,
@@ -246,36 +261,29 @@ where
         Fut: Future<Output = V> + Send,
         FC: FnOnce(&V) -> bool,
     {
-        self.check_capacity();
-        let val = self.store.entry(key);
-        let Self { order, .. } = self;
-        match val {
-            Entry::Occupied(occupied) => {
-                let index = *occupied.get();
-                self.hits += 1;
-                let replace_existing = {
-                    let v = &order.get_mut(index).1;
-                    !is_valid(v)
-                };
-                if replace_existing {
-                    let key = occupied.key().clone();
-                    order.set(index, (key, f().await));
-                }
-                order.move_to_front(index);
-                (true, !replace_existing, &mut order.get_mut(index).1)
+        let hash = self.hash(&key);
+        let index = self.get_index(hash, &key);
+        if let Some(index) = index {
+            self.hits += 1;
+            let replace_existing = {
+                let v = &self.order.get(index).1;
+                !is_valid(v)
+            };
+            if replace_existing {
+                self.order.set(index, (key, f().await));
             }
-            Entry::Vacant(vacant) => {
-                let key = vacant.key().clone();
-                let new_val = f().await;
-                self.misses += 1;
-                let index = *vacant.insert(order.push_front(None));
-                order.set(index, (key, new_val));
-                (false, false, &mut order.get_mut(index).1)
-            }
+            self.order.move_to_front(index);
+            (true, !replace_existing, &mut self.order.get_mut(index).1)
+        } else {
+            self.check_capacity();
+            self.misses += 1;
+            let index = self.order.push_front((key, f().await));
+            self.insert_index(hash, index);
+            (false, false, &mut self.order.get_mut(index).1)
         }
     }
 
-    pub(crate) async fn try_get_or_set_with_if_async<E, F, Fut, FC>(
+    pub(super) async fn try_get_or_set_with_if_async<E, F, Fut, FC>(
         &mut self,
         key: K,
         f: F,
@@ -287,32 +295,25 @@ where
         Fut: Future<Output = Result<V, E>> + Send,
         FC: FnOnce(&V) -> bool,
     {
-        self.check_capacity();
-        let val = self.store.entry(key);
-        let Self { order, .. } = self;
-        match val {
-            Entry::Occupied(occupied) => {
-                let index = *occupied.get();
-                self.hits += 1;
-                let replace_existing = {
-                    let v = &order.get_mut(index).1;
-                    !is_valid(v)
-                };
-                if replace_existing {
-                    let key = occupied.key().clone();
-                    order.set(index, (key, f().await?));
-                }
-                order.move_to_front(index);
-                Ok((true, !replace_existing, &mut order.get_mut(index).1))
+        let hash = self.hash(&key);
+        let index = self.get_index(hash, &key);
+        if let Some(index) = index {
+            self.hits += 1;
+            let replace_existing = {
+                let v = &self.order.get(index).1;
+                !is_valid(v)
+            };
+            if replace_existing {
+                self.order.set(index, (key, f().await?));
             }
-            Entry::Vacant(vacant) => {
-                self.misses += 1;
-                let key = vacant.key().clone();
-                let new_val = f().await?;
-                let index = *vacant.insert(order.push_front(None));
-                order.set(index, (key, new_val));
-                Ok((false, false, &mut order.get_mut(index).1))
-            }
+            self.order.move_to_front(index);
+            Ok((true, !replace_existing, &mut self.order.get_mut(index).1))
+        } else {
+            self.check_capacity();
+            self.misses += 1;
+            let index = self.order.push_front((key, f().await?));
+            self.insert_index(hash, index);
+            Ok((false, false, &mut self.order.get_mut(index).1))
         }
     }
 }
@@ -328,11 +329,14 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         self.check_capacity();
-        let Self { store, order, .. } = self;
-        let index = *store
-            .entry(key.clone())
-            .or_insert_with(|| order.push_front(None));
-        order.set(index, (key, val)).map(|(_, v)| v)
+        let hash = self.hash(&key);
+        if let Some(index) = self.get_index(hash, &key) {
+            self.order.set(index, (key, val)).map(|(_, v)| v)
+        } else {
+            let index = self.order.push_front((key, val));
+            self.insert_index(hash, index);
+            None
+        }
     }
 
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
@@ -342,7 +346,8 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
 
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         // try and remove item from mapping, and then from order list if it was in mapping
-        if let Some(index) = self.store.remove(k) {
+        let hash = self.hash(&k);
+        if let Some(index) = self.remove_index(hash, k) {
             // need to remove the key in the order list
             let (_key, value) = self.order.remove(index);
             Some(value)

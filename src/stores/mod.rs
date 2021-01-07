@@ -73,7 +73,7 @@ impl<T> LRUList<T> {
         self.link_after(index, Self::OCCUPIED);
     }
 
-    fn push_front(&mut self, value: Option<T>) -> usize {
+    fn push_front(&mut self, value: T) -> usize {
         if self.values[Self::FREE].next == Self::FREE {
             self.values.push(ListEntry::<T> {
                 value: None,
@@ -83,7 +83,7 @@ impl<T> LRUList<T> {
             self.values[Self::FREE].next = self.values.len() - 1;
         }
         let index = self.values[Self::FREE].next;
-        self.values[index].value = value;
+        self.values[index].value = Some(value);
         self.unlink(index);
         self.link_after(index, Self::OCCUPIED);
         index
@@ -99,11 +99,6 @@ impl<T> LRUList<T> {
         self.values[Self::OCCUPIED].prev
     }
 
-    fn pop_back(&mut self) -> T {
-        let index = self.back();
-        self.remove(index)
-    }
-
     fn get(&self, index: usize) -> &T {
         self.values[index].value.as_ref().expect("invalid index")
     }
@@ -113,7 +108,7 @@ impl<T> LRUList<T> {
     }
 
     fn set(&mut self, index: usize, value: T) -> Option<T> {
-        std::mem::replace(&mut self.values[index].value, Some(value))
+        self.values[index].value.replace(value)
     }
 
     fn clear(&mut self) {
