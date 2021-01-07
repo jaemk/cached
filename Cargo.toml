@@ -19,6 +19,11 @@ default = ["proc_macro", "async"]
 proc_macro = ["async-mutex", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "async-trait"]
 
+[dependencies.hashbrown]
+version = "0.9.1"
+default-features = false
+features = ["raw"]
+
 [dependencies.once_cell]
 version = "1"
 
