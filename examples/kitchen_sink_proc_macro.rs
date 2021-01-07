@@ -284,4 +284,6 @@ pub fn main() {
         println!("misses: {:?}", cache.cache_misses());
         // make sure the cache-lock is dropped
     }
+
+    println!("all done");
 }

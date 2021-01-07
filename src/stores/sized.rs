@@ -17,6 +17,7 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 /// Note: This cache is in-memory only
 #[derive(Clone)]
 pub struct SizedCache<K, V> {
+    // `store` contains a hash of K -> index of (K, V) tuple in `order`
     pub(super) store: RawTable<usize>,
     pub(super) hash_builder: RandomState,
     pub(super) order: LRUList<(K, V)>,
@@ -114,7 +115,11 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             ref hash_builder,
             ..
         } = *self;
+        // insert the value `index` at `hash`, the closure provided
+        // is used to rehash values if a resize is necessary.
         store.insert(hash, index, move |&i| {
+            // rehash the "key" value stored at index `i` - requires looking
+            // up the original "key" value in the `order` list.
             let hasher = &mut hash_builder.build_hasher();
             order.get(i).0.hash(hasher);
             hasher.finish()
@@ -123,6 +128,10 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
 
     fn get_index(&self, hash: u64, key: &K) -> Option<usize> {
         let Self { store, order, .. } = self;
+        // Get the `order` index store under `hash`, the closure provided
+        // is used to compare against matching hashes - we lookup the original
+        // `key` value from the `order` list.
+        // This pattern is repeated in other lookup situations.
         store.get(hash, |&i| *key == order.get(i).0).copied()
     }
 
@@ -444,6 +453,50 @@ mod tests {
         assert_eq!(2, c.cache_misses().unwrap());
         let size = c.cache_size();
         assert_eq!(5, size);
+
+        assert_eq!(c.cache_set(7, 200), Some(100));
+
+        #[derive(Hash, Clone, Eq, PartialEq)]
+        struct MyKey {
+            v: String,
+        }
+        let mut c = SizedCache::with_size(5);
+        assert_eq!(
+            c.cache_set(
+                MyKey {
+                    v: String::from("s")
+                },
+                String::from("a")
+            ),
+            None
+        );
+        assert_eq!(
+            c.cache_set(
+                MyKey {
+                    v: String::from("s")
+                },
+                String::from("a")
+            ),
+            Some(String::from("a"))
+        );
+        assert_eq!(
+            c.cache_set(
+                MyKey {
+                    v: String::from("s2")
+                },
+                String::from("b")
+            ),
+            None
+        );
+        assert_eq!(
+            c.cache_set(
+                MyKey {
+                    v: String::from("s2")
+                },
+                String::from("b")
+            ),
+            Some(String::from("b"))
+        );
     }
 
     #[test]
