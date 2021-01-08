@@ -1,8 +1,7 @@
+use super::Cached;
 use std::cmp::Eq;
 use std::collections::HashMap;
 use std::hash::Hash;
-
-use super::Cached;
 
 use std::collections::hash_map::Entry;
 

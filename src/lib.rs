@@ -451,6 +451,7 @@ cached_control!{
 
 pub extern crate once_cell;
 
+mod lru_list;
 pub mod macros;
 pub mod stores;
 

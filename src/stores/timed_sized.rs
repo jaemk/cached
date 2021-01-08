@@ -1,8 +1,7 @@
+use super::{Cached, SizedCache};
 use std::cmp::Eq;
 use std::hash::Hash;
 use std::time::Instant;
-
-use super::{Cached, SizedCache};
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
