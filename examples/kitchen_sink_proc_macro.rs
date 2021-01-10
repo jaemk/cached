@@ -165,7 +165,9 @@ pub fn main() {
     {
         let cache = FIB.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 2);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(4));
         // make sure lock is dropped
     }
     fib(10);
@@ -177,7 +179,9 @@ pub fn main() {
     {
         let cache = FLIB.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure lock is dropped
     }
 
@@ -187,7 +191,9 @@ pub fn main() {
     {
         let cache = FIB_SPECIFIC.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 19);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(21));
         // make sure lock is dropped
     }
     fib_specific(20);
@@ -198,7 +204,9 @@ pub fn main() {
     {
         let cache = CUSTOM.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 25);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure lock is dropped
     }
 
@@ -210,7 +218,9 @@ pub fn main() {
     {
         let cache = SLOW.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure the cache-lock is dropped
     }
 
@@ -222,7 +232,9 @@ pub fn main() {
     {
         let cache = SLOW_RESULT.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure the cache-lock is dropped
     }
 
@@ -241,7 +253,9 @@ pub fn main() {
     {
         let cache = WITH_CACHED_FLAG.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure the cache-lock is dropped
     }
 
@@ -261,7 +275,9 @@ pub fn main() {
     {
         let cache = WITH_CACHED_FLAG_RESULT.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure the cache-lock is dropped
     }
 
@@ -281,7 +297,9 @@ pub fn main() {
     {
         let cache = WITH_CACHED_FLAG_OPTION.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
+        assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
+        assert_eq!(cache.cache_misses(), Some(1));
         // make sure the cache-lock is dropped
     }
 
