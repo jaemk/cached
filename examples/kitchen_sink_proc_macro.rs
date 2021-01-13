@@ -204,9 +204,10 @@ pub fn main() {
     {
         let cache = CUSTOM.lock().unwrap();
         println!("hits: {:?}", cache.cache_hits());
-        assert_eq!(cache.cache_hits().unwrap(), 25);
+        assert_eq!(cache.cache_hits(), None);
         println!("misses: {:?}", cache.cache_misses());
-        assert_eq!(cache.cache_misses(), Some(1));
+        assert_eq!(cache.cache_misses(), None);
+        //custom cache doesn't implement these so they're None
         // make sure lock is dropped
     }
 
@@ -220,7 +221,7 @@ pub fn main() {
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
-        assert_eq!(cache.cache_misses(), Some(1));
+        assert_eq!(cache.cache_misses().unwrap(), 1);
         // make sure the cache-lock is dropped
     }
 
