@@ -304,5 +304,5 @@ pub fn main() {
         // make sure the cache-lock is dropped
     }
 
-    println!("all done");
+    println!("done!");
 }

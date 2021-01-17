@@ -21,4 +21,5 @@ async fn main() {
     cached_sleep_secs(4).await;
     println!("cached sleeping for 4 seconds");
     cached_sleep_secs(4).await;
+    println!("done!");
 }

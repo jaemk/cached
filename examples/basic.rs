@@ -38,4 +38,6 @@ pub fn main() {
         println!("misses=11 -> {:?}", cache.cache_misses().unwrap() == 11);
         // make sure the cache-lock is dropped
     }
+
+    println!("done!");
 }
