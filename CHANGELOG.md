@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.23.0]
+## Added
+## Changed
+- Refactor cache store types to separate modules
+## Removed
+
 ## cached[0.22.0] / cached_proc_macro[0.6.0] / cached_proc_macro_types[0.1.0]
 ## Added
 - Add support for returning a `cached::Return` wrapper type that
