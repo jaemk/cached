@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- Support of Redis cache store type
 ## Changed
 ## Removed
 

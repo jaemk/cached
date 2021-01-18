@@ -1,4 +1,4 @@
-use super::Cached;
+use crate::Cached;
 use std::cmp::Eq;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -7,11 +7,15 @@ use std::hash::Hash;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
+#[cfg(feature = "redis")]
+mod redis;
 mod sized;
 mod timed;
 mod timed_sized;
 mod unbound;
 
+#[cfg(feature = "redis")]
+pub use redis::RedisCache;
 pub use sized::SizedCache;
 pub use timed::TimedCache;
 pub use timed_sized::TimedSizedCache;
