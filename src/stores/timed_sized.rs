@@ -4,7 +4,7 @@ use std::hash::Hash;
 use std::time::Instant;
 
 #[cfg(feature = "async")]
-use {super::CachedAsync, async_trait::async_trait, futures::Future};
+use {super::CachedAsync, async_trait::async_trait, futures_lite::Future};
 
 /// Timed LRU Cache
 ///

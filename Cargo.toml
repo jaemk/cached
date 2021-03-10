@@ -17,7 +17,11 @@ travis-ci = { repository = "jaemk/cached", branch = "master" }
 [features]
 default = ["proc_macro", "async"]
 proc_macro = ["async-mutex", "cached_proc_macro", "cached_proc_macro_types"]
-async = ["futures", "async-trait"]
+async = ["futures-lite", "async-trait"]
+
+[dependencies.futures-lite]
+version = "1.11.3"
+optional = true
 
 [dependencies.hashbrown]
 version = "0.9.1"
@@ -39,10 +43,6 @@ optional = true
 [dependencies.cached_proc_macro_types]
 version = "0.1.0"
 path = "cached_proc_macro_types"
-optional = true
-
-[dependencies.futures]
-version = "0.3"
 optional = true
 
 [dependencies.async-trait]

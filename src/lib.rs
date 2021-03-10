@@ -468,7 +468,7 @@ pub use async_mutex;
 pub use proc_macro::Return;
 
 #[cfg(feature = "async")]
-use {async_trait::async_trait, futures::Future};
+use {async_trait::async_trait, futures_lite::Future};
 
 /// Cache operations
 pub trait Cached<K, V> {

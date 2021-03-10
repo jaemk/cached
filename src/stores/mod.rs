@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 #[cfg(feature = "async")]
-use {super::CachedAsync, async_trait::async_trait, futures::Future};
+use {super::CachedAsync, async_trait::async_trait, futures_lite::Future};
 
 mod sized;
 mod timed;
