@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::collections::hash_map::Entry;
 
 #[cfg(feature = "async")]
-use {super::CachedAsync, async_trait::async_trait, futures::Future};
+use {super::CachedAsync, async_trait::async_trait, futures_lite::Future};
 
 /// Default unbounded cache
 ///

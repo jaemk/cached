@@ -7,7 +7,7 @@ use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 #[cfg(feature = "async")]
-use {super::CachedAsync, async_trait::async_trait, futures::Future};
+use {super::CachedAsync, async_trait::async_trait, futures_lite::Future};
 
 /// Least Recently Used / `Sized` Cache
 ///
