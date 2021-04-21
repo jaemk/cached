@@ -33,6 +33,29 @@ macro_rules! cached {
             val
         }
     };
+
+    ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     async fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:block) => {
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
+
+        #[allow(unused_parens)]
+        pub async fn $name($($arg: $argtype),*) -> $ret {
+            let key = ($($arg.clone()),*);
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
+                if let Some(res) = res { return res.clone(); }
+            }
+            // run the function and cache the result
+            async fn inner($($arg: $argtype),*) -> $ret $body
+            let val = inner($($arg),*).await;
+
+            let mut cache = $cachename.lock().unwrap();
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
+            val
+        }
+    };
 }
 
 #[macro_export]
@@ -53,6 +76,29 @@ macro_rules! cached_key {
                 if let Some(res) = res { return res.clone(); }
             }
             let val = (||$body)();
+            let mut cache = $cachename.lock().unwrap();
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
+            val
+        }
+    };
+
+    ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     Key = $key:expr;
+     async fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
+
+        #[allow(unused_parens)]
+        pub async fn $name($($arg: $argtype),*) -> $ret {
+            let key = $key;
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
+                if let Some(res) = res { return res.clone(); }
+            }
+            // run the function and cache the result
+            async fn inner($($arg: $argtype),*) -> $ret $body
+            let val = inner($($arg),*).await;
             let mut cache = $cachename.lock().unwrap();
             $crate::Cached::cache_set(&mut *cache, key, val.clone());
             val
@@ -80,6 +126,30 @@ macro_rules! cached_result {
             // Store return in temporary typed variable in case type cannot be inferred
             let ret : $ret = (||$body)();
             let val = ret?;
+
+            let mut cache = $cachename.lock().unwrap();
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
+            Ok(val)
+        }
+    };
+
+    ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     async fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
+
+        #[allow(unused_parens)]
+        pub async fn $name($($arg: $argtype),*) -> $ret {
+            let key = ($($arg.clone()),*);
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
+                if let Some(res) = res { return Ok(res.clone()); }
+            }
+
+            // run the function and cache the result
+            async fn inner($($arg: $argtype),*) -> $ret $body
+            let val = inner($($arg),*).await?;
 
             let mut cache = $cachename.lock().unwrap();
             $crate::Cached::cache_set(&mut *cache, key, val.clone());
@@ -115,6 +185,31 @@ macro_rules! cached_key_result {
             Ok(val)
         }
     };
+
+    ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     Key = $key:expr;
+     async fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
+
+        #[allow(unused_parens)]
+        pub async fn $name($($arg: $argtype),*) -> $ret {
+            let key = $key;
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
+                if let Some(res) = res { return Ok(res.clone()); }
+            }
+
+            // run the function and cache the result
+            async fn inner($($arg: $argtype),*) -> $ret $body
+            let val = inner($($arg),*).await?;
+
+            let mut cache = $cachename.lock().unwrap();
+            $crate::Cached::cache_set(&mut *cache, key, val.clone());
+            Ok(val)
+        }
+    };
 }
 
 #[macro_export]
@@ -141,6 +236,37 @@ macro_rules! cached_control {
                 }
             }
             let $body_value = (||$body)();
+            let $set_value = $post_exec;
+            let mut cache = $cachename.lock().unwrap();
+            $crate::Cached::cache_set(&mut *cache, key, $pre_set);
+            let $ret_value = $set_value;
+            $return
+        }
+    };
+
+    ($cachename:ident : $cachetype:ty = $cacheinstance:expr ;
+     Key = $key:expr;
+     PostGet($cached_value:ident) = $post_get:expr;
+     PostExec($body_value:ident) = $post_exec:expr;
+     Set($set_value:ident) = $pre_set:expr;
+     Return($ret_value:ident) = $return:expr;
+     async fn $name:ident ($($arg:ident : $argtype:ty),*) -> $ret:ty = $body:expr) => {
+        static $cachename: $crate::once_cell::sync::Lazy<::std::sync::Mutex<$cachetype>>
+            = $crate::once_cell::sync::Lazy::new(|| ::std::sync::Mutex::new($cacheinstance));
+
+        #[allow(unused_parens)]
+        pub async fn $name($($arg: $argtype),*) -> $ret {
+            let key = $key;
+            {
+                let mut cache = $cachename.lock().unwrap();
+                let res = $crate::Cached::cache_get(&mut *cache, &key);
+                if let Some($cached_value) = res {
+                    $post_get
+                }
+            }
+             // run the function and cache the result
+            async fn inner($($arg: $argtype),*) -> $ret $body
+            let $body_value = inner($($arg),*).await?;
             let $set_value = $post_exec;
             let mut cache = $cachename.lock().unwrap();
             $crate::Cached::cache_set(&mut *cache, key, $pre_set);

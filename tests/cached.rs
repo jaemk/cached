@@ -4,7 +4,10 @@ Full tests of macro-defined functions
 #[macro_use]
 extern crate cached;
 
+#[cfg(feature = "redis")]
+use cached::RedisCache;
 use cached::{proc_macro::cached, Cached, SizedCache, TimedCache, TimedSizedCache, UnboundCache};
+
 use std::thread::{self, sleep};
 use std::time::Duration;
 
@@ -575,5 +578,74 @@ fn test_cached_return_flag_option() {
         let cache = CACHED_RETURN_FLAG_OPTION.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
+    }
+}
+
+#[cfg(feature = "redis")]
+cached_result! {
+    UNBOUND_REDIS: RedisCache<u32, u32> = RedisCache::new();
+    fn cached_unbound_redis(n: u32) -> Result<u32, ()> = {
+        if n < 5 { Ok(n) } else { Err(()) }
+    }
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn test_cached_unbound_redis() {
+    assert!(cached_unbound_redis(2).is_ok());
+    assert!(cached_unbound_redis(4).is_ok());
+    assert!(cached_unbound_redis(6).is_err());
+    assert!(cached_unbound_redis(6).is_err());
+    assert!(cached_unbound_redis(2).is_ok());
+    assert!(cached_unbound_redis(4).is_ok());
+    {
+        let mut cache = UNBOUND_REDIS.lock().unwrap();
+        assert_eq!(2, cache.cache_size());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        assert_eq!(4, cache.cache_misses().unwrap());
+        cache.cache_clear();
+    }
+}
+
+#[cfg(feature = "redis")]
+cached! {
+    TIMED_REDIS: RedisCache<u32, u32> = RedisCache::with_lifespan(2);
+    fn cached_timed_redis(n: u32) -> u32 = {
+        sleep(Duration::new(3, 0));
+        n
+    }
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn test_cached_timed_redis() {
+    cached_timed_redis(1);
+    cached_timed_redis(1);
+    {
+        let cache = TIMED_REDIS.lock().unwrap();
+        assert_eq!(1, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    sleep(Duration::new(3, 0));
+    cached_timed_redis(1);
+    {
+        let cache = TIMED_REDIS.lock().unwrap();
+        assert_eq!(2, cache.cache_misses().unwrap());
+        assert_eq!(1, cache.cache_hits().unwrap());
+    }
+    {
+        let mut cache = TIMED_REDIS.lock().unwrap();
+        assert_eq!(2, cache.cache_set_lifespan(1).unwrap());
+        cache.cache_clear();
+    }
+    cached_timed_redis(1);
+    cached_timed_redis(1);
+    sleep(Duration::new(1, 0));
+    cached_timed_redis(1);
+    {
+        let mut cache = TIMED_REDIS.lock().unwrap();
+        assert_eq!(4, cache.cache_misses().unwrap());
+        assert_eq!(2, cache.cache_hits().unwrap());
+        cache.cache_clear();
     }
 }

@@ -18,6 +18,7 @@ travis-ci = { repository = "jaemk/cached", branch = "master" }
 default = ["proc_macro", "async"]
 proc_macro = ["async-mutex", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "async-trait"]
+redis = ["redis_rs", "redis_rs/tls", "serde", "serde_json"]
 
 [dependencies.hashbrown]
 version = "0.9.1"
@@ -49,6 +50,19 @@ optional = true
 version = "0.1"
 optional = true
 
+[dependencies.redis_rs]
+package = "redis"
+version = "0.19"
+optional = true
+
+[dependencies.serde]
+version = "1.0"
+optional = true
+
+[dependencies.serde_json]
+version = "1.0"
+optional = true
+
 [dev-dependencies.tokio]
 version = "0.3"
 features = ["macros", "time", "rt-multi-thread"]
@@ -59,3 +73,7 @@ features = ["attributes"]
 
 [workspace]
 members = ["cached_proc_macro"]
+
+[[example]]
+name = "redis"
+required-features = ["redis"]

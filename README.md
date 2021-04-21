@@ -223,6 +223,28 @@ fn keyed(a: &str, b: &str) -> usize {
 }
 ```
 
+```rust
+#[macro_use] extern crate cached;
+use std::thread::sleep;
+use std::time::Duration;
+use cached::RedisCache;
+
+cached! {
+    UNBOUND_REDIS: RedisCache<u32, u32> = RedisCache::new();
+    fn cached_redis(n: u32) -> u32 = {
+        sleep(Duration::new(3, 0));
+        n
+    }
+}
+
+cached! {
+    TIMED_REDIS: RedisCache<u32, u32> = RedisCache::with_lifespan(2);
+    fn cached_timed_redis(n: u32) -> u32 = {
+        sleep(Duration::new(3, 0));
+        n
+    }
+}
+```
 ----
 
 
@@ -233,9 +255,14 @@ computed (and still valid) value before evaluating the function body.
 
 Due to the requirements of storing arguments and return values in a global cache:
 
-- Function return types must be owned and implement `Clone`
-- Function arguments must either be owned and implement `Hash + Eq + Clone` OR the `cached_key!`
+- Function return types:
+  - In all store types, except Redis, must be owned and implement `Clone`
+  - In the Redis type, must be `Serialize + DeserializeOwned + Clone`
+- Function arguments:
+  - In all store types, except Redis, must either be owned and implement `Hash + Eq + Clone` OR the `cached_key!`
   macro must be used to convert arguments into an owned + `Hash + Eq + Clone` type.
+  - In the Redis store type, must either be owned and implement `Display` OR the `cached_key!`
+  macro must be used to convert arguments into an owned + `Display` type.
 - Arguments and return values will be `cloned` in the process of insertion and retrieval.
 - `#[cached]`/`cached!` functions should not be used to produce side-effectual results!
 - `#[cached]`/`cached!` functions cannot live directly under `impl` blocks since `cached!` expands to a
