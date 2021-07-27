@@ -373,6 +373,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         // SizedCache uses cache_clear because capacity is fixed.
         self.cache_clear();
     }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
+    }
     fn cache_size(&self) -> usize {
         self.store.len()
     }

@@ -115,6 +115,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_reset(&mut self) {
         self.store = Self::new_store(self.initial_capacity);
     }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
+    }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
