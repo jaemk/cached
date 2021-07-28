@@ -458,6 +458,14 @@ mod tests {
         let size = c.cache_size();
         assert_eq!(5, size);
 
+        c.cache_reset_metrics();
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        let size = c.cache_size();
+        assert_eq!(0, hits);
+        assert_eq!(0, misses);
+        assert_eq!(5, size);
+
         assert_eq!(c.cache_set(7, 200), Some(100));
 
         #[derive(Hash, Clone, Eq, PartialEq)]
