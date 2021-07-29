@@ -493,6 +493,9 @@ pub trait Cached<K, V> {
     /// Remove all cached values. Free memory and return to initial state
     fn cache_reset(&mut self);
 
+    /// Reset misses/hits counters
+    fn cache_reset_metrics(&mut self) {}
+
     /// Return the current cache size (number of elements)
     fn cache_size(&self) -> usize;
 

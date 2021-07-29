@@ -151,6 +151,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     fn cache_clear(&mut self) {
         self.store.clear();
     }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
+    }
     fn cache_reset(&mut self) {
         self.store = Self::new_store(self.initial_capacity);
     }

@@ -373,6 +373,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         // SizedCache uses cache_clear because capacity is fixed.
         self.cache_clear();
     }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
+    }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
@@ -452,6 +456,14 @@ mod tests {
 
         assert_eq!(2, c.cache_misses().unwrap());
         let size = c.cache_size();
+        assert_eq!(5, size);
+
+        c.cache_reset_metrics();
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        let size = c.cache_size();
+        assert_eq!(0, hits);
+        assert_eq!(0, misses);
         assert_eq!(5, size);
 
         assert_eq!(c.cache_set(7, 200), Some(100));

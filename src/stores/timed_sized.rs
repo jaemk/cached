@@ -125,6 +125,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
     fn cache_reset(&mut self) {
         self.cache_clear();
     }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
+    }
     fn cache_size(&self) -> usize {
         self.store.cache_size()
     }
