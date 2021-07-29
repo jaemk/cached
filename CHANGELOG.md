@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.24.0]
+## Added
+- `cache_reset_metrics` trait method to reset hits/misses
+## Changed
+## Removed
+
 ## [0.23.0]
 ## Added
 ## Changed
