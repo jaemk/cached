@@ -64,6 +64,13 @@ fn keyed(a: &str, b: &str) -> usize {
     size
 }
 
+#[cached(key = "String", convert = r#"{ format!("{}{}", a, b) }"#)]
+fn keyed_key(a: &str, b: &str) -> usize {
+    let size = a.len() + b.len();
+    sleep(Duration::new(size as u64, 0));
+    size
+}
+
 // Implement our own cache type
 struct MyCache<K: Hash + Eq, V> {
     store: HashMap<K, V>,
