@@ -86,6 +86,36 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         }
     }
 
+    /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    pub fn try_with_size(size: usize) -> std::io::Result<SizedCache<K, V>> {
+        if size == 0 {
+            // EINVAL
+            return Err(std::io::Error::from_raw_os_error(22));
+        }
+
+        let store = match RawTable::try_with_capacity(size) {
+            Ok(store) => store,
+            Err(e) => {
+                let errcode = match e {
+                    // ENOMEM
+                    hashbrown::TryReserveError::AllocError { .. } => 12,
+                    // EINVAL
+                    hashbrown::TryReserveError::CapacityOverflow => 22,
+                };
+                return Err(std::io::Error::from_raw_os_error(errcode));
+            }
+        };
+
+        Ok(SizedCache {
+            store,
+            hash_builder: RandomState::new(),
+            order: LRUList::<(K, V)>::with_capacity(size),
+            capacity: size,
+            hits: 0,
+            misses: 0,
+        })
+    }
+
     pub(super) fn iter_order(&self) -> impl Iterator<Item = &(K, V)> {
         self.order.iter()
     }
@@ -509,6 +539,12 @@ mod tests {
             ),
             Some(String::from("b"))
         );
+    }
+
+    #[test]
+    fn try_new() {
+        let c: std::io::Result<SizedCache<i32, i32>> = SizedCache::try_with_size(0);
+        assert_eq!(c.unwrap_err().raw_os_error(), Some(22));
     }
 
     #[test]

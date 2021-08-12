@@ -38,6 +38,23 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
         }
     }
 
+    pub fn try_with_size_and_lifespan(
+        size: usize,
+        seconds: u64,
+    ) -> std::io::Result<TimedSizedCache<K, V>> {
+        if size == 0 {
+            // EINVAL
+            return Err(std::io::Error::from_raw_os_error(22));
+        }
+        Ok(TimedSizedCache {
+            store: SizedCache::try_with_size(size)?,
+            size,
+            seconds,
+            hits: 0,
+            misses: 0,
+        })
+    }
+
     fn iter_order(&self) -> impl Iterator<Item = &(K, (Instant, V))> {
         let max_seconds = self.seconds;
         self.store
@@ -291,6 +308,13 @@ mod tests {
             v
         };
         assert_eq!(c.cache_get_or_set_with(1, setter), &1);
+    }
+
+    #[test]
+    fn try_new() {
+        let c: std::io::Result<TimedSizedCache<i32, i32>> =
+            TimedSizedCache::try_with_size_and_lifespan(0, 2);
+        assert_eq!(c.unwrap_err().raw_os_error(), Some(22));
     }
 
     #[test]
