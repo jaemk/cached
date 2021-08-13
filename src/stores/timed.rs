@@ -29,18 +29,13 @@ pub struct TimedCache<K, V> {
     pub(super) hits: u64,
     pub(super) misses: u64,
     pub(super) initial_capacity: Option<usize>,
+    pub(super) refresh: bool,
 }
 
 impl<K: Hash + Eq, V> TimedCache<K, V> {
     /// Creates a new `TimedCache` with a specified lifespan
     pub fn with_lifespan(seconds: u64) -> TimedCache<K, V> {
-        TimedCache {
-            store: Self::new_store(None),
-            seconds,
-            hits: 0,
-            misses: 0,
-            initial_capacity: None,
-        }
+        Self::with_lifespan_and_refresh(seconds, false)
     }
 
     /// Creates a new `TimedCache` with a specified lifespan and
@@ -52,7 +47,31 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
             hits: 0,
             misses: 0,
             initial_capacity: Some(size),
+            refresh: false,
         }
+    }
+
+    /// Creates a new `TimedCache` with a specified lifespan which
+    /// refreshes the ttl when the entry is retreived
+    pub fn with_lifespan_and_refresh(seconds: u64, refresh: bool) -> TimedCache<K, V> {
+        TimedCache {
+            store: Self::new_store(None),
+            seconds,
+            hits: 0,
+            misses: 0,
+            initial_capacity: None,
+            refresh,
+        }
+    }
+
+    /// Returns if the lifetime is refreshed when the value is retrived
+    pub fn refresh(&self) -> bool {
+        self.refresh
+    }
+
+    /// Sets if the lifetime is refreshed when the value is retrived
+    pub fn set_refresh(&mut self, refresh: bool) {
+        self.refresh = refresh
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, (Instant, V)> {
@@ -63,9 +82,12 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
 impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         let status = {
-            let val = self.store.get(key);
-            if let Some(&(instant, _)) = val {
+            let mut val = self.store.get_mut(key);
+            if let Some(&mut (instant, _)) = val.as_mut() {
                 if instant.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        *instant = Instant::now();
+                    }
                     Status::Found
                 } else {
                     Status::Expired
@@ -93,9 +115,12 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
 
     fn cache_get_mut(&mut self, key: &K) -> Option<&mut V> {
         let status = {
-            let val = self.store.get(key);
-            if let Some(&(instant, _)) = val {
+            let mut val = self.store.get_mut(key);
+            if let Some(&mut (instant, _)) = val.as_mut() {
                 if instant.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        *instant = Instant::now();
+                    }
                     Status::Found
                 } else {
                     Status::Expired
@@ -125,6 +150,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
                 if occupied.get().0.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        occupied.get_mut().0 = Instant::now();
+                    }
                     self.hits += 1;
                 } else {
                     self.misses += 1;
@@ -193,6 +221,9 @@ where
         match self.store.entry(k) {
             Entry::Occupied(mut occupied) => {
                 if occupied.get().0.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        occupied.get_mut().0 = Instant::now();
+                    }
                     self.hits += 1;
                 } else {
                     self.misses += 1;
@@ -216,6 +247,9 @@ where
         let v = match self.store.entry(k) {
             Entry::Occupied(mut occupied) => {
                 if occupied.get().0.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        occupied.get_mut().0 = Instant::now();
+                    }
                     self.hits += 1;
                 } else {
                     self.misses += 1;
@@ -272,6 +306,30 @@ mod tests {
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(3, misses);
+    }
+
+    #[test]
+    fn timed_cache_refresh() {
+        let mut c = TimedCache::with_lifespan_and_refresh(2, true);
+        assert_eq!(c.refresh(), true);
+        assert_eq!(c.cache_get(&1), None);
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, hits);
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&2), Some(&200));
+        sleep(Duration::new(1, 0));
+        assert_eq!(c.cache_get(&1), Some(&100));
+        sleep(Duration::new(1, 0));
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), None);
     }
 
     #[test]

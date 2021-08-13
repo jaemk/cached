@@ -21,11 +21,22 @@ pub struct TimedSizedCache<K, V> {
     pub(super) seconds: u64,
     pub(super) hits: u64,
     pub(super) misses: u64,
+    pub(super) refresh: bool,
 }
 
 impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
     pub fn with_size_and_lifespan(size: usize, seconds: u64) -> TimedSizedCache<K, V> {
+        Self::with_size_and_lifespan_and_refresh(size, seconds, false)
+    }
+
+    /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data.
+    /// Also set if the ttl should be refreshed on retriving
+    pub fn with_size_and_lifespan_and_refresh(
+        size: usize,
+        seconds: u64,
+        refresh: bool,
+    ) -> TimedSizedCache<K, V> {
         if size == 0 {
             panic!("`size` of `TimedSizedCache` must be greater than zero.")
         }
@@ -35,6 +46,7 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
             seconds,
             hits: 0,
             misses: 0,
+            refresh,
         }
     }
 
@@ -58,6 +70,16 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     pub fn value_order(&self) -> impl Iterator<Item = &(Instant, V)> {
         self.iter_order().map(|(_k, v)| v)
     }
+
+    /// Returns if the lifetime is refreshed when the value is retrived
+    pub fn refresh(&self) -> bool {
+        self.refresh
+    }
+
+    /// Sets if the lifetime is refreshed when the value is retrived
+    pub fn set_refresh(&mut self, refresh: bool) {
+        self.refresh = refresh
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
@@ -65,13 +87,16 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         let max_seconds = self.seconds;
         let val = self
             .store
-            .get_if(key, |stamped| stamped.0.elapsed().as_secs() < max_seconds);
+            .get_mut_if(key, |stamped| stamped.0.elapsed().as_secs() < max_seconds);
         match val {
             None => {
                 self.misses += 1;
                 None
             }
             Some(stamped) => {
+                if self.refresh {
+                    stamped.0 = Instant::now();
+                }
                 self.hits += 1;
                 Some(&stamped.1)
             }
@@ -89,6 +114,9 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
                 None
             }
             Some(stamped) => {
+                if self.refresh {
+                    stamped.0 = Instant::now();
+                }
                 self.hits += 1;
                 Some(&mut stamped.1)
             }
@@ -103,6 +131,9 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
                 stamped.0.elapsed().as_secs() < max_seconds
             });
         if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
             self.hits += 1;
         } else {
             self.misses += 1;
@@ -172,6 +203,9 @@ where
             })
             .await;
         if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
             self.hits += 1;
         } else {
             self.misses += 1;
@@ -197,6 +231,9 @@ where
             })
             .await?;
         if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
             self.hits += 1;
         } else {
             self.misses += 1;
@@ -291,6 +328,30 @@ mod tests {
             v
         };
         assert_eq!(c.cache_get_or_set_with(1, setter), &1);
+    }
+
+    #[test]
+    fn timed_cache_refresh() {
+        let mut c = TimedSizedCache::with_size_and_lifespan_and_refresh(2, 2, true);
+        assert_eq!(c.refresh(), true);
+        assert_eq!(c.cache_get(&1), None);
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, hits);
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&2), Some(&200));
+        sleep(Duration::new(1, 0));
+        assert_eq!(c.cache_get(&1), Some(&100));
+        sleep(Duration::new(1, 0));
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), None);
     }
 
     #[test]
