@@ -355,7 +355,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
 
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         // try and remove item from mapping, and then from order list if it was in mapping
-        let hash = self.hash(&k);
+        let hash = self.hash(k);
         if let Some(index) = self.remove_index(hash, k) {
             // need to remove the key in the order list
             let (_key, value) = self.order.remove(index);
