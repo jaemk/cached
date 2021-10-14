@@ -50,7 +50,7 @@ version = "0.1"
 optional = true
 
 [dev-dependencies.tokio]
-version = "0.3"
+version = "1.12"
 features = ["macros", "time", "rt-multi-thread"]
 
 [dev-dependencies.async-std]
