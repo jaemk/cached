@@ -18,8 +18,7 @@ proc-macro = true
 
 [dependencies]
 quote = "1.0.6"
-darling = "0.10.2"
-async-mutex = "1.1.5"
+darling = "0.13.0"
 
 [dependencies.syn]
 version = "1.0.27"
