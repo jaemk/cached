@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.25.1]
+## Added
+## Changed
+- Update deps hashbrown and darling, remove async-mutex from cached-proc-macro crate
+## Removed
+
 ## [0.25.0]
 ## Added
 - Add option to "timed" caches to refresh the ttl of entries on cache hits
