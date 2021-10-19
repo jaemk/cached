@@ -245,6 +245,11 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             Ok((false, false, &mut self.order.get_mut(index).1))
         }
     }
+
+    /// Returns a reference to the cache's `order`
+    pub fn get_order(&self) -> &LRUList<(K, V)> {
+        &self.order
+    }
 }
 
 #[cfg(feature = "async")]

@@ -77,6 +77,11 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     fn new_store(capacity: Option<usize>) -> HashMap<K, (Instant, V)> {
         capacity.map_or_else(HashMap::new, HashMap::with_capacity)
     }
+
+    /// Returns a reference to the cache's `store`
+    pub fn get_store(&self) -> &HashMap<K, (Instant, V)> {
+        &self.store
+    }
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 ## Added
+- For all caches, add a function to get an immutable reference to their
+  contents. This makes it possible to manually dump a cache, so its contents
+  can be saved and restored later.
 ## Changed
 ## Removed
 
