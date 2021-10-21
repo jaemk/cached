@@ -8,10 +8,12 @@
 `cached` provides implementations of several caching structures as well as a handy macro
 for defining memoized functions.
 
-Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in a mutex.
-The function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
+Memoized functions defined using `#[cached]`/`#[once]`/`cached!` macros are thread-safe with the backing function-cache wrapped in a mutex/rwlock.
+By default, the function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
-the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`.
+the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`. To synchronize the execution and caching
+of un-cached arguments, specify `#[cached(sync_writes = true)]` /
+`#[once(sync_writes = true)]`.
 
 See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for details about the
 cache stores available.
@@ -21,16 +23,17 @@ cache stores available.
 - `proc_macro`: (default) pull in proc macro support
 - `async`: (default) Add `CachedAsync` trait
 
-## Defining memoized functions using macros, `#[cached]` & `cached!`
+## Defining memoized functions using macros, `#[cached]`, `#[once]`, & `cached!`
 
-**Notes on the proc-macro version #[cached]**
+**Note**:
 
-- enabled by default, but can be disabled by specifying `default-features = false`
-  (if you aren't using it and don't want to have to compile `syn`)
-- supports more features at this point than the original collection of `cached!` macros do
-- works with async functions
-- see `cached_proc_macro/src/lib.rs` and examples below for more details on macro arguments
-- see `examples/kitchen_sink_proc_macro.rs` for basic usage
+> It is recommended you use the two proc-macros (`#[cached]`, `#[once]`) as
+> these work with async functions and have more options/features. See the `examples/`
+> directory for more sample usage, and `cached_proc_macro/src/lib.rs` for the
+> full list of available proc-macro arguments.
+>
+> The declarative macros (`cached!` and co.) are still available, but are less maintained
+> and have fewer features.
 
 The basic usage looks like:
 
