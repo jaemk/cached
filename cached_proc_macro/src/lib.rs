@@ -26,6 +26,8 @@ struct MacroArgs {
     #[darling(default)]
     option: bool,
     #[darling(default)]
+    sync_writes: bool,
+    #[darling(default)]
     with_cached_flag: bool,
     #[darling(default, rename = "type")]
     cache_type: Option<String>,
@@ -283,6 +285,56 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("the result and option attributes are mutually exclusive"),
     };
 
+    let do_set_return_block = if asyncness.is_some() {
+        if args.sync_writes {
+            quote! {
+                // try to get a write lock first
+                let mut cache = #cache_ident.lock().await;
+                if let Some(result) = cache.cache_get(&key) {
+                    #return_cache_block
+                }
+
+                // run the function and cache the result
+                async fn inner(#inputs) #output #body;
+                let result = inner(#(#input_names),*).await;
+                #set_cache_block
+                result
+            }
+        } else {
+            quote! {
+                // run the function and cache the result
+                async fn inner(#inputs) #output #body;
+                let result = inner(#(#input_names),*).await;
+                let mut cache = #cache_ident.lock().await;
+                #set_cache_block
+                result
+            }
+        }
+    } else if args.sync_writes {
+        quote! {
+            // try to get a write lock first
+            let mut cache = #cache_ident.lock().unwrap();
+            if let Some(result) = cache.cache_get(&key) {
+                #return_cache_block
+            }
+
+            // run the function and cache the result
+            fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*);
+            #set_cache_block
+            result
+        }
+    } else {
+        quote! {
+            // run the function and cache the result
+            fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*);
+            let mut cache = #cache_ident.lock().unwrap();
+            #set_cache_block
+            result
+        }
+    };
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
@@ -299,15 +351,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         #return_cache_block
                     }
                 }
-
-                // run the function and cache the result
-                async fn inner(#inputs) #output #body;
-                let result = inner(#(#input_names),*).await;
-
-                let mut cache = #cache_ident.lock().await;
-                #set_cache_block
-
-                result
+                #do_set_return_block
             }
         }
     } else {
@@ -325,15 +369,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         #return_cache_block
                     }
                 }
-
-                // run the function and cache the result
-                fn inner(#inputs) #output #body;
-                let result = inner(#(#input_names),*);
-
-                let mut cache = #cache_ident.lock().unwrap();
-                #set_cache_block
-
-                result
+                #do_set_return_block
             }
         }
     };

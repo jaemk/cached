@@ -1,6 +1,6 @@
 [package]
 name = "cached_proc_macro"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["csos95 <csoscss@gmail.com>", "James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"

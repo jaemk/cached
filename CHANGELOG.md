@@ -5,6 +5,16 @@
 ## Changed
 ## Removed
 
+## [0.26.1] / [cached_proc_macro[0.7.1]]
+## Added
+- Add `sync_writes` option to `#[cached]` macro to synchronize
+  concurrent function calls of duplicate arguments. For ex, if
+  a long running `#[cached(sync_writes = true)]` function is called
+  several times concurrently, the actual function is only executed
+  once while all other calls block and return the newly cached value.
+## Changed
+## Removed
+
 ## [0.26.0] / [cached_proc_macro[0.7.0]]
 ## Added
 - Add `#[once]` macro for create a `RwLock` cache wrapping a single value

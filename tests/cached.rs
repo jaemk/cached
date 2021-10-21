@@ -860,3 +860,39 @@ async fn test_only_cached_once_per_second_sync_writes() {
     let b = async_std::task::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
     assert_eq!(a.await, b.await);
 }
+
+#[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
+fn cached_sync_writes(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[test]
+fn test_cached_sync_writes() {
+    let a = std::thread::spawn(|| cached_sync_writes("a".to_string()));
+    sleep(Duration::new(1, 0));
+    let b = std::thread::spawn(|| cached_sync_writes("b".to_string()));
+    let c = std::thread::spawn(|| cached_sync_writes("c".to_string()));
+    let a = a.join().unwrap();
+    let b = b.join().unwrap();
+    let c = c.join().unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a, c);
+}
+
+#[cfg(feature = "async")]
+#[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
+async fn cached_sync_writes_a(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_cached_sync_writes_a() {
+    let a = async_std::task::spawn(cached_sync_writes_a("a".to_string()));
+    async_std::task::sleep(Duration::new(1, 0)).await;
+    let b = async_std::task::spawn(cached_sync_writes_a("b".to_string()));
+    let c = async_std::task::spawn(cached_sync_writes_a("c".to_string()));
+    let a = a.await;
+    assert_eq!(a, b.await);
+    assert_eq!(a, c.await);
+}

@@ -145,6 +145,24 @@ fn keyed(a: String) -> Option<usize> {
 
 ```rust,no_run
 use cached::proc_macro::cached;
+
+/// Cache an optional function. Only `Some` results are cached.
+/// When called concurrently, duplicate argument-calls will be
+/// synchronized so as to only run once - the remaining concurrent
+/// calls return a cached value.
+#[cached(size=1, option = true, sync_writes = true)]
+fn keyed(a: String) -> Option<usize> {
+    if a == "a" {
+        Some(a.len())
+    } else {
+        None
+    }
+}
+# pub fn main() { }
+```
+
+```rust,no_run
+use cached::proc_macro::cached;
 use cached::Return;
 
 /// Get a `cached::Return` value that indicates
@@ -231,6 +249,27 @@ fn keyed(a: &str, b: &str) -> usize {
 }
 # pub fn main() { }
 ```
+
+```rust,no_run
+use cached::proc_macro::once;
+
+/// Only cache the initial function call.
+/// Function will be re-executed after the cache
+/// expires (according to `time` seconds).
+/// When no (or expired) cache, concurrent calls
+/// will synchronize (`sync_writes`) so the function
+/// is only executed once.
+#[once(time=10, option = true, sync_writes = true)]
+fn keyed(a: String) -> Option<usize> {
+    if a == "a" {
+        Some(a.len())
+    } else {
+        None
+    }
+}
+# pub fn main() { }
+```
+
 
 ----
 
