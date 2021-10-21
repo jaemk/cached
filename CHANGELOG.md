@@ -2,15 +2,15 @@
 
 ## [Unreleased]
 ## Added
-- For all caches, add a function to get an immutable reference to their
-  contents. This makes it possible to manually dump a cache, so its contents
-  can be saved and restored later.
 ## Changed
 ## Removed
 
 ## [0.26.0] / [cached_proc_macro[0.7.0]]
 ## Added
 - Add `#[once]` macro for create a `RwLock` cache wrapping a single value
+- For all caches, add a function to get an immutable reference to their
+  contents. This makes it possible to manually dump a cache, so its contents
+  can be saved and restored later.
 ## Changed
 ## Removed
 

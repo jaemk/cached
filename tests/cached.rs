@@ -38,10 +38,14 @@ cached! {
 
 #[test]
 fn test_sized_cache() {
-    fib1(20);
+    let last = fib1(20);
     {
         let cache = SIZED_FIB.lock().unwrap();
         assert_eq!(3, cache.cache_size());
+        let items = cache.get_order().iter().collect::<Vec<_>>();
+        assert_eq!(3, items.len());
+        // (arg, result)
+        assert_eq!(&(20, last), items[0]);
     }
 }
 

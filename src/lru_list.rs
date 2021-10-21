@@ -105,7 +105,7 @@ impl<T> LRUList<T> {
         });
     }
 
-    pub(crate) fn iter(&self) -> LRUListIterator<T> {
+    pub fn iter(&self) -> LRUListIterator<T> {
         LRUListIterator::<T> {
             list: self,
             index: Self::OCCUPIED,
@@ -114,7 +114,7 @@ impl<T> LRUList<T> {
 }
 
 #[derive(Debug)]
-pub(crate) struct LRUListIterator<'a, T> {
+pub struct LRUListIterator<'a, T> {
     list: &'a LRUList<T>,
     index: usize,
 }
