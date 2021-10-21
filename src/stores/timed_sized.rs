@@ -80,6 +80,11 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     pub fn set_refresh(&mut self, refresh: bool) {
         self.refresh = refresh
     }
+
+    /// Returns a reference to the cache's `store`
+    pub fn get_store(&self) -> &SizedCache<K, (Instant, V)> {
+        &self.store
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {

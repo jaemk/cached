@@ -1,6 +1,6 @@
 /// Limited functionality doubly linked list using Vec as storage.
 #[derive(Clone, Debug)]
-pub(crate) struct LRUList<T> {
+pub struct LRUList<T> {
     values: Vec<ListEntry<T>>,
 }
 
