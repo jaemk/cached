@@ -340,3 +340,332 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     expanded.into()
 }
+
+#[derive(FromMeta)]
+struct OnceMacroArgs {
+    #[darling(default)]
+    name: Option<String>,
+    #[darling(default)]
+    time: Option<u64>,
+    #[darling(default)]
+    sync_writes: bool,
+    #[darling(default)]
+    result: bool,
+    #[darling(default)]
+    option: bool,
+    #[darling(default)]
+    with_cached_flag: bool,
+}
+
+/// # Attributes
+/// - **Cache Name:** Use `name = "CACHE_NAME"` to specify the name for the generated cache.
+/// - **Caching Result/Option:** If your function returns a `Result` or `Option`
+/// you may want to use `result` or `option` to only cache when the output is `Ok` or `Some`
+/// - ** Indicating whether a result was cached ** Use `with_cached_flag = true` with a
+/// `cached::Return<T>` return type to have the macro set the `was_cached` flag on the
+/// `cached::Return<T>` result.
+#[proc_macro_attribute]
+pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
+    let attr_args = parse_macro_input!(args as AttributeArgs);
+    let args = match OnceMacroArgs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(e.write_errors());
+        }
+    };
+    let input = parse_macro_input!(input as ItemFn);
+
+    // pull out the parts of the input
+    let _attributes = input.attrs;
+    let visibility = input.vis;
+    let signature = input.sig;
+    let body = input.block;
+
+    // pull out the parts of the function signature
+    let fn_ident = signature.ident.clone();
+    let inputs = signature.inputs.clone();
+    let output = signature.output.clone();
+    let asyncness = signature.asyncness;
+
+    // pull out the names and types of the function inputs
+    let input_names = inputs
+        .iter()
+        .map(|input| match input {
+            FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
+            FnArg::Typed(pat_type) => pat_type.pat.clone(),
+        })
+        .collect::<Vec<Box<Pat>>>();
+
+    // pull out the output type
+    let output_ty = match &output {
+        ReturnType::Default => quote! {()},
+        ReturnType::Type(_, ty) => quote! {#ty},
+    };
+
+    let output_span = output_ty.span();
+    let output_ts = TokenStream::from(output_ty.clone());
+    let output_parts = output_ts
+        .clone()
+        .into_iter()
+        .filter_map(|tt| match tt {
+            proc_macro::TokenTree::Ident(ident) => Some(ident.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let output_string = output_parts.join("::");
+    let output_type_display = output_ts.to_string().replace(" ", "");
+
+    // if `with_cached_flag = true`, then enforce that the return type
+    // is something wrapped in `Return`. Either `Return<T>` or the
+    // fully qualified `cached::Return<T>`
+    if args.with_cached_flag
+        && !output_string.contains("Return")
+        && !output_string.contains("cached::Return")
+    {
+        return syn::Error::new(
+            output_span,
+            format!(
+                "\nWhen specifying `with_cached_flag = true`, \
+                    the return type must be wrapped in `cached::Return<T>`. \n\
+                    The following return types are supported: \n\
+                    |    `cached::Return<T>`\n\
+                    |    `std::result::Result<cachedReturn<T>, E>`\n\
+                    |    `std::option::Option<cachedReturn<T>>`\n\
+                    Found type: {t}.",
+                t = output_type_display
+            ),
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Find the type of the value to store.
+    // Normally it's the same as the return type of the functions, but
+    // for Options and Results it's the (first) inner type. So for
+    // Option<u32>, store u32, for Result<i32, String>, store i32, etc.
+    let cache_value_ty = match (&args.result, &args.option) {
+        (false, false) => output_ty,
+        (true, true) => panic!("the result and option attributes are mutually exclusive"),
+        _ => match output.clone() {
+            ReturnType::Default => {
+                panic!("function must return something for result or option attributes")
+            }
+            ReturnType::Type(_, ty) => {
+                if let Type::Path(typepath) = *ty {
+                    let segments = typepath.path.segments;
+                    if let PathArguments::AngleBracketed(brackets) =
+                        &segments.last().unwrap().arguments
+                    {
+                        let inner_ty = brackets.args.first().unwrap();
+                        quote! {#inner_ty}
+                    } else {
+                        panic!("function return type has no inner type")
+                    }
+                } else {
+                    panic!("function return type too complex")
+                }
+            }
+        },
+    };
+
+    // make the cache identifier
+    let cache_ident = match args.name {
+        Some(name) => Ident::new(&name, fn_ident.span()),
+        None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
+    };
+
+    // make the cache type and create statement
+    let (cache_ty, cache_create) = match &args.time {
+        None => (quote! { Option<#cache_value_ty> }, quote! { None }),
+        Some(_) => (
+            quote! { Option<(std::time::Instant, #cache_value_ty)> },
+            quote! { None },
+        ),
+    };
+
+    // make the set cache and return cache blocks
+    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+        (false, false) => {
+            let set_cache_block = if args.time.is_some() {
+                quote! {
+                    *cached = Some((now, result.clone()));
+                }
+            } else {
+                quote! {
+                    *cached = Some(result.clone());
+                }
+            };
+
+            let return_cache_block = if args.with_cached_flag {
+                quote! { let mut r = result.clone(); r.was_cached = true; return r }
+            } else {
+                quote! { return result.clone() }
+            };
+            let return_cache_block = if let Some(time) = &args.time {
+                quote! {
+                    let (created_sec, result) = result;
+                    if now.duration_since(*created_sec).as_secs() < #time {
+                        #return_cache_block
+                    }
+                }
+            } else {
+                quote! { #return_cache_block }
+            };
+            (set_cache_block, return_cache_block)
+        }
+        (true, false) => {
+            let set_cache_block = if args.time.is_some() {
+                quote! {
+                    if let Ok(result) = &result {
+                        *cached = Some((now, result.clone()));
+                    }
+                }
+            } else {
+                quote! {
+                    if let Ok(result) = &result {
+                        *cached = Some(result.clone());
+                    }
+                }
+            };
+
+            let return_cache_block = if args.with_cached_flag {
+                quote! { let mut r = result.clone(); r.was_cached = true; return Ok(r) }
+            } else {
+                quote! { return Ok(result.clone()) }
+            };
+            let return_cache_block = if let Some(time) = &args.time {
+                quote! {
+                    let (created_sec, result) = result;
+                    if now.duration_since(*created_sec).as_secs() < #time {
+                        #return_cache_block
+                    }
+                }
+            } else {
+                quote! { #return_cache_block }
+            };
+            (set_cache_block, return_cache_block)
+        }
+        (false, true) => {
+            let set_cache_block = if args.time.is_some() {
+                quote! {
+                    if let Some(result) = &result {
+                        *cached = Some((now, result.clone()));
+                    }
+                }
+            } else {
+                quote! {
+                    if let Some(result) = &result {
+                        *cached = Some(result.clone());
+                    }
+                }
+            };
+
+            let return_cache_block = if args.with_cached_flag {
+                quote! { let mut r = result.clone(); r.was_cached = true; return Some(r) }
+            } else {
+                quote! { return Some(result.clone()) }
+            };
+            let return_cache_block = if let Some(time) = &args.time {
+                quote! {
+                    let (created_sec, result) = result;
+                    if now.duration_since(*created_sec).as_secs() < #time {
+                        #return_cache_block
+                    }
+                }
+            } else {
+                quote! { #return_cache_block }
+            };
+            (set_cache_block, return_cache_block)
+        }
+        _ => panic!("the result and option attributes are mutually exclusive"),
+    };
+
+    let do_set_return_block = if asyncness.is_some() {
+        if args.sync_writes {
+            quote! {
+                // try to get a write lock first
+                let mut cached = #cache_ident.write().await;
+                if let Some(result) = &*cached {
+                    #return_cache_block
+                }
+
+                // run the function and cache the result
+                async fn inner(#inputs) #output #body;
+                let result = inner(#(#input_names),*).await;
+                #set_cache_block
+                result
+            }
+        } else {
+            quote! {
+                // run the function and cache the result
+                async fn inner(#inputs) #output #body;
+                let result = inner(#(#input_names),*).await;
+                let mut cached = #cache_ident.write().await;
+                #set_cache_block
+                result
+            }
+        }
+    } else if args.sync_writes {
+        quote! {
+            // try to get a write lock first
+            let mut cached = #cache_ident.write().unwrap();
+            if let Some(result) = &*cached {
+                #return_cache_block
+            }
+
+            // run the function and cache the result
+            fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*);
+            #set_cache_block
+            result
+        }
+    } else {
+        quote! {
+            // run the function and cache the result
+            fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*);
+            let mut cached = #cache_ident.write().unwrap();
+            #set_cache_block
+            result
+        }
+    };
+
+    // put it all together
+    let expanded = if asyncness.is_some() {
+        quote! {
+            /// Cached static
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_rwlock::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_rwlock::RwLock::new(#cache_create));
+            /// Cached function
+            #visibility #signature {
+                let now = std::time::Instant::now();
+                {
+                    // check if the result is cached
+                    let mut cached = #cache_ident.read().await;
+                    if let Some(result) = &*cached {
+                        #return_cache_block
+                    }
+                }
+                #do_set_return_block
+            }
+        }
+    } else {
+        quote! {
+            /// Cached static
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::RwLock::new(#cache_create));
+            /// Cached function
+            #visibility #signature {
+                let now = std::time::Instant::now();
+                {
+                    // check if the result is cached
+                    let mut cached = #cache_ident.read().unwrap();
+                    if let Some(result) = &*cached {
+                        #return_cache_block
+                    }
+                }
+                #do_set_return_block
+            }
+        }
+    };
+
+    expanded.into()
+}

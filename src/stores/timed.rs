@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn timed_cache_refresh() {
         let mut c = TimedCache::with_lifespan_and_refresh(2, true);
-        assert_eq!(c.refresh(), true);
+        assert!(c.refresh());
         assert_eq!(c.cache_get(&1), None);
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);

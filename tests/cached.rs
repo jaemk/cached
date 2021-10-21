@@ -4,7 +4,10 @@ Full tests of macro-defined functions
 #[macro_use]
 extern crate cached;
 
-use cached::{proc_macro::cached, Cached, SizedCache, TimedCache, TimedSizedCache, UnboundCache};
+use cached::{
+    proc_macro::cached, proc_macro::once, Cached, SizedCache, TimedCache, TimedSizedCache,
+    UnboundCache,
+};
 use std::thread::{self, sleep};
 use std::time::Duration;
 
@@ -576,4 +579,280 @@ fn test_cached_return_flag_option() {
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
+}
+
+/// should only cache the _first_ value returned for 1 second.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+#[once(time = 1)]
+fn only_cached_once_per_second(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[test]
+fn test_only_cached_once_per_second() {
+    let a = only_cached_once_per_second("a".to_string());
+    let b = only_cached_once_per_second("b".to_string());
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_once_per_second("b".to_string());
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+#[cfg(feature = "async")]
+#[once(time = 1)]
+async fn only_cached_once_per_second_a(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_once_per_second_a() {
+    let a = only_cached_once_per_second_a("a".to_string()).await;
+    let b = only_cached_once_per_second_a("b".to_string()).await;
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_once_per_second_a("b".to_string()).await;
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+/// should only cache the _first_ `Ok` returned.
+/// all arguments are ignored for subsequent calls.
+#[once(result = true)]
+fn only_cached_result_once(s: String, error: bool) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_result_once() {
+    assert!(only_cached_result_once("z".to_string(), true).is_err());
+    let a = only_cached_result_once("a".to_string(), false).unwrap();
+    let b = only_cached_result_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+}
+
+#[cfg(feature = "async")]
+#[once(result = true)]
+async fn only_cached_result_once_a(
+    s: String,
+    error: bool,
+) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_result_once_a() {
+    assert!(only_cached_result_once_a("z".to_string(), true)
+        .await
+        .is_err());
+    let a = only_cached_result_once_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_result_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+}
+
+/// should only cache the _first_ `Ok` returned for 1 second.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+#[once(result = true, time = 1)]
+fn only_cached_result_once_per_second(
+    s: String,
+    error: bool,
+) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_result_once_per_second() {
+    assert!(only_cached_result_once_per_second("z".to_string(), true).is_err());
+    let a = only_cached_result_once_per_second("a".to_string(), false).unwrap();
+    let b = only_cached_result_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+#[cfg(feature = "async")]
+#[once(result = true, time = 1)]
+async fn only_cached_result_once_per_second_a(
+    s: String,
+    error: bool,
+) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_result_once_per_second_a() {
+    assert!(only_cached_result_once_per_second_a("z".to_string(), true)
+        .await
+        .is_err());
+    let a = only_cached_result_once_per_second_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_result_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+/// should only cache the _first_ `Some` returned .
+/// all arguments are ignored for subsequent calls
+#[once(option = true)]
+fn only_cached_option_once(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_option_once() {
+    assert!(only_cached_option_once("z".to_string(), true).is_none());
+    let a = only_cached_option_once("a".to_string(), false).unwrap();
+    let b = only_cached_option_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+}
+
+#[cfg(feature = "async")]
+#[once(option = true)]
+async fn only_cached_option_once_a(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_option_once_a() {
+    assert!(only_cached_option_once_a("z".to_string(), true)
+        .await
+        .is_none());
+    let a = only_cached_option_once_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_option_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+}
+
+/// should only cache the _first_ `Some` returned for 1 second.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+#[once(option = true, time = 1)]
+fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_option_once_per_second() {
+    assert!(only_cached_option_once_per_second("z".to_string(), true).is_none());
+    let a = only_cached_option_once_per_second("a".to_string(), false).unwrap();
+    let b = only_cached_option_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+#[cfg(feature = "async")]
+#[once(option = true, time = 1)]
+async fn only_cached_option_once_per_second_a(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_option_once_per_second_a() {
+    assert!(only_cached_option_once_per_second_a("z".to_string(), true)
+        .await
+        .is_none());
+    let a = only_cached_option_once_per_second_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_option_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+/// should only cache the _first_ value returned for 2 seconds.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+/// when multiple un-cached tasks are running concurrently, only
+/// _one_ call will be "executed" and all others will be synchronized
+/// to return the cached result of the one call instead of all
+/// concurrently un-cached tasks executing and writing concurrently.
+#[cfg(feature = "async")]
+#[once(time = 2, sync_writes = true)]
+async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_once_per_second_sync_writes() {
+    let a = async_std::task::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
+    async_std::task::sleep(Duration::new(1, 0)).await;
+    let b = async_std::task::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
+    assert_eq!(a.await, b.await);
 }

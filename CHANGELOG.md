@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.26.0] / [cached_proc_macro[0.7.0]]
+## Added
+- Add `#[once]` macro for create a `RwLock` cache wrapping a single value
+## Changed
+## Removed
+
 ## [0.25.1]
 ## Added
 ## Changed

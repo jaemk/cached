@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn timed_cache_refresh() {
         let mut c = TimedSizedCache::with_size_and_lifespan_and_refresh(2, 2, true);
-        assert_eq!(c.refresh(), true);
+        assert!(c.refresh());
         assert_eq!(c.cache_get(&1), None);
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
@@ -502,22 +502,22 @@ mod tests {
 
         c.cache_reset();
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(10).await?) })
+            .try_get_or_set_with(0, || async { _try_get(10).await })
             .await;
         assert!(res.is_err());
         assert!(c.key_order().next().is_none());
 
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(1).await?) })
+            .try_get_or_set_with(0, || async { _try_get(1).await })
             .await;
         assert_eq!(res.unwrap(), &1);
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .try_get_or_set_with(0, || async { _try_get(5).await })
             .await;
         assert_eq!(res.unwrap(), &1);
         sleep(Duration::new(1, 0));
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .try_get_or_set_with(0, || async { _try_get(5).await })
             .await;
         assert_eq!(res.unwrap(), &5);
     }

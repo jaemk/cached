@@ -1,9 +1,18 @@
 set -e
 
+function sha {
+    read in
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo $in | sha256sum
+    else
+        echo $in | shasum -a 256
+    fi
+}
+
 if [ "$1" = "check" ]; then
     echo "Checking if README.md is up to date with src/lib.rs"
-    lib_hash=$(cargo readme --no-indent-headings | sha256sum)
-    readme_hash=$(cat README.md | sha256sum)
+    lib_hash=$(cargo readme --no-indent-headings | sha)
+    readme_hash=$(cat README.md | sha)
     if [ "$lib_hash" = "$readme_hash" ]; then
         echo "README.md is up to date"
     else

@@ -460,10 +460,13 @@ pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro {
     pub use cached_proc_macro::cached;
+    pub use cached_proc_macro::once;
     pub use cached_proc_macro_types::Return;
 }
 #[cfg(feature = "proc_macro")]
 pub use async_mutex;
+#[cfg(feature = "proc_macro")]
+pub use async_rwlock;
 #[cfg(feature = "proc_macro")]
 pub use proc_macro::Return;
 

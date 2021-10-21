@@ -676,17 +676,17 @@ mod tests {
 
         c.cache_reset();
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(10).await?) })
+            .try_get_or_set_with(0, || async { _try_get(10).await })
             .await;
         assert!(res.is_err());
         assert!(c.key_order().next().is_none());
 
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(1).await?) })
+            .try_get_or_set_with(0, || async { _try_get(1).await })
             .await;
         assert_eq!(res.unwrap(), &1);
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .try_get_or_set_with(0, || async { _try_get(5).await })
             .await;
         assert_eq!(res.unwrap(), &1);
     }
