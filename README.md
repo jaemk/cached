@@ -165,8 +165,7 @@ use cached::Return;
 /// Get a `cached::Return` value that indicates
 /// whether the value returned came from the cache:
 /// `cached::Return.was_cached`.
-/// Use an LRU cache with a TTL of 60s
-/// and a `String` cache key.
+/// Use an LRU cache and a `String` cache key.
 #[cached(size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Return<String> {
     Return::new(a)

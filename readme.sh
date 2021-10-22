@@ -1,11 +1,10 @@
 set -e
 
 function sha {
-    read in
     if command -v sha256sum >/dev/null 2>&1; then
-        echo $in | sha256sum
+        sha256sum
     else
-        echo $in | shasum -a 256
+        shasum -a 256
     fi
 }
 
