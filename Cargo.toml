@@ -61,5 +61,8 @@ features = ["macros", "time", "rt-multi-thread"]
 version = "1.6"
 features = ["attributes"]
 
+[dev-dependencies.smartstring]
+version = "0.2.9"
+
 [workspace]
 members = ["cached_proc_macro"]

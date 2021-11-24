@@ -175,7 +175,7 @@ fn test_timed_sized_cache() {
 cached! {
     STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_size(1);
     fn string_1(a: String, b: String) -> String = {
-        a + &b
+        a + b.as_ref()
     }
 }
 
@@ -895,4 +895,34 @@ async fn test_cached_sync_writes_a() {
     let a = a.await;
     assert_eq!(a, b.await);
     assert_eq!(a, c.await);
+}
+
+#[cached(size = 2)]
+fn cached_smartstring(s: smartstring::alias::String) -> smartstring::alias::String {
+    if s == "very stringy" {
+        smartstring::alias::String::from("equal")
+    } else {
+        smartstring::alias::String::from("not equal")
+    }
+}
+
+#[test]
+fn test_cached_smartstring() {
+    smartstring::validate();
+
+    let mut string = smartstring::alias::String::new();
+    string.push_str("very stringy");
+    assert_eq!("equal", cached_smartstring(string.clone()));
+    {
+        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert_eq!("equal", cached_smartstring(string.clone()));
+    {
+        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
 }
