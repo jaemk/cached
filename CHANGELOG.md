@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.28.0]
+## Added
+- Add failable TimedSize and SizeCached constructors
+## Changed
+## Removed
+
 ## [0.27.0] / [cached_proc_macro[0.8.0]]
 ## Added
 - Add `time_refresh` option to `#[cached]` to refresh TTLs on cache hits
