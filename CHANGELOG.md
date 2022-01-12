@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 ## Added
+## Changed
+## Removed
+
+## [0.27.0] / [cached_proc_macro[0.8.0]]
+## Added
 - Add `time_refresh` option to `#[cached]` to refresh TTLs on cache hits
 - Generate `*_prime_cache` functions for every `#[cached]` and `#[once]` function
   to allow priming caches.
