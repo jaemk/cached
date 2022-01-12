@@ -1048,3 +1048,95 @@ fn test_cached_timed_sized_refresh() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
 }
+
+#[cached(
+    size = 2,
+    time = 1,
+    time_refresh = true,
+    key = "String",
+    convert = r#"{ String::from(s) }"#
+)]
+fn cached_timed_sized_refresh_prime(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_sized_refresh_prime() {
+    assert!(cached_timed_sized_refresh_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+    assert!(cached_timed_sized_refresh_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
+
+    // stats unchanged (other than this new hit) since we kept priming
+    assert!(cached_timed_sized_refresh_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(2));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[cached(size = 2, time = 1, key = "String", convert = r#"{ String::from(s) }"#)]
+fn cached_timed_sized_prime(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_sized_prime() {
+    assert!(cached_timed_sized_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+    assert!(cached_timed_sized_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_prime_prime_cache("true"));
+
+    // stats unchanged (other than this new hit) since we kept priming
+    assert!(cached_timed_sized_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(2));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[once]
+fn once_for_priming() -> bool {
+    true
+}
+
+#[test]
+fn test_once_for_priming() {
+    assert!(once_for_priming_prime_cache());
+    {
+        let cache = ONCE_FOR_PRIMING.read().unwrap();
+        assert!(cache.is_some());
+    }
+}

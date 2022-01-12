@@ -338,6 +338,30 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());
+    let mut prime_sig = signature.clone();
+    prime_sig.ident = prime_fn_ident;
+
+    let prime_do_set_return_block = if asyncness.is_some() {
+        quote! {
+            // run the function and cache the result
+            async fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*).await;
+            let mut cache = #cache_ident.lock().await;
+            #set_cache_block
+            result
+        }
+    } else {
+        quote! {
+            // run the function and cache the result
+            fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*);
+            let mut cache = #cache_ident.lock().unwrap();
+            #set_cache_block
+            result
+        }
+    };
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
@@ -356,6 +380,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
+            /// Prime cached function
+            #visibility #prime_sig {
+                use cached::Cached;
+                let key = #key_convert_block;
+                #prime_do_set_return_block
+            }
         }
     } else {
         quote! {
@@ -373,6 +403,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
                 #do_set_return_block
+            }
+            /// Prime cached function
+            #visibility #prime_sig {
+                use cached::Cached;
+                let key = #key_convert_block;
+                #prime_do_set_return_block
             }
         }
     };
@@ -669,6 +705,30 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());
+    let mut prime_sig = signature.clone();
+    prime_sig.ident = prime_fn_ident;
+
+    let prime_do_set_return_block = if asyncness.is_some() {
+        quote! {
+            // run the function and cache the result
+            async fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*).await;
+            let mut cached = #cache_ident.write().await;
+            #set_cache_block
+            result
+        }
+    } else {
+        quote! {
+            // run the function and cache the result
+            fn inner(#inputs) #output #body;
+            let result = inner(#(#input_names),*);
+            let mut cached = #cache_ident.write().unwrap();
+            #set_cache_block
+            result
+        }
+    };
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
@@ -686,6 +746,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
+            /// Prime cached function
+            #visibility #prime_sig {
+                let now = std::time::Instant::now();
+                #prime_do_set_return_block
+            }
         }
     } else {
         quote! {
@@ -702,6 +767,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
                 #do_set_return_block
+            }
+            /// Prime cached function
+            #visibility #prime_sig {
+                let now = std::time::Instant::now();
+                #prime_do_set_return_block
             }
         }
     };

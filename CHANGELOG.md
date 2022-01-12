@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 ## Added
-- Add `time_refresh` option to `cached` to refresh TTLs on cache hits
+- Add `time_refresh` option to `#[cached]` to refresh TTLs on cache hits
+- Generate `*_prime_cache` functions for every `#[cached]` and `#[once]` function
+  to allow priming caches.
 ## Changed
 ## Removed
 

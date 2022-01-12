@@ -273,6 +273,47 @@ fn keyed(a: String) -> Option<usize> {
 # pub fn main() { }
 ```
 
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::cached;
+
+/// Use a timed cache with a TTL of 60s.
+/// Run a background thread to continuously refresh a specific key.
+#[cached(time = 60, key = "String", convert = r#"{ String::from(a) }"#)]
+fn keyed(a: &str) -> usize {
+    a.len()
+}
+pub fn main() {
+    std::thread::spawn(|| {
+        loop {
+            sleep(Duration::from_secs(60));
+            keyed_prime_cache("a");
+        }
+    });
+}
+```
+
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::once;
+
+/// Run a background thread to continuously refresh a singleton.
+#[once]
+fn keyed() -> String {
+    // do some long http request
+    "some data".to_string()
+}
+pub fn main() {
+    std::thread::spawn(|| {
+        loop {
+            sleep(Duration::from_secs(60));
+            keyed_prime_cache();
+        }
+    });
+}
+```
 
 ----
 
