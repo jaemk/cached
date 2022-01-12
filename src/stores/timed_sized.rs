@@ -64,6 +64,7 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
             seconds,
             hits: 0,
             misses: 0,
+            refresh: false,
         })
     }
 
