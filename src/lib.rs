@@ -315,6 +315,32 @@ pub fn main() {
 }
 ```
 
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::cached;
+
+/// Run a background thread to continuously refresh every key of a cache
+#[cached(key = "String", convert = r#"{ String::from(a) }"#)]
+fn keyed(a: &str) -> usize {
+    a.len()
+}
+pub fn main() {
+    std::thread::spawn(|| {
+        loop {
+            sleep(Duration::from_secs(60));
+            let keys: Vec<String> = {
+                // note the cache keys are a tuple of all function arguments, unless it's one value
+                KEYED.lock().unwrap().get_store().keys().map(|k| k.clone()).collect()
+            };
+            for k in &keys {
+                keyed_prime_cache(k);
+            }
+        }
+    });
+}
+```
+
 ----
 
 
