@@ -1,6 +1,8 @@
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
+use std::ops::Deref;
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
     parse_macro_input, parse_str, AttributeArgs, Block, FnArg, Ident, ItemFn, Pat, PathArguments,
@@ -92,7 +94,30 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .iter()
         .map(|input| match input {
             FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
-            FnArg::Typed(pat_type) => pat_type.pat.clone(),
+            FnArg::Typed(pat_type) => {
+                // if you define arguments as mutable, e.g.
+                // #[cached]
+                // fn mutable_args(mut a: i32, mut b: i32) -> (i32, i32) {
+                //     a += 1;
+                //     b += 1;
+                //     (a, b)
+                // }
+                // then we need to strip off the `mut` keyword from the
+                // variable identifiers so we can refer to arguments `a` and `b`
+                // instead of `mut a` and `mut b`
+                match &pat_type.pat.deref() {
+                    Pat::Ident(pat_ident) => {
+                        if pat_ident.mutability.is_some() {
+                            let mut p = pat_ident.clone();
+                            p.mutability = None;
+                            Box::new(Pat::Ident(p))
+                        } else {
+                            Box::new(Pat::Ident(pat_ident.clone()))
+                        }
+                    }
+                    _ => pat_type.pat.clone(),
+                }
+            }
         })
         .collect::<Vec<Box<Pat>>>();
 
@@ -338,8 +363,48 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // if you define arguments as mutable, e.g.
+    // #[cached]
+    // fn mutable_args(mut a: i32, mut b: i32) -> (i32, i32) {
+    //     a += 1;
+    //     b += 1;
+    //     (a, b)
+    // }
+    // then we want the `mut` keywords present on the "inner" function
+    // that wraps your actual block of code.
+    // If the `mut`s are also on the outer method, then you'll
+    // get compiler warnings about your arguments not needing to be `mut`
+    // when they really do need to be.
+    let mut signature_no_muts = signature;
+    let mut sig_inputs = Punctuated::new();
+    for inp in &signature_no_muts.inputs {
+        let item = match inp {
+            FnArg::Receiver(_) => inp.clone(),
+            FnArg::Typed(pat_type) => {
+                let mut pt = pat_type.clone();
+                let pat = match &pat_type.pat.deref() {
+                    Pat::Ident(pat_ident) => {
+                        if pat_ident.mutability.is_some() {
+                            let mut p = pat_ident.clone();
+                            p.mutability = None;
+                            Box::new(Pat::Ident(p))
+                        } else {
+                            Box::new(Pat::Ident(pat_ident.clone()))
+                        }
+                    }
+                    _ => pat_type.pat.clone(),
+                };
+                pt.pat = pat;
+                FnArg::Typed(pt)
+            }
+        };
+        sig_inputs.push(item);
+    }
+    signature_no_muts.inputs = sig_inputs;
+
+    // create a signature for the cache-priming function
     let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());
-    let mut prime_sig = signature.clone();
+    let mut prime_sig = signature_no_muts.clone();
     prime_sig.ident = prime_fn_ident;
 
     let prime_do_set_return_block = if asyncness.is_some() {
@@ -368,7 +433,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             /// Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_mutex::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_mutex::Mutex::new(#cache_create));
             /// Cached function
-            #visibility #signature {
+            #visibility #signature_no_muts {
                 use cached::Cached;
                 let key = #key_convert_block;
                 {
@@ -392,7 +457,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             /// Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
             /// Cached function
-            #visibility #signature {
+            #visibility #signature_no_muts {
                 use cached::Cached;
                 let key = #key_convert_block;
                 {
@@ -467,7 +532,30 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .iter()
         .map(|input| match input {
             FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
-            FnArg::Typed(pat_type) => pat_type.pat.clone(),
+            FnArg::Typed(pat_type) => {
+                // if you define arguments as mutable, e.g.
+                // #[once]
+                // fn mutable_args(mut a: i32, mut b: i32) -> (i32, i32) {
+                //     a += 1;
+                //     b += 1;
+                //     (a, b)
+                // }
+                // then we need to strip off the `mut` keyword from the
+                // variable identifiers so we can refer to arguments `a` and `b`
+                // instead of `mut a` and `mut b`
+                match &pat_type.pat.deref() {
+                    Pat::Ident(pat_ident) => {
+                        if pat_ident.mutability.is_some() {
+                            let mut p = pat_ident.clone();
+                            p.mutability = None;
+                            Box::new(Pat::Ident(p))
+                        } else {
+                            Box::new(Pat::Ident(pat_ident.clone()))
+                        }
+                    }
+                    _ => pat_type.pat.clone(),
+                }
+            }
         })
         .collect::<Vec<Box<Pat>>>();
 
@@ -705,8 +793,47 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // if you define arguments as mutable, e.g.
+    // #[once]
+    // fn mutable_args(mut a: i32, mut b: i32) -> (i32, i32) {
+    //     a += 1;
+    //     b += 1;
+    //     (a, b)
+    // }
+    // then we want the `mut` keywords present on the "inner" function
+    // that wraps your actual block of code.
+    // If the `mut`s are also on the outer method, then you'll
+    // get compiler warnings about your arguments not needing to be `mut`
+    // when they really do need to be.
+    let mut signature_no_muts = signature;
+    let mut sig_inputs = Punctuated::new();
+    for inp in &signature_no_muts.inputs {
+        let item = match inp {
+            FnArg::Receiver(_) => inp.clone(),
+            FnArg::Typed(pat_type) => {
+                let mut pt = pat_type.clone();
+                let pat = match &pat_type.pat.deref() {
+                    Pat::Ident(pat_ident) => {
+                        if pat_ident.mutability.is_some() {
+                            let mut p = pat_ident.clone();
+                            p.mutability = None;
+                            Box::new(Pat::Ident(p))
+                        } else {
+                            Box::new(Pat::Ident(pat_ident.clone()))
+                        }
+                    }
+                    _ => pat_type.pat.clone(),
+                };
+                pt.pat = pat;
+                FnArg::Typed(pt)
+            }
+        };
+        sig_inputs.push(item);
+    }
+    signature_no_muts.inputs = sig_inputs;
+
     let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());
-    let mut prime_sig = signature.clone();
+    let mut prime_sig = signature_no_muts.clone();
     prime_sig.ident = prime_fn_ident;
 
     let prime_do_set_return_block = if asyncness.is_some() {
@@ -735,7 +862,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             /// Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_rwlock::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_rwlock::RwLock::new(#cache_create));
             /// Cached function
-            #visibility #signature {
+            #visibility #signature_no_muts {
                 let now = std::time::Instant::now();
                 {
                     // check if the result is cached
@@ -757,7 +884,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             /// Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::RwLock::new(#cache_create));
             /// Cached function
-            #visibility #signature {
+            #visibility #signature_no_muts {
                 let now = std::time::Instant::now();
                 {
                     // check if the result is cached

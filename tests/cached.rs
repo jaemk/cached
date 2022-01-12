@@ -1140,3 +1140,42 @@ fn test_once_for_priming() {
         assert!(cache.is_some());
     }
 }
+
+#[cached]
+fn mutable_args(mut a: i32, mut b: i32) -> (i32, i32) {
+    a += 1;
+    b += 1;
+    (a, b)
+}
+
+#[test]
+fn test_mutable_args() {
+    assert_eq!((2, 2), mutable_args(1, 1));
+    assert_eq!((2, 2), mutable_args(1, 1));
+}
+
+#[cached]
+fn mutable_args_str(mut a: String) -> String {
+    a.push_str("-ok");
+    a
+}
+
+#[test]
+fn test_mutable_args_str() {
+    assert_eq!("a-ok", mutable_args_str(String::from("a")));
+    assert_eq!("a-ok", mutable_args_str(String::from("a")));
+}
+
+#[once]
+fn mutable_args_once(mut a: i32, mut b: i32) -> (i32, i32) {
+    a += 1;
+    b += 1;
+    (a, b)
+}
+
+#[test]
+fn test_mutable_args_once() {
+    assert_eq!((2, 2), mutable_args_once(1, 1));
+    assert_eq!((2, 2), mutable_args_once(1, 1));
+    assert_eq!((2, 2), mutable_args_once(5, 6));
+}

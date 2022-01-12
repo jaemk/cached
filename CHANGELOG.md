@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- proc-macro: support arguments of the wrapped function prefixed with `mut`
 ## Changed
 ## Removed
 
