@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- Add `time_refresh` option to `cached` to refresh TTLs on cache hits
 ## Changed
 ## Removed
 

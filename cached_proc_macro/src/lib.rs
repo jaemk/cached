@@ -18,6 +18,8 @@ struct MacroArgs {
     #[darling(default)]
     time: Option<u64>,
     #[darling(default)]
+    time_refresh: bool,
+    #[darling(default)]
     key: Option<String>,
     #[darling(default)]
     convert: Option<String>,
@@ -203,34 +205,35 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.time,
         &args.cache_type,
         &args.cache_create,
+        &args.time_refresh,
     ) {
-        (true, None, None, None, None) => {
+        (true, None, None, None, None, _) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
         }
-        (false, Some(size), None, None, None) => {
+        (false, Some(size), None, None, None, _) => {
             let cache_ty = quote! {cached::SizedCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::SizedCache::with_size(#size)};
             (cache_ty, cache_create)
         }
-        (false, None, Some(time), None, None) => {
+        (false, None, Some(time), None, None, time_refresh) => {
             let cache_ty = quote! {cached::TimedCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::TimedCache::with_lifespan(#time)};
-            (cache_ty, cache_create)
-        }
-        (false, Some(size), Some(time), None, None) => {
-            let cache_ty = quote! {cached::TimedSizedCache<#cache_key_ty, #cache_value_ty>};
             let cache_create =
-                quote! {cached::TimedSizedCache::with_size_and_lifespan(#size, #time)};
+                quote! {cached::TimedCache::with_lifespan_and_refresh(#time, #time_refresh)};
             (cache_ty, cache_create)
         }
-        (false, None, None, None, None) => {
+        (false, Some(size), Some(time), None, None, time_refresh) => {
+            let cache_ty = quote! {cached::TimedSizedCache<#cache_key_ty, #cache_value_ty>};
+            let cache_create = quote! {cached::TimedSizedCache::with_size_and_lifespan_and_refresh(#size, #time, #time_refresh)};
+            (cache_ty, cache_create)
+        }
+        (false, None, None, None, None, _) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
             (cache_ty, cache_create)
         }
-        (false, None, None, Some(type_str), Some(create_str)) => {
+        (false, None, None, Some(type_str), Some(create_str), _) => {
             let cache_type = parse_str::<Type>(type_str).expect("unable to parse cache type");
 
             let cache_create =
@@ -238,8 +241,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
             (quote! { #cache_type }, quote! { #cache_create })
         }
-        (false, None, None, Some(_), None) => panic!("type requires create to also be set"),
-        (false, None, None, None, Some(_)) => panic!("create requires type to also be set"),
+        (false, None, None, Some(_), None, _) => panic!("type requires create to also be set"),
+        (false, None, None, None, Some(_), _) => panic!("create requires type to also be set"),
         _ => panic!(
             "cache types (unbound, size and/or time, or type and create) are mutually exclusive"
         ),

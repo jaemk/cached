@@ -64,12 +64,12 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
         }
     }
 
-    /// Returns if the lifetime is refreshed when the value is retrived
+    /// Returns if the lifetime is refreshed when the value is retrieved
     pub fn refresh(&self) -> bool {
         self.refresh
     }
 
-    /// Sets if the lifetime is refreshed when the value is retrived
+    /// Sets if the lifetime is refreshed when the value is retrieved
     pub fn set_refresh(&mut self, refresh: bool) {
         self.refresh = refresh
     }

@@ -969,3 +969,82 @@ fn test_cached_smartstring_from_str() {
         assert_eq!(cache.cache_misses(), Some(2));
     }
 }
+
+#[cached(
+    time = 1,
+    time_refresh = true,
+    key = "String",
+    convert = r#"{ String::from(s) }"#
+)]
+fn cached_timed_refresh(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_refresh() {
+    assert!(cached_timed_refresh("true"));
+    {
+        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert!(cached_timed_refresh("true"));
+    {
+        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_refresh("true"));
+    {
+        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(4));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[cached(
+    size = 2,
+    time = 1,
+    time_refresh = true,
+    key = "String",
+    convert = r#"{ String::from(s) }"#
+)]
+fn cached_timed_sized_refresh(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_sized_refresh() {
+    assert!(cached_timed_sized_refresh("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert!(cached_timed_sized_refresh("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(4));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}

@@ -105,8 +105,9 @@ use std::time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed cache with a TTL of 60s
+/// that refreshes the entry TTL on cache hit,
 /// and a `(String, String)` cache key
-#[cached(time=60)]
+#[cached(time=60, time_refresh=true)]
 fn keyed(a: String, b: String) -> usize {
     let size = a.len() + b.len();
     sleep(Duration::new(size as u64, 0));
