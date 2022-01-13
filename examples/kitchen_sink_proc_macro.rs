@@ -148,6 +148,13 @@ fn with_cached_flag_option(a: String) -> Option<Return<String>> {
     Some(Return::new(a))
 }
 
+// A simple cache that expires after a second. We'll keep the
+// value fresh by priming it in a separate thread.
+#[cached(time = 1)]
+fn expires_for_priming(a: i32) -> i32 {
+    a
+}
+
 // NOTE:
 // The following fails with compilation error
 // ```
@@ -311,5 +318,42 @@ pub fn main() {
         // make sure the cache-lock is dropped
     }
 
-    println!("done!");
+    println!("\n ** refresh by priming **");
+    let h = std::thread::spawn(|| {
+        for _ in 1..6 {
+            expires_for_priming_prime_cache(1);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for n in 1..6 {
+        assert_eq!(1, expires_for_priming(1));
+        {
+            let c = EXPIRES_FOR_PRIMING.lock().unwrap();
+            assert_eq!(n, c.cache_hits().unwrap());
+            assert_eq!(0, c.cache_misses().unwrap());
+            println!(
+                "primed cache hits: {}, misses: {}",
+                c.cache_hits().unwrap(),
+                c.cache_misses().unwrap()
+            )
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    h.join().unwrap();
+    println!("now wait for expiration");
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert_eq!(1, expires_for_priming(1));
+    {
+        let c = EXPIRES_FOR_PRIMING.lock().unwrap();
+        assert_eq!(5, c.cache_hits().unwrap());
+        assert_eq!(1, c.cache_misses().unwrap());
+        println!(
+            "primed cache hits: {}, misses: {}",
+            c.cache_hits().unwrap(),
+            c.cache_misses().unwrap()
+        )
+    }
+
+    println!("\ndone!");
 }
