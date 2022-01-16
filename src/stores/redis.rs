@@ -1,13 +1,14 @@
 use super::Cached;
-use redis_rs::{Client, Commands, RedisResult};
+use futures::executor;
+use redis::{AsyncCommands, Client, RedisResult};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::env;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-#[cfg(feature = "async")]
+use tokio::runtime::Handle;
+use tokio::task;
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
 /// Cache store optionally bound by time
@@ -17,10 +18,10 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 #[derive(Debug)]
 pub struct RedisCache<K, V> {
     pub(super) store: Vec<V>,
-    pub(super) client: Client,
     pub(super) seconds: Option<u64>,
     pub(super) hits: u64,
     pub(super) misses: u64,
+    client: Client,
     prefix: String,
     _phantom: PhantomData<K>,
 }
@@ -29,36 +30,19 @@ const ENV_KEY: &str = "REDIS_CS";
 const PREFIX: &str = "cached_key_prefix-";
 
 impl<K, V> RedisCache<K, V>
-where
-    K: Display,
-    V: Serialize + DeserializeOwned + Clone,
+    where
+        K: Display,
+        V: Serialize + DeserializeOwned + Clone,
 {
-    fn get_connection_string() -> String {
-        env::var(ENV_KEY).unwrap_or_else(|_| {
-            panic!(
-                "Environment variable for Redis connection string is missing, please set {} env var.",
-                ENV_KEY
-            )
-        })
-    }
-
-    fn get_client() -> Client {
-        redis_rs::Client::open(Self::get_connection_string()).expect("Cannot connect to Redis")
-    }
-
     /// Creates an empty `RedisCache` definition
     pub fn new() -> Self {
         Self {
             store: vec![],
-            client: Self::get_client(),
             seconds: None,
             hits: 0,
             misses: 0,
-            prefix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                .to_string(),
+            client: Self::get_client(None),
+            prefix: Self::generate_prefix(),
             _phantom: Default::default(),
         }
     }
@@ -67,25 +51,52 @@ where
     pub fn with_lifespan(seconds: u64) -> Self {
         Self {
             store: vec![],
-            client: Self::get_client(),
             seconds: Some(seconds),
             hits: 0,
             misses: 0,
-            prefix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                .to_string(),
+            client: Self::get_client(None),
+            prefix: Self::generate_prefix(),
             _phantom: Default::default(),
         }
     }
 
-    fn generate_prefix(&self) -> String {
-        format!("{}{}-", PREFIX, self.prefix)
+    /// Set the prefix for the keys
+    pub fn set_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.to_string();
+        self
+    }
+
+    /// Set the connection string for redis
+    pub fn set_connection_string(mut self, cs: &str) -> Self {
+        self.client = Self::get_client(cs.to_string());
+        self
+    }
+
+    fn get_client(cs: impl Into<Option<String>>) -> Client {
+        let cs = cs.into().unwrap_or_else(|| {
+            env::var(ENV_KEY).unwrap_or_else(|_| {
+                panic!(
+                    "Environment variable for Redis connection string is missing, please set {} env var.",
+                    ENV_KEY
+                )
+            })
+        }
+        );
+
+        redis::Client::open(cs).expect("Cannot connect to Redis")
+    }
+
+    fn generate_prefix() -> String {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        format!("{}{}-", PREFIX, timestamp)
     }
 
     fn generate_key(&self, key: &K) -> String {
-        format!("{}{}", self.generate_prefix(), key)
+        format!("{}{}", self.prefix, key)
     }
 
     fn clean_up(&mut self) {
@@ -98,19 +109,25 @@ where
         &mut self.store[index]
     }
 
-    fn base_get(&self, key: &K) -> Option<String> {
-        let mut con = self.client.get_connection().unwrap();
-        let val: RedisResult<String> = con.get(self.generate_key(key));
+    async fn base_get(&self, key: K) -> Option<String> {
+        let val: RedisResult<String> = executor::block_on(async {
+            let mut con = self.client.get_async_connection().await.unwrap();
+            con.get(self.generate_key(&key)).await
+        });
         val.ok()
     }
 
-    fn base_set(&self, key: &K, val: &V) {
-        let mut con = self.client.get_connection().unwrap();
-        let generated_key = self.generate_key(key);
+    async fn base_set(&self, key: K, val: V) {
+        let mut con = self.client.get_async_connection().await.unwrap();
+        let generated_key = self.generate_key(&key);
 
         match self.seconds {
             None => con
-                .set::<String, String, String>(generated_key, serde_json::to_string(&val).unwrap())
+                .set::<String, String, String>(
+                    generated_key,
+                    serde_json::to_string(&val).unwrap(),
+                )
+                .await
                 .unwrap(),
             Some(s) => con
                 .set_ex::<String, String, String>(
@@ -118,15 +135,16 @@ where
                     serde_json::to_string(&val).unwrap(),
                     s as usize,
                 )
+                .await
                 .unwrap(),
         };
     }
 }
 
 impl<K, V> Default for RedisCache<K, V>
-where
-    K: Display,
-    V: Serialize + DeserializeOwned + Clone,
+    where
+        K: Display,
+        V: Serialize + DeserializeOwned + Clone,
 {
     fn default() -> Self {
         Self::new()
@@ -134,14 +152,18 @@ where
 }
 
 impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
-where
-    K: Display,
-    V: Serialize + DeserializeOwned + Clone,
+    where
+        K: Display + Clone,
+        V: Serialize + DeserializeOwned + Clone,
 {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         self.clean_up();
 
-        match self.base_get(key) {
+        let handle = Handle::current();
+
+        let val = handle.block_on(async { self.base_get(key.clone()).await });
+
+        match val {
             Some(val) => {
                 self.hits += 1;
                 Some(self.base_vec_fill(&val))
@@ -156,7 +178,9 @@ where
     fn cache_get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.clean_up();
 
-        match self.base_get(key) {
+        let val = task::spawn_blocking(async { self.base_get(key.clone()).await });
+
+        match val {
             Some(val) => {
                 self.hits += 1;
                 Some(self.base_vec_fill(&val))
@@ -170,16 +194,22 @@ where
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         self.clean_up();
-        let old_val = self
-            .base_get(&key)
-            .map(|val| serde_json::from_str(&val).unwrap());
-        self.base_set(&key, &val);
-        old_val
+        executor::block_on(async {
+            let old_val = self
+                .base_get(key.clone())
+                .await
+                .map(|val| serde_json::from_str(&val).unwrap());
+            self.base_set(key, val).await;
+            old_val
+        })
     }
 
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         self.clean_up();
-        match self.base_get(&key) {
+
+        let val = task::spawn_blocking(async { self.base_get(key.clone()).await });
+
+        match val {
             Some(val) => {
                 self.hits += 1;
                 self.base_vec_fill(&val)
@@ -187,7 +217,9 @@ where
             None => {
                 self.misses += 1;
                 let val = f();
-                self.base_set(&key, &val);
+                executor::block_on(async {
+                    self.base_set(key, val.clone()).await;
+                });
                 let index = self.store.len();
                 self.store.push(val);
                 &mut self.store[index]
@@ -197,22 +229,53 @@ where
 
     fn cache_remove(&mut self, key: &K) -> Option<V> {
         self.clean_up();
-        let mut con = self.client.get_connection().unwrap();
-        self.base_get(key).map(|val| {
-            con.del::<String, ()>(self.generate_key(key)).unwrap();
-            serde_json::from_str(&val).unwrap()
+
+        // let x = handle.spawn(async move {
+        //     let mut con = self.client.get_async_connection().await.unwrap();
+        //     self.base_get(key.clone()).await.map(|val| {
+        //         executor::block_on(async {
+        //             con.del::<String, ()>(self.generate_key(key)).await.unwrap();
+        //         });
+        //         serde_json::from_str(&val).unwrap()
+        //     })
+        // });
+        //
+        // let x = task::spawn_blocking(|| {
+        //     let mut con = self.client.get_async_connection().await.unwrap();
+        //         self.base_get(key.clone()).await.map(|val| {
+        //             executor::block_on(async {
+        //                 con.del::<String, ()>(self.generate_key(key)).await.unwrap();
+        //             });
+        //             serde_json::from_str(&val).unwrap()
+        //         })
+        // })
+
+        executor::block_on(async {
+            let mut con = self.client.get_async_connection().await.unwrap();
+            self.base_get(key.clone()).await.map(|val| {
+                executor::block_on(async {
+                    con.del::<String, ()>(self.generate_key(key)).await.unwrap();
+                });
+                serde_json::from_str(&val).unwrap()
+            })
         })
     }
 
     fn cache_clear(&mut self) {
+        // copied from https://stackoverflow.com/questions/4006324/how-to-atomically-delete-keys-matching-a-pattern-using-redis#comment39607023_16974060
+        const REDIS_LUA_BATCH_DELETE_CMD: &str = "local keys = redis.call('keys', ARGV[1]) \n for i=1,#keys,5000 do \n redis.call('del', unpack(keys, i, math.min(i+4999, #keys))) \n end \n return keys";
+
         self.clean_up();
-        let mut con = self.client.get_connection().unwrap();
-        redis_rs::cmd("EVAL")
-            .arg("local keys = redis.call('keys', ARGV[1]) \n for i=1,#keys,5000 do \n redis.call('del', unpack(keys, i, math.min(i+4999, #keys))) \n end \n return keys")
-            .arg(0)
-            .arg(format!("{}*", self.generate_prefix()))
-            .query(&mut con)
-            .unwrap()
+        executor::block_on(async {
+            let mut con = self.client.get_async_connection().await.unwrap();
+            redis::cmd("EVAL")
+                .arg(REDIS_LUA_BATCH_DELETE_CMD)
+                .arg(0)
+                .arg(format!("{}*", self.prefix))
+                .query_async(&mut con)
+                .await
+                .unwrap()
+        })
     }
 
     /// In `RedisCache`, it's an alias to `cache_clear`
@@ -221,15 +284,15 @@ where
     }
 
     fn cache_size(&self) -> usize {
-        let mut con = self.client.get_connection().unwrap();
-        redis_rs::cmd("EVAL")
-            .arg(format!(
-                "return #redis.call('keys', '{}*')",
-                self.generate_prefix()
-            ))
-            .arg(0)
-            .query(&mut con)
-            .unwrap()
+        executor::block_on(async {
+            let mut con = self.client.get_async_connection().await.unwrap();
+            redis::cmd("EVAL")
+                .arg(format!("return #redis.call('keys', '{}*')", self.prefix))
+                .arg(0)
+                .query_async(&mut con)
+                .await
+                .unwrap()
+        })
     }
 
     fn cache_hits(&self) -> Option<u64> {
@@ -252,22 +315,21 @@ where
     }
 }
 
-#[cfg(feature = "async")]
 #[async_trait]
 impl<K, V> CachedAsync<K, V> for RedisCache<K, V>
-where
-    K: Send + Display,
-    V: Serialize + DeserializeOwned + Clone,
+    where
+        K: Send + Display + Sync,
+        V: Serialize + DeserializeOwned + Clone + Sync,
 {
     async fn get_or_set_with<F, Fut>(&mut self, key: K, f: F) -> &mut V
-    where
-        V: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = V> + Send,
+        where
+            V: Send,
+            F: FnOnce() -> Fut + Send,
+            Fut: Future<Output=V> + Send,
     {
-        let mut con = self.client.get_connection().unwrap();
+        let mut con = self.client.get_async_connection().await.unwrap();
         let generated_key = self.generate_key(&key);
-        let val: RedisResult<String> = con.get(generated_key.clone());
+        let val: RedisResult<String> = con.get(generated_key.clone()).await;
         match val {
             Ok(val) => {
                 self.hits += 1;
@@ -275,7 +337,8 @@ where
             }
             Err(_) => {
                 let val = f().await;
-                self.base_set(&key, &val);
+                let val2 = val.clone();
+                self.base_set(key, val2).await;
                 let index = self.store.len();
                 self.store.push(val);
                 &mut self.store[index]
@@ -284,14 +347,14 @@ where
     }
 
     async fn try_get_or_set_with<F, Fut, E>(&mut self, key: K, f: F) -> Result<&mut V, E>
-    where
-        V: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = Result<V, E>> + Send,
+        where
+            V: Send,
+            F: FnOnce() -> Fut + Send,
+            Fut: Future<Output=Result<V, E>> + Send,
     {
-        let mut con = self.client.get_connection().unwrap();
+        let mut con = self.client.get_async_connection().await.unwrap();
         let generated_key = self.generate_key(&key);
-        let val: RedisResult<String> = con.get(generated_key.clone());
+        let val: RedisResult<String> = con.get(generated_key.clone()).await;
         let v = match val {
             Ok(val) => {
                 self.hits += 1;
@@ -299,7 +362,7 @@ where
             }
             Err(_) => {
                 let val = f().await?;
-                self.base_set(&key, &val);
+                self.base_set(key, val.clone()).await;
                 let index = self.store.len();
                 self.store.push(val);
                 &mut self.store[index]

@@ -1,6 +1,7 @@
 /// Limited functionality doubly linked list using Vec as storage.
 #[derive(Clone, Debug)]
-pub struct LRUList<T> {
+
+pub struct LruList<T> {
     values: Vec<ListEntry<T>>,
 }
 
@@ -14,11 +15,11 @@ struct ListEntry<T> {
 /// Free and occupied cells are each linked into a cyclic list with one auxiliary cell.
 /// Cell #0 is on the list of free cells, element #1 is on the list of occupied cells.
 ///
-impl<T> LRUList<T> {
+impl<T> LruList<T> {
     const FREE: usize = 0;
     const OCCUPIED: usize = 1;
 
-    pub(crate) fn with_capacity(capacity: usize) -> LRUList<T> {
+    pub(crate) fn with_capacity(capacity: usize) -> LruList<T> {
         let mut values = Vec::with_capacity(capacity + 2);
         values.push(ListEntry::<T> {
             value: None,
@@ -30,7 +31,7 @@ impl<T> LRUList<T> {
             next: 1,
             prev: 1,
         });
-        LRUList { values }
+        LruList { values }
     }
 
     pub(crate) fn unlink(&mut self, index: usize) {
@@ -105,8 +106,8 @@ impl<T> LRUList<T> {
         });
     }
 
-    pub fn iter(&self) -> LRUListIterator<T> {
-        LRUListIterator::<T> {
+    pub fn iter(&self) -> LruListIterator<T> {
+        LruListIterator::<T> {
             list: self,
             index: Self::OCCUPIED,
         }
@@ -114,17 +115,17 @@ impl<T> LRUList<T> {
 }
 
 #[derive(Debug)]
-pub struct LRUListIterator<'a, T> {
-    list: &'a LRUList<T>,
+pub struct LruListIterator<'a, T> {
+    list: &'a LruList<T>,
     index: usize,
 }
 
-impl<'a, T> Iterator for LRUListIterator<'a, T> {
+impl<'a, T> Iterator for LruListIterator<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.list.values[self.index].next;
-        if next == LRUList::<T>::OCCUPIED {
+        if next == LruList::<T>::OCCUPIED {
             None
         } else {
             let value = self.list.values[next].value.as_ref();
