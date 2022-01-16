@@ -63,6 +63,11 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     fn new_store(capacity: Option<usize>) -> HashMap<K, V> {
         capacity.map_or_else(HashMap::new, HashMap::with_capacity)
     }
+
+    /// Returns a reference to the cache's `store`
+    pub fn get_store(&self) -> &HashMap<K, V> {
+        &self.store
+    }
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
@@ -114,6 +119,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     }
     fn cache_reset(&mut self) {
         self.store = Self::new_store(self.initial_capacity);
+    }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
     }
     fn cache_size(&self) -> usize {
         self.store.len()

@@ -86,6 +86,36 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         }
     }
 
+    /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    pub fn try_with_size(size: usize) -> std::io::Result<SizedCache<K, V>> {
+        if size == 0 {
+            // EINVAL
+            return Err(std::io::Error::from_raw_os_error(22));
+        }
+
+        let store = match RawTable::try_with_capacity(size) {
+            Ok(store) => store,
+            Err(e) => {
+                let errcode = match e {
+                    // ENOMEM
+                    hashbrown::TryReserveError::AllocError { .. } => 12,
+                    // EINVAL
+                    hashbrown::TryReserveError::CapacityOverflow => 22,
+                };
+                return Err(std::io::Error::from_raw_os_error(errcode));
+            }
+        };
+
+        Ok(SizedCache {
+            store,
+            hash_builder: RandomState::new(),
+            order: LRUList::<(K, V)>::with_capacity(size),
+            capacity: size,
+            hits: 0,
+            misses: 0,
+        })
+    }
+
     pub(super) fn iter_order(&self) -> impl Iterator<Item = &(K, V)> {
         self.order.iter()
     }
@@ -245,6 +275,11 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             Ok((false, false, &mut self.order.get_mut(index).1))
         }
     }
+
+    /// Returns a reference to the cache's `order`
+    pub fn get_order(&self) -> &LRUList<(K, V)> {
+        &self.order
+    }
 }
 
 #[cfg(feature = "async")]
@@ -355,7 +390,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
 
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         // try and remove item from mapping, and then from order list if it was in mapping
-        let hash = self.hash(&k);
+        let hash = self.hash(k);
         if let Some(index) = self.remove_index(hash, k) {
             // need to remove the key in the order list
             let (_key, value) = self.order.remove(index);
@@ -372,6 +407,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_reset(&mut self) {
         // SizedCache uses cache_clear because capacity is fixed.
         self.cache_clear();
+    }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
     }
     fn cache_size(&self) -> usize {
         self.store.len()
@@ -454,6 +493,14 @@ mod tests {
         let size = c.cache_size();
         assert_eq!(5, size);
 
+        c.cache_reset_metrics();
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        let size = c.cache_size();
+        assert_eq!(0, hits);
+        assert_eq!(0, misses);
+        assert_eq!(5, size);
+
         assert_eq!(c.cache_set(7, 200), Some(100));
 
         #[derive(Hash, Clone, Eq, PartialEq)]
@@ -497,6 +544,12 @@ mod tests {
             ),
             Some(String::from("b"))
         );
+    }
+
+    #[test]
+    fn try_new() {
+        let c: std::io::Result<SizedCache<i32, i32>> = SizedCache::try_with_size(0);
+        assert_eq!(c.unwrap_err().raw_os_error(), Some(22));
     }
 
     #[test]
@@ -664,17 +717,17 @@ mod tests {
 
         c.cache_reset();
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(10).await?) })
+            .try_get_or_set_with(0, || async { _try_get(10).await })
             .await;
         assert!(res.is_err());
         assert!(c.key_order().next().is_none());
 
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(1).await?) })
+            .try_get_or_set_with(0, || async { _try_get(1).await })
             .await;
         assert_eq!(res.unwrap(), &1);
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .try_get_or_set_with(0, || async { _try_get(5).await })
             .await;
         assert_eq!(res.unwrap(), &1);
     }

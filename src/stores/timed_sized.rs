@@ -21,11 +21,22 @@ pub struct TimedSizedCache<K, V> {
     pub(super) seconds: u64,
     pub(super) hits: u64,
     pub(super) misses: u64,
+    pub(super) refresh: bool,
 }
 
 impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
     pub fn with_size_and_lifespan(size: usize, seconds: u64) -> TimedSizedCache<K, V> {
+        Self::with_size_and_lifespan_and_refresh(size, seconds, false)
+    }
+
+    /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data.
+    /// Also set if the ttl should be refreshed on retriving
+    pub fn with_size_and_lifespan_and_refresh(
+        size: usize,
+        seconds: u64,
+        refresh: bool,
+    ) -> TimedSizedCache<K, V> {
         if size == 0 {
             panic!("`size` of `TimedSizedCache` must be greater than zero.")
         }
@@ -35,7 +46,26 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
             seconds,
             hits: 0,
             misses: 0,
+            refresh,
         }
+    }
+
+    pub fn try_with_size_and_lifespan(
+        size: usize,
+        seconds: u64,
+    ) -> std::io::Result<TimedSizedCache<K, V>> {
+        if size == 0 {
+            // EINVAL
+            return Err(std::io::Error::from_raw_os_error(22));
+        }
+        Ok(TimedSizedCache {
+            store: SizedCache::try_with_size(size)?,
+            size,
+            seconds,
+            hits: 0,
+            misses: 0,
+            refresh: false,
+        })
     }
 
     fn iter_order(&self) -> impl Iterator<Item = &(K, (Instant, V))> {
@@ -58,6 +88,21 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     pub fn value_order(&self) -> impl Iterator<Item = &(Instant, V)> {
         self.iter_order().map(|(_k, v)| v)
     }
+
+    /// Returns if the lifetime is refreshed when the value is retrived
+    pub fn refresh(&self) -> bool {
+        self.refresh
+    }
+
+    /// Sets if the lifetime is refreshed when the value is retrived
+    pub fn set_refresh(&mut self, refresh: bool) {
+        self.refresh = refresh
+    }
+
+    /// Returns a reference to the cache's `store`
+    pub fn get_store(&self) -> &SizedCache<K, (Instant, V)> {
+        &self.store
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
@@ -65,13 +110,16 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         let max_seconds = self.seconds;
         let val = self
             .store
-            .get_if(key, |stamped| stamped.0.elapsed().as_secs() < max_seconds);
+            .get_mut_if(key, |stamped| stamped.0.elapsed().as_secs() < max_seconds);
         match val {
             None => {
                 self.misses += 1;
                 None
             }
             Some(stamped) => {
+                if self.refresh {
+                    stamped.0 = Instant::now();
+                }
                 self.hits += 1;
                 Some(&stamped.1)
             }
@@ -89,6 +137,9 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
                 None
             }
             Some(stamped) => {
+                if self.refresh {
+                    stamped.0 = Instant::now();
+                }
                 self.hits += 1;
                 Some(&mut stamped.1)
             }
@@ -103,6 +154,9 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
                 stamped.0.elapsed().as_secs() < max_seconds
             });
         if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
             self.hits += 1;
         } else {
             self.misses += 1;
@@ -124,6 +178,10 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
     }
     fn cache_reset(&mut self) {
         self.cache_clear();
+    }
+    fn cache_reset_metrics(&mut self) {
+        self.misses = 0;
+        self.hits = 0;
     }
     fn cache_size(&self) -> usize {
         self.store.cache_size()
@@ -168,6 +226,9 @@ where
             })
             .await;
         if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
             self.hits += 1;
         } else {
             self.misses += 1;
@@ -193,6 +254,9 @@ where
             })
             .await?;
         if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
             self.hits += 1;
         } else {
             self.misses += 1;
@@ -287,6 +351,37 @@ mod tests {
             v
         };
         assert_eq!(c.cache_get_or_set_with(1, setter), &1);
+    }
+
+    #[test]
+    fn timed_cache_refresh() {
+        let mut c = TimedSizedCache::with_size_and_lifespan_and_refresh(2, 2, true);
+        assert!(c.refresh());
+        assert_eq!(c.cache_get(&1), None);
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        let hits = c.cache_hits().unwrap();
+        let misses = c.cache_misses().unwrap();
+        assert_eq!(1, hits);
+        assert_eq!(1, misses);
+
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&2), Some(&200));
+        sleep(Duration::new(1, 0));
+        assert_eq!(c.cache_get(&1), Some(&100));
+        sleep(Duration::new(1, 0));
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), None);
+    }
+
+    #[test]
+    fn try_new() {
+        let c: std::io::Result<TimedSizedCache<i32, i32>> =
+            TimedSizedCache::try_with_size_and_lifespan(0, 2);
+        assert_eq!(c.unwrap_err().raw_os_error(), Some(22));
     }
 
     #[test]
@@ -437,22 +532,22 @@ mod tests {
 
         c.cache_reset();
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(10).await?) })
+            .try_get_or_set_with(0, || async { _try_get(10).await })
             .await;
         assert!(res.is_err());
         assert!(c.key_order().next().is_none());
 
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(1).await?) })
+            .try_get_or_set_with(0, || async { _try_get(1).await })
             .await;
         assert_eq!(res.unwrap(), &1);
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .try_get_or_set_with(0, || async { _try_get(5).await })
             .await;
         assert_eq!(res.unwrap(), &1);
         sleep(Duration::new(1, 0));
         let res: Result<&mut usize, String> = c
-            .try_get_or_set_with(0, || async { Ok(_try_get(5).await?) })
+            .try_get_or_set_with(0, || async { _try_get(5).await })
             .await;
         assert_eq!(res.unwrap(), &5);
     }

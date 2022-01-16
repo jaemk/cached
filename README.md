@@ -11,10 +11,12 @@
 `cached` provides implementations of several caching structures as well as a handy macro
 for defining memoized functions.
 
-Memoized functions defined using `#[cached]`/`cached!` macros are thread-safe with the backing function-cache wrapped in a mutex.
-The function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
+Memoized functions defined using `#[cached]`/`#[once]`/`cached!` macros are thread-safe with the backing function-cache wrapped in a mutex/rwlock.
+By default, the function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
-the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`.
+the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`. To synchronize the execution and caching
+of un-cached arguments, specify `#[cached(sync_writes = true)]` /
+`#[once(sync_writes = true)]`.
 
 See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for details about the
 cache stores available.
@@ -24,16 +26,17 @@ cache stores available.
 - `proc_macro`: (default) pull in proc macro support
 - `async`: (default) Add `CachedAsync` trait
 
-## Defining memoized functions using macros, `#[cached]` & `cached!`
+## Defining memoized functions using macros, `#[cached]`, `#[once]`, & `cached!`
 
-**Notes on the proc-macro version #[cached]**
+**Note**:
 
-- enabled by default, but can be disabled by specifying `default-features = false`
-  (if you aren't using it and don't want to have to compile `syn`)
-- supports more features at this point than the original collection of `cached!` macros do
-- works with async functions
-- see `cached_proc_macro/src/lib.rs` and examples below for more details on macro arguments
-- see `examples/kitchen_sink_proc_macro.rs` for basic usage
+> It is recommended you use the two proc-macros (`#[cached]`, `#[once]`) as
+> these work with async functions and have more options/features. See the `examples/`
+> directory for more sample usage, and `cached_proc_macro/src/lib.rs` for the
+> full list of available proc-macro arguments.
+>
+> The declarative macros (`cached!` and co.) are still available, but are less maintained
+> and have fewer features.
 
 The basic usage looks like:
 
@@ -103,8 +106,9 @@ use std::time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed cache with a TTL of 60s
+/// that refreshes the entry TTL on cache hit,
 /// and a `(String, String)` cache key
-#[cached(time=60)]
+#[cached(time=60, time_refresh=true)]
 fn keyed(a: String, b: String) -> usize {
     let size = a.len() + b.len();
     sleep(Duration::new(size as u64, 0));
@@ -140,13 +144,29 @@ fn keyed(a: String) -> Option<usize> {
 
 ```rust
 use cached::proc_macro::cached;
+
+/// Cache an optional function. Only `Some` results are cached.
+/// When called concurrently, duplicate argument-calls will be
+/// synchronized so as to only run once - the remaining concurrent
+/// calls return a cached value.
+#[cached(size=1, option = true, sync_writes = true)]
+fn keyed(a: String) -> Option<usize> {
+    if a == "a" {
+        Some(a.len())
+    } else {
+        None
+    }
+}
+```
+
+```rust
+use cached::proc_macro::cached;
 use cached::Return;
 
 /// Get a `cached::Return` value that indicates
 /// whether the value returned came from the cache:
 /// `cached::Return.was_cached`.
-/// Use an LRU cache with a TTL of 60s
-/// and a `String` cache key.
+/// Use an LRU cache and a `String` cache key.
 #[cached(size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Return<String> {
     Return::new(a)
@@ -220,6 +240,93 @@ fn keyed(a: &str, b: &str) -> usize {
     let size = a.len() + b.len();
     sleep(Duration::new(size as u64, 0));
     size
+}
+```
+
+```rust
+use cached::proc_macro::once;
+
+/// Only cache the initial function call.
+/// Function will be re-executed after the cache
+/// expires (according to `time` seconds).
+/// When no (or expired) cache, concurrent calls
+/// will synchronize (`sync_writes`) so the function
+/// is only executed once.
+#[once(time=10, option = true, sync_writes = true)]
+fn keyed(a: String) -> Option<usize> {
+    if a == "a" {
+        Some(a.len())
+    } else {
+        None
+    }
+}
+```
+
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::cached;
+
+/// Use a timed cache with a TTL of 60s.
+/// Run a background thread to continuously refresh a specific key.
+#[cached(time = 60, key = "String", convert = r#"{ String::from(a) }"#)]
+fn keyed(a: &str) -> usize {
+    a.len()
+}
+pub fn main() {
+    std::thread::spawn(|| {
+        loop {
+            sleep(Duration::from_secs(60));
+            keyed_prime_cache("a");
+        }
+    });
+}
+```
+
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::once;
+
+/// Run a background thread to continuously refresh a singleton.
+#[once]
+fn keyed() -> String {
+    // do some long http request
+    "some data".to_string()
+}
+pub fn main() {
+    std::thread::spawn(|| {
+        loop {
+            sleep(Duration::from_secs(60));
+            keyed_prime_cache();
+        }
+    });
+}
+```
+
+```rust
+use std::thread::sleep;
+use std::time::Duration;
+use cached::proc_macro::cached;
+
+/// Run a background thread to continuously refresh every key of a cache
+#[cached(key = "String", convert = r#"{ String::from(a) }"#)]
+fn keyed(a: &str) -> usize {
+    a.len()
+}
+pub fn main() {
+    std::thread::spawn(|| {
+        loop {
+            sleep(Duration::from_secs(60));
+            let keys: Vec<String> = {
+                // note the cache keys are a tuple of all function arguments, unless it's one value
+                KEYED.lock().unwrap().get_store().keys().map(|k| k.clone()).collect()
+            };
+            for k in &keys {
+                keyed_prime_cache(k);
+            }
+        }
+    });
 }
 ```
 

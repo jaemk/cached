@@ -6,8 +6,10 @@ extern crate cached;
 
 #[cfg(feature = "redis")]
 use cached::RedisCache;
-use cached::{proc_macro::cached, Cached, SizedCache, TimedCache, TimedSizedCache, UnboundCache};
-
+use cached::{
+    proc_macro::cached, proc_macro::once, Cached, SizedCache, TimedCache, TimedSizedCache,
+    UnboundCache,
+};
 use std::thread::{self, sleep};
 use std::time::Duration;
 
@@ -38,10 +40,14 @@ cached! {
 
 #[test]
 fn test_sized_cache() {
-    fib1(20);
+    let last = fib1(20);
     {
         let cache = SIZED_FIB.lock().unwrap();
         assert_eq!(3, cache.cache_size());
+        let items = cache.get_order().iter().collect::<Vec<_>>();
+        assert_eq!(3, items.len());
+        // (arg, result)
+        assert_eq!(&(20, last), items[0]);
     }
 }
 
@@ -171,7 +177,7 @@ fn test_timed_sized_cache() {
 cached! {
     STRING_CACHE_EXPLICIT: SizedCache<(String, String), String> = SizedCache::with_size(1);
     fn string_1(a: String, b: String) -> String = {
-        a + &b
+        a + b.as_ref()
     }
 }
 
@@ -579,6 +585,601 @@ fn test_cached_return_flag_option() {
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
+}
+
+/// should only cache the _first_ value returned for 1 second.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+#[once(time = 1)]
+fn only_cached_once_per_second(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[test]
+fn test_only_cached_once_per_second() {
+    let a = only_cached_once_per_second("a".to_string());
+    let b = only_cached_once_per_second("b".to_string());
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_once_per_second("b".to_string());
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+#[cfg(feature = "async")]
+#[once(time = 1)]
+async fn only_cached_once_per_second_a(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_once_per_second_a() {
+    let a = only_cached_once_per_second_a("a".to_string()).await;
+    let b = only_cached_once_per_second_a("b".to_string()).await;
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_once_per_second_a("b".to_string()).await;
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+/// should only cache the _first_ `Ok` returned.
+/// all arguments are ignored for subsequent calls.
+#[once(result = true)]
+fn only_cached_result_once(s: String, error: bool) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_result_once() {
+    assert!(only_cached_result_once("z".to_string(), true).is_err());
+    let a = only_cached_result_once("a".to_string(), false).unwrap();
+    let b = only_cached_result_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+}
+
+#[cfg(feature = "async")]
+#[once(result = true)]
+async fn only_cached_result_once_a(
+    s: String,
+    error: bool,
+) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_result_once_a() {
+    assert!(only_cached_result_once_a("z".to_string(), true)
+        .await
+        .is_err());
+    let a = only_cached_result_once_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_result_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+}
+
+/// should only cache the _first_ `Ok` returned for 1 second.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+#[once(result = true, time = 1)]
+fn only_cached_result_once_per_second(
+    s: String,
+    error: bool,
+) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_result_once_per_second() {
+    assert!(only_cached_result_once_per_second("z".to_string(), true).is_err());
+    let a = only_cached_result_once_per_second("a".to_string(), false).unwrap();
+    let b = only_cached_result_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+#[cfg(feature = "async")]
+#[once(result = true, time = 1)]
+async fn only_cached_result_once_per_second_a(
+    s: String,
+    error: bool,
+) -> std::result::Result<Vec<String>, u32> {
+    if error {
+        Err(1)
+    } else {
+        Ok(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_result_once_per_second_a() {
+    assert!(only_cached_result_once_per_second_a("z".to_string(), true)
+        .await
+        .is_err());
+    let a = only_cached_result_once_per_second_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_result_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_result_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+/// should only cache the _first_ `Some` returned .
+/// all arguments are ignored for subsequent calls
+#[once(option = true)]
+fn only_cached_option_once(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_option_once() {
+    assert!(only_cached_option_once("z".to_string(), true).is_none());
+    let a = only_cached_option_once("a".to_string(), false).unwrap();
+    let b = only_cached_option_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+}
+
+#[cfg(feature = "async")]
+#[once(option = true)]
+async fn only_cached_option_once_a(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_option_once_a() {
+    assert!(only_cached_option_once_a("z".to_string(), true)
+        .await
+        .is_none());
+    let a = only_cached_option_once_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_option_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+}
+
+/// should only cache the _first_ `Some` returned for 1 second.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+#[once(option = true, time = 1)]
+fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[test]
+fn test_only_cached_option_once_per_second() {
+    assert!(only_cached_option_once_per_second("z".to_string(), true).is_none());
+    let a = only_cached_option_once_per_second("a".to_string(), false).unwrap();
+    let b = only_cached_option_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once_per_second("b".to_string(), false).unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+#[cfg(feature = "async")]
+#[once(option = true, time = 1)]
+async fn only_cached_option_once_per_second_a(s: String, none: bool) -> Option<Vec<String>> {
+    if none {
+        None
+    } else {
+        Some(vec![s])
+    }
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_option_once_per_second_a() {
+    assert!(only_cached_option_once_per_second_a("z".to_string(), true)
+        .await
+        .is_none());
+    let a = only_cached_option_once_per_second_a("a".to_string(), false)
+        .await
+        .unwrap();
+    let b = only_cached_option_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    sleep(Duration::new(1, 0));
+    let b = only_cached_option_once_per_second_a("b".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(vec!["b".to_string()], b);
+}
+
+/// should only cache the _first_ value returned for 2 seconds.
+/// all arguments are ignored for subsequent calls until the
+/// cache expires after a second.
+/// when multiple un-cached tasks are running concurrently, only
+/// _one_ call will be "executed" and all others will be synchronized
+/// to return the cached result of the one call instead of all
+/// concurrently un-cached tasks executing and writing concurrently.
+#[cfg(feature = "async")]
+#[once(time = 2, sync_writes = true)]
+async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_only_cached_once_per_second_sync_writes() {
+    let a = async_std::task::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
+    async_std::task::sleep(Duration::new(1, 0)).await;
+    let b = async_std::task::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
+    assert_eq!(a.await, b.await);
+}
+
+#[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
+fn cached_sync_writes(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[test]
+fn test_cached_sync_writes() {
+    let a = std::thread::spawn(|| cached_sync_writes("a".to_string()));
+    sleep(Duration::new(1, 0));
+    let b = std::thread::spawn(|| cached_sync_writes("b".to_string()));
+    let c = std::thread::spawn(|| cached_sync_writes("c".to_string()));
+    let a = a.join().unwrap();
+    let b = b.join().unwrap();
+    let c = c.join().unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a, c);
+}
+
+#[cfg(feature = "async")]
+#[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
+async fn cached_sync_writes_a(s: String) -> Vec<String> {
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_cached_sync_writes_a() {
+    let a = async_std::task::spawn(cached_sync_writes_a("a".to_string()));
+    async_std::task::sleep(Duration::new(1, 0)).await;
+    let b = async_std::task::spawn(cached_sync_writes_a("b".to_string()));
+    let c = async_std::task::spawn(cached_sync_writes_a("c".to_string()));
+    let a = a.await;
+    assert_eq!(a, b.await);
+    assert_eq!(a, c.await);
+}
+
+#[cached(size = 2)]
+fn cached_smartstring(s: smartstring::alias::String) -> smartstring::alias::String {
+    if s == "very stringy" {
+        smartstring::alias::String::from("equal")
+    } else {
+        smartstring::alias::String::from("not equal")
+    }
+}
+
+#[test]
+fn test_cached_smartstring() {
+    smartstring::validate();
+
+    let mut string = smartstring::alias::String::new();
+    string.push_str("very stringy");
+    assert_eq!("equal", cached_smartstring(string.clone()));
+    {
+        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert_eq!("equal", cached_smartstring(string.clone()));
+    {
+        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    let string = smartstring::alias::String::from("also stringy");
+    assert_eq!("not equal", cached_smartstring(string));
+    {
+        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(2));
+    }
+}
+
+#[cached(
+    size = 2,
+    key = "smartstring::alias::String",
+    convert = r#"{ smartstring::alias::String::from(s) }"#
+)]
+fn cached_smartstring_from_str(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_smartstring_from_str() {
+    smartstring::validate();
+
+    assert!(cached_smartstring_from_str("true"));
+    {
+        let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert!(cached_smartstring_from_str("true"));
+    {
+        let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert!(!cached_smartstring_from_str("false"));
+    {
+        let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(2));
+    }
+}
+
+#[cached(
+    time = 1,
+    time_refresh = true,
+    key = "String",
+    convert = r#"{ String::from(s) }"#
+)]
+fn cached_timed_refresh(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_refresh() {
+    assert!(cached_timed_refresh("true"));
+    {
+        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert!(cached_timed_refresh("true"));
+    {
+        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_refresh("true"));
+    {
+        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(4));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[cached(
+    size = 2,
+    time = 1,
+    time_refresh = true,
+    key = "String",
+    convert = r#"{ String::from(s) }"#
+)]
+fn cached_timed_sized_refresh(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_sized_refresh() {
+    assert!(cached_timed_sized_refresh("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    assert!(cached_timed_sized_refresh("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(4));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[cached(
+    size = 2,
+    time = 1,
+    time_refresh = true,
+    key = "String",
+    convert = r#"{ String::from(s) }"#
+)]
+fn cached_timed_sized_refresh_prime(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_sized_refresh_prime() {
+    assert!(cached_timed_sized_refresh_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+    assert!(cached_timed_sized_refresh_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
+
+    // stats unchanged (other than this new hit) since we kept priming
+    assert!(cached_timed_sized_refresh_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(2));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[cached(size = 2, time = 1, key = "String", convert = r#"{ String::from(s) }"#)]
+fn cached_timed_sized_prime(s: &str) -> bool {
+    s == "true"
+}
+
+#[test]
+fn test_cached_timed_sized_prime() {
+    assert!(cached_timed_sized_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+    assert!(cached_timed_sized_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_prime_prime_cache("true"));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(cached_timed_sized_prime_prime_cache("true"));
+
+    // stats unchanged (other than this new hit) since we kept priming
+    assert!(cached_timed_sized_prime("true"));
+    {
+        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        assert_eq!(cache.cache_hits(), Some(2));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+#[once]
+fn once_for_priming() -> bool {
+    true
+}
+
+#[test]
+fn test_once_for_priming() {
+    assert!(once_for_priming_prime_cache());
+    {
+        let cache = ONCE_FOR_PRIMING.read().unwrap();
+        assert!(cache.is_some());
+    }
+}
+
+#[cached]
+fn mutable_args(mut a: i32, mut b: i32) -> (i32, i32) {
+    a += 1;
+    b += 1;
+    (a, b)
+}
+
+#[test]
+fn test_mutable_args() {
+    assert_eq!((2, 2), mutable_args(1, 1));
+    assert_eq!((2, 2), mutable_args(1, 1));
+}
+
+#[cached]
+fn mutable_args_str(mut a: String) -> String {
+    a.push_str("-ok");
+    a
+}
+
+#[test]
+fn test_mutable_args_str() {
+    assert_eq!("a-ok", mutable_args_str(String::from("a")));
+    assert_eq!("a-ok", mutable_args_str(String::from("a")));
+}
+
+#[once]
+fn mutable_args_once(mut a: i32, mut b: i32) -> (i32, i32) {
+    a += 1;
+    b += 1;
+    (a, b)
+}
+
+#[test]
+fn test_mutable_args_once() {
+    assert_eq!((2, 2), mutable_args_once(1, 1));
+    assert_eq!((2, 2), mutable_args_once(1, 1));
+    assert_eq!((2, 2), mutable_args_once(5, 6));
 }
 
 #[cfg(feature = "redis")]
