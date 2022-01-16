@@ -1,5 +1,6 @@
 use crate::Cached;
 use std::cmp::Eq;
+#[cfg(feature = "async")]
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;

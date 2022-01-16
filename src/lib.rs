@@ -341,7 +341,7 @@ pub fn main() {
 }
 ```
 
-```rust,no_run
+```rust,ignore
 #[macro_use] extern crate cached;
 use std::thread::sleep;
 use std::time::Duration;

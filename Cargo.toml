@@ -18,7 +18,7 @@ travis-ci = { repository = "jaemk/cached", branch = "master" }
 default = ["proc_macro", "async"]
 proc_macro = ["async-mutex", "async-rwlock", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "async-trait"]
-redis = ["redis_rs", "redis_rs/tls", "serde", "serde_json"]
+redis = ["redis_rs", "redis_rs/tls", "serde", "serde_json", "proc_macro"]
 
 [dependencies.hashbrown]
 version = "0.11.2"

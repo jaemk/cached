@@ -94,7 +94,7 @@ where
 
     fn base_vec_fill(&mut self, val: &str) -> &mut V {
         let index = self.store.len();
-        self.store.push(serde_json::from_str(&val).unwrap());
+        self.store.push(serde_json::from_str(val).unwrap());
         &mut self.store[index]
     }
 
@@ -198,7 +198,7 @@ where
     fn cache_remove(&mut self, key: &K) -> Option<V> {
         self.clean_up();
         let mut con = self.client.get_connection().unwrap();
-        self.base_get(&key).map(|val| {
+        self.base_get(key).map(|val| {
             con.del::<String, ()>(self.generate_key(key)).unwrap();
             serde_json::from_str(&val).unwrap()
         })
