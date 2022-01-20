@@ -280,6 +280,16 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     pub fn get_order(&self) -> &LRUList<(K, V)> {
         &self.order
     }
+
+    pub fn retain<F: Fn(&K, &V) -> bool>(&mut self, keep: F) {
+        let remove_keys = self
+            .iter_order()
+            .filter_map(|(k, v)| if !keep(k, v) { Some(k.clone()) } else { None })
+            .collect::<Vec<_>>();
+        for k in remove_keys {
+            self.cache_remove(&k);
+        }
+    }
 }
 
 #[cfg(feature = "async")]

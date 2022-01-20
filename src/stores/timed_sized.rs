@@ -104,6 +104,13 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     pub fn get_store(&self) -> &SizedCache<K, (Instant, V)> {
         &self.store
     }
+
+    /// Remove any expired values from the cache
+    pub fn flush(&mut self) {
+        let seconds = self.seconds;
+        self.store
+            .retain(|_, (instant, _)| instant.elapsed().as_secs() < seconds);
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
@@ -523,6 +530,21 @@ mod tests {
         // still around until we try to get
         assert_eq!(1, c.cache_size());
         assert_eq!(None, c.cache_get_mut(&1));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn flush_expired() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // still around until we flush
+        assert_eq!(1, c.cache_size());
+        c.flush();
         assert_eq!(0, c.cache_size());
     }
 
