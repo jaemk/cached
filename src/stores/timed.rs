@@ -10,7 +10,7 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
 /// Enum used for defining the status of time-cached values
 #[derive(Debug)]
-enum Status {
+pub(super) enum Status {
     NotFound,
     Found,
     Expired,
@@ -176,10 +176,22 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let stamped = (Instant::now(), val);
-        self.store.insert(key, stamped).map(|(_, v)| v)
+        self.store.insert(key, stamped).and_then(|(instant, v)| {
+            if instant.elapsed().as_secs() < self.seconds {
+                Some(v)
+            } else {
+                None
+            }
+        })
     }
     fn cache_remove(&mut self, k: &K) -> Option<V> {
-        self.store.remove(k).map(|(_, v)| v)
+        self.store.remove(k).and_then(|(instant, v)| {
+            if instant.elapsed().as_secs() < self.seconds {
+                Some(v)
+            } else {
+                None
+            }
+        })
     }
     fn cache_clear(&mut self) {
         self.store.clear();
@@ -383,6 +395,63 @@ mod tests {
 
         assert_eq!(Some(100), c.cache_remove(&1));
         assert_eq!(2, c.cache_size());
+    }
+
+    #[test]
+    fn remove_expired() {
+        let mut c = TimedCache::with_lifespan(1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(None, c.cache_remove(&1));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn insert_expired() {
+        let mut c = TimedCache::with_lifespan(1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(1, c.cache_size());
+        assert_eq!(None, c.cache_set(1, 300));
+        assert_eq!(1, c.cache_size());
+    }
+
+    #[test]
+    fn get_expired() {
+        let mut c = TimedCache::with_lifespan(1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // still around until we try to get
+        assert_eq!(1, c.cache_size());
+        assert_eq!(None, c.cache_get(&1));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn get_mut_expired() {
+        let mut c = TimedCache::with_lifespan(1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // still around until we try to get
+        assert_eq!(1, c.cache_size());
+        assert_eq!(None, c.cache_get_mut(&1));
+        assert_eq!(0, c.cache_size());
     }
 
     #[test]
