@@ -1,4 +1,4 @@
-name: Rust
+name: format-lint-build-test
 
 on:
   push:
