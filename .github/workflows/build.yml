@@ -1,4 +1,4 @@
-name: format-lint-build-test
+name: build
 
 on:
   push:
