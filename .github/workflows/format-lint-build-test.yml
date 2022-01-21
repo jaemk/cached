@@ -16,8 +16,34 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
+
+    - name: Cache cargo dir
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-cargo-dir
+      with:
+        path: ~/.cargo
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ env.cache-name }}-
+          ${{ runner.os }}-build-
+          ${{ runner.os }}-
+
+    - name: Cache target dir
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-target-dir
+      with:
+        path: ./target
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ env.cache-name }}-
+          ${{ runner.os }}-build-
+          ${{ runner.os }}-
+
     - run: ./lint-test.sh
       shell: bash
