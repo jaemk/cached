@@ -1,0 +1,24 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Formatting
+      run: cargo fmt --check
+    - name: Lint
+      run: cargo clippy
+    - name: Run tests
+      run: cargo test --verbose --all-targets --all-features
