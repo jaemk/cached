@@ -16,9 +16,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
-    - name: Formatting
-      run: cargo fmt --check
-    - name: Lint
-      run: cargo clippy
-    - name: Run tests
-      run: cargo test --verbose --all-targets --all-features
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+    - run: cargo fmt --check
+    - run: cargo clippy
+    - run: cargo test --verbose --all-targets --all-features
