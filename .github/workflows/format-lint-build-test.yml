@@ -19,6 +19,5 @@ jobs:
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-    - run: cargo fmt --check
-    - run: cargo clippy
-    - run: cargo test --verbose --all-targets --all-features
+    - run: ./lint-test.sh
+      shell: bash
