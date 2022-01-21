@@ -3,6 +3,8 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Convert to github actions
+- Update build status badge to link to github actions
 ## Removed
 
 ## [0.30.0]
