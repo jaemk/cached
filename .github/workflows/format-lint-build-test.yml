@@ -45,5 +45,7 @@ jobs:
           ${{ runner.os }}-build-
           ${{ runner.os }}-
 
+    - run: cargo install cargo-readme
+
     - run: ./lint-test.sh
       shell: bash
