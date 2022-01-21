@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.30.0]
+## Added
+- Add flush method to TimedSize and TimedSized caches
+## Changed
+- Fix timed/timed-sized cache-get/insert/remove to remove and not
+  return expired values
+## Removed
+
 ## [0.29.0] / [cached_proc_macro[0.9.0]]
 ## Added
 - proc-macro: support arguments of the wrapped function being prefixed with `mut`
