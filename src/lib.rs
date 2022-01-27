@@ -1,5 +1,5 @@
 /*!
-[![Build Status](https://travis-ci.org/jaemk/cached.svg?branch=master)](https://travis-ci.org/jaemk/cached)
+[![Build Status](https://github.com/jaemk/cached/actions/workflows/build.yml/badge.svg)](https://github.com/jaemk/cached/actions/workflows/build.yml)
 [![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached)
 [![docs](https://docs.rs/cached/badge.svg)](https://docs.rs/cached)
 

@@ -4,6 +4,16 @@
 ## Added
 - Support of Redis cache store type
 ## Changed
+- Convert to github actions
+- Update build status badge to link to github actions
+## Removed
+
+## [0.30.0]
+## Added
+- Add flush method to TimedSize and TimedSized caches
+## Changed
+- Fix timed/timed-sized cache-get/insert/remove to remove and not
+  return expired values
 ## Removed
 
 ## [0.29.0] / [cached_proc_macro[0.9.0]]

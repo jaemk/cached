@@ -1123,9 +1123,13 @@ fn test_cached_timed_sized_prime() {
     // stats unchanged (other than this new hit) since we kept priming
     assert!(cached_timed_sized_prime("true"));
     {
-        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        let mut cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(2));
         assert_eq!(cache.cache_misses(), Some(1));
+        assert!(cache.cache_size() > 0);
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        cache.flush();
+        assert_eq!(cache.cache_size(), 0);
     }
 }
 

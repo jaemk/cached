@@ -1,4 +1,5 @@
 use super::{Cached, SizedCache};
+use crate::stores::timed::Status;
 use std::cmp::Eq;
 use std::hash::Hash;
 use std::time::Instant;
@@ -103,45 +104,78 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     pub fn get_store(&self) -> &SizedCache<K, (Instant, V)> {
         &self.store
     }
+
+    /// Remove any expired values from the cache
+    pub fn flush(&mut self) {
+        let seconds = self.seconds;
+        self.store
+            .retain(|_, (instant, _)| instant.elapsed().as_secs() < seconds);
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
-        let max_seconds = self.seconds;
-        let val = self
-            .store
-            .get_mut_if(key, |stamped| stamped.0.elapsed().as_secs() < max_seconds);
-        match val {
-            None => {
+        let status = {
+            let mut val = self.store.get_mut_if(key, |_| true);
+            if let Some(&mut (instant, _)) = val.as_mut() {
+                if instant.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        *instant = Instant::now();
+                    }
+                    Status::Found
+                } else {
+                    Status::Expired
+                }
+            } else {
+                Status::NotFound
+            }
+        };
+        match status {
+            Status::NotFound => {
                 self.misses += 1;
                 None
             }
-            Some(stamped) => {
-                if self.refresh {
-                    stamped.0 = Instant::now();
-                }
+            Status::Found => {
                 self.hits += 1;
-                Some(&stamped.1)
+                self.store.cache_get(key).map(|stamped| &stamped.1)
+            }
+            Status::Expired => {
+                self.misses += 1;
+                self.store.cache_remove(key);
+                None
             }
         }
     }
 
     fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
-        let max_seconds = self.seconds;
-        let val = self
-            .store
-            .get_mut_if(key, |stamped| stamped.0.elapsed().as_secs() < max_seconds);
-        match val {
-            None => {
+        let status = {
+            let mut val = self.store.get_mut_if(key, |_| true);
+            if let Some(&mut (instant, _)) = val.as_mut() {
+                if instant.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        *instant = Instant::now();
+                    }
+                    Status::Found
+                } else {
+                    Status::Expired
+                }
+            } else {
+                Status::NotFound
+            }
+        };
+        match status {
+            Status::NotFound => {
                 self.misses += 1;
                 None
             }
-            Some(stamped) => {
-                if self.refresh {
-                    stamped.0 = Instant::now();
-                }
+            Status::Found => {
                 self.hits += 1;
-                Some(&mut stamped.1)
+                self.store.cache_get_mut(key).map(|stamped| &mut stamped.1)
+            }
+            Status::Expired => {
+                self.misses += 1;
+                self.store.cache_remove(key);
+                None
             }
         }
     }
@@ -166,12 +200,24 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let stamped = self.store.cache_set(key, (Instant::now(), val));
-        stamped.map(|stamped| stamped.1)
+        stamped.and_then(|(instant, v)| {
+            if instant.elapsed().as_secs() < self.seconds {
+                Some(v)
+            } else {
+                None
+            }
+        })
     }
 
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         let stamped = self.store.cache_remove(k);
-        stamped.map(|stamped| stamped.1)
+        stamped.and_then(|(instant, v)| {
+            if instant.elapsed().as_secs() < self.seconds {
+                Some(v)
+            } else {
+                None
+            }
+        })
     }
     fn cache_clear(&mut self) {
         self.store.cache_clear();
@@ -427,6 +473,78 @@ mod tests {
         assert_eq!(1, c.cache_size());
 
         assert_eq!(Some(300), c.cache_remove(&3));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn remove_expired() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(None, c.cache_remove(&1));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn insert_expired() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(1, c.cache_size());
+        assert_eq!(None, c.cache_set(1, 300));
+        assert_eq!(1, c.cache_size());
+    }
+
+    #[test]
+    fn get_expired() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // still around until we try to get
+        assert_eq!(1, c.cache_size());
+        assert_eq!(None, c.cache_get(&1));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn get_mut_expired() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // still around until we try to get
+        assert_eq!(1, c.cache_size());
+        assert_eq!(None, c.cache_get_mut(&1));
+        assert_eq!(0, c.cache_size());
+    }
+
+    #[test]
+    fn flush_expired() {
+        let mut c = TimedSizedCache::with_size_and_lifespan(3, 1);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_size(), 1);
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // still around until we flush
+        assert_eq!(1, c.cache_size());
+        c.flush();
         assert_eq!(0, c.cache_size());
     }
 
