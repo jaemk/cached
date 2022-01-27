@@ -1,14 +1,12 @@
 use super::Cached;
-use futures::executor;
-use redis::{AsyncCommands, Client, RedisResult};
+use redis::{Client, Commands, RedisResult};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::env;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::runtime::Handle;
-use tokio::task;
+#[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
 /// Cache store optionally bound by time
@@ -30,9 +28,9 @@ const ENV_KEY: &str = "REDIS_CS";
 const PREFIX: &str = "cached_key_prefix-";
 
 impl<K, V> RedisCache<K, V>
-    where
-        K: Display,
-        V: Serialize + DeserializeOwned + Clone,
+where
+    K: Display,
+    V: Serialize + DeserializeOwned + Clone,
 {
     /// Creates an empty `RedisCache` definition
     pub fn new() -> Self {
@@ -109,25 +107,19 @@ impl<K, V> RedisCache<K, V>
         &mut self.store[index]
     }
 
-    async fn base_get(&self, key: K) -> Option<String> {
-        let val: RedisResult<String> = executor::block_on(async {
-            let mut con = self.client.get_async_connection().await.unwrap();
-            con.get(self.generate_key(&key)).await
-        });
+    fn base_get(&self, key: K) -> Option<String> {
+        let mut con = self.client.get_connection().unwrap();
+        let val: RedisResult<String> = con.get(self.generate_key(&key));
         val.ok()
     }
 
-    async fn base_set(&self, key: K, val: V) {
-        let mut con = self.client.get_async_connection().await.unwrap();
+    fn base_set(&self, key: K, val: V) {
+        let mut con = self.client.get_connection().unwrap();
         let generated_key = self.generate_key(&key);
 
         match self.seconds {
             None => con
-                .set::<String, String, String>(
-                    generated_key,
-                    serde_json::to_string(&val).unwrap(),
-                )
-                .await
+                .set::<String, String, String>(generated_key, serde_json::to_string(&val).unwrap())
                 .unwrap(),
             Some(s) => con
                 .set_ex::<String, String, String>(
@@ -135,16 +127,15 @@ impl<K, V> RedisCache<K, V>
                     serde_json::to_string(&val).unwrap(),
                     s as usize,
                 )
-                .await
                 .unwrap(),
         };
     }
 }
 
 impl<K, V> Default for RedisCache<K, V>
-    where
-        K: Display,
-        V: Serialize + DeserializeOwned + Clone,
+where
+    K: Display,
+    V: Serialize + DeserializeOwned + Clone,
 {
     fn default() -> Self {
         Self::new()
@@ -152,16 +143,14 @@ impl<K, V> Default for RedisCache<K, V>
 }
 
 impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
-    where
-        K: Display + Clone,
-        V: Serialize + DeserializeOwned + Clone,
+where
+    K: Display + Clone,
+    V: Serialize + DeserializeOwned + Clone,
 {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
         self.clean_up();
 
-        let handle = Handle::current();
-
-        let val = handle.block_on(async { self.base_get(key.clone()).await });
+        let val = self.base_get(key.clone());
 
         match val {
             Some(val) => {
@@ -178,7 +167,7 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
     fn cache_get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.clean_up();
 
-        let val = task::spawn_blocking(async { self.base_get(key.clone()).await });
+        let val = self.base_get(key.clone());
 
         match val {
             Some(val) => {
@@ -194,20 +183,17 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         self.clean_up();
-        executor::block_on(async {
-            let old_val = self
-                .base_get(key.clone())
-                .await
-                .map(|val| serde_json::from_str(&val).unwrap());
-            self.base_set(key, val).await;
-            old_val
-        })
+        let old_val = self
+            .base_get(key.clone())
+            .map(|val| serde_json::from_str(&val).unwrap());
+        self.base_set(key, val);
+        old_val
     }
 
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         self.clean_up();
 
-        let val = task::spawn_blocking(async { self.base_get(key.clone()).await });
+        let val = self.base_get(key.clone());
 
         match val {
             Some(val) => {
@@ -217,9 +203,7 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
             None => {
                 self.misses += 1;
                 let val = f();
-                executor::block_on(async {
-                    self.base_set(key, val.clone()).await;
-                });
+                self.base_set(key, val.clone());
                 let index = self.store.len();
                 self.store.push(val);
                 &mut self.store[index]
@@ -229,35 +213,10 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
 
     fn cache_remove(&mut self, key: &K) -> Option<V> {
         self.clean_up();
-
-        // let x = handle.spawn(async move {
-        //     let mut con = self.client.get_async_connection().await.unwrap();
-        //     self.base_get(key.clone()).await.map(|val| {
-        //         executor::block_on(async {
-        //             con.del::<String, ()>(self.generate_key(key)).await.unwrap();
-        //         });
-        //         serde_json::from_str(&val).unwrap()
-        //     })
-        // });
-        //
-        // let x = task::spawn_blocking(|| {
-        //     let mut con = self.client.get_async_connection().await.unwrap();
-        //         self.base_get(key.clone()).await.map(|val| {
-        //             executor::block_on(async {
-        //                 con.del::<String, ()>(self.generate_key(key)).await.unwrap();
-        //             });
-        //             serde_json::from_str(&val).unwrap()
-        //         })
-        // })
-
-        executor::block_on(async {
-            let mut con = self.client.get_async_connection().await.unwrap();
-            self.base_get(key.clone()).await.map(|val| {
-                executor::block_on(async {
-                    con.del::<String, ()>(self.generate_key(key)).await.unwrap();
-                });
-                serde_json::from_str(&val).unwrap()
-            })
+        let mut con = self.client.get_connection().unwrap();
+        self.base_get(key.clone()).map(|val| {
+            con.del::<String, ()>(self.generate_key(key)).unwrap();
+            serde_json::from_str(&val).unwrap()
         })
     }
 
@@ -266,16 +225,13 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
         const REDIS_LUA_BATCH_DELETE_CMD: &str = "local keys = redis.call('keys', ARGV[1]) \n for i=1,#keys,5000 do \n redis.call('del', unpack(keys, i, math.min(i+4999, #keys))) \n end \n return keys";
 
         self.clean_up();
-        executor::block_on(async {
-            let mut con = self.client.get_async_connection().await.unwrap();
-            redis::cmd("EVAL")
-                .arg(REDIS_LUA_BATCH_DELETE_CMD)
-                .arg(0)
-                .arg(format!("{}*", self.prefix))
-                .query_async(&mut con)
-                .await
-                .unwrap()
-        })
+        let mut con = self.client.get_connection().unwrap();
+        redis::cmd("EVAL")
+            .arg(REDIS_LUA_BATCH_DELETE_CMD)
+            .arg(0)
+            .arg(format!("{}*", self.prefix))
+            .query(&mut con)
+            .unwrap()
     }
 
     /// In `RedisCache`, it's an alias to `cache_clear`
@@ -284,15 +240,12 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
     }
 
     fn cache_size(&self) -> usize {
-        executor::block_on(async {
-            let mut con = self.client.get_async_connection().await.unwrap();
-            redis::cmd("EVAL")
-                .arg(format!("return #redis.call('keys', '{}*')", self.prefix))
-                .arg(0)
-                .query_async(&mut con)
-                .await
-                .unwrap()
-        })
+        let mut con = self.client.get_connection().unwrap();
+        redis::cmd("EVAL")
+            .arg(format!("return #redis.call('keys', '{}*')", self.prefix))
+            .arg(0)
+            .query(&mut con)
+            .unwrap()
     }
 
     fn cache_hits(&self) -> Option<u64> {
@@ -315,21 +268,22 @@ impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
     }
 }
 
+#[cfg(feature = "async")]
 #[async_trait]
 impl<K, V> CachedAsync<K, V> for RedisCache<K, V>
-    where
-        K: Send + Display + Sync,
-        V: Serialize + DeserializeOwned + Clone + Sync,
+where
+    K: Send + Display,
+    V: Serialize + DeserializeOwned + Clone,
 {
     async fn get_or_set_with<F, Fut>(&mut self, key: K, f: F) -> &mut V
-        where
-            V: Send,
-            F: FnOnce() -> Fut + Send,
-            Fut: Future<Output=V> + Send,
+    where
+        V: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
     {
-        let mut con = self.client.get_async_connection().await.unwrap();
+        let mut con = self.client.get_connection().unwrap();
         let generated_key = self.generate_key(&key);
-        let val: RedisResult<String> = con.get(generated_key.clone()).await;
+        let val: RedisResult<String> = con.get(generated_key.clone());
         match val {
             Ok(val) => {
                 self.hits += 1;
@@ -337,8 +291,7 @@ impl<K, V> CachedAsync<K, V> for RedisCache<K, V>
             }
             Err(_) => {
                 let val = f().await;
-                let val2 = val.clone();
-                self.base_set(key, val2).await;
+                self.base_set(key, val.clone());
                 let index = self.store.len();
                 self.store.push(val);
                 &mut self.store[index]
@@ -347,14 +300,14 @@ impl<K, V> CachedAsync<K, V> for RedisCache<K, V>
     }
 
     async fn try_get_or_set_with<F, Fut, E>(&mut self, key: K, f: F) -> Result<&mut V, E>
-        where
-            V: Send,
-            F: FnOnce() -> Fut + Send,
-            Fut: Future<Output=Result<V, E>> + Send,
+    where
+        V: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
     {
-        let mut con = self.client.get_async_connection().await.unwrap();
+        let mut con = self.client.get_connection().unwrap();
         let generated_key = self.generate_key(&key);
-        let val: RedisResult<String> = con.get(generated_key.clone()).await;
+        let val: RedisResult<String> = con.get(generated_key.clone());
         let v = match val {
             Ok(val) => {
                 self.hits += 1;
@@ -362,7 +315,7 @@ impl<K, V> CachedAsync<K, V> for RedisCache<K, V>
             }
             Err(_) => {
                 let val = f().await?;
-                self.base_set(key, val.clone()).await;
+                self.base_set(key, val.clone());
                 let index = self.store.len();
                 self.store.push(val);
                 &mut self.store[index]

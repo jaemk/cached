@@ -18,7 +18,7 @@ travis-ci = { repository = "jaemk/cached", branch = "master" }
 default = ["proc_macro", "tokio"]
 proc_macro = ["async-mutex", "async-rwlock", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "async-trait"]
-tokio_redis = ["async", "redis", "redis/tokio-native-tls-comp", "redis/tokio-comp", "serde", "serde_json"]
+sync_redis = ["redis", "serde", "serde_json"]
 
 [dependencies.hashbrown]
 version = "0.11.2"
@@ -83,4 +83,4 @@ members = ["cached_proc_macro"]
 
 [[example]]
 name = "redis"
-required-features = ["tokio_redis"]
+required-features = ["sync_redis", "proc_macro"]

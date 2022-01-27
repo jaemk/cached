@@ -16,7 +16,7 @@ mod timed_sized;
 mod unbound;
 
 #[cfg(feature = "redis")]
-pub use redis::RedisCache;
+pub use crate::stores::redis::RedisCache;
 pub use sized::SizedCache;
 pub use timed::TimedCache;
 pub use timed_sized::TimedSizedCache;

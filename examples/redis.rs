@@ -9,21 +9,15 @@ extern crate cached;
 
 use cached::proc_macro::cached;
 use cached::RedisCache;
+use std::io;
+use std::io::Write;
 use std::time::Duration;
-
-fn sleep_secs(secs: u64) {
-    std::thread::sleep(Duration::from_secs(secs));
-}
 
 cached! {
     SLOW_FN: RedisCache<u64, ()> = RedisCache::with_lifespan(30);
     fn cached_sleep_secs(secs: u64) -> () = {
         std::thread::sleep(Duration::from_secs(secs));
     }
-}
-
-async fn async_sleep_secs(secs: u64) {
-    tokio::time::sleep(Duration::from_secs(secs)).await;
 }
 
 cached! {
@@ -36,19 +30,22 @@ cached! {
 #[tokio::main]
 async fn main() {
     if cfg!(feature = "redis") {
-        println!("sleeping for 2 seconds");
-
-        async_sleep_secs(2).await;
-        println!("first cached sleeping for 2 seconds");
+        print!("first async call with a 2 seconds sleep...");
+        io::stdout().flush().unwrap();
         cached_async_sleep_secs(2).await;
-        println!("second cached sleeping for 2 seconds");
+        println!("done");
+        print!("second async call with a 2 seconds sleep (it should be fast)...");
+        io::stdout().flush().unwrap();
         cached_async_sleep_secs(2).await;
+        println!("done");
 
-        println!("sleeping for 2 seconds");
-        sleep_secs(2);
-        println!("first cached sleeping for 2 seconds");
+        print!("first sync call with a 2 seconds sleep...");
+        io::stdout().flush().unwrap();
         cached_sleep_secs(2);
-        println!("second cached sleeping for 2 seconds");
+        println!("done");
+        print!("second sync call with a 2 seconds sleep (it should be fast)...");
+        io::stdout().flush().unwrap();
         cached_sleep_secs(2);
+        println!("done");
     }
 }
