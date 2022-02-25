@@ -438,12 +438,15 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // make prime cached function doc comment
+    let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            /// Cached static
+            // Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_mutex::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_mutex::Mutex::new(#cache_create));
-            /// Cached function
+            // Cached function
             #visibility #signature_no_muts {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -456,7 +459,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -465,9 +469,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            /// Cached static
+            // Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
-            /// Cached function
+            // Cached function
             #visibility #signature_no_muts {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -480,7 +484,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -868,12 +873,15 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // make prime cached function doc comment
+    let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            /// Cached static
+            // Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_rwlock::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_rwlock::RwLock::new(#cache_create));
-            /// Cached function
+            // Cached function
             #visibility #signature_no_muts {
                 let now = std::time::Instant::now();
                 {
@@ -885,7 +893,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 let now = std::time::Instant::now();
                 #prime_do_set_return_block
@@ -893,9 +902,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            /// Cached static
+            // Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::RwLock::new(#cache_create));
-            /// Cached function
+            // Cached function
             #visibility #signature_no_muts {
                 let now = std::time::Instant::now();
                 {
@@ -907,7 +916,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 let now = std::time::Instant::now();
                 #prime_do_set_return_block
@@ -1386,16 +1396,19 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // make prime cached function doc comment
+    let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            /// Cached static
+            // Cached static
             ::cached::lazy_static::lazy_static! {
                 #visibility static ref #cache_ident: ::cached::async_once::AsyncOnce<#cache_ty> = ::cached::async_once::AsyncOnce::new(async move { #cache_create });
             }
             // #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_once::AsyncOnce<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(move || ::cached::async_once::AsyncOnce::new(async move { #cache_create }));
             // #visibility static #cache_ident: ::cached::async_once_cell::Lazy<#cache_ty> = ::cached::async_once_cell::Lazy::new(async move { #cache_create });
-            /// Cached function
+            // Cached function
             #visibility #signature_no_muts {
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
@@ -1408,7 +1421,8 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
@@ -1417,9 +1431,9 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            /// Cached static
+            // Cached static
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<#cache_ty> = ::cached::once_cell::sync::Lazy::new(|| #cache_create);
-            /// Cached function
+            // Cached function
             #visibility #signature_no_muts {
                 use cached::IOCached;
                 let key = #key_convert_block;
@@ -1432,7 +1446,8 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::IOCached;
                 let key = #key_convert_block;
