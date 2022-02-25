@@ -15,7 +15,7 @@ concurrent calls of long-running functions with the same arguments will each exe
 the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`. To synchronize the execution and caching
 of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_writes = true)]` (not supported by `#[io_cached]`.
 
-See [`cached::stores` docs](stores) cache stores available.
+See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 
 **Features**
 
