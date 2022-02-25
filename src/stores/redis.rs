@@ -1,4 +1,4 @@
-use super::IOCached;
+use crate::IOCached;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Display;

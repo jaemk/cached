@@ -1,4 +1,4 @@
-use crate::{Cached, IOCached};
+use crate::Cached;
 use std::cmp::Eq;
 #[cfg(feature = "async")]
 use std::collections::hash_map::Entry;

@@ -12,7 +12,7 @@
 - Add `#[io_cached]` proc macro for defining cached functions backed
   by stores that implement `IOCached`/`IOCachedAsync`
 ## Changed
-- Convert to github actions
+- Convert from travis-ci to github actions
 - Update build status badge to link to github actions
 ## Removed
 
