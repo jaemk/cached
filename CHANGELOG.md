@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 ## Added
-- Support of Redis cache store type
+## Changed
+## Removed
+
+## [0.31.0] / [cached_proc_macro[0.10.0]]
+## Added
+- `IOCached` and `IOCachedAsync` traits
+- `RedisCache` and `AsyncRedisCache` store types
+- Add `#[io_cached]` proc macro for defining cached functions backed
+  by stores that implement `IOCached`/`IOCachedAsync`
 ## Changed
 - Convert to github actions
 - Update build status badge to link to github actions
