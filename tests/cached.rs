@@ -5,8 +5,8 @@ Full tests of macro-defined functions
 extern crate cached;
 
 use cached::{
-    proc_macro::cached, proc_macro::io_cached, proc_macro::once, Cached, SizedCache, TimedCache,
-    TimedSizedCache, UnboundCache,
+    proc_macro::cached, proc_macro::once, Cached, SizedCache, TimedCache, TimedSizedCache,
+    UnboundCache,
 };
 use std::thread::{self, sleep};
 use std::time::Duration;
@@ -1187,6 +1187,7 @@ fn test_mutable_args_once() {
 #[cfg(feature = "redis_store")]
 mod redis_tests {
     use super::*;
+    use cached::proc_macro::io_cached;
     use cached::RedisCache;
     use thiserror::Error;
 

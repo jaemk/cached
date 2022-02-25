@@ -99,7 +99,7 @@ fn keyed(a: String) -> Option<usize> {
 
 ----
 
-```rust
+```rust,no_run,ignore
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
 use thiserror::Error;
