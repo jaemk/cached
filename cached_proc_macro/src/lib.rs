@@ -138,7 +138,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         })
         .collect::<Vec<_>>();
     let output_string = output_parts.join("::");
-    let output_type_display = output_ts.to_string().replace(" ", "");
+    let output_type_display = output_ts.to_string().replace(' ', "");
 
     // if `with_cached_flag = true`, then enforce that the return type
     // is something wrapped in `Return`. Either `Return<T>` or the
@@ -576,7 +576,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         })
         .collect::<Vec<_>>();
     let output_string = output_parts.join("::");
-    let output_type_display = output_ts.to_string().replace(" ", "");
+    let output_type_display = output_ts.to_string().replace(' ', "");
 
     // if `with_cached_flag = true`, then enforce that the return type
     // is something wrapped in `Return`. Either `Return<T>` or the

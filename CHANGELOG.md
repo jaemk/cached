@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- Support of Redis cache store type
 ## Changed
 - Convert to github actions
 - Update build status badge to link to github actions
