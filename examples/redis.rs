@@ -33,6 +33,18 @@ fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     Ok(())
 }
 
+// If not `cache_prefix_block` is specified, then the function name
+// is used to create a prefix for cache keys used by this function
+#[io_cached(
+    redis = true,
+    time = 30,
+    map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
+)]
+fn cached_sleep_secs_example_2(secs: u64) -> Result<(), ExampleError> {
+    std::thread::sleep(Duration::from_secs(secs));
+    Ok(())
+}
+
 #[io_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     type = "cached::AsyncRedisCache<u64, String>",
@@ -91,7 +103,16 @@ async fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
-    print!("2. first async call with a 2 seconds sleep...");
+    print!("2. first sync call with a 2 seconds sleep...");
+    io::stdout().flush().unwrap();
+    cached_sleep_secs_example_2(2).unwrap();
+    println!("done");
+    print!("second sync call with a 2 seconds sleep (it should be fast)...");
+    io::stdout().flush().unwrap();
+    cached_sleep_secs_example_2(2).unwrap();
+    println!("done");
+
+    print!("3. first async call with a 2 seconds sleep...");
     io::stdout().flush().unwrap();
     async_cached_sleep_secs(2).await.unwrap();
     println!("done");
@@ -101,7 +122,7 @@ async fn main() {
     println!("done");
 
     async_cached_sleep_secs_config_prime_cache(2).await.unwrap();
-    print!("3. first primed async call with a 2 seconds sleep (should be fast)...");
+    print!("4. first primed async call with a 2 seconds sleep (should be fast)...");
     io::stdout().flush().unwrap();
     async_cached_sleep_secs_config(2).await.unwrap();
     println!("done");
