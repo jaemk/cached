@@ -11,6 +11,9 @@ keywords = ["caching", "cache", "memoize", "lru"]
 license = "MIT"
 edition = "2018"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [badges]
 travis-ci = { repository = "jaemk/cached", branch = "master" }
 
