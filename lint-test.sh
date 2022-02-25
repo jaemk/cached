@@ -25,7 +25,9 @@ else
     for ex in examples/*; do
         base=$(basename $ex)
         exname=$(echo $base | cut -d . -f 1)
-        cargo run --example $exname --all-features
+        if [[ -z "$RUN_EXAMPLE_NAME" ]] || [[ "$RUN_EXAMPLE_NAME" = "$exname" ]]; then
+            cargo run --example $exname --all-features
+        fi
     done
 fi
 
