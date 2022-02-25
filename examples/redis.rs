@@ -1,51 +1,112 @@
 /*
-Have Redis or run it locally via docker with the following command: `docker run --rm --name cached-tests -p 6379:6379 -d redis`
-Set the required env variable and run this example. Similar to the following command:
-`REDIS_CS=redis://127.0.0.1/ cargo run --example redis --features=redis`
+Start a redis docker image if you don't already have it running locally:
+    docker run --rm --name cached-redis-example -p 6379:6379 -d redis
+Set the required env variable and run this example and run with required features:
+    CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 cargo run --example redis --features "async redis_store redis_tokio"
+Cleanup the redis docker container:
+    docker rm -f cached-redis-example
  */
 
-#[macro_use]
-extern crate cached;
-
-use cached::proc_macro::cached;
-use cached::RedisCache;
+use cached::proc_macro::io_cached;
+use cached::AsyncRedisCache;
 use std::io;
 use std::io::Write;
 use std::time::Duration;
+use thiserror::Error;
 
-cached! {
-    SLOW_FN: RedisCache<u64, ()> = RedisCache::with_lifespan(30);
-    fn cached_sleep_secs(secs: u64) -> () = {
-        std::thread::sleep(Duration::from_secs(secs));
-    }
+#[derive(Error, Debug, PartialEq, Clone)]
+enum ExampleError {
+    #[error("error with redis cache `{0}`")]
+    RedisError(String),
 }
 
-cached! {
-    SLOW_ASYNC_FN: RedisCache<u64, ()> = RedisCache::with_lifespan(30);
-    async fn cached_async_sleep_secs(secs: u64) -> () = {
-        tokio::time::sleep(Duration::from_secs(secs)).await;
+// When the macro constructs your RedisCache instance, the connection string
+// will be pulled from the env var: `CACHED_REDIS_CONNECTION_STRING`;
+#[io_cached(
+    redis = true,
+    time = 30,
+    cache_prefix_block = r##"{ "cache-redis-example-1" }"##,
+    map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
+)]
+fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
+    std::thread::sleep(Duration::from_secs(secs));
+    Ok(())
+}
+
+#[io_cached(
+    map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
+    type = "cached::AsyncRedisCache<u64, String>",
+    create = r##" {
+        AsyncRedisCache::new("cache_redis_example_cached_sleep_secs", 1)
+            .set_refresh(true)
+            .build()
+            .await
+            .expect("error building example redis cache")
+    } "##
+)]
+async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
+    std::thread::sleep(Duration::from_secs(secs));
+    Ok(secs.to_string())
+}
+
+struct Config {
+    conn_str: String,
+}
+impl Config {
+    fn load() -> Self {
+        Self {
+            conn_str: std::env::var("CACHED_REDIS_CONNECTION_STRING").unwrap(),
+        }
     }
+}
+lazy_static::lazy_static! {
+    static ref CONFIG: Config = Config::load();
+}
+
+#[io_cached(
+    map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
+    type = "cached::AsyncRedisCache<u64, String>",
+    create = r##" {
+        AsyncRedisCache::new("cache_redis_example_cached_sleep_secs_config", 1)
+            .set_refresh(true)
+            .set_connection_string(&CONFIG.conn_str)
+            .build()
+            .await
+            .expect("error building example redis cache")
+    } "##
+)]
+async fn async_cached_sleep_secs_config(secs: u64) -> Result<String, ExampleError> {
+    std::thread::sleep(Duration::from_secs(secs));
+    Ok(secs.to_string())
 }
 
 #[tokio::main]
 async fn main() {
-    if cfg!(feature = "redis") {
-        print!("first async call with a 2 seconds sleep...");
-        io::stdout().flush().unwrap();
-        cached_async_sleep_secs(2).await;
-        println!("done");
-        print!("second async call with a 2 seconds sleep (it should be fast)...");
-        io::stdout().flush().unwrap();
-        cached_async_sleep_secs(2).await;
-        println!("done");
+    print!("1. first sync call with a 2 seconds sleep...");
+    io::stdout().flush().unwrap();
+    cached_sleep_secs(2).unwrap();
+    println!("done");
+    print!("second sync call with a 2 seconds sleep (it should be fast)...");
+    io::stdout().flush().unwrap();
+    cached_sleep_secs(2).unwrap();
+    println!("done");
 
-        print!("first sync call with a 2 seconds sleep...");
-        io::stdout().flush().unwrap();
-        cached_sleep_secs(2);
-        println!("done");
-        print!("second sync call with a 2 seconds sleep (it should be fast)...");
-        io::stdout().flush().unwrap();
-        cached_sleep_secs(2);
-        println!("done");
-    }
+    print!("2. first async call with a 2 seconds sleep...");
+    io::stdout().flush().unwrap();
+    async_cached_sleep_secs(2).await.unwrap();
+    println!("done");
+    print!("second async call with a 2 seconds sleep (it should be fast)...");
+    io::stdout().flush().unwrap();
+    async_cached_sleep_secs(2).await.unwrap();
+    println!("done");
+
+    async_cached_sleep_secs_config_prime_cache(2).await.unwrap();
+    print!("3. first primed async call with a 2 seconds sleep (should be fast)...");
+    io::stdout().flush().unwrap();
+    async_cached_sleep_secs_config(2).await.unwrap();
+    println!("done");
+    print!("second async call with a 2 seconds sleep (it should be fast)...");
+    io::stdout().flush().unwrap();
+    async_cached_sleep_secs_config(2).await.unwrap();
+    println!("done");
 }

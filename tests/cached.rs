@@ -4,11 +4,9 @@ Full tests of macro-defined functions
 #[macro_use]
 extern crate cached;
 
-#[cfg(feature = "redis")]
-use cached::RedisCache;
 use cached::{
-    proc_macro::cached, proc_macro::once, Cached, SizedCache, TimedCache, TimedSizedCache,
-    UnboundCache,
+    proc_macro::cached, proc_macro::io_cached, proc_macro::once, Cached, SizedCache, TimedCache,
+    TimedSizedCache, UnboundCache,
 };
 use std::thread::{self, sleep};
 use std::time::Duration;
@@ -1186,71 +1184,159 @@ fn test_mutable_args_once() {
     assert_eq!((2, 2), mutable_args_once(5, 6));
 }
 
-#[cfg(feature = "redis")]
-cached_result! {
-    UNBOUND_REDIS: RedisCache<u32, u32> = RedisCache::new();
-    fn cached_unbound_redis(n: u32) -> Result<u32, ()> = {
-        if n < 5 { Ok(n) } else { Err(()) }
-    }
-}
+#[cfg(feature = "redis_store")]
+mod redis_tests {
+    use super::*;
+    use cached::RedisCache;
+    use thiserror::Error;
 
-#[cfg(feature = "redis")]
-#[test]
-fn test_cached_unbound_redis() {
-    assert!(cached_unbound_redis(2).is_ok());
-    assert!(cached_unbound_redis(4).is_ok());
-    assert!(cached_unbound_redis(6).is_err());
-    assert!(cached_unbound_redis(6).is_err());
-    assert!(cached_unbound_redis(2).is_ok());
-    assert!(cached_unbound_redis(4).is_ok());
-    {
-        let mut cache = UNBOUND_REDIS.lock().unwrap();
-        assert_eq!(2, cache.cache_size());
-        assert_eq!(2, cache.cache_hits().unwrap());
-        assert_eq!(4, cache.cache_misses().unwrap());
-        cache.cache_clear();
+    #[derive(Error, Debug, PartialEq, Clone)]
+    enum TestError {
+        #[error("error with redis cache `{0}`")]
+        RedisError(String),
+        #[error("count `{0}`")]
+        Count(u32),
     }
-}
 
-#[cfg(feature = "redis")]
-cached! {
-    TIMED_REDIS: RedisCache<u32, u32> = RedisCache::with_lifespan(2);
-    fn cached_timed_redis(n: u32) -> u32 = {
-        sleep(Duration::new(3, 0));
-        n
+    #[io_cached(
+        redis = true,
+        time = 1,
+        cache_prefix_block = "{ \"__cached_redis_proc_macro_test_fn_cached_redis\" }",
+        map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
+    )]
+    fn cached_redis(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
     }
-}
 
-#[cfg(feature = "redis")]
-#[test]
-fn test_cached_timed_redis() {
-    cached_timed_redis(1);
-    cached_timed_redis(1);
-    {
-        let cache = TIMED_REDIS.lock().unwrap();
-        assert_eq!(1, cache.cache_misses().unwrap());
-        assert_eq!(1, cache.cache_hits().unwrap());
+    #[test]
+    fn test_cached_redis() {
+        assert_eq!(cached_redis(1), Ok(1));
+        assert_eq!(cached_redis(1), Ok(1));
+        assert_eq!(cached_redis(5), Err(TestError::Count(5)));
+        assert_eq!(cached_redis(6), Err(TestError::Count(6)));
     }
-    sleep(Duration::new(3, 0));
-    cached_timed_redis(1);
-    {
-        let cache = TIMED_REDIS.lock().unwrap();
-        assert_eq!(2, cache.cache_misses().unwrap());
-        assert_eq!(1, cache.cache_hits().unwrap());
+
+    #[io_cached(
+        redis = true,
+        time = 1,
+        with_cached_flag = true,
+        map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
+    )]
+    fn cached_redis_cached_flag(n: u32) -> Result<cached::Return<u32>, TestError> {
+        if n < 5 {
+            Ok(cached::Return::new(n))
+        } else {
+            Err(TestError::Count(n))
+        }
     }
-    {
-        let mut cache = TIMED_REDIS.lock().unwrap();
-        assert_eq!(2, cache.cache_set_lifespan(1).unwrap());
-        cache.cache_clear();
+
+    #[test]
+    fn test_cached_redis_cached_flag() {
+        assert!(!cached_redis_cached_flag(1).unwrap().was_cached);
+        assert!(cached_redis_cached_flag(1).unwrap().was_cached);
+        assert!(cached_redis_cached_flag(5).is_err());
+        assert!(cached_redis_cached_flag(6).is_err());
     }
-    cached_timed_redis(1);
-    cached_timed_redis(1);
-    sleep(Duration::new(1, 0));
-    cached_timed_redis(1);
-    {
-        let mut cache = TIMED_REDIS.lock().unwrap();
-        assert_eq!(4, cache.cache_misses().unwrap());
-        assert_eq!(2, cache.cache_hits().unwrap());
-        cache.cache_clear();
+
+    #[io_cached(
+        map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
+        type = "cached::RedisCache<u32, u32>",
+        create = r##" { RedisCache::new("cache_redis_test_cache_create", 1).set_refresh(true).build().expect("error building redis cache") } "##
+    )]
+    fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_redis_cache_create() {
+        assert_eq!(cached_redis_cache_create(1), Ok(1));
+        assert_eq!(cached_redis_cache_create(1), Ok(1));
+        assert_eq!(cached_redis_cache_create(5), Err(TestError::Count(5)));
+        assert_eq!(cached_redis_cache_create(6), Err(TestError::Count(6)));
+    }
+
+    #[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
+    mod async_redis_tests {
+        use super::*;
+
+        #[io_cached(
+            redis = true,
+            time = 1,
+            cache_prefix_block = "{ \"__cached_redis_proc_macro_test_fn_async_cached_redis\" }",
+            map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
+        )]
+        async fn async_cached_redis(n: u32) -> Result<u32, TestError> {
+            if n < 5 {
+                Ok(n)
+            } else {
+                Err(TestError::Count(n))
+            }
+        }
+
+        #[async_std::test]
+        async fn test_async_cached_redis() {
+            assert_eq!(async_cached_redis(1).await, Ok(1));
+            assert_eq!(async_cached_redis(1).await, Ok(1));
+            assert_eq!(async_cached_redis(5).await, Err(TestError::Count(5)));
+            assert_eq!(async_cached_redis(6).await, Err(TestError::Count(6)));
+        }
+
+        #[io_cached(
+            redis = true,
+            time = 1,
+            with_cached_flag = true,
+            map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
+        )]
+        async fn async_cached_redis_cached_flag(n: u32) -> Result<cached::Return<u32>, TestError> {
+            if n < 5 {
+                Ok(cached::Return::new(n))
+            } else {
+                Err(TestError::Count(n))
+            }
+        }
+
+        #[async_std::test]
+        async fn test_async_cached_redis_cached_flag() {
+            assert!(!async_cached_redis_cached_flag(1).await.unwrap().was_cached);
+            assert!(async_cached_redis_cached_flag(1).await.unwrap().was_cached,);
+            assert!(async_cached_redis_cached_flag(5).await.is_err());
+            assert!(async_cached_redis_cached_flag(6).await.is_err());
+        }
+
+        use cached::AsyncRedisCache;
+        #[io_cached(
+            map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
+            type = "cached::AsyncRedisCache<u32, u32>",
+            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", 1).set_refresh(true).build().await.expect("error building async redis cache") } "##
+        )]
+        async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
+            if n < 5 {
+                Ok(n)
+            } else {
+                Err(TestError::Count(n))
+            }
+        }
+
+        #[async_std::test]
+        async fn test_async_cached_redis_cache_create() {
+            assert_eq!(async_cached_redis_cache_create(1).await, Ok(1));
+            assert_eq!(async_cached_redis_cache_create(1).await, Ok(1));
+            assert_eq!(
+                async_cached_redis_cache_create(5).await,
+                Err(TestError::Count(5))
+            );
+            assert_eq!(
+                async_cached_redis_cache_create(6).await,
+                Err(TestError::Count(6))
+            );
+        }
     }
 }

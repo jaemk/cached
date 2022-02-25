@@ -17,8 +17,10 @@ travis-ci = { repository = "jaemk/cached", branch = "master" }
 [features]
 default = ["proc_macro", "tokio"]
 proc_macro = ["async-mutex", "async-rwlock", "cached_proc_macro", "cached_proc_macro_types"]
-async = ["futures", "async-trait"]
-sync_redis = ["redis", "serde", "serde_json"]
+async = ["futures", "async-trait", "async_once", "lazy_static"]
+redis_store = ["redis", "r2d2", "serde", "serde_json"]
+redis_async_std = ["redis", "r2d2", "serde", "serde_json", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
+redis_tokio = ["redis", "r2d2", "serde", "serde_json", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
 
 [dependencies.hashbrown]
 version = "0.11.2"
@@ -26,6 +28,17 @@ default-features = false
 features = ["raw"]
 
 [dependencies.once_cell]
+version = "1"
+
+[dependencies.lazy_static]
+version = "1"
+optional = true
+
+[dependencies.async_once]
+version = "0.2"
+optional = true
+
+[dependencies.thiserror]
 version = "1"
 
 [dependencies.async-mutex]
@@ -56,10 +69,16 @@ optional = true
 
 [dependencies.redis]
 version = "0.21"
+features = ["r2d2", "aio"]
+optional = true
+
+[dependencies.r2d2]
+version = "0.8"
 optional = true
 
 [dependencies.serde]
 version = "1.0"
+features = ["derive"]
 optional = true
 
 [dependencies.serde_json]
@@ -83,4 +102,4 @@ members = ["cached_proc_macro"]
 
 [[example]]
 name = "redis"
-required-features = ["sync_redis", "proc_macro"]
+required-features = ["redis_store", "proc_macro"]

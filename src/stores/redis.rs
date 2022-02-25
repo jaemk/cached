@@ -1,330 +1,554 @@
-use super::Cached;
-use redis::{Client, Commands, RedisResult};
+use super::IOCached;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::env;
 use std::fmt::Display;
 use std::marker::PhantomData;
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(feature = "async")]
-use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
-/// Cache store optionally bound by time
-///
-/// Values can be timestamped when inserted,
-/// then will be evicted if expired at time of retrieval.
-#[derive(Debug)]
-pub struct RedisCache<K, V> {
-    pub(super) store: Vec<V>,
-    pub(super) seconds: Option<u64>,
-    pub(super) hits: u64,
-    pub(super) misses: u64,
-    client: Client,
+pub struct RedisCacheBuilder<K, V> {
+    seconds: u64,
+    refresh: bool,
     prefix: String,
-    _phantom: PhantomData<K>,
+    connection_string: Option<String>,
+    _phantom_k: PhantomData<K>,
+    _phantom_v: PhantomData<V>,
 }
 
-const ENV_KEY: &str = "REDIS_CS";
-const PREFIX: &str = "cached_key_prefix-";
+const ENV_KEY: &str = "CACHED_REDIS_CONNECTION_STRING";
+const PREFIX_NAMESPACE: &str = "cached-redis-store";
 
-impl<K, V> RedisCache<K, V>
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum RedisCacheBuildError {
+    #[error("redis connection error")]
+    Connection(#[from] redis::RedisError),
+    #[error("redis pool error")]
+    Pool(#[from] r2d2::Error),
+    #[error("Connection string not specified or invalid in env var {env_key:?}: {error:?}")]
+    MissingConnectionString {
+        env_key: String,
+        error: std::env::VarError,
+    },
+}
+
+fn generate_prefix(prefix: &str) -> String {
+    format!("{}:{}", PREFIX_NAMESPACE, prefix)
+}
+
+impl<K, V> RedisCacheBuilder<K, V>
 where
     K: Display,
-    V: Serialize + DeserializeOwned + Clone,
+    V: Serialize + DeserializeOwned,
 {
-    /// Creates an empty `RedisCache` definition
-    pub fn new() -> Self {
+    /// Initialize a `RedisCacheBuilder`
+    pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> RedisCacheBuilder<K, V> {
         Self {
-            store: vec![],
-            seconds: None,
-            hits: 0,
-            misses: 0,
-            client: Self::get_client(None),
-            prefix: Self::generate_prefix(),
-            _phantom: Default::default(),
+            seconds,
+            refresh: false,
+            prefix: generate_prefix(prefix.as_ref()),
+            connection_string: None,
+            _phantom_k: Default::default(),
+            _phantom_v: Default::default(),
         }
     }
 
-    /// Creates a new `RedisCache` with a specified lifespan
-    pub fn with_lifespan(seconds: u64) -> Self {
-        Self {
-            store: vec![],
-            seconds: Some(seconds),
-            hits: 0,
-            misses: 0,
-            client: Self::get_client(None),
-            prefix: Self::generate_prefix(),
-            _phantom: Default::default(),
-        }
+    /// Specify the cache TTL/lifespan in seconds
+    pub fn set_lifespan(mut self, seconds: u64) -> Self {
+        self.seconds = seconds;
+        self
+    }
+
+    /// Specify whether cache hits refresh the TTL
+    pub fn set_refresh(mut self, refresh: bool) -> Self {
+        self.refresh = refresh;
+        self
     }
 
     /// Set the prefix for the keys
-    pub fn set_prefix(mut self, prefix: &str) -> Self {
-        self.prefix = prefix.to_string();
+    pub fn set_prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
+        self.prefix = generate_prefix(prefix.as_ref());
         self
     }
 
     /// Set the connection string for redis
     pub fn set_connection_string(mut self, cs: &str) -> Self {
-        self.client = Self::get_client(cs.to_string());
+        self.connection_string = Some(cs.to_string());
         self
     }
 
-    fn get_client(cs: impl Into<Option<String>>) -> Client {
-        let cs = cs.into().unwrap_or_else(|| {
-            env::var(ENV_KEY).unwrap_or_else(|_| {
-                panic!(
-                    "Environment variable for Redis connection string is missing, please set {} env var.",
-                    ENV_KEY
-                )
-            })
+    /// Return the current connection string or load from the env var: CACHED_REDIS_CONNECTION_STRING
+    pub fn connection_string(&self) -> Result<String, RedisCacheBuildError> {
+        match self.connection_string {
+            Some(ref s) => Ok(s.to_string()),
+            None => {
+                std::env::var(ENV_KEY).map_err(|e| RedisCacheBuildError::MissingConnectionString {
+                    env_key: ENV_KEY.to_string(),
+                    error: e,
+                })
+            }
         }
-        );
-
-        redis::Client::open(cs).expect("Cannot connect to Redis")
     }
 
-    fn generate_prefix() -> String {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .to_string();
-        format!("{}{}-", PREFIX, timestamp)
+    fn create_pool(&self) -> Result<r2d2::Pool<redis::Client>, RedisCacheBuildError> {
+        let s = self.connection_string()?;
+        let client: redis::Client = redis::Client::open(s)?;
+        let pool: r2d2::Pool<redis::Client> = r2d2::Pool::builder().build(client)?;
+        Ok(pool)
+    }
+
+    pub fn build(self) -> Result<RedisCache<K, V>, RedisCacheBuildError> {
+        Ok(RedisCache {
+            seconds: self.seconds,
+            refresh: self.refresh,
+            connection_string: self.connection_string()?,
+            pool: self.create_pool()?,
+            prefix: self.prefix,
+            _phantom_k: self._phantom_k,
+            _phantom_v: self._phantom_v,
+        })
+    }
+}
+
+/// Cache store backed by redis
+///
+/// Values have a ttl applied and enforced by redis.
+pub struct RedisCache<K, V> {
+    pub(super) seconds: u64,
+    pub(super) refresh: bool,
+    pub(super) prefix: String,
+    connection_string: String,
+    pool: r2d2::Pool<redis::Client>,
+    _phantom_k: PhantomData<K>,
+    _phantom_v: PhantomData<V>,
+}
+
+impl<K, V> RedisCache<K, V>
+where
+    K: Display,
+    V: Serialize + DeserializeOwned,
+{
+    #[allow(clippy::new_ret_no_self)]
+    /// Initialize a `RedisCacheBuilder`
+    pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> RedisCacheBuilder<K, V> {
+        RedisCacheBuilder::new(prefix, seconds)
     }
 
     fn generate_key(&self, key: &K) -> String {
         format!("{}{}", self.prefix, key)
     }
 
-    fn clean_up(&mut self) {
-        self.store.clear();
-    }
-
-    fn base_vec_fill(&mut self, val: &str) -> &mut V {
-        let index = self.store.len();
-        self.store.push(serde_json::from_str(val).unwrap());
-        &mut self.store[index]
-    }
-
-    fn base_get(&self, key: K) -> Option<String> {
-        let mut con = self.client.get_connection().unwrap();
-        let val: RedisResult<String> = con.get(self.generate_key(&key));
-        val.ok()
-    }
-
-    fn base_set(&self, key: K, val: V) {
-        let mut con = self.client.get_connection().unwrap();
-        let generated_key = self.generate_key(&key);
-
-        match self.seconds {
-            None => con
-                .set::<String, String, String>(generated_key, serde_json::to_string(&val).unwrap())
-                .unwrap(),
-            Some(s) => con
-                .set_ex::<String, String, String>(
-                    generated_key,
-                    serde_json::to_string(&val).unwrap(),
-                    s as usize,
-                )
-                .unwrap(),
-        };
+    /// Return the redis connection string used
+    pub fn connection_string(&self) -> String {
+        self.connection_string.clone()
     }
 }
 
-impl<K, V> Default for RedisCache<K, V>
+#[derive(Error, Debug)]
+pub enum RedisCacheError {
+    #[error("redis error")]
+    RedisCacheError(#[from] redis::RedisError),
+    #[error("redis pool error")]
+    PoolError(#[from] r2d2::Error),
+    #[error("Error deserializing cached value {cached_value:?}: {error:?}")]
+    CacheDeserializationError {
+        cached_value: String,
+        error: serde_json::Error,
+    },
+    #[error("Error serializing cached value: {error:?}")]
+    CacheSerializationError { error: serde_json::Error },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedRedisValue<V> {
+    value: V,
+}
+
+impl<'de, K, V> IOCached<K, V> for RedisCache<K, V>
 where
     K: Display,
-    V: Serialize + DeserializeOwned + Clone,
+    V: Serialize + DeserializeOwned,
 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+    type Error = RedisCacheError;
 
-impl<'de, K, V> Cached<K, V> for RedisCache<K, V>
-where
-    K: Display + Clone,
-    V: Serialize + DeserializeOwned + Clone,
-{
-    fn cache_get(&mut self, key: &K) -> Option<&V> {
-        self.clean_up();
+    fn cache_get(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let mut pipe = redis::pipe();
+        let key = self.generate_key(key);
 
-        let val = self.base_get(key.clone());
-
-        match val {
-            Some(val) => {
-                self.hits += 1;
-                Some(self.base_vec_fill(&val))
-            }
-            None => {
-                self.misses += 1;
-                None
+        pipe.get(key.clone());
+        if self.refresh {
+            pipe.expire(key, self.seconds as usize).ignore();
+        }
+        // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
+        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        match res.0 {
+            None => Ok(None),
+            Some(s) => {
+                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                    RedisCacheError::CacheDeserializationError {
+                        cached_value: s,
+                        error: e,
+                    }
+                })?;
+                Ok(Some(v.value))
             }
         }
     }
 
-    fn cache_get_mut(&mut self, key: &K) -> Option<&mut V> {
-        self.clean_up();
+    fn cache_set(&self, key: K, val: V) -> Result<Option<V>, RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let mut pipe = redis::pipe();
+        let key = self.generate_key(&key);
 
-        let val = self.base_get(key.clone());
+        let val = CachedRedisValue { value: val };
+        pipe.get(key.clone());
+        pipe.set_ex::<String, String>(
+            key,
+            serde_json::to_string(&val)
+                .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
+            self.seconds as usize,
+        )
+        .ignore();
 
-        match val {
-            Some(val) => {
-                self.hits += 1;
-                Some(self.base_vec_fill(&val))
-            }
-            None => {
-                self.misses += 1;
-                None
-            }
-        }
-    }
-
-    fn cache_set(&mut self, key: K, val: V) -> Option<V> {
-        self.clean_up();
-        let old_val = self
-            .base_get(key.clone())
-            .map(|val| serde_json::from_str(&val).unwrap());
-        self.base_set(key, val);
-        old_val
-    }
-
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
-        self.clean_up();
-
-        let val = self.base_get(key.clone());
-
-        match val {
-            Some(val) => {
-                self.hits += 1;
-                self.base_vec_fill(&val)
-            }
-            None => {
-                self.misses += 1;
-                let val = f();
-                self.base_set(key, val.clone());
-                let index = self.store.len();
-                self.store.push(val);
-                &mut self.store[index]
+        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        match res.0 {
+            None => Ok(None),
+            Some(s) => {
+                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                    RedisCacheError::CacheDeserializationError {
+                        cached_value: s,
+                        error: e,
+                    }
+                })?;
+                Ok(Some(v.value))
             }
         }
     }
 
-    fn cache_remove(&mut self, key: &K) -> Option<V> {
-        self.clean_up();
-        let mut con = self.client.get_connection().unwrap();
-        self.base_get(key.clone()).map(|val| {
-            con.del::<String, ()>(self.generate_key(key)).unwrap();
-            serde_json::from_str(&val).unwrap()
-        })
-    }
+    fn cache_remove(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let mut pipe = redis::pipe();
+        let key = self.generate_key(key);
 
-    fn cache_clear(&mut self) {
-        // copied from https://stackoverflow.com/questions/4006324/how-to-atomically-delete-keys-matching-a-pattern-using-redis#comment39607023_16974060
-        const REDIS_LUA_BATCH_DELETE_CMD: &str = "local keys = redis.call('keys', ARGV[1]) \n for i=1,#keys,5000 do \n redis.call('del', unpack(keys, i, math.min(i+4999, #keys))) \n end \n return keys";
-
-        self.clean_up();
-        let mut con = self.client.get_connection().unwrap();
-        redis::cmd("EVAL")
-            .arg(REDIS_LUA_BATCH_DELETE_CMD)
-            .arg(0)
-            .arg(format!("{}*", self.prefix))
-            .query(&mut con)
-            .unwrap()
-    }
-
-    /// In `RedisCache`, it's an alias to `cache_clear`
-    fn cache_reset(&mut self) {
-        self.cache_clear();
-    }
-
-    fn cache_size(&self) -> usize {
-        let mut con = self.client.get_connection().unwrap();
-        redis::cmd("EVAL")
-            .arg(format!("return #redis.call('keys', '{}*')", self.prefix))
-            .arg(0)
-            .query(&mut con)
-            .unwrap()
-    }
-
-    fn cache_hits(&self) -> Option<u64> {
-        Some(self.hits)
-    }
-
-    fn cache_misses(&self) -> Option<u64> {
-        Some(self.misses)
+        pipe.get(key.clone());
+        pipe.del::<String>(key).ignore();
+        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        match res.0 {
+            None => Ok(None),
+            Some(s) => {
+                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                    RedisCacheError::CacheDeserializationError {
+                        cached_value: s,
+                        error: e,
+                    }
+                })?;
+                Ok(Some(v.value))
+            }
+        }
     }
 
     fn cache_lifespan(&self) -> Option<u64> {
-        self.seconds
+        Some(self.seconds)
     }
 
     fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
-        self.clean_up();
         let old = self.seconds;
-        self.seconds = Some(seconds);
+        self.seconds = seconds;
+        Some(old)
+    }
+
+    fn cache_set_refresh(&mut self, refresh: bool) -> bool {
+        let old = self.refresh;
+        self.refresh = refresh;
         old
     }
 }
 
-#[cfg(feature = "async")]
-#[async_trait]
-impl<K, V> CachedAsync<K, V> for RedisCache<K, V>
-where
-    K: Send + Display,
-    V: Serialize + DeserializeOwned + Clone,
-{
-    async fn get_or_set_with<F, Fut>(&mut self, key: K, f: F) -> &mut V
+#[cfg(all(
+    feature = "async",
+    any(feature = "redis_async_std", feature = "redis_tokio")
+))]
+mod async_redis {
+    use super::*;
+    use {crate::IOCachedAsync, async_trait::async_trait};
+
+    pub struct AsyncRedisCacheBuilder<K, V> {
+        seconds: u64,
+        refresh: bool,
+        prefix: String,
+        connection_string: Option<String>,
+        _phantom_k: PhantomData<K>,
+        _phantom_v: PhantomData<V>,
+    }
+
+    impl<K, V> AsyncRedisCacheBuilder<K, V>
     where
-        V: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = V> + Send,
+        K: Display,
+        V: Serialize + DeserializeOwned,
     {
-        let mut con = self.client.get_connection().unwrap();
-        let generated_key = self.generate_key(&key);
-        let val: RedisResult<String> = con.get(generated_key.clone());
-        match val {
-            Ok(val) => {
-                self.hits += 1;
-                self.base_vec_fill(&val)
+        /// Initialize a `RedisCacheBuilder`
+        pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> AsyncRedisCacheBuilder<K, V> {
+            Self {
+                seconds,
+                refresh: false,
+                prefix: generate_prefix(prefix.as_ref()),
+                connection_string: None,
+                _phantom_k: Default::default(),
+                _phantom_v: Default::default(),
             }
-            Err(_) => {
-                let val = f().await;
-                self.base_set(key, val.clone());
-                let index = self.store.len();
-                self.store.push(val);
-                &mut self.store[index]
+        }
+
+        /// Specify the cache TTL/lifespan in seconds
+        pub fn set_lifespan(mut self, seconds: u64) -> Self {
+            self.seconds = seconds;
+            self
+        }
+
+        /// Specify whether cache hits refresh the TTL
+        pub fn set_refresh(mut self, refresh: bool) -> Self {
+            self.refresh = refresh;
+            self
+        }
+
+        /// Set the prefix for the keys
+        pub fn set_prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
+            self.prefix = generate_prefix(prefix.as_ref());
+            self
+        }
+
+        /// Set the connection string for redis
+        pub fn set_connection_string(mut self, cs: &str) -> Self {
+            self.connection_string = Some(cs.to_string());
+            self
+        }
+
+        /// Return the current connection string or load from the env var: CACHED_REDIS_CONNECTION_STRING
+        pub fn connection_string(&self) -> Result<String, RedisCacheBuildError> {
+            match self.connection_string {
+                Some(ref s) => Ok(s.to_string()),
+                None => std::env::var(ENV_KEY).map_err(|e| {
+                    RedisCacheBuildError::MissingConnectionString {
+                        env_key: ENV_KEY.to_string(),
+                        error: e,
+                    }
+                }),
             }
+        }
+
+        async fn create_multiplexed_connection(
+            &self,
+        ) -> Result<redis::aio::MultiplexedConnection, RedisCacheBuildError> {
+            let s = self.connection_string()?;
+            let client = redis::Client::open(s)?;
+            let conn = client.get_multiplexed_async_connection().await?;
+            Ok(conn)
+        }
+
+        pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
+            Ok(AsyncRedisCache {
+                seconds: self.seconds,
+                refresh: self.refresh,
+                connection_string: self.connection_string()?,
+                multiplexed_connection: self.create_multiplexed_connection().await?,
+                prefix: self.prefix,
+                _phantom_k: self._phantom_k,
+                _phantom_v: self._phantom_v,
+            })
         }
     }
 
-    async fn try_get_or_set_with<F, Fut, E>(&mut self, key: K, f: F) -> Result<&mut V, E>
-    where
-        V: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = Result<V, E>> + Send,
-    {
-        let mut con = self.client.get_connection().unwrap();
-        let generated_key = self.generate_key(&key);
-        let val: RedisResult<String> = con.get(generated_key.clone());
-        let v = match val {
-            Ok(val) => {
-                self.hits += 1;
-                self.base_vec_fill(&val)
-            }
-            Err(_) => {
-                let val = f().await?;
-                self.base_set(key, val.clone());
-                let index = self.store.len();
-                self.store.push(val);
-                &mut self.store[index]
-            }
-        };
+    /// Cache store backed by redis
+    ///
+    /// Values have a ttl applied and enforced by redis.
+    pub struct AsyncRedisCache<K, V> {
+        pub(super) seconds: u64,
+        pub(super) refresh: bool,
+        pub(super) prefix: String,
+        connection_string: String,
+        multiplexed_connection: redis::aio::MultiplexedConnection,
+        _phantom_k: PhantomData<K>,
+        _phantom_v: PhantomData<V>,
+    }
 
-        Ok(v)
+    impl<K, V> AsyncRedisCache<K, V>
+    where
+        K: Display + Send + Sync,
+        V: Serialize + DeserializeOwned + Send + Sync,
+    {
+        #[allow(clippy::new_ret_no_self)]
+        /// Initialize an `AsyncRedisCacheBuilder`
+        pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> AsyncRedisCacheBuilder<K, V> {
+            AsyncRedisCacheBuilder::new(prefix, seconds)
+        }
+
+        fn generate_key(&self, key: &K) -> String {
+            format!("{}{}", self.prefix, key)
+        }
+
+        /// Return the redis connection string used
+        pub fn connection_string(&self) -> String {
+            self.connection_string.clone()
+        }
+    }
+
+    #[async_trait]
+    impl<'de, K, V> IOCachedAsync<K, V> for AsyncRedisCache<K, V>
+    where
+        K: Display + Send + Sync,
+        V: Serialize + DeserializeOwned + Send + Sync,
+    {
+        type Error = RedisCacheError;
+
+        /// Get a cached value
+        async fn cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
+            let mut conn = self.multiplexed_connection.clone();
+            let mut pipe = redis::pipe();
+            let key = self.generate_key(key);
+
+            pipe.get(key.clone());
+            if self.refresh {
+                pipe.expire(key, self.seconds as usize).ignore();
+            }
+            let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+            match res.0 {
+                None => Ok(None),
+                Some(s) => {
+                    let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                        RedisCacheError::CacheDeserializationError {
+                            cached_value: s,
+                            error: e,
+                        }
+                    })?;
+                    Ok(Some(v.value))
+                }
+            }
+        }
+
+        /// Set a cached value
+        async fn cache_set(&self, key: K, val: V) -> Result<Option<V>, Self::Error> {
+            let mut conn = self.multiplexed_connection.clone();
+            let mut pipe = redis::pipe();
+            let key = self.generate_key(&key);
+
+            let val = CachedRedisValue { value: val };
+            pipe.get(key.clone());
+            pipe.set_ex::<String, String>(
+                key,
+                serde_json::to_string(&val)
+                    .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
+                self.seconds as usize,
+            )
+            .ignore();
+
+            let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+            match res.0 {
+                None => Ok(None),
+                Some(s) => {
+                    let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                        RedisCacheError::CacheDeserializationError {
+                            cached_value: s,
+                            error: e,
+                        }
+                    })?;
+                    Ok(Some(v.value))
+                }
+            }
+        }
+
+        /// Remove a cached value
+        async fn cache_remove(&self, key: &K) -> Result<Option<V>, Self::Error> {
+            let mut conn = self.multiplexed_connection.clone();
+            let mut pipe = redis::pipe();
+            let key = self.generate_key(key);
+
+            pipe.get(key.clone());
+            pipe.del::<String>(key).ignore();
+            let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+            match res.0 {
+                None => Ok(None),
+                Some(s) => {
+                    let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                        RedisCacheError::CacheDeserializationError {
+                            cached_value: s,
+                            error: e,
+                        }
+                    })?;
+                    Ok(Some(v.value))
+                }
+            }
+        }
+
+        /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value
+        fn cache_set_refresh(&mut self, refresh: bool) -> bool {
+            let old = self.refresh;
+            self.refresh = refresh;
+            old
+        }
+
+        /// Return the lifespan of cached values (time to eviction)
+        fn cache_lifespan(&self) -> Option<u64> {
+            Some(self.seconds)
+        }
+
+        /// Set the lifespan of cached values, returns the old value
+        fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
+            let old = self.seconds;
+            self.seconds = seconds;
+            Some(old)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        fn now_millis() -> u128 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        }
+
+        #[async_std::test]
+        async fn test_async_redis_cache() {
+            let mut c: AsyncRedisCache<u32, u32> =
+                AsyncRedisCache::new(format!("{}:async-redis-cache-test", now_millis()), 2)
+                    .build()
+                    .await
+                    .unwrap();
+
+            assert!(c.cache_get(&1).await.unwrap().is_none());
+
+            assert!(c.cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.cache_get(&1).await.unwrap().is_some());
+
+            sleep(Duration::new(2, 500000));
+            assert!(c.cache_get(&1).await.unwrap().is_none());
+
+            let old = c.cache_set_lifespan(1).unwrap();
+            assert_eq!(2, old);
+            assert!(c.cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.cache_get(&1).await.unwrap().is_some());
+
+            sleep(Duration::new(1, 600000));
+            assert!(c.cache_get(&1).await.unwrap().is_none());
+
+            c.cache_set_lifespan(10).unwrap();
+            assert!(c.cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.cache_set(2, 100).await.unwrap().is_none());
+            assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
+            assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
+        }
     }
 }
+
+#[cfg(all(
+    feature = "async",
+    any(feature = "redis_async_std", feature = "redis_tokio")
+))]
+pub use async_redis::AsyncRedisCache;
 
 #[cfg(test)]
 /// Cache store tests
@@ -334,119 +558,54 @@ mod tests {
 
     use super::*;
 
+    fn now_millis() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    }
+
     #[test]
     fn redis_cache() {
-        let mut c = RedisCache::with_lifespan(2);
+        let mut c: RedisCache<u32, u32> =
+            RedisCache::new(format!("{}:redis-cache-test", now_millis()), 2)
+                .build()
+                .unwrap();
 
-        assert!(c.cache_get(&1).is_none());
-        let misses = c.cache_misses().unwrap();
-        assert_eq!(1, misses);
+        assert!(c.cache_get(&1).unwrap().is_none());
 
-        assert_eq!(c.cache_set(1, 100), None);
-        assert!(c.cache_get(&1).is_some());
-        let hits = c.cache_hits().unwrap();
-        let misses = c.cache_misses().unwrap();
-        assert_eq!(1, hits);
-        assert_eq!(1, misses);
+        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_get(&1).unwrap().is_some());
 
-        sleep(Duration::new(2, 0));
-        assert!(c.cache_get(&1).is_none());
-        let misses = c.cache_misses().unwrap();
-        assert_eq!(2, misses);
+        sleep(Duration::new(2, 500000));
+        assert!(c.cache_get(&1).unwrap().is_none());
 
         let old = c.cache_set_lifespan(1).unwrap();
         assert_eq!(2, old);
-        assert_eq!(c.cache_set(1, 100), None);
-        assert!(c.cache_get(&1).is_some());
-        let hits = c.cache_hits().unwrap();
-        let misses = c.cache_misses().unwrap();
-        assert_eq!(2, hits);
-        assert_eq!(2, misses);
+        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_get(&1).unwrap().is_some());
 
-        sleep(Duration::new(1, 0));
-        assert!(c.cache_get(&1).is_none());
-        let misses = c.cache_misses().unwrap();
-        assert_eq!(3, misses);
+        sleep(Duration::new(1, 600000));
+        assert!(c.cache_get(&1).unwrap().is_none());
 
-        c.cache_clear();
         c.cache_set_lifespan(10).unwrap();
-        assert_eq!(c.cache_set(1, 100), None);
-        assert_eq!(c.cache_set(2, 100), None);
-        assert_eq!(c.store.len(), 0);
-        assert_eq!(c.cache_get(&1), Some(&100));
-        assert_eq!(c.store.len(), 1);
-        assert_eq!(c.cache_get(&1), Some(&100));
-        assert_eq!(c.store.len(), 1);
-        c.cache_clear();
-    }
-
-    #[test]
-    fn clear() {
-        let mut c = RedisCache::with_lifespan(3600);
-
-        assert_eq!(c.cache_set(1, 100), None);
-        assert_eq!(c.cache_set(2, 200), None);
-        assert_eq!(c.cache_set(3, 300), None);
-        c.cache_clear();
-
-        assert_eq!(0, c.cache_size());
-        c.cache_clear();
-    }
-
-    #[test]
-    fn reset() {
-        let mut c = RedisCache::with_lifespan(100);
-
-        assert_eq!(c.cache_set(1, 100), None);
-        assert_eq!(c.cache_set(2, 200), None);
-        assert_eq!(c.cache_set(3, 300), None);
-        assert_eq!(0, c.store.capacity());
-
-        c.cache_reset();
-
-        assert_eq!(0, c.store.capacity());
-        c.cache_clear();
+        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_set(2, 100).unwrap().is_none());
+        assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
+        assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
     }
 
     #[test]
     fn remove() {
-        let mut c = RedisCache::with_lifespan(3600);
+        let c: RedisCache<u32, u32> =
+            RedisCache::new(format!("{}:redis-cache-test-remove", now_millis()), 3600)
+                .build()
+                .unwrap();
 
-        assert_eq!(c.cache_set(1, 100), None);
-        assert_eq!(c.cache_set(2, 200), None);
-        assert_eq!(c.cache_set(3, 300), None);
+        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_set(2, 200).unwrap().is_none());
+        assert!(c.cache_set(3, 300).unwrap().is_none());
 
-        assert_eq!(Some(100), c.cache_remove(&1));
-        assert_eq!(2, c.cache_size());
-        c.cache_clear();
-    }
-
-    #[test]
-    fn get_or_set_with() {
-        let mut c = RedisCache::with_lifespan(2);
-
-        assert_eq!(c.cache_get_or_set_with(0, || 0), &0);
-        assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
-        assert_eq!(c.cache_get_or_set_with(2, || 2), &2);
-        assert_eq!(c.cache_get_or_set_with(3, || 3), &3);
-        assert_eq!(c.cache_get_or_set_with(4, || 4), &4);
-        assert_eq!(c.cache_get_or_set_with(5, || 5), &5);
-
-        assert_eq!(c.cache_misses(), Some(6));
-
-        assert_eq!(c.cache_get_or_set_with(0, || 0), &0);
-
-        assert_eq!(c.cache_misses(), Some(6));
-
-        assert_eq!(c.cache_get_or_set_with(0, || 42), &0);
-
-        assert_eq!(c.cache_misses(), Some(6));
-
-        sleep(Duration::new(2, 0));
-
-        assert_eq!(c.cache_get_or_set_with(1, || 42), &42);
-
-        assert_eq!(c.cache_misses(), Some(7));
-        c.cache_clear();
+        assert_eq!(100, c.cache_remove(&1).unwrap().unwrap());
     }
 }

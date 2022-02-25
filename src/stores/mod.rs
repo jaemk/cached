@@ -1,4 +1,4 @@
-use crate::Cached;
+use crate::{Cached, IOCached};
 use std::cmp::Eq;
 #[cfg(feature = "async")]
 use std::collections::hash_map::Entry;
@@ -8,19 +8,26 @@ use std::hash::Hash;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
-#[cfg(feature = "redis")]
+#[cfg(feature = "redis_store")]
 mod redis;
 mod sized;
 mod timed;
 mod timed_sized;
 mod unbound;
 
-#[cfg(feature = "redis")]
-pub use crate::stores::redis::RedisCache;
+#[cfg(feature = "redis_store")]
+pub use crate::stores::redis::{RedisCache, RedisCacheError};
 pub use sized::SizedCache;
 pub use timed::TimedCache;
 pub use timed_sized::TimedSizedCache;
 pub use unbound::UnboundCache;
+
+#[cfg(all(
+    feature = "async",
+    feature = "redis_store",
+    any(feature = "redis_async_std", feature = "redis_tokio")
+))]
+pub use crate::stores::redis::AsyncRedisCache;
 
 impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
     fn cache_get(&mut self, k: &K) -> Option<&V> {
