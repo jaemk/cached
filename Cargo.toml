@@ -6,8 +6,8 @@ description = "Generic cache implementations and simplified function memoization
 repository = "https://github.com/jaemk/cached"
 documentation = "https://docs.rs/cached"
 readme = "README.md"
-categories = ["caching"]
-keywords = ["caching", "cache", "memoize", "lru"]
+categories = ["caching", "data-structures"]
+keywords = ["caching", "cache", "memoize", "lru", "macro", "redis"]
 license = "MIT"
 edition = "2018"
 
