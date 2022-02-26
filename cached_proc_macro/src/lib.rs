@@ -5,8 +5,8 @@ use std::ops::Deref;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, parse_str, AttributeArgs, Block, ExprClosure, FnArg, GenericArgument, Ident,
-    ItemFn, Pat, PathArguments, ReturnType, Type,
+    parse_macro_input, parse_quote, parse_str, AttributeArgs, Block, ExprClosure, FnArg,
+    GenericArgument, Ident, ItemFn, Pat, PathArguments, ReturnType, Type,
 };
 
 #[derive(FromMeta)]
@@ -77,7 +77,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ItemFn);
 
     // pull out the parts of the input
-    let _attributes = input.attrs;
+    let mut attributes = input.attrs;
     let visibility = input.vis;
     let signature = input.sig;
     let body = input.block;
@@ -438,12 +438,29 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // make cached static, cached function and prime cached function doc comments
+    let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
+    let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
+    let cache_fn_doc_extra = format!(
+        "This is a cached function that uses the [`{}`] cached static.",
+        cache_ident
+    );
+    if attributes.iter().any(|attr| attr.path.is_ident("doc")) {
+        attributes.push(parse_quote! { #[doc = ""] });
+        attributes.push(parse_quote! { #[doc = "# Caching"] });
+        attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });
+    } else {
+        attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });
+    }
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            /// Cached static
+            // Cached static
+            #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_mutex::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_mutex::Mutex::new(#cache_create));
-            /// Cached function
+            // Cached function
+            #(#attributes)*
             #visibility #signature_no_muts {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -456,7 +473,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -465,9 +483,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            /// Cached static
+            // Cached static
+            #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
-            /// Cached function
+            // Cached function
+            #(#attributes)*
             #visibility #signature_no_muts {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -480,7 +500,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -528,7 +549,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ItemFn);
 
     // pull out the parts of the input
-    let _attributes = input.attrs;
+    let mut attributes = input.attrs;
     let visibility = input.vis;
     let signature = input.sig;
     let body = input.block;
@@ -868,12 +889,29 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // make cached static, cached function and prime cached function doc comments
+    let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
+    let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
+    let cache_fn_doc_extra = format!(
+        "This is a cached function that uses the [`{}`] cached static.",
+        cache_ident
+    );
+    if attributes.iter().any(|attr| attr.path.is_ident("doc")) {
+        attributes.push(parse_quote! { #[doc = ""] });
+        attributes.push(parse_quote! { #[doc = "# Caching"] });
+        attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });
+    } else {
+        attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });
+    }
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            /// Cached static
+            // Cached static
+            #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_rwlock::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_rwlock::RwLock::new(#cache_create));
-            /// Cached function
+            // Cached function
+            #(#attributes)*
             #visibility #signature_no_muts {
                 let now = std::time::Instant::now();
                 {
@@ -885,7 +923,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 let now = std::time::Instant::now();
                 #prime_do_set_return_block
@@ -893,9 +932,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            /// Cached static
+            // Cached static
+            #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::RwLock::new(#cache_create));
-            /// Cached function
+            // Cached function
+            #(#attributes)*
             #visibility #signature_no_muts {
                 let now = std::time::Instant::now();
                 {
@@ -907,7 +948,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 let now = std::time::Instant::now();
                 #prime_do_set_return_block
@@ -981,7 +1023,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ItemFn);
 
     // pull out the parts of the input
-    let _attributes = input.attrs;
+    let mut attributes = input.attrs;
     let visibility = input.vis;
     let signature = input.sig;
     let body = input.block;
@@ -1386,16 +1428,33 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // make cached static, cached function and prime cached function doc comments
+    let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
+    let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
+    let cache_fn_doc_extra = format!(
+        "This is a cached function that uses the [`{}`] cached static.",
+        cache_ident
+    );
+    if attributes.iter().any(|attr| attr.path.is_ident("doc")) {
+        attributes.push(parse_quote! { #[doc = ""] });
+        attributes.push(parse_quote! { #[doc = "# Caching"] });
+        attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });
+    } else {
+        attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });
+    }
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            /// Cached static
+            // Cached static
+            #[doc = #cache_ident_doc]
             ::cached::lazy_static::lazy_static! {
                 #visibility static ref #cache_ident: ::cached::async_once::AsyncOnce<#cache_ty> = ::cached::async_once::AsyncOnce::new(async move { #cache_create });
             }
             // #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_once::AsyncOnce<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(move || ::cached::async_once::AsyncOnce::new(async move { #cache_create }));
             // #visibility static #cache_ident: ::cached::async_once_cell::Lazy<#cache_ty> = ::cached::async_once_cell::Lazy::new(async move { #cache_create });
-            /// Cached function
+            // Cached function
+            #(#attributes)*
             #visibility #signature_no_muts {
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
@@ -1408,7 +1467,8 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
@@ -1417,9 +1477,11 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            /// Cached static
+            // Cached static
+            #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<#cache_ty> = ::cached::once_cell::sync::Lazy::new(|| #cache_create);
-            /// Cached function
+            // Cached function
+            #(#attributes)*
             #visibility #signature_no_muts {
                 use cached::IOCached;
                 let key = #key_convert_block;
@@ -1432,7 +1494,8 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
                 #do_set_return_block
             }
-            /// Prime cached function
+            // Prime cached function
+            #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
                 use cached::IOCached;
                 let key = #key_convert_block;
