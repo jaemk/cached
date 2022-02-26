@@ -5,6 +5,16 @@
 ## Changed
 ## Removed
 
+## [0.32.0] / [cached_proc_macro[0.11.0]]
+## Added
+- Fix how doc strings are handled by proc-macros. Capture all documentation on the
+  cached function definitions and add them to the function definitions generated
+  by the proc-macros. Add doc strings to generated static caches. Link to relevant static
+  caches in generated function definitions. Add documentation to the generated
+  cache-priming function.
+## Changed
+## Removed
+
 ## [0.31.0] / [cached_proc_macro[0.10.0]]
 ## Added
 - `IOCached` and `IOCachedAsync` traits
