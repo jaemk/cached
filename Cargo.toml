@@ -19,8 +19,8 @@ default = ["proc_macro", "tokio"]
 proc_macro = ["async-mutex", "async-rwlock", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "async-trait", "async_once", "lazy_static"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
-redis_async_std = ["redis", "r2d2", "serde", "serde_json", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
-redis_tokio = ["redis", "r2d2", "serde", "serde_json", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_async_std = ["redis", "r2d2", "serde", "serde_json", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
+redis_tokio = ["redis", "r2d2", "serde", "serde_json", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
 
 [dependencies.hashbrown]
 version = "0.11.2"
@@ -69,7 +69,7 @@ optional = true
 
 [dependencies.redis]
 version = "0.21"
-features = ["r2d2", "aio"]
+features = ["r2d2"]
 optional = true
 
 [dependencies.r2d2]
@@ -96,6 +96,9 @@ features = ["attributes"]
 
 [dev-dependencies.smartstring]
 version = "0.2.9"
+
+[dev-dependencies.lazy_static]
+version = "1"
 
 [workspace]
 members = ["cached_proc_macro"]
