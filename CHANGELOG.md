@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.32.1]
+## Added
+## Changed
+- Fix redis features so `redis/aio` is only included when async redis
+  features (`redis_tokio` / `redis_async_std`) are enabled
+## Removed
+
 ## [0.32.0] / [cached_proc_macro[0.11.0]]
 ## Added
 - Fix how doc strings are handled by proc-macros. Capture all documentation on the
