@@ -9,6 +9,10 @@ pub struct RedisCacheBuilder<K, V> {
     refresh: bool,
     prefix: String,
     connection_string: Option<String>,
+    pool_max_size: Option<u32>,
+    pool_min_idle: Option<u32>,
+    pool_max_lifetime: Option<std::time::Duration>,
+    pool_idle_timeout: Option<std::time::Duration>,
     _phantom_k: PhantomData<K>,
     _phantom_v: PhantomData<V>,
 }
@@ -47,6 +51,10 @@ where
             refresh: false,
             prefix: generate_prefix(prefix.as_ref()),
             connection_string: None,
+            pool_max_size: None,
+            pool_min_idle: None,
+            pool_max_lifetime: None,
+            pool_idle_timeout: None,
             _phantom_k: Default::default(),
             _phantom_v: Default::default(),
         }
@@ -76,6 +84,31 @@ where
         self
     }
 
+    /// Set the max size of the underlying redis connection pool
+    pub fn set_connection_pool_max_size(mut self, max_size: u32) -> Self {
+        self.pool_max_size = Some(max_size);
+        self
+    }
+
+    /// Set the minimum number of idle redis connections that should be maintained by the
+    /// underlying redis connection pool
+    pub fn set_connection_pool_min_idle(mut self, min_idle: u32) -> Self {
+        self.pool_min_idle = Some(min_idle);
+        self
+    }
+
+    /// Set the max lifetime of connections used by the underlying redis connection pool
+    pub fn set_connection_pool_max_lifetime(mut self, max_lifetime: std::time::Duration) -> Self {
+        self.pool_max_lifetime = Some(max_lifetime);
+        self
+    }
+
+    /// Set the max lifetime of idle connections maintained by the underlying redis connection pool
+    pub fn set_connection_pool_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
+        self.pool_idle_timeout = Some(idle_timeout);
+        self
+    }
+
     /// Return the current connection string or load from the env var: CACHED_REDIS_CONNECTION_STRING
     pub fn connection_string(&self) -> Result<String, RedisCacheBuildError> {
         match self.connection_string {
@@ -92,7 +125,31 @@ where
     fn create_pool(&self) -> Result<r2d2::Pool<redis::Client>, RedisCacheBuildError> {
         let s = self.connection_string()?;
         let client: redis::Client = redis::Client::open(s)?;
-        let pool: r2d2::Pool<redis::Client> = r2d2::Pool::builder().build(client)?;
+        // some pool-builder defaults are set when the builder is initialized
+        // so we can't overwrite any values with Nones...
+        let pool_builder = r2d2::Pool::builder();
+        let pool_builder = if let Some(max_size) = self.pool_max_size {
+            pool_builder.max_size(max_size)
+        } else {
+            pool_builder
+        };
+        let pool_builder = if let Some(min_idle) = self.pool_min_idle {
+            pool_builder.min_idle(Some(min_idle))
+        } else {
+            pool_builder
+        };
+        let pool_builder = if let Some(max_lifetime) = self.pool_max_lifetime {
+            pool_builder.max_lifetime(Some(max_lifetime))
+        } else {
+            pool_builder
+        };
+        let pool_builder = if let Some(idle_timeout) = self.pool_idle_timeout {
+            pool_builder.idle_timeout(Some(idle_timeout))
+        } else {
+            pool_builder
+        };
+
+        let pool: r2d2::Pool<redis::Client> = pool_builder.build(client)?;
         Ok(pool)
     }
 
@@ -112,6 +169,7 @@ where
 /// Cache store backed by redis
 ///
 /// Values have a ttl applied and enforced by redis.
+/// Uses an r2d2 connection pool under the hood.
 pub struct RedisCache<K, V> {
     pub(super) seconds: u64,
     pub(super) refresh: bool,
@@ -360,6 +418,7 @@ mod async_redis {
     /// Cache store backed by redis
     ///
     /// Values have a ttl applied and enforced by redis.
+    /// Uses a `redis::aio::MultiplexedConnection` under the hood.
     pub struct AsyncRedisCache<K, V> {
         pub(super) seconds: u64,
         pub(super) refresh: bool,
