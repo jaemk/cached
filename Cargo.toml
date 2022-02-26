@@ -7,7 +7,7 @@ repository = "https://github.com/jaemk/cached"
 documentation = "https://docs.rs/cached"
 readme = "README.md"
 categories = ["caching", "data-structures"]
-keywords = ["caching", "cache", "memoize", "lru", "macro", "redis"]
+keywords = ["caching", "cache", "memoize", "lru", "redis"]
 license = "MIT"
 edition = "2018"
 
