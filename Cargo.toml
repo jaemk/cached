@@ -23,9 +23,9 @@ redis_async_std = ["redis", "r2d2", "serde", "serde_json", "redis/aio", "redis/a
 redis_tokio = ["redis", "r2d2", "serde", "serde_json", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
 
 [dependencies.hashbrown]
-version = "0.11.2"
+version = "0.12"
 default-features = false
-features = ["raw"]
+features = ["raw", "inline-more"]
 
 [dependencies.once_cell]
 version = "1"
@@ -95,7 +95,7 @@ version = "1.6"
 features = ["attributes"]
 
 [dev-dependencies.smartstring]
-version = "0.2.9"
+version = "1"
 
 [dev-dependencies.lazy_static]
 version = "1"
