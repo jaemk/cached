@@ -95,7 +95,7 @@ version = "1.6"
 features = ["attributes"]
 
 [dev-dependencies.smartstring]
-version = "0.2.9"
+version = "1"
 
 [workspace]
 members = ["cached_proc_macro"]

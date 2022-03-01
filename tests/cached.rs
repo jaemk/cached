@@ -908,8 +908,6 @@ fn cached_smartstring(s: smartstring::alias::String) -> smartstring::alias::Stri
 
 #[test]
 fn test_cached_smartstring() {
-    smartstring::validate();
-
     let mut string = smartstring::alias::String::new();
     string.push_str("very stringy");
     assert_eq!("equal", cached_smartstring(string.clone()));
@@ -946,8 +944,6 @@ fn cached_smartstring_from_str(s: &str) -> bool {
 
 #[test]
 fn test_cached_smartstring_from_str() {
-    smartstring::validate();
-
     assert!(cached_smartstring_from_str("true"));
     {
         let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
