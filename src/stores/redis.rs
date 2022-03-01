@@ -7,6 +7,7 @@ use std::marker::PhantomData;
 pub struct RedisCacheBuilder<K, V> {
     seconds: u64,
     refresh: bool,
+    namespace: String,
     prefix: String,
     connection_string: Option<String>,
     pool_max_size: Option<u32>,
@@ -18,7 +19,7 @@ pub struct RedisCacheBuilder<K, V> {
 }
 
 const ENV_KEY: &str = "CACHED_REDIS_CONNECTION_STRING";
-const PREFIX_NAMESPACE: &str = "cached-redis-store";
+const DEFAULT_NAMESPACE: &str = "cached-redis-store:";
 
 use thiserror::Error;
 
@@ -35,10 +36,6 @@ pub enum RedisCacheBuildError {
     },
 }
 
-fn generate_prefix(prefix: &str) -> String {
-    format!("{}:{}", PREFIX_NAMESPACE, prefix)
-}
-
 impl<K, V> RedisCacheBuilder<K, V>
 where
     K: Display,
@@ -49,7 +46,8 @@ where
         Self {
             seconds,
             refresh: false,
-            prefix: generate_prefix(prefix.as_ref()),
+            namespace: DEFAULT_NAMESPACE.to_string(),
+            prefix: prefix.as_ref().to_string(),
             connection_string: None,
             pool_max_size: None,
             pool_min_idle: None,
@@ -72,9 +70,21 @@ where
         self
     }
 
-    /// Set the prefix for the keys
+    /// Set the namespace for cache keys. Defaults to `cached-redis-store:`.
+    /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
+    /// Note that no delimiters are implicitly added so you may pass
+    /// an empty string if you want there to be no namespace on keys.
+    pub fn set_namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
+        self.namespace = namespace.as_ref().to_string();
+        self
+    }
+
+    /// Set the prefix for cache keys.
+    /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
+    /// Note that no delimiters are implicitly added so you may pass
+    /// an empty string if you want there to be no prefix on keys.
     pub fn set_prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
-        self.prefix = generate_prefix(prefix.as_ref());
+        self.prefix = prefix.as_ref().to_string();
         self
     }
 
@@ -159,6 +169,7 @@ where
             refresh: self.refresh,
             connection_string: self.connection_string()?,
             pool: self.create_pool()?,
+            namespace: self.namespace,
             prefix: self.prefix,
             _phantom_k: self._phantom_k,
             _phantom_v: self._phantom_v,
@@ -173,6 +184,7 @@ where
 pub struct RedisCache<K, V> {
     pub(super) seconds: u64,
     pub(super) refresh: bool,
+    pub(super) namespace: String,
     pub(super) prefix: String,
     connection_string: String,
     pool: r2d2::Pool<redis::Client>,
@@ -192,7 +204,7 @@ where
     }
 
     fn generate_key(&self, key: &K) -> String {
-        format!("{}{}", self.prefix, key)
+        format!("{}{}{}", self.namespace, self.prefix, key)
     }
 
     /// Return the redis connection string used
@@ -333,6 +345,7 @@ mod async_redis {
     pub struct AsyncRedisCacheBuilder<K, V> {
         seconds: u64,
         refresh: bool,
+        namespace: String,
         prefix: String,
         connection_string: Option<String>,
         _phantom_k: PhantomData<K>,
@@ -349,7 +362,8 @@ mod async_redis {
             Self {
                 seconds,
                 refresh: false,
-                prefix: generate_prefix(prefix.as_ref()),
+                namespace: DEFAULT_NAMESPACE.to_string(),
+                prefix: prefix.as_ref().to_string(),
                 connection_string: None,
                 _phantom_k: Default::default(),
                 _phantom_v: Default::default(),
@@ -368,9 +382,21 @@ mod async_redis {
             self
         }
 
-        /// Set the prefix for the keys
+        /// Set the namespace for cache keys. Defaults to `cached-redis-store:`.
+        /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
+        /// Note that no delimiters are implicitly added so you may pass
+        /// an empty string if you want there to be no namespace on keys.
+        pub fn set_namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
+            self.namespace = namespace.as_ref().to_string();
+            self
+        }
+
+        /// Set the prefix for cache keys
+        /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
+        /// Note that no delimiters are implicitly added so you may pass
+        /// an empty string if you want there to be no prefix on keys.
         pub fn set_prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
-            self.prefix = generate_prefix(prefix.as_ref());
+            self.prefix = prefix.as_ref().to_string();
             self
         }
 
@@ -408,6 +434,7 @@ mod async_redis {
                 refresh: self.refresh,
                 connection_string: self.connection_string()?,
                 multiplexed_connection: self.create_multiplexed_connection().await?,
+                namespace: self.namespace,
                 prefix: self.prefix,
                 _phantom_k: self._phantom_k,
                 _phantom_v: self._phantom_v,
@@ -422,6 +449,7 @@ mod async_redis {
     pub struct AsyncRedisCache<K, V> {
         pub(super) seconds: u64,
         pub(super) refresh: bool,
+        pub(super) namespace: String,
         pub(super) prefix: String,
         connection_string: String,
         multiplexed_connection: redis::aio::MultiplexedConnection,
@@ -441,7 +469,7 @@ mod async_redis {
         }
 
         fn generate_key(&self, key: &K) -> String {
-            format!("{}{}", self.prefix, key)
+            format!("{}{}{}", self.namespace, self.prefix, key)
         }
 
         /// Return the redis connection string used
@@ -628,6 +656,7 @@ mod tests {
     fn redis_cache() {
         let mut c: RedisCache<u32, u32> =
             RedisCache::new(format!("{}:redis-cache-test", now_millis()), 2)
+                .set_namespace("in-tests:")
                 .build()
                 .unwrap();
 
