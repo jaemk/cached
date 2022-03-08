@@ -44,7 +44,7 @@ The basic usage looks like:
 use cached::proc_macro::cached;
 
 /// Defines a function named `fib` that uses a cache implicitly named `FIB`.
-/// By default, the cache will be the function's in all caps.
+/// By default, the cache will be the function's name in all caps.
 /// The following line is equivalent to #[cached(name = "FIB", unbound)]
 #[cached]
 fn fib(n: u64) -> u64 {
