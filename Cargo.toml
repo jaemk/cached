@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.33.0"
+version = "0.34.0"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -22,6 +22,16 @@ redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
 redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
 
+[dependencies.cached_proc_macro]
+version = "0.12.0"
+path = "cached_proc_macro"
+optional = true
+
+[dependencies.cached_proc_macro_types]
+version = "0.1.0"
+path = "cached_proc_macro_types"
+optional = true
+
 [dependencies.hashbrown]
 version = "0.12"
 default-features = false
@@ -40,16 +50,6 @@ optional = true
 
 [dependencies.thiserror]
 version = "1"
-
-[dependencies.cached_proc_macro]
-version = "0.11.0"
-path = "cached_proc_macro"
-optional = true
-
-[dependencies.cached_proc_macro_types]
-version = "0.1.0"
-path = "cached_proc_macro_types"
-optional = true
 
 [dependencies.futures]
 version = "0.3"
