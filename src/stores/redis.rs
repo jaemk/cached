@@ -230,7 +230,16 @@ pub enum RedisCacheError {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedRedisValue<V> {
-    value: V,
+    pub(crate) value: V,
+    pub(crate) version: Option<u64>,
+}
+impl<V> CachedRedisValue<V> {
+    fn new(value: V) -> Self {
+        Self {
+            value,
+            version: Some(1),
+        }
+    }
 }
 
 impl<'de, K, V> IOCached<K, V> for RedisCache<K, V>
@@ -270,7 +279,7 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(&key);
 
-        let val = CachedRedisValue { value: val };
+        let val = CachedRedisValue::new(val);
         pipe.get(key.clone());
         pipe.set_ex::<String, String>(
             key,
@@ -517,7 +526,7 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
 
-            let val = CachedRedisValue { value: val };
+            let val = CachedRedisValue::new(val);
             pipe.get(key.clone());
             pipe.set_ex::<String, String>(
                 key,
