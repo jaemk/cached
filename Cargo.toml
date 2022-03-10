@@ -15,12 +15,12 @@ edition = "2018"
 all-features = true
 
 [features]
-default = ["proc_macro", "tokio"]
-proc_macro = ["async-mutex", "async-rwlock", "cached_proc_macro", "cached_proc_macro_types"]
-async = ["futures", "async-trait", "async_once", "lazy_static"]
+default = ["proc_macro", "async"]
+proc_macro = ["tokio", "cached_proc_macro", "cached_proc_macro_types"]
+async = ["futures", "tokio", "async-trait", "async_once", "lazy_static"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
-redis_async_std = ["redis", "r2d2", "serde", "serde_json", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
-redis_tokio = ["redis", "r2d2", "serde", "serde_json", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
+redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
 
 [dependencies.hashbrown]
 version = "0.12"
@@ -40,14 +40,6 @@ optional = true
 
 [dependencies.thiserror]
 version = "1"
-
-[dependencies.async-mutex]
-version = "1.4"
-optional = true
-
-[dependencies.async-rwlock]
-version = "1.3"
-optional = true
 
 [dependencies.cached_proc_macro]
 version = "0.11.0"
@@ -87,7 +79,7 @@ optional = true
 
 [dependencies.tokio]
 version = "1.12"
-features = ["macros", "time", "rt-multi-thread"]
+features = ["macros", "time", "sync", "rt-multi-thread"]
 optional = true
 
 [dev-dependencies.async-std]

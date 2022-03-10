@@ -607,7 +607,7 @@ mod async_redis {
                 .as_millis()
         }
 
-        #[async_std::test]
+        #[tokio::test]
         async fn test_async_redis_cache() {
             let mut c: AsyncRedisCache<u32, u32> =
                 AsyncRedisCache::new(format!("{}:async-redis-cache-test", now_millis()), 2)

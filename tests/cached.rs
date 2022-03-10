@@ -610,7 +610,7 @@ async fn only_cached_once_per_second_a(s: String) -> Vec<String> {
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_only_cached_once_per_second_a() {
     let a = only_cached_once_per_second_a("a".to_string()).await;
     let b = only_cached_once_per_second_a("b".to_string()).await;
@@ -656,7 +656,7 @@ async fn only_cached_result_once_a(
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_only_cached_result_once_a() {
     assert!(only_cached_result_once_a("z".to_string(), true)
         .await
@@ -715,7 +715,7 @@ async fn only_cached_result_once_per_second_a(
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_only_cached_result_once_per_second_a() {
     assert!(only_cached_result_once_per_second_a("z".to_string(), true)
         .await
@@ -767,7 +767,7 @@ async fn only_cached_option_once_a(s: String, none: bool) -> Option<Vec<String>>
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_only_cached_option_once_a() {
     assert!(only_cached_option_once_a("z".to_string(), true)
         .await
@@ -820,7 +820,7 @@ async fn only_cached_option_once_per_second_a(s: String, none: bool) -> Option<V
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_only_cached_option_once_per_second_a() {
     assert!(only_cached_option_once_per_second_a("z".to_string(), true)
         .await
@@ -853,12 +853,12 @@ async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_only_cached_once_per_second_sync_writes() {
-    let a = async_std::task::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
-    async_std::task::sleep(Duration::new(1, 0)).await;
-    let b = async_std::task::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
-    assert_eq!(a.await, b.await);
+    let a = tokio::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
+    tokio::time::sleep(Duration::new(1, 0)).await;
+    let b = tokio::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
+    assert_eq!(a.await.unwrap(), b.await.unwrap());
 }
 
 #[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
@@ -886,15 +886,15 @@ async fn cached_sync_writes_a(s: String) -> Vec<String> {
 }
 
 #[cfg(feature = "async")]
-#[async_std::test]
+#[tokio::test]
 async fn test_cached_sync_writes_a() {
-    let a = async_std::task::spawn(cached_sync_writes_a("a".to_string()));
-    async_std::task::sleep(Duration::new(1, 0)).await;
-    let b = async_std::task::spawn(cached_sync_writes_a("b".to_string()));
-    let c = async_std::task::spawn(cached_sync_writes_a("c".to_string()));
-    let a = a.await;
-    assert_eq!(a, b.await);
-    assert_eq!(a, c.await);
+    let a = tokio::spawn(cached_sync_writes_a("a".to_string()));
+    tokio::time::sleep(Duration::new(1, 0)).await;
+    let b = tokio::spawn(cached_sync_writes_a("b".to_string()));
+    let c = tokio::spawn(cached_sync_writes_a("c".to_string()));
+    let a = a.await.unwrap();
+    assert_eq!(a, b.await.unwrap());
+    assert_eq!(a, c.await.unwrap());
 }
 
 #[cached(size = 2)]
@@ -1278,7 +1278,7 @@ mod redis_tests {
             }
         }
 
-        #[async_std::test]
+        #[tokio::test]
         async fn test_async_cached_redis() {
             assert_eq!(async_cached_redis(1).await, Ok(1));
             assert_eq!(async_cached_redis(1).await, Ok(1));
@@ -1300,7 +1300,7 @@ mod redis_tests {
             }
         }
 
-        #[async_std::test]
+        #[tokio::test]
         async fn test_async_cached_redis_cached_flag() {
             assert!(!async_cached_redis_cached_flag(1).await.unwrap().was_cached);
             assert!(async_cached_redis_cached_flag(1).await.unwrap().was_cached,);
@@ -1322,7 +1322,7 @@ mod redis_tests {
             }
         }
 
-        #[async_std::test]
+        #[tokio::test]
         async fn test_async_cached_redis_cache_create() {
             assert_eq!(async_cached_redis_cache_create(1).await, Ok(1));
             assert_eq!(async_cached_redis_cache_create(1).await, Ok(1));

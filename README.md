@@ -22,12 +22,12 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 
 **Features**
 
-- `default`: Include proc macro support
+- `default`: Include `proc_macro` and `async` features
 - `proc_macro`: Include proc macros
 - `async`: Include support for async functions and async cache stores
 - `redis_store`: Include Redis cache store
-- `redis_async_std`: Include async Redis support using `async-std` and `async-std` tls support
-- `redis_tokio`: Include async Redis support using `tokio` and `tokio` tls support
+- `redis_async_std`: Include async Redis support using `async-std` and `async-std` tls support, implies `redis_store` and `async`
+- `redis_tokio`: Include async Redis support using `tokio` and `tokio` tls support, implies `redis_store` and `async`
 
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.

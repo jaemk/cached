@@ -458,7 +458,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Cached static
             #[doc = #cache_ident_doc]
-            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_mutex::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_mutex::Mutex::new(#cache_create));
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::Mutex::new(#cache_create));
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
@@ -909,7 +909,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Cached static
             #[doc = #cache_ident_doc]
-            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_rwlock::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_rwlock::RwLock::new(#cache_create));
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::RwLock::new(#cache_create));
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
@@ -1451,8 +1451,6 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             ::cached::lazy_static::lazy_static! {
                 #visibility static ref #cache_ident: ::cached::async_once::AsyncOnce<#cache_ty> = ::cached::async_once::AsyncOnce::new(async move { #cache_create });
             }
-            // #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_once::AsyncOnce<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(move || ::cached::async_once::AsyncOnce::new(async move { #cache_create }));
-            // #visibility static #cache_ident: ::cached::async_once_cell::Lazy<#cache_ty> = ::cached::async_once_cell::Lazy::new(async move { #cache_create });
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {

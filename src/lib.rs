@@ -21,12 +21,12 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 
 **Features**
 
-- `default`: Include proc macro support
+- `default`: Include `proc_macro` and `async` features
 - `proc_macro`: Include proc macros
 - `async`: Include support for async functions and async cache stores
 - `redis_store`: Include Redis cache store
-- `redis_async_std`: Include async Redis support using `async-std` and `async-std` tls support
-- `redis_tokio`: Include async Redis support using `tokio` and `tokio` tls support
+- `redis_async_std`: Include async Redis support using `async-std` and `async-std` tls support, implies `redis_store` and `async`
+- `redis_tokio`: Include async Redis support using `tokio` and `tokio` tls support, implies `redis_store` and `async`
 
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
@@ -181,10 +181,12 @@ pub use stores::AsyncRedisCache;
 pub use stores::{RedisCache, RedisCacheError};
 pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 
-#[cfg(feature = "proc_macro")]
-pub use async_mutex;
-#[cfg(feature = "proc_macro")]
-pub use async_rwlock;
+#[cfg(any(feature = "proc_macro", feature = "async"))]
+pub mod async_sync {
+    pub use tokio::sync::Mutex;
+    pub use tokio::sync::RwLock;
+}
+
 #[cfg(feature = "proc_macro")]
 pub use proc_macro::Return;
 
