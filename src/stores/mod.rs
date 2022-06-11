@@ -16,7 +16,9 @@ mod timed_sized;
 mod unbound;
 
 #[cfg(feature = "redis_store")]
-pub use crate::stores::redis::{RedisCache, RedisCacheError};
+pub use crate::stores::redis::{
+    RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
+};
 pub use sized::SizedCache;
 pub use timed::TimedCache;
 pub use timed_sized::TimedSizedCache;
@@ -27,7 +29,7 @@ pub use unbound::UnboundCache;
     feature = "redis_store",
     any(feature = "redis_async_std", feature = "redis_tokio")
 ))]
-pub use crate::stores::redis::AsyncRedisCache;
+pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 
 impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
     fn cache_get(&mut self, k: &K) -> Option<&V> {

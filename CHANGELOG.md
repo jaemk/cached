@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.34.1]
+## Added
+- Make sure `AsyncRedisCacheBuilder`, `RedisCacheBuilder`, and `RedisCacheBuildError` publicly visible
+## Changed
+## Removed
+
 ## [0.34.0] / [cached_proc_macro[0.12.0]]
 ## Added
 ## Changed
