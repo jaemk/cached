@@ -82,6 +82,9 @@ version = "1.12"
 features = ["macros", "time", "sync", "rt-multi-thread"]
 optional = true
 
+[dependencies.instant]
+version = "0.1"
+
 [dev-dependencies.async-std]
 version = "1.6"
 features = ["attributes"]
