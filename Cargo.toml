@@ -97,7 +97,7 @@ version = "1"
 version = "1"
 
 [workspace]
-members = ["cached_proc_macro"]
+members = ["cached_proc_macro","examples/wasm"]
 
 [[example]]
 name = "redis"

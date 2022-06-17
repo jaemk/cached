@@ -1,0 +1,29 @@
+[package]
+name = "wasm"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.cached]
+path ="../.."
+features = ["wasm"]
+
+[dependencies.web-sys]
+version = "0.3"
+
+[dependencies.chrono]
+version = "0.4"
+features = [
+    "wasmbind"
+]
+
+[dependencies.reqwasm]
+version = "0.5"
+
+[dependencies.wasm-bindgen-futures]
+version = "0.4"
+
+[dependencies.yew]
+version = "0.19.3"
+
