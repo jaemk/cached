@@ -6,7 +6,7 @@ use std::hash::Hash;
 use instant::Instant;
 
 #[cfg(feature = "async")]
-use {async_trait::async_trait, futures::Future, super::CachedAsync};
+use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
 use super::Cached;
 
