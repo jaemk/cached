@@ -169,15 +169,15 @@ pub extern crate async_once;
 pub extern crate lazy_static;
 pub extern crate once_cell;
 
-#[cfg(feature = "async")]
-use {async_trait::async_trait, futures::Future};
 #[cfg(feature = "proc_macro")]
 pub use proc_macro::Return;
+#[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
+pub use stores::AsyncRedisCache;
 #[cfg(feature = "redis_store")]
 pub use stores::{RedisCache, RedisCacheError};
 pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
-#[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
-pub use stores::AsyncRedisCache;
+#[cfg(feature = "async")]
+use {async_trait::async_trait, futures::Future};
 
 mod lru_list;
 pub mod macros;
