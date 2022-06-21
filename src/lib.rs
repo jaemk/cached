@@ -27,7 +27,7 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 - `redis_store`: Include Redis cache store
 - `redis_async_std`: Include async Redis support using `async-std` and `async-std` tls support, implies `redis_store` and `async`
 - `redis_tokio`: Include async Redis support using `tokio` and `tokio` tls support, implies `redis_store` and `async`
-
+- `wasm`: Enable WASM support. Note that this feature is incompatible with all Redis features (`redis_store`, `redis_async_std`, `redis_tokio`)
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the
@@ -169,29 +169,27 @@ pub extern crate async_once;
 pub extern crate lazy_static;
 pub extern crate once_cell;
 
+#[cfg(feature = "async")]
+use {async_trait::async_trait, futures::Future};
+#[cfg(feature = "proc_macro")]
+pub use proc_macro::Return;
+#[cfg(feature = "redis_store")]
+pub use stores::{RedisCache, RedisCacheError};
+pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
+#[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
+pub use stores::AsyncRedisCache;
+
 mod lru_list;
 pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
 pub mod stores;
 
-#[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
-pub use stores::AsyncRedisCache;
-#[cfg(feature = "redis_store")]
-pub use stores::{RedisCache, RedisCacheError};
-pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
-
 #[cfg(any(feature = "proc_macro", feature = "async"))]
 pub mod async_sync {
     pub use tokio::sync::Mutex;
     pub use tokio::sync::RwLock;
 }
-
-#[cfg(feature = "proc_macro")]
-pub use proc_macro::Return;
-
-#[cfg(feature = "async")]
-use {async_trait::async_trait, futures::Future};
 
 /// Cache operations
 pub trait Cached<K, V> {
