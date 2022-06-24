@@ -674,7 +674,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let (cache_ty, cache_create) = match &args.time {
         None => (quote! { Option<#cache_value_ty> }, quote! { None }),
         Some(_) => (
-            quote! { Option<(std::time::Instant, #cache_value_ty)> },
+            quote! { Option<(instant::Instant, #cache_value_ty)> },
             quote! { None },
         ),
     };
@@ -913,7 +913,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
-                let now = std::time::Instant::now();
+                let now = instant::Instant::now();
                 {
                     // check if the result is cached
                     let mut cached = #cache_ident.read().await;
@@ -926,7 +926,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
-                let now = std::time::Instant::now();
+                let now = instant::Instant::now();
                 #prime_do_set_return_block
             }
         }
@@ -938,7 +938,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
-                let now = std::time::Instant::now();
+                let now = instant::Instant::now();
                 {
                     // check if the result is cached
                     let mut cached = #cache_ident.read().unwrap();
@@ -951,7 +951,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
             #visibility #prime_sig {
-                let now = std::time::Instant::now();
+                let now = instant::Instant::now();
                 #prime_do_set_return_block
             }
         }
