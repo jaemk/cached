@@ -184,6 +184,7 @@ pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
 pub mod stores;
+pub use instant;
 
 #[cfg(any(feature = "proc_macro", feature = "async"))]
 pub mod async_sync {
