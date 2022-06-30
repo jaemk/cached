@@ -92,6 +92,9 @@ version = "1"
 [dev-dependencies.lazy_static]
 version = "1"
 
+[dev-dependencies.serial_test]
+version = "0.7"
+
 [workspace]
 members = ["cached_proc_macro"]
 

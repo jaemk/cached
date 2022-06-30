@@ -8,6 +8,7 @@ use std::hash::Hash;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
+mod expiring_value_cache;
 #[cfg(feature = "redis_store")]
 mod redis;
 mod sized;
@@ -19,6 +20,7 @@ mod unbound;
 pub use crate::stores::redis::{
     RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
+pub use expiring_value_cache::{CanExpire, ExpiringValueCache};
 pub use sized::SizedCache;
 pub use timed::TimedCache;
 pub use timed_sized::TimedSizedCache;
