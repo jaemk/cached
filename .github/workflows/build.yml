@@ -47,5 +47,8 @@ jobs:
 
     - run: cargo install cargo-readme
 
-    - run: ./lint-test.sh
-      shell: bash
+    - run: make ci
+      name: 'Running `make ci`'
+
+    - run: make clean/docker
+      name: Cleaning Docker services
