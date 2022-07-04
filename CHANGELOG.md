@@ -1,11 +1,14 @@
 # Changelog
 
 ## [Unreleased]
-
 ## Added
+## Changed
+## Removed
 
+## [0.35.0]
+## Added
 - Added `ExpiringValueCache` for caching values that can themselves expire.
-
+- Added COPYRIGHT file
 ## Changed
 ## Removed
 
