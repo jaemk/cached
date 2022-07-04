@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.35.0]
+## Added
+- Added `ExpiringValueCache` for caching values that can themselves expire.
+- Added COPYRIGHT file
+## Changed
+## Removed
+
 ## [0.34.1]
 ## Added
 - Make sure `AsyncRedisCacheBuilder`, `RedisCacheBuilder`, and `RedisCacheBuildError` publicly visible
@@ -135,7 +142,7 @@
 ## cached[0.22.0] / cached_proc_macro[0.6.0] / cached_proc_macro_types[0.1.0]
 ## Added
 - Add support for returning a `cached::Return` wrapper type that
-  indicates whether the result came from the function's cache. 
+  indicates whether the result came from the function's cache.
 ## Changed
 ## Removed
 
