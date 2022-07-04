@@ -177,9 +177,11 @@ pub mod stores;
 
 #[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
 pub use stores::AsyncRedisCache;
+pub use stores::{
+    CanExpire, ExpiringValueCache, SizedCache, TimedCache, TimedSizedCache, UnboundCache,
+};
 #[cfg(feature = "redis_store")]
 pub use stores::{RedisCache, RedisCacheError};
-pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 
 #[cfg(any(feature = "proc_macro", feature = "async"))]
 pub mod async_sync {

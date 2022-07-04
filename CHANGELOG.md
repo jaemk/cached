@@ -1,7 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
 ## Added
+
+- Added `ExpiringValueCache` for caching values that can themselves expire.
+
 ## Changed
 ## Removed
 
@@ -135,7 +139,7 @@
 ## cached[0.22.0] / cached_proc_macro[0.6.0] / cached_proc_macro_types[0.1.0]
 ## Added
 - Add support for returning a `cached::Return` wrapper type that
-  indicates whether the result came from the function's cache. 
+  indicates whether the result came from the function's cache.
 ## Changed
 ## Removed
 

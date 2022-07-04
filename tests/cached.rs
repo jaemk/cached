@@ -5,9 +5,10 @@ Full tests of macro-defined functions
 extern crate cached;
 
 use cached::{
-    proc_macro::cached, proc_macro::once, Cached, SizedCache, TimedCache, TimedSizedCache,
-    UnboundCache,
+    proc_macro::cached, proc_macro::once, Cached, CanExpire, ExpiringValueCache, SizedCache,
+    TimedCache, TimedSizedCache, UnboundCache,
 };
+use serial_test::serial;
 use std::thread::{self, sleep};
 use std::time::Duration;
 
@@ -1335,5 +1336,105 @@ mod redis_tests {
                 Err(TestError::Count(6))
             );
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct NewsArticle {
+    slug: String,
+    is_expired: bool,
+}
+
+impl CanExpire for NewsArticle {
+    fn is_expired(&self) -> bool {
+        self.is_expired
+    }
+}
+
+const EXPIRED_SLUG: &str = "expired_slug";
+const UNEXPIRED_SLUG: &str = "unexpired_slug";
+
+#[cached(
+    type = "ExpiringValueCache<String, NewsArticle>",
+    create = "{ ExpiringValueCache::with_size(3) }",
+    result = true
+)]
+fn fetch_article(slug: String) -> Result<NewsArticle, ()> {
+    match slug.as_str() {
+        EXPIRED_SLUG => Ok(NewsArticle {
+            slug: String::from(EXPIRED_SLUG),
+            is_expired: true,
+        }),
+        UNEXPIRED_SLUG => Ok(NewsArticle {
+            slug: String::from(UNEXPIRED_SLUG),
+            is_expired: false,
+        }),
+        _ => Err(()),
+    }
+}
+
+#[test]
+#[serial(ExpiringCacheTest)]
+fn test_expiring_value_expired_article_returned_with_miss() {
+    {
+        let mut cache = FETCH_ARTICLE.lock().unwrap();
+        cache.cache_reset();
+        cache.cache_reset_metrics();
+    }
+    let expired_article = fetch_article(EXPIRED_SLUG.to_string());
+
+    assert!(expired_article.is_ok());
+    assert_eq!(EXPIRED_SLUG, expired_article.unwrap().slug.as_str());
+
+    // The article was fetched due to a cache miss and the result cached.
+    {
+        let cache = FETCH_ARTICLE.lock().unwrap();
+        assert_eq!(1, cache.cache_size());
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    let _ = fetch_article(EXPIRED_SLUG.to_string());
+
+    // The article was fetched again as it had expired.
+    {
+        let cache = FETCH_ARTICLE.lock().unwrap();
+        assert_eq!(1, cache.cache_size());
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(2));
+    }
+}
+
+#[test]
+#[serial(ExpiringCacheTest)]
+fn test_expiring_value_unexpired_article_returned_with_hit() {
+    {
+        let mut cache = FETCH_ARTICLE.lock().unwrap();
+        cache.cache_reset();
+        cache.cache_reset_metrics();
+    }
+    let unexpired_article = fetch_article(UNEXPIRED_SLUG.to_string());
+
+    assert!(unexpired_article.is_ok());
+    assert_eq!(UNEXPIRED_SLUG, unexpired_article.unwrap().slug.as_str());
+
+    // The article was fetched due to a cache miss and the result cached.
+    {
+        let cache = FETCH_ARTICLE.lock().unwrap();
+        assert_eq!(1, cache.cache_size());
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+
+    let cached_article = fetch_article(UNEXPIRED_SLUG.to_string());
+    assert!(cached_article.is_ok());
+    assert_eq!(UNEXPIRED_SLUG, cached_article.unwrap().slug.as_str());
+
+    // The article was not fetched but returned as a hit from the cache.
+    {
+        let cache = FETCH_ARTICLE.lock().unwrap();
+        assert_eq!(1, cache.cache_size());
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
     }
 }
