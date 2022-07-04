@@ -178,7 +178,6 @@ pub use stores::{
 };
 #[cfg(feature = "redis_store")]
 pub use stores::{RedisCache, RedisCacheError};
-pub use stores::{SizedCache, TimedCache, TimedSizedCache, UnboundCache};
 #[cfg(feature = "async")]
 use {async_trait::async_trait, futures::Future};
 
