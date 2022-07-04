@@ -21,6 +21,7 @@ async = ["futures", "tokio", "async-trait", "async_once", "lazy_static"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
 redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+wasm = ["instant/wasm-bindgen"]
 
 [dependencies.cached_proc_macro]
 version = "0.12.0"
@@ -82,6 +83,9 @@ version = "1.12"
 features = ["macros", "time", "sync", "rt-multi-thread"]
 optional = true
 
+[dependencies.instant]
+version = "0.1"
+
 [dev-dependencies.async-std]
 version = "1.6"
 features = ["attributes"]
@@ -96,7 +100,7 @@ version = "1"
 version = "0.7"
 
 [workspace]
-members = ["cached_proc_macro"]
+members = ["cached_proc_macro","examples/wasm"]
 
 [[example]]
 name = "redis"

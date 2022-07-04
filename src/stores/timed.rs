@@ -1,12 +1,14 @@
-use super::Cached;
 use std::cmp::Eq;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::time::Instant;
+
+use instant::Instant;
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
+
+use super::Cached;
 
 /// Enum used for defining the status of time-cached values
 #[derive(Debug)]

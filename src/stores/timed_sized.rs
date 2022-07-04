@@ -1,11 +1,14 @@
-use super::{Cached, SizedCache};
-use crate::stores::timed::Status;
 use std::cmp::Eq;
 use std::hash::Hash;
-use std::time::Instant;
+
+use instant::Instant;
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
+
+use crate::stores::timed::Status;
+
+use super::{Cached, SizedCache};
 
 /// Timed LRU Cache
 ///
