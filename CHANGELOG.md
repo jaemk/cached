@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.36.0] / [cached_proc_macro[0.13.0]]
+## Added
+- wasm support for non-io macros and stores
+## Changed
+- Use `instant` crate for wasm compatible time
+## Removed
+
 ## [0.35.0]
 ## Added
 - Added `ExpiringValueCache` for caching values that can themselves expire.
