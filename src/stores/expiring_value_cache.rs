@@ -1,6 +1,3 @@
-// Copyright 2022 VMware Inc.
-// SPDX-License-Identifier: MIT
-
 use super::{Cached, SizedCache};
 use crate::stores::timed::Status;
 use std::hash::Hash;
