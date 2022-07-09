@@ -62,7 +62,7 @@ ci: check tests examples
 examples: examples/basic examples/cargo examples/redis
 # Runs all basic examples
 examples/basic: $(addprefix examples/basic/, $(CACHED_BASIC_EXAMPLES))
-# TODO: Builds all project examples?
+# Runs all the project based examples
 examples/cargo: $(addprefix examples/cargo/, $(CACHED_CARGO_EXAMPLES))
 # Runs `redis` related examples. NOTE: depends on `docker/redis`
 examples/redis: $(addprefix examples/redis/, $(CACHED_REDIS_EXAMPLES))
@@ -71,8 +71,9 @@ examples/basic/%:
 	@echo [$@]: Running example $*...
 	$(CARGO_COMMAND) run --example $* --all-features
 
+# Only builds the `wasm` example. Running this example requires a browser
 examples/cargo/wasm:
-	@echo [$@]: Running example $*...
+	@echo [$@]: Building example $*...
 	cd examples/wasm ; $(CARGO_COMMAND) build --target=wasm32-unknown-unknown
 
 examples/redis/%: docker/redis
@@ -104,13 +105,13 @@ sync: sync/readme
 sync/readme: README.md
 
 README.md: src/lib.rs
-	@echo Updating $@...
+	@echo [$@]: Updating $@...
 	$(README_CC) $(README_CCFLAGS) > $@
 
 ################################################################################
 # Formats `cached` crate
 fmt:
-	@echo Formatting code...
+	@echo [$@]: Formatting code...
 	$(FMT_CC) $(FMT_CCFLAGS)
 
 ################################################################################
@@ -134,10 +135,13 @@ check/clippy:
 	$(CARGO_COMMAND) clippy --all-features --all-targets --examples --tests
 
 ################################################################################
-# TODO currently disabled
-clean:
-	@echo Currently disabled. Did you mean clean/docker?
-	@exit 42
+# Cleans all generated artifacts and deletes all docker containers
+clean: clean/docker clean/cargo
+
+# Runs `cargo clean`
+clean/cargo:
+	@echo [$@]: Removing cargo artifacts...
+	$(CARGO_COMMAND) clean
 
 # Removes all docker containers
 clean/docker: clean/docker/$(DOCKER_REDIS_CONTAINER_NAME)

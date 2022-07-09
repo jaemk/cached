@@ -38,8 +38,8 @@ make sync
 make fmt
 # Performs multiple checks (formatting, clippy and documentation sync)
 make check
-# Removes all Docker containers used, if any
-make clean/docker
+# Removes all generated artifacts, including docker containers
+make clean
 ```
 
 ## Submitting Changes
