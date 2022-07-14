@@ -475,6 +475,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -502,6 +503,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::Cached;
                 let key = #key_convert_block;
@@ -925,6 +927,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
             #visibility #prime_sig {
                 let now = ::cached::instant::Instant::now();
                 #prime_do_set_return_block
@@ -950,6 +953,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
             #visibility #prime_sig {
                 let now = ::cached::instant::Instant::now();
                 #prime_do_set_return_block
@@ -1467,6 +1471,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
@@ -1494,6 +1499,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // Prime cached function
             #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::IOCached;
                 let key = #key_convert_block;
