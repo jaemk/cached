@@ -35,7 +35,7 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     }
 
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data.
-    /// Also set if the ttl should be refreshed on retriving
+    /// Also set if the ttl should be refreshed on retrieving
     pub fn with_size_and_lifespan_and_refresh(
         size: usize,
         seconds: u64,
@@ -93,12 +93,12 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
         self.iter_order().map(|(_k, v)| v)
     }
 
-    /// Returns if the lifetime is refreshed when the value is retrived
+    /// Returns if the lifetime is refreshed when the value is retrieved
     pub fn refresh(&self) -> bool {
         self.refresh
     }
 
-    /// Sets if the lifetime is refreshed when the value is retrived
+    /// Sets if the lifetime is refreshed when the value is retrieved
     pub fn set_refresh(&mut self, refresh: bool) {
         self.refresh = refresh
     }

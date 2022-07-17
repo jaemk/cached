@@ -54,7 +54,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     }
 
     /// Creates a new `TimedCache` with a specified lifespan which
-    /// refreshes the ttl when the entry is retreived
+    /// refreshes the ttl when the entry is retrieved
     pub fn with_lifespan_and_refresh(seconds: u64, refresh: bool) -> TimedCache<K, V> {
         TimedCache {
             store: Self::new_store(None),
