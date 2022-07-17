@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.36.0"
+version = "0.37.0"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -24,7 +24,7 @@ redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/t
 wasm = ["instant/wasm-bindgen"]
 
 [dependencies.cached_proc_macro]
-version = "0.13.0"
+version = "0.14.0"
 path = "cached_proc_macro"
 optional = true
 

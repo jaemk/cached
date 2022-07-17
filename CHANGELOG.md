@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.37.0] / [cached_proc_macro[0.14.0]]
+## Added
+## Changed
+- Mark the auto-generated "priming" functions with `#[allow(dead_code)]`
+- Fix documentation typos
+- Replace dev/build scripts with a Makefile
+## Removed
+
 ## [0.36.0] / [cached_proc_macro[0.13.0]]
 ## Added
 - wasm support for non-io macros and stores
