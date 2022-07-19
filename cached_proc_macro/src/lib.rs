@@ -42,7 +42,7 @@ struct MacroArgs {
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
 /// - `size`: (optional, usize) specify an LRU max size, implies the cache type is a `SizedCache` or `TimedSizedCache`.
-/// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCached` or `TimedSizedCache`.
+/// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCache` or `TimedSizedCache`.
 /// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
 /// - `sync_writes`: (optional, bool) specify whether to synchronize the execution of writing of uncached values.
 /// - `type`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
@@ -51,7 +51,7 @@ struct MacroArgs {
 ///   When `size` and `time` are specified, defaults to `TimedSizedCache`. When `type` is
 ///   specified, `create` must also be specified.
 /// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
-/// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `type = "TimedCached<u32, u32>"`.
+/// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `key = "u32"`.
 ///    When `key` is specified, `convert` must also be specified.
 /// - `convert`: (optional, string expr) specify an expression used to convert function arguments to a cache
 ///   key, e.g. `convert = r##"{ format!("{}:{}", arg1, arg2) }"##`. When `convert` is specified,
