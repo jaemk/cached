@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.38.0] / [cached_proc_macro[0.15.0]]
+## Added
+## Changed
+- Fix proc macro argument documentation
+- Disable futures `default-features`
+- Add cache-remove to redis example
+## Removed
+
 ## [0.37.0] / [cached_proc_macro[0.14.0]]
 ## Added
 ## Changed
