@@ -86,6 +86,13 @@ async fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
+    use cached::IOCached;
+    CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
+    print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
+    io::stdout().flush().unwrap();
+    cached_sleep_secs(2).unwrap();
+    println!("done");
+
     print!("2. first sync call with a 2 seconds sleep...");
     io::stdout().flush().unwrap();
     cached_sleep_secs_example_2(2).unwrap();
