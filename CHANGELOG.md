@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- Add flush method to ExpiringValueCache
 ## Changed
 ## Removed
 
