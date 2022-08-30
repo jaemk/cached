@@ -44,6 +44,11 @@ impl<K: Clone + Hash + Eq, V: CanExpire> ExpiringValueCache<K, V> {
             None => Status::NotFound,
         }
     }
+
+    /// Remove any expired values from the cache
+    pub fn flush(&mut self) {
+        self.store.retain(|_, v| !v.is_expired());
+    }
 }
 
 // https://docs.rs/cached/latest/cached/trait.Cached.html
@@ -228,5 +233,20 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
         assert_eq!(c.cache_hits(), Some(0));
         assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn flush_expired() {
+        let mut c: ExpiringValueCache<u8, ExpiredU8> = ExpiringValueCache::with_size(3);
+
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(1, 200), Some(100));
+        assert_eq!(c.cache_set(2, 1), None);
+        assert_eq!(c.cache_size(), 2);
+
+        // It should only flush n > 10
+        assert_eq!(2, c.cache_size());
+        c.flush();
+        assert_eq!(1, c.cache_size());
     }
 }
