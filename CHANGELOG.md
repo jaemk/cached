@@ -5,6 +5,15 @@
 ## Changed
 ## Removed
 
+## [0.40.0]
+## Added
+- Add optional feature flag `redis_ahash` to enable `redis`'s optional `ahash` feature
+## Changed
+- Update `redis` to `0.22.0`
+- Move `tokio`'s `rt-multi-thread` feature from being a default to being optionally enabled by `async_tokio_rt_multi_thread`
+- Fix makefile's doc target to match documentation, changed from `make sync` to `make docs`
+## Removed
+
 ## [0.39.0]
 ## Added
 - Add flush method to ExpiringValueCache

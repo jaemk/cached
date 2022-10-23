@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.39.0"
+version = "0.40.0"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -18,9 +18,11 @@ all-features = true
 default = ["proc_macro", "async"]
 proc_macro = ["tokio", "cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "tokio", "async-trait", "async_once", "lazy_static"]
+async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
 redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_ahash = ["redis_store", "redis/ahash"]
 wasm = ["instant/wasm-bindgen"]
 
 [dependencies.cached_proc_macro]
@@ -62,7 +64,7 @@ version = "0.1"
 optional = true
 
 [dependencies.redis]
-version = "0.21"
+version = "0.22"
 features = ["r2d2"]
 optional = true
 
@@ -80,8 +82,8 @@ version = "1.0"
 optional = true
 
 [dependencies.tokio]
-version = "1.12"
-features = ["macros", "time", "sync", "rt-multi-thread"]
+version = "1"
+features = ["macros", "time", "sync"]
 optional = true
 
 [dependencies.instant]
