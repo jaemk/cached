@@ -99,10 +99,10 @@ docker/status:
 
 ################################################################################
 # Syncs all docs
-sync: sync/readme
+docs: docs/readme
 
 # Updates README.md using `README_CC`
-sync/readme: README.md
+docs/readme: README.md
 
 README.md: src/lib.rs
 	@echo [$@]: Updating $@...
@@ -158,7 +158,7 @@ clean/docker/%:
 		$(filter examples%, $(MAKECMDGOALS)) \
 		$(filter tests%, $(MAKECMDGOALS)) \
 		$(filter docker%, $(MAKECMDGOALS)) \
-		$(filter sync%, $(MAKECMDGOALS)) \
+		$(filter docs%, $(MAKECMDGOALS)) \
 		$(filter fmt%, $(MAKECMDGOALS)) \
 		$(filter check%, $(MAKECMDGOALS)) \
 		$(filter clean%, $(MAKECMDGOALS))

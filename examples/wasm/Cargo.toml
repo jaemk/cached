@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies.cached]
 path ="../.."
-features = ["wasm"]
+default_features = false
+features = ["proc_macro", "wasm"]
 
 [dependencies.web-sys]
 version = "0.3"
