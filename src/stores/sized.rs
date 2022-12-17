@@ -171,17 +171,28 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     }
 
     fn check_capacity(&mut self) {
-        if self.store.len() >= self.capacity {
+        let Self {
+            ref mut store,
+            ref mut order,
+            ref hash_builder,
+            capacity,
+            ..
+        } = *self;
+        let len = store.len();
+        if len > capacity {
             // store has reached capacity, evict the oldest item.
             // store capacity cannot be zero, so there must be content in `self.order`.
-            let index = self.order.back();
-            let key = &self.order.get(index).0;
-            let hash = self.hash(key);
+            let index = order.back();
+            let key = &order.get(index).0;
+            let hasher = &mut hash_builder.build_hasher();
+            key.hash(hasher);
+            let hash = hasher.finish();
 
-            let order = &self.order;
-            let erased = self.store.erase_entry(hash, |&i| *key == order.get(i).0);
+            let order_ = &order;
+            let erased = store.erase_entry(hash, |&i| *key == order_.get(i).0);
             assert!(erased, "SizedCache::cache_set failed evicting cache key");
-            self.order.remove(index);
+            store.remove_entry(hash, |&i| *key == order_.get(i).0);
+            order.remove(index);
         }
     }
 
@@ -239,10 +250,10 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             self.order.move_to_front(index);
             (true, !replace_existing, &mut self.order.get_mut(index).1)
         } else {
-            self.check_capacity();
             self.misses += 1;
             let index = self.order.push_front((key, f()));
             self.insert_index(hash, index);
+            self.check_capacity();
             (false, false, &mut self.order.get_mut(index).1)
         }
     }
@@ -268,10 +279,10 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             self.order.move_to_front(index);
             Ok((true, !replace_existing, &mut self.order.get_mut(index).1))
         } else {
-            self.check_capacity();
             self.misses += 1;
             let index = self.order.push_front((key, f()?));
             self.insert_index(hash, index);
+            self.check_capacity();
             Ok((false, false, &mut self.order.get_mut(index).1))
         }
     }
@@ -329,10 +340,10 @@ where
             self.order.move_to_front(index);
             (true, !replace_existing, &mut self.order.get_mut(index).1)
         } else {
-            self.check_capacity();
             self.misses += 1;
             let index = self.order.push_front((key, f().await));
             self.insert_index(hash, index);
+            self.check_capacity();
             (false, false, &mut self.order.get_mut(index).1)
         }
     }
@@ -363,10 +374,10 @@ where
             self.order.move_to_front(index);
             Ok((true, !replace_existing, &mut self.order.get_mut(index).1))
         } else {
-            self.check_capacity();
             self.misses += 1;
             let index = self.order.push_front((key, f().await?));
             self.insert_index(hash, index);
+            self.check_capacity();
             Ok((false, false, &mut self.order.get_mut(index).1))
         }
     }
@@ -382,15 +393,16 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     }
 
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
-        self.check_capacity();
         let hash = self.hash(&key);
-        if let Some(index) = self.get_index(hash, &key) {
+        let v = if let Some(index) = self.get_index(hash, &key) {
             self.order.set(index, (key, val)).map(|(_, v)| v)
         } else {
             let index = self.order.push_front((key, val));
             self.insert_index(hash, index);
             None
-        }
+        };
+        self.check_capacity();
+        v
     }
 
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
@@ -645,6 +657,32 @@ mod tests {
         assert_eq!(2, hits);
         assert_eq!(1, misses);
         assert_eq!(*c.cache_get_mut(&1).unwrap(), 10);
+    }
+
+    #[test]
+    fn sized_cache_eviction_fix() {
+        let mut cache = SizedCache::<u32, ()>::with_size(3);
+
+        cache.cache_set(1, ());
+        cache.cache_set(2, ());
+        cache.cache_set(3, ());
+
+        assert!(cache.cache_get(&1).is_some());
+        assert!(cache.cache_get(&2).is_some());
+        assert!(cache.cache_get(&3).is_some());
+        assert!(!cache.cache_get(&4).is_some());
+
+        // previous bug: inserting the same key multiple times would continue
+        //               to evict the oldest cache member
+        cache.cache_set(4, ());
+        assert_eq!(cache.cache_size(), 3);
+        cache.cache_set(4, ());
+        assert_eq!(cache.cache_size(), 3); // previously failed, returning 2
+
+        assert!(!cache.cache_get(&1).is_some()); // 1 is evicted by first "4" insert
+        assert!(cache.cache_get(&2).is_some()); // previously failed, 2 would be evicted by second "4" insert
+        assert!(cache.cache_get(&3).is_some());
+        assert!(cache.cache_get(&4).is_some());
     }
 
     #[test]
