@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.41.0]
+## Added
+## Changed
+- Fix "sized" cache types (`SizedCache`, `TimedSizedCache`) to check capacity and evict members after insertion.
+- Fixes bug where continuously inserting a key present in the cache would incorrectly evict the oldest cache member
+  even though the cache size was not increasing.
+## Removed
+
 ## [0.40.0]
 ## Added
 - Add optional feature flag `redis_ahash` to enable `redis`'s optional `ahash` feature
