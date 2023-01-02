@@ -3,6 +3,7 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Better code generation for `#[cached]` when the `sync_writes` flag is true.
 ## Removed
 
 ## [0.41.0]

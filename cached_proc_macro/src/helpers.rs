@@ -97,8 +97,8 @@ pub(super) fn make_cache_key_type(
     key: &Option<String>,
     convert: &Option<String>,
     cache_type: &Option<String>,
-    input_tys: Vec<Box<Type>>,
-    input_names: &Vec<Box<Pat>>,
+    input_tys: Vec<Type>,
+    input_names: &Vec<Pat>,
 ) -> (TokenStream2, TokenStream2) {
     match (key, convert, cache_type) {
         (Some(key_str), Some(convert_str), _) => {
@@ -134,14 +134,14 @@ pub(super) fn make_cache_key_type(
 // then we need to strip off the `mut` keyword from the
 // variable identifiers, so we can refer to arguments `a` and `b`
 // instead of `mut a` and `mut b`
-pub(super) fn get_input_names(inputs: &Punctuated<FnArg, Comma>) -> Vec<Box<Pat>> {
+pub(super) fn get_input_names(inputs: &Punctuated<FnArg, Comma>) -> Vec<Pat> {
     inputs
         .iter()
         .map(|input| match input {
             FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
-            FnArg::Typed(pat_type) => match_pattern_type(&pat_type),
+            FnArg::Typed(pat_type) => *match_pattern_type(&pat_type),
         })
-        .collect::<Vec<Box<Pat>>>()
+        .collect()
 }
 
 pub(super) fn fill_in_attributes(attributes: &mut Vec<Attribute>, cache_fn_doc_extra: String) {
@@ -155,14 +155,14 @@ pub(super) fn fill_in_attributes(attributes: &mut Vec<Attribute>, cache_fn_doc_e
 }
 
 // pull out the names and types of the function inputs
-pub(super) fn get_input_types(inputs: &Punctuated<FnArg, Comma>) -> Vec<Box<Type>> {
+pub(super) fn get_input_types(inputs: &Punctuated<FnArg, Comma>) -> Vec<Type> {
     inputs
         .iter()
         .map(|input| match input {
             FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
-            FnArg::Typed(pat_type) => pat_type.ty.clone(),
+            FnArg::Typed(pat_type) => *pat_type.ty.clone(),
         })
-        .collect::<Vec<Box<Type>>>()
+        .collect()
 }
 
 pub(super) fn get_output_parts(output_ts: &TokenStream) -> Vec<String> {
@@ -173,7 +173,7 @@ pub(super) fn get_output_parts(output_ts: &TokenStream) -> Vec<String> {
             proc_macro::TokenTree::Ident(ident) => Some(ident.to_string()),
             _ => None,
         })
-        .collect::<Vec<_>>()
+        .collect()
 }
 
 pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: String) -> TokenStream {

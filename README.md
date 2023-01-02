@@ -35,7 +35,7 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the
-[`examples`](https://github.com/jaemk/cached/tree/master/examples) directory for runnable snippets.`
+[`examples`](https://github.com/jaemk/cached/tree/master/examples) directory for runnable snippets.
 
 Any custom cache that implements `cached::Cached`/`cached::CachedAsync` can be used with the `#[cached]`/`#[once]`/`cached!` macros in place of the built-ins.
 Any custom cache that implements `cached::IOCached`/`cached::IOCachedAsync` can be used with the `#[io_cached]` macro.
