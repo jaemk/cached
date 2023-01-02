@@ -670,7 +670,7 @@ mod tests {
         assert!(cache.cache_get(&1).is_some());
         assert!(cache.cache_get(&2).is_some());
         assert!(cache.cache_get(&3).is_some());
-        assert!(!cache.cache_get(&4).is_some());
+        assert!(cache.cache_get(&4).is_none());
 
         // previous bug: inserting the same key multiple times would continue
         //               to evict the oldest cache member
@@ -679,7 +679,7 @@ mod tests {
         cache.cache_set(4, ());
         assert_eq!(cache.cache_size(), 3); // previously failed, returning 2
 
-        assert!(!cache.cache_get(&1).is_some()); // 1 is evicted by first "4" insert
+        assert!(cache.cache_get(&1).is_none()); // 1 is evicted by first "4" insert
         assert!(cache.cache_get(&2).is_some()); // previously failed, 2 would be evicted by second "4" insert
         assert!(cache.cache_get(&3).is_some());
         assert!(cache.cache_get(&4).is_some());
