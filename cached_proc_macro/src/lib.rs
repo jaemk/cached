@@ -549,6 +549,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             #return_cache_block
             #w_lock
+            if let Some(result) = &*cached {
+                #return_cache_block
+            }
             #function_call
             #set_cache_and_return
         }
