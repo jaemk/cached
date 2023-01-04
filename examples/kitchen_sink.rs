@@ -44,7 +44,7 @@ cached! {
 // Note that the cache key type is a `String` created from the borrow arguments
 cached_key! {
     KEYED: SizedCache<String, usize> = SizedCache::with_size(100);
-    Key = { format!("{}{}", a, b) };
+    Key = { format!("{a}{b}") };
     fn keyed(a: &str, b: &str) -> usize = {
         let size = a.len() + b.len();
         sleep(Duration::new(size as u64, 0));
@@ -97,7 +97,7 @@ cached! {
     CUSTOM: MyCache<u32, ()> = MyCache::with_capacity(50);
     fn custom(n: u32) -> () = {
         if n == 0 { return; }
-        custom(n-1)
+        custom(n-1);
     }
 }
 

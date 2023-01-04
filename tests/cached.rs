@@ -218,7 +218,7 @@ fn test_timed_cache_key() {
 
 cached_key! {
     SIZED_CACHE: SizedCache<String, usize> = SizedCache::with_size(2);
-    Key = { format!("{}{}", a, b) };
+    Key = { format!("{a}{b}") };
     fn sized_key(a: &str, b: &str) -> usize = {
         let size = a.len() + b.len();
         sleep(Duration::new(size as u64, 0));
@@ -335,12 +335,12 @@ cached_control! {
     };
     Set(set_value) = set_value.clone();
     Return(return_value) = {
-        println!("{}", return_value);
+        println!("{return_value}");
         Ok(return_value)
     };
     fn can_fail(input: &str) -> Result<String, String> = {
         let len = input.len();
-        if len < 3 { Ok(format!("{}-{}", input, len)) }
+        if len < 3 { Ok(format!("{input}-{len}")) }
         else { Err("too big".to_string()) }
     }
 }
@@ -362,19 +362,19 @@ fn test_can_fail() {
 
 cached_key! {
     SIZED_KEY_RESULT_CACHE: SizedCache<String, String> = SizedCache::with_size(2);
-    Key = { format!("{}/{}", a, b) };
+    Key = { format!("{a}/{b}") };
     fn slow_small_cache(a: &str, b: &str) -> String = {
         sleep(Duration::new(1, 0));
-        format!("{}:{}", a, b)
+        format!("{a}:{b}")
     }
 }
 
 #[test]
-/// This is a regression test to confirm that racing cache sets on a SizedCache
+/// This is a regression test to confirm that racing cache sets on a `SizedCache`
 /// do not cause duplicates to exist in the internal `order`. See issue #7
 fn test_racing_duplicate_keys_do_not_duplicate_sized_cache_ordering() {
     let a = thread::spawn(|| slow_small_cache("a", "b"));
-    sleep(Duration::new(0, 500000));
+    sleep(Duration::new(0, 500_000));
     let b = thread::spawn(|| slow_small_cache("a", "b"));
     a.join().unwrap();
     b.join().unwrap();
@@ -482,13 +482,13 @@ fn test_proc_timed_sized_cache() {
         let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
         assert_eq!(2, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
-        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1])
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1]);
     }
     // sleep to expire the one entry
     sleep(Duration::new(1, 0));
     {
         let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
-        assert!(cache.key_order().next().is_none())
+        assert!(cache.key_order().next().is_none());
     }
     proc_timed_sized_sleeper(1);
     proc_timed_sized_sleeper(1);
@@ -496,7 +496,7 @@ fn test_proc_timed_sized_cache() {
         let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
         assert_eq!(3, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
-        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1])
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1]);
     }
     // lru size is 1, so this new thing evicts the existing key
     proc_timed_sized_sleeper(2);
@@ -504,7 +504,7 @@ fn test_proc_timed_sized_cache() {
         let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
         assert_eq!(4, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
-        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&2])
+        assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&2]);
     }
 }
 

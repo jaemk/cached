@@ -1,13 +1,11 @@
-use std::cmp::Eq;
-use std::collections::HashMap;
-use std::hash::Hash;
-
-use std::thread::sleep;
-use std::time::Duration;
-
 use cached::proc_macro::cached;
 use cached::Return;
 use cached::{Cached, SizedCache, UnboundCache};
+use std::cmp::Eq;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::thread::{sleep, spawn};
+use std::time::Duration;
 
 // cached shorthand, uses the default unbounded cache.
 // Equivalent to specifying `type = "UnboundCache<(u32), u32>", create= "{ UnboundCache::new() }"`
@@ -113,11 +111,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 
 // Specify our custom cache and supply an instance to use
 #[cached(type = "MyCache<u32, ()>", create = "{ MyCache::with_capacity(50) }")]
-fn custom(n: u32) -> () {
+fn custom(n: u32) {
     if n == 0 {
         return;
     }
-    custom(n - 1)
+    custom(n - 1);
 }
 
 // handle results, don't cache errors
@@ -319,13 +317,13 @@ pub fn main() {
     }
 
     println!("\n ** refresh by priming **");
-    let h = std::thread::spawn(|| {
+    let h = spawn(|| {
         for _ in 1..6 {
             expires_for_priming_prime_cache(1);
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            sleep(Duration::from_millis(500));
         }
     });
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    sleep(Duration::from_millis(200));
     for n in 1..6 {
         assert_eq!(1, expires_for_priming(1));
         {
@@ -336,13 +334,13 @@ pub fn main() {
                 "primed cache hits: {}, misses: {}",
                 c.cache_hits().unwrap(),
                 c.cache_misses().unwrap()
-            )
+            );
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        sleep(Duration::from_millis(500));
     }
     h.join().unwrap();
     println!("now wait for expiration");
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    sleep(Duration::from_millis(1000));
     assert_eq!(1, expires_for_priming(1));
     {
         let c = EXPIRES_FOR_PRIMING.lock().unwrap();
@@ -352,7 +350,7 @@ pub fn main() {
             "primed cache hits: {}, misses: {}",
             c.cache_hits().unwrap(),
             c.cache_misses().unwrap()
-        )
+        );
     }
 
     println!("\ndone!");

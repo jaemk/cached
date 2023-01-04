@@ -30,19 +30,25 @@ pub struct TimedSizedCache<K, V> {
 
 impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    #[must_use]
     pub fn with_size_and_lifespan(size: usize, seconds: u64) -> TimedSizedCache<K, V> {
         Self::with_size_and_lifespan_and_refresh(size, seconds, false)
     }
 
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data.
     /// Also set if the ttl should be refreshed on retrieving
+    ///
+    /// # Panics
+    ///
+    /// Will panic if size is 0
+    #[must_use]
     pub fn with_size_and_lifespan_and_refresh(
         size: usize,
         seconds: u64,
         refresh: bool,
     ) -> TimedSizedCache<K, V> {
         if size == 0 {
-            panic!("`size` of `TimedSizedCache` must be greater than zero.")
+            panic!("`size` of `TimedSizedCache` must be greater than zero.");
         }
         TimedSizedCache {
             store: SizedCache::with_size(size),
@@ -54,6 +60,11 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
         }
     }
 
+    /// Creates a new `TimedSizedCache` with a specified lifespan and a given size limit and pre-allocated backing data
+    ///
+    /// # Errors
+    ///
+    /// Will return a `std::io::Error`, depending on the error
     pub fn try_with_size_and_lifespan(
         size: usize,
         seconds: u64,
@@ -94,16 +105,18 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
     }
 
     /// Returns if the lifetime is refreshed when the value is retrieved
+    #[must_use]
     pub fn refresh(&self) -> bool {
         self.refresh
     }
 
     /// Sets if the lifetime is refreshed when the value is retrieved
     pub fn set_refresh(&mut self, refresh: bool) {
-        self.refresh = refresh
+        self.refresh = refresh;
     }
 
     /// Returns a reference to the cache's `store`
+    #[must_use]
     pub fn get_store(&self) -> &SizedCache<K, (Instant, V)> {
         &self.store
     }
@@ -340,19 +353,19 @@ mod tests {
         assert_eq!(c.cache_set(4, 100), None);
         assert_eq!(c.cache_set(5, 100), None);
 
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
 
         sleep(Duration::new(1, 0));
 
         assert_eq!(c.cache_set(6, 100), None);
         assert_eq!(c.cache_set(7, 100), None);
 
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
 
         assert!(c.cache_get(&2).is_none());
         assert!(c.cache_get(&3).is_some());
 
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [3, 7, 6, 5, 4]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [3, 7, 6, 5, 4]);
 
         assert_eq!(2, c.cache_misses().unwrap());
         assert_eq!(5, c.cache_size());
@@ -372,7 +385,7 @@ mod tests {
         assert!(c.cache_set(1, 100).is_none());
         assert!(c.cache_set(2, 100).is_none());
         assert!(c.cache_set(3, 100).is_none());
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [3, 2, 1, 7, 6]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [3, 2, 1, 7, 6]);
 
         sleep(Duration::new(1, 0));
 

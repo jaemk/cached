@@ -34,7 +34,7 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the
-[`examples`](https://github.com/jaemk/cached/tree/master/examples) directory for runnable snippets.`
+[`examples`](https://github.com/jaemk/cached/tree/master/examples) directory for runnable snippets.
 
 Any custom cache that implements `cached::Cached`/`cached::CachedAsync` can be used with the `#[cached]`/`#[once]`/`cached!` macros in place of the built-ins.
 Any custom cache that implements `cached::IOCached`/`cached::IOCachedAsync` can be used with the `#[io_cached]` macro.
@@ -273,12 +273,24 @@ pub trait IOCached<K, V> {
     type Error;
 
     /// Attempt to retrieve a cached value
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Insert a key, value pair and return the previous value
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached value
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value

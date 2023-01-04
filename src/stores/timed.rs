@@ -36,12 +36,14 @@ pub struct TimedCache<K, V> {
 
 impl<K: Hash + Eq, V> TimedCache<K, V> {
     /// Creates a new `TimedCache` with a specified lifespan
+    #[must_use]
     pub fn with_lifespan(seconds: u64) -> TimedCache<K, V> {
         Self::with_lifespan_and_refresh(seconds, false)
     }
 
     /// Creates a new `TimedCache` with a specified lifespan and
     /// cache-store with the specified pre-allocated capacity
+    #[must_use]
     pub fn with_lifespan_and_capacity(seconds: u64, size: usize) -> TimedCache<K, V> {
         TimedCache {
             store: Self::new_store(Some(size)),
@@ -55,6 +57,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
 
     /// Creates a new `TimedCache` with a specified lifespan which
     /// refreshes the ttl when the entry is retrieved
+    #[must_use]
     pub fn with_lifespan_and_refresh(seconds: u64, refresh: bool) -> TimedCache<K, V> {
         TimedCache {
             store: Self::new_store(None),
@@ -67,13 +70,14 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     }
 
     /// Returns if the lifetime is refreshed when the value is retrieved
+    #[must_use]
     pub fn refresh(&self) -> bool {
         self.refresh
     }
 
     /// Sets if the lifetime is refreshed when the value is retrieved
     pub fn set_refresh(&mut self, refresh: bool) {
-        self.refresh = refresh
+        self.refresh = refresh;
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, (Instant, V)> {
@@ -81,6 +85,7 @@ impl<K: Hash + Eq, V> TimedCache<K, V> {
     }
 
     /// Returns a reference to the cache's `store`
+    #[must_use]
     pub fn get_store(&self) -> &HashMap<K, (Instant, V)> {
         &self.store
     }

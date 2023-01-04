@@ -2,16 +2,16 @@ use super::{Cached, SizedCache};
 use crate::stores::timed::Status;
 use std::hash::Hash;
 
-/// The CanExpire trait defines a function for implementations to determine if
+/// The `CanExpire` trait defines a function for implementations to determine if
 /// the value has expired.
 pub trait CanExpire {
-    /// is_expired returns whether the value has expired.
+    /// `is_expired` returns whether the value has expired.
     fn is_expired(&self) -> bool;
 }
 
 /// Expiring Value Cache
 ///
-/// Stores values that implement the CanExpire trait so that expiration
+/// Stores values that implement the `CanExpire` trait so that expiration
 /// is determined by the values themselves. This is useful for caching
 /// values which themselves contain an expiry timestamp.
 ///
@@ -26,6 +26,7 @@ pub struct ExpiringValueCache<K: Hash + Eq, V: CanExpire> {
 impl<K: Clone + Hash + Eq, V: CanExpire> ExpiringValueCache<K, V> {
     /// Creates a new `ExpiringValueCache` with a given size limit and
     /// pre-allocated backing data.
+    #[must_use]
     pub fn with_size(size: usize) -> ExpiringValueCache<K, V> {
         ExpiringValueCache {
             store: SizedCache::with_size(size),
@@ -37,10 +38,13 @@ impl<K: Clone + Hash + Eq, V: CanExpire> ExpiringValueCache<K, V> {
     fn status(&mut self, k: &K) -> Status {
         let v = self.store.cache_get(k);
         match v {
-            Some(v) => match v.is_expired() {
-                true => Status::Expired,
-                false => Status::Found,
-            },
+            Some(v) => {
+                if v.is_expired() {
+                    Status::Expired
+                } else {
+                    Status::Found
+                }
+            }
             None => Status::NotFound,
         }
     }
@@ -110,7 +114,7 @@ impl<K: Hash + Eq + Clone, V: CanExpire> Cached<K, V> for ExpiringValueCache<K, 
         self.store.cache_clear();
     }
     fn cache_reset(&mut self) {
-        self.store.cache_reset()
+        self.store.cache_reset();
     }
     fn cache_size(&self) -> usize {
         self.store.cache_size()

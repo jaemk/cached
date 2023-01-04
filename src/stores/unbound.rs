@@ -41,6 +41,7 @@ where
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
     /// Creates an empty `UnboundCache`
     #[allow(clippy::new_without_default)]
+    #[must_use]
     pub fn new() -> UnboundCache<K, V> {
         UnboundCache {
             store: Self::new_store(None),
@@ -51,6 +52,7 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     }
 
     /// Creates an empty `UnboundCache` with a given pre-allocated capacity
+    #[must_use]
     pub fn with_capacity(size: usize) -> UnboundCache<K, V> {
         UnboundCache {
             store: Self::new_store(Some(size)),
@@ -65,6 +67,7 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     }
 
     /// Returns a reference to the cache's `store`
+    #[must_use]
     pub fn get_store(&self) -> &HashMap<K, V> {
         &self.store
     }
@@ -72,27 +75,21 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
 
 impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_get(&mut self, key: &K) -> Option<&V> {
-        match self.store.get(key) {
-            Some(v) => {
-                self.hits += 1;
-                Some(v)
-            }
-            None => {
-                self.misses += 1;
-                None
-            }
+        if let Some(v) = self.store.get(key) {
+            self.hits += 1;
+            Some(v)
+        } else {
+            self.misses += 1;
+            None
         }
     }
     fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
-        match self.store.get_mut(key) {
-            Some(v) => {
-                self.hits += 1;
-                Some(v)
-            }
-            None => {
-                self.misses += 1;
-                None
-            }
+        if let Some(v) = self.store.get_mut(key) {
+            self.hits += 1;
+            Some(v)
+        } else {
+            self.misses += 1;
+            None
         }
     }
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {

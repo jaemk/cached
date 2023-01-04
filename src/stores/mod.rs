@@ -33,18 +33,22 @@ pub use unbound::UnboundCache;
 ))]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 
-impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
+impl<K, V, S> Cached<K, V> for HashMap<K, V, S>
+where
+    K: Hash + Eq,
+    S: std::hash::BuildHasher + Default,
+{
     fn cache_get(&mut self, k: &K) -> Option<&V> {
         self.get(k)
     }
     fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
         self.get_mut(k)
     }
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
-        self.entry(key).or_insert_with(f)
-    }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         self.insert(k, v)
+    }
+    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+        self.entry(key).or_insert_with(f)
     }
     fn cache_remove(&mut self, k: &K) -> Option<V> {
         self.remove(k)
@@ -53,7 +57,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
         self.clear();
     }
     fn cache_reset(&mut self) {
-        *self = HashMap::new();
+        *self = HashMap::default();
     }
     fn cache_size(&self) -> usize {
         self.len()
@@ -62,9 +66,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for HashMap<K, V> {
 
 #[cfg(feature = "async")]
 #[async_trait]
-impl<K, V> CachedAsync<K, V> for HashMap<K, V>
+impl<K, V, S> CachedAsync<K, V> for HashMap<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
+    S: std::hash::BuildHasher + Send,
 {
     async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
     where

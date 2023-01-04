@@ -67,14 +67,20 @@ where
 
 impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     #[deprecated(since = "0.5.1", note = "method renamed to `with_size`")]
+    #[must_use]
     pub fn with_capacity(size: usize) -> SizedCache<K, V> {
         Self::with_size(size)
     }
 
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    ///
+    /// # Panics
+    ///
+    /// Will panic if size is 0
+    #[must_use]
     pub fn with_size(size: usize) -> SizedCache<K, V> {
         if size == 0 {
-            panic!("`size` of `SizedCache` must be greater than zero.")
+            panic!("`size` of `SizedCache` must be greater than zero.");
         }
         SizedCache {
             store: RawTable::with_capacity(size),
@@ -87,6 +93,10 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     }
 
     /// Creates a new `SizedCache` with a given size limit and pre-allocated backing data
+    ///
+    /// # Errors
+    ///
+    /// Will return a `std::io::Error`, depending on the error
     pub fn try_with_size(size: usize) -> std::io::Result<SizedCache<K, V>> {
         if size == 0 {
             // EINVAL
@@ -228,7 +238,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     /// is either not-set or if `is_valid` returns `false` for
     /// the set value.
     ///
-    /// Returns (was_present, was_valid, mut ref to set value)
+    /// Returns (`was_present`, `was_valid`, mut ref to set value)
     /// `was_valid` will be false when `was_present` is false
     pub(super) fn get_or_set_with_if<F: FnOnce() -> V, FC: FnOnce(&V) -> bool>(
         &mut self,
@@ -288,6 +298,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     }
 
     /// Returns a reference to the cache's `order`
+    #[must_use]
     pub fn get_order(&self) -> &LRUList<(K, V)> {
         &self.order
     }
@@ -295,7 +306,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
     pub fn retain<F: Fn(&K, &V) -> bool>(&mut self, keep: F) {
         let remove_keys = self
             .iter_order()
-            .filter_map(|(k, v)| if !keep(k, v) { Some(k.clone()) } else { None })
+            .filter_map(|(k, v)| if keep(k, v) { None } else { Some(k.clone()) })
             .collect::<Vec<_>>();
         for k in remove_keys {
             self.cache_remove(&k);
@@ -312,7 +323,7 @@ where
     /// is either not-set or if `is_valid` returns `false` for
     /// the set value.
     ///
-    /// Returns (was_present, was_valid, mut ref to set value)
+    /// Returns (`was_present`, `was_valid`, mut ref to set value)
     /// `was_valid` will be false when `was_present` is false
     pub(super) async fn get_or_set_with_if_async<F, Fut, FC>(
         &mut self,
@@ -499,17 +510,17 @@ mod tests {
         assert_eq!(c.cache_set(4, 100), None);
         assert_eq!(c.cache_set(5, 100), None);
 
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [5, 4, 3, 2, 1]);
 
         assert_eq!(c.cache_set(6, 100), None);
         assert_eq!(c.cache_set(7, 100), None);
 
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [7, 6, 5, 4, 3]);
 
         assert!(c.cache_get(&2).is_none());
         assert!(c.cache_get(&3).is_some());
 
-        assert_eq!(c.key_order().cloned().collect::<Vec<_>>(), [3, 7, 6, 5, 4]);
+        assert_eq!(c.key_order().copied().collect::<Vec<_>>(), [3, 7, 6, 5, 4]);
 
         assert_eq!(2, c.cache_misses().unwrap());
         let size = c.cache_size();
@@ -575,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    /// This is a regression test to confirm that racing cache sets on a SizedCache
+    /// This is a regression test to confirm that racing cache sets on a `SizedCache`
     /// do not cause duplicates to exist in the internal `order`. See issue #7
     fn size_cache_racing_keys_eviction_regression() {
         let mut c = SizedCache::with_size(2);
@@ -670,7 +681,7 @@ mod tests {
         assert!(cache.cache_get(&1).is_some());
         assert!(cache.cache_get(&2).is_some());
         assert!(cache.cache_get(&3).is_some());
-        assert!(!cache.cache_get(&4).is_some());
+        assert!(cache.cache_get(&4).is_none());
 
         // previous bug: inserting the same key multiple times would continue
         //               to evict the oldest cache member
@@ -679,7 +690,7 @@ mod tests {
         cache.cache_set(4, ());
         assert_eq!(cache.cache_size(), 3); // previously failed, returning 2
 
-        assert!(!cache.cache_get(&1).is_some()); // 1 is evicted by first "4" insert
+        assert!(cache.cache_get(&1).is_none()); // 1 is evicted by first "4" insert
         assert!(cache.cache_get(&2).is_some()); // previously failed, 2 would be evicted by second "4" insert
         assert!(cache.cache_get(&3).is_some());
         assert!(cache.cache_get(&4).is_some());

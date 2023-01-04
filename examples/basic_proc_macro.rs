@@ -15,7 +15,7 @@ fn slow_fn(n: u32) -> String {
 #[once(time = 1)]
 fn once_slow_fn(n: u32) -> String {
     sleep(Duration::new(1, 0));
-    format!("{}", n)
+    format!("{n}")
 }
 
 pub fn main() {
