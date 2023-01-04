@@ -32,6 +32,7 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 - `redis_connection_manager`: Enable the optional `connection-manager` feature of `redis`. Any async redis caches created
                               will use a connection manager instead of a `MultiplexedConnection`
 - `redis_ahash`: Enable the optional `ahash` feature of `redis`
+- `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
    runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_async_std`, `redis_tokio`, `redis_ahash`)
 
@@ -189,6 +190,8 @@ pub use stores::{
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use stores::{RedisCache, RedisCacheError};
+#[cfg(feature = "disk_store")]
+pub use stores::{DiskCache, DiskCacheError};
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 use {async_trait::async_trait, futures::Future};

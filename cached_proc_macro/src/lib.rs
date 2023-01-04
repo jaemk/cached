@@ -68,6 +68,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   the error type returned by your function.
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
 /// - `redis`: (optional, bool) default to a `RedisCache` or `AsyncRedisCache`
+/// - `disk`: (optional, bool) default to a `DiskCache` or `AsyncDiskCache`
 /// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCached` or `TimedSizedCache`.
 /// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
 /// - `type`: (optional, string type) explicitly specify the cache store type to use.
