@@ -3,6 +3,11 @@
 ## [Unreleased]
 ## Added
 ## Changed
+## Removed
+
+## [0.42.0] / [cached_proc_macro[0.16.0]]
+## Added
+## Changed
 - Better code generation for `#[cached]` when the `sync_writes` flag is true.
 ## Removed
 
