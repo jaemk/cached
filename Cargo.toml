@@ -64,7 +64,7 @@ version = "0.1"
 optional = true
 
 [dependencies.redis]
-version = "0.22"
+version = "0.23"
 features = ["r2d2"]
 optional = true
 
@@ -100,7 +100,7 @@ version = "1"
 version = "1"
 
 [dev-dependencies.serial_test]
-version = "0.10"
+version = "2"
 
 [workspace]
 members = ["cached_proc_macro","examples/wasm"]
