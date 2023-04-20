@@ -3,6 +3,9 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Show proc-macro documentation on docs.rs
+- Document needed feature flags
+- Hide implementation details in documentation
 ## Removed
 
 ## [0.43.0]
