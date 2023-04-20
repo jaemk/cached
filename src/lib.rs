@@ -166,6 +166,8 @@ Due to the requirements of storing arguments and return values in a global cache
 
 */
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 #[cfg(feature = "async")]
 #[doc(hidden)]
 pub extern crate async_once;
@@ -176,15 +178,22 @@ pub extern crate lazy_static;
 pub extern crate once_cell;
 
 #[cfg(feature = "proc_macro")]
+#[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
 pub use proc_macro::Return;
 #[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "redis_async_std", feature = "redis_tokio")))
+)]
 pub use stores::AsyncRedisCache;
 pub use stores::{
     CanExpire, ExpiringValueCache, SizedCache, TimedCache, TimedSizedCache, UnboundCache,
 };
 #[cfg(feature = "redis_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use stores::{RedisCache, RedisCacheError};
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 use {async_trait::async_trait, futures::Future};
 
 mod lru_list;
@@ -259,6 +268,7 @@ pub trait Cached<K, V> {
 }
 
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[async_trait]
 pub trait CachedAsync<K, V> {
     async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
@@ -314,6 +324,7 @@ pub trait IOCached<K, V> {
 }
 
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[async_trait]
 pub trait IOCachedAsync<K, V> {
     type Error;

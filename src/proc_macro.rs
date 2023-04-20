@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
+
 /*!
 Procedural macros for defining functions that wrap a static-ref cache object.
 
