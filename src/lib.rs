@@ -167,9 +167,12 @@ Due to the requirements of storing arguments and return values in a global cache
 */
 
 #[cfg(feature = "async")]
+#[doc(hidden)]
 pub extern crate async_once;
 #[cfg(feature = "async")]
+#[doc(hidden)]
 pub extern crate lazy_static;
+#[doc(hidden)]
 pub extern crate once_cell;
 
 #[cfg(feature = "proc_macro")]
@@ -188,10 +191,13 @@ mod lru_list;
 pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
+#[doc(hidden)]
 pub mod stores;
+#[doc(hidden)]
 pub use instant;
 
 #[cfg(any(feature = "proc_macro", feature = "async"))]
+#[doc(hidden)]
 pub mod async_sync {
     pub use tokio::sync::Mutex;
     pub use tokio::sync::RwLock;
