@@ -337,7 +337,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             // run the function and cache the result
             async fn inner(#inputs) #output #body;
             let result = inner(#(#input_names),*).await;
-            let cache = &#cache_ident.get().await;
+            let cache = &#cache_ident.get_or_init(init).await;
             #set_cache_block
             result
         }
@@ -373,17 +373,16 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Cached static
             #[doc = #cache_ident_doc]
-            ::cached::lazy_static::lazy_static! {
-                #visibility static ref #cache_ident: ::cached::async_once::AsyncOnce<#cache_ty> = ::cached::async_once::AsyncOnce::new(async move { #cache_create });
-            }
+            #visibility static #cache_ident: ::cached::async_sync::OnceCell<#cache_ty> = ::cached::async_sync::OnceCell::const_new();
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
+                let init = || async { #cache_create };
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
                 {
                     // check if the result is cached
-                    let cache = &#cache_ident.get().await;
+                    let cache = &#cache_ident.get_or_init(init).await;
                     if let Some(result) = cache.cache_get(&key).await.map_err(#map_error)? {
                         #return_cache_block
                     }
@@ -395,6 +394,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::IOCachedAsync;
+                let init = || async { #cache_create };
                 let key = #key_convert_block;
                 #do_set_return_block
             }

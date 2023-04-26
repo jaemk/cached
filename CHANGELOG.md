@@ -5,6 +5,10 @@
 ## Changed
 ## Removed
 
+## [0.42.1]
+## Removed
+- Dependency to `lazy_static` and `async_once` are removed.
+
 ## [0.42.0] / [cached_proc_macro[0.16.0]]
 ## Added
 ## Changed

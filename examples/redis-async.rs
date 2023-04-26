@@ -9,6 +9,7 @@ Cleanup the redis docker container:
 
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
+use once_cell::sync::Lazy;
 use std::io;
 use std::io::Write;
 use std::time::Duration;
@@ -59,9 +60,8 @@ impl Config {
         }
     }
 }
-lazy_static::lazy_static! {
-    static ref CONFIG: Config = Config::load();
-}
+
+static CONFIG: Lazy<Config> = Lazy::new(Config::load);
 
 #[io_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
