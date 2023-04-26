@@ -5,9 +5,16 @@
 ## Changed
 ## Removed
 
-## [0.42.1]
+## [0.43.1]
 ## Removed
 - Dependency to `lazy_static` and `async_once` are removed.
+
+## [0.43.0]
+## Added
+## Changed
+- Update redis `0.22.0` -> `0.23.0`
+- Update serial_test `0.10.0` -> `2.0.0`
+## Removed
 
 ## [0.42.0] / [cached_proc_macro[0.16.0]]
 ## Added
