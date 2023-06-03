@@ -21,9 +21,6 @@
     {
   ```
 ## Removed
-
-## [0.43.1]
-## Removed
 - Dependency to `lazy_static` and `async_once` are removed.
 
 ## [0.43.0]
