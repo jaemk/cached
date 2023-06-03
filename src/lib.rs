@@ -160,7 +160,7 @@ Due to the requirements of storing arguments and return values in a global cache
   where arguments are formatted into `Strings` and values are de/serialized.
 - Macro-defined functions should not be used to produce side-effectual results!
 - Macro-defined functions cannot live directly under `impl` blocks since macros expand to a
-  `once_cell`/`lazy_static` initialization and one or more function definitions.
+  `once_cell` initialization and one or more function definitions.
 - Macro-defined functions cannot accept `Self` types as a parameter.
 
 
@@ -168,12 +168,6 @@ Due to the requirements of storing arguments and return values in a global cache
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(feature = "async")]
-#[doc(hidden)]
-pub extern crate async_once;
-#[cfg(feature = "async")]
-#[doc(hidden)]
-pub extern crate lazy_static;
 #[doc(hidden)]
 pub extern crate once_cell;
 
@@ -209,6 +203,7 @@ pub use instant;
 #[doc(hidden)]
 pub mod async_sync {
     pub use tokio::sync::Mutex;
+    pub use tokio::sync::OnceCell;
     pub use tokio::sync::RwLock;
 }
 
