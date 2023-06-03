@@ -3,6 +3,12 @@
 ## [Unreleased]
 ## Added
 ## Changed
+## Removed
+
+## [0.44.0] / [cached_proc_macro[0.17.0]]
+## Added
+- Option to enable redis multiplex-connection manager on `AsyncRedisCache`
+## Changed
 - Show proc-macro documentation on docs.rs
 - Document needed feature flags
 - Hide implementation details in documentation
