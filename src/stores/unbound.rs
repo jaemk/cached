@@ -74,7 +74,11 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
-    fn cache_get(&mut self, key: &K) -> Option<&V> {
+    fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         if let Some(v) = self.store.get(key) {
             self.hits += 1;
             Some(v)
@@ -83,7 +87,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
             None
         }
     }
-    fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
+    fn cache_get_mut<Q>(&mut self, key: &Q) -> std::option::Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         if let Some(v) = self.store.get_mut(key) {
             self.hits += 1;
             Some(v)
@@ -108,7 +116,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
             }
         }
     }
-    fn cache_remove(&mut self, k: &K) -> Option<V> {
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.store.remove(k)
     }
     fn cache_clear(&mut self) {
