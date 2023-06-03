@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
+
 /*!
 Procedural macros for defining functions that wrap a static-ref cache object.
 
@@ -325,18 +327,7 @@ pub fn main() {
 
 */
 
-/// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedAsync` for async functions)
-pub use cached_proc_macro::cached;
-
-/// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedAsync` for async functions). Function arguments are not used to identify
-/// a cached value, only one value is cached unless a `time` expiry is specified.
-pub use cached_proc_macro::once;
-
-/// Define a memoized function using a cache store that implements `cached::IOCached` (and
-/// `cached::IOCachedAsync` for async functions)
-pub use cached_proc_macro::io_cached;
-
-/// Used to wrap a function result so callers can see whether the result was cached.
+#[doc(inline)]
+pub use cached_proc_macro::{cached, io_cached, once};
+#[doc(inline)]
 pub use cached_proc_macro_types::Return;

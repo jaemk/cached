@@ -17,6 +17,7 @@ mod timed_sized;
 mod unbound;
 
 #[cfg(feature = "redis_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{
     RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
@@ -31,6 +32,14 @@ pub use unbound::UnboundCache;
     feature = "redis_store",
     any(feature = "redis_async_std", feature = "redis_tokio")
 ))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(all(
+        feature = "async",
+        feature = "redis_store",
+        any(feature = "redis_async_std", feature = "redis_tokio")
+    )))
+)]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 
 impl<K, V, S> Cached<K, V> for HashMap<K, V, S>
@@ -38,10 +47,18 @@ where
     K: Hash + Eq,
     S: std::hash::BuildHasher + Default,
 {
-    fn cache_get(&mut self, k: &K) -> Option<&V> {
+    fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.get(k)
     }
-    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
+    fn cache_get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.get_mut(k)
     }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
@@ -50,7 +67,11 @@ where
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         self.entry(key).or_insert_with(f)
     }
-    fn cache_remove(&mut self, k: &K) -> Option<V> {
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.remove(k)
     }
     fn cache_clear(&mut self) {

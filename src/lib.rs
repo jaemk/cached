@@ -166,28 +166,41 @@ Due to the requirements of storing arguments and return values in a global cache
 
 */
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+#[doc(hidden)]
 pub extern crate once_cell;
 
 #[cfg(feature = "proc_macro")]
+#[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
 pub use proc_macro::Return;
 #[cfg(any(feature = "redis_async_std", feature = "redis_tokio"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "redis_async_std", feature = "redis_tokio")))
+)]
 pub use stores::AsyncRedisCache;
 pub use stores::{
     CanExpire, ExpiringValueCache, SizedCache, TimedCache, TimedSizedCache, UnboundCache,
 };
 #[cfg(feature = "redis_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use stores::{RedisCache, RedisCacheError};
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 use {async_trait::async_trait, futures::Future};
 
 mod lru_list;
 pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
+#[doc(hidden)]
 pub mod stores;
+#[doc(hidden)]
 pub use instant;
 
 #[cfg(any(feature = "proc_macro", feature = "async"))]
+#[doc(hidden)]
 pub mod async_sync {
     pub use tokio::sync::Mutex;
     pub use tokio::sync::OnceCell;
@@ -195,12 +208,58 @@ pub mod async_sync {
 }
 
 /// Cache operations
+///
+/// ```rust
+/// use cached::{Cached, UnboundCache};
+///
+/// let mut cache: UnboundCache<String, String> = UnboundCache::new();
+///
+/// // When writing, keys and values are owned:
+/// cache.cache_set("key".to_string(), "owned value".to_string());
+///
+/// // When reading, keys are only borrowed for lookup:
+/// let borrowed_cache_value = cache.cache_get("key");
+///
+/// assert_eq!(borrowed_cache_value, Some(&"owned value".to_string()))
+/// ```
 pub trait Cached<K, V> {
     /// Attempt to retrieve a cached value
-    fn cache_get(&mut self, k: &K) -> Option<&V>;
+    ///
+    /// ```rust
+    /// # use cached::{Cached, UnboundCache};
+    /// # let mut cache: UnboundCache<String, String> = UnboundCache::new();
+    /// # cache.cache_set("key".to_string(), "owned value".to_string());
+    /// // You can use borrowed data, or the data's borrowed type:
+    /// let borrow_lookup_1 = cache.cache_get("key")
+    ///     .map(String::clone);
+    /// let borrow_lookup_2 = cache.cache_get(&"key".to_string())
+    ///     .map(String::clone); // copy the values for test asserts
+    ///
+    /// # assert_eq!(borrow_lookup_1, borrow_lookup_2);
+    /// ```
+    fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Attempt to retrieve a cached value with mutable access
-    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V>;
+    ///
+    /// ```rust
+    /// # use cached::{Cached, UnboundCache};
+    /// # let mut cache: UnboundCache<String, String> = UnboundCache::new();
+    /// # cache.cache_set("key".to_string(), "owned value".to_string());
+    /// // You can use borrowed data, or the data's borrowed type:
+    /// let borrow_lookup_1 = cache.cache_get_mut("key")
+    ///     .map(|value| value.clone());
+    /// let borrow_lookup_2 = cache.cache_get_mut(&"key".to_string())
+    ///     .map(|value| value.clone()); // copy the values for test asserts
+    ///
+    /// # assert_eq!(borrow_lookup_1, borrow_lookup_2);
+    /// ```
+    fn cache_get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Insert a key, value pair and return the previous value
     fn cache_set(&mut self, k: K, v: V) -> Option<V>;
@@ -209,7 +268,23 @@ pub trait Cached<K, V> {
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V;
 
     /// Remove a cached value
-    fn cache_remove(&mut self, k: &K) -> Option<V>;
+    ///
+    /// ```rust
+    /// # use cached::{Cached, UnboundCache};
+    /// # let mut cache: UnboundCache<String, String> = UnboundCache::new();
+    /// # cache.cache_set("key1".to_string(), "owned value 1".to_string());
+    /// # cache.cache_set("key2".to_string(), "owned value 2".to_string());
+    /// // You can use borrowed data, or the data's borrowed type:
+    /// let remove_1 = cache.cache_remove("key1");
+    /// let remove_2 = cache.cache_remove(&"key2".to_string());
+    ///
+    /// # assert_eq!(remove_1, Some("owned value 1".to_string()));
+    /// # assert_eq!(remove_2, Some("owned value 2".to_string()));
+    /// ```
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Remove all cached values. Keeps the allocated memory for reuse.
     fn cache_clear(&mut self);
@@ -250,6 +325,7 @@ pub trait Cached<K, V> {
 }
 
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[async_trait]
 pub trait CachedAsync<K, V> {
     async fn get_or_set_with<F, Fut>(&mut self, k: K, f: F) -> &mut V
@@ -305,6 +381,7 @@ pub trait IOCached<K, V> {
 }
 
 #[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[async_trait]
 pub trait IOCachedAsync<K, V> {
     type Error;

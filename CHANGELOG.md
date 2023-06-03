@@ -3,6 +3,23 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Show proc-macro documentation on docs.rs
+- Document needed feature flags
+- Hide implementation details in documentation
+- Relax `Cached` trait's `cache_get`, `cache_get_mut` and `cache_remove` key parameter. Allow `K: Borrow<Q>`
+  like `std::collections::HashMap` and friends. Avoids copies particularly on `Cached<String, _>` where now
+  you can do `cache.cache_get("key")` and before you had to `cache.cache_get("key".to_string())`.
+
+  Note: This is a minor breaking change for anyone manually implementing the `Cached` trait.
+  The signatures of `cache_get`, `cache_get_mut`, and `cache_remove` must be updated to include the
+  additional trait bound on the `key` type:
+  ```rust
+    fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+  ```
 ## Removed
 
 ## [0.43.1]

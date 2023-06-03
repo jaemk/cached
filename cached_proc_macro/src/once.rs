@@ -21,14 +21,6 @@ struct OnceMacroArgs {
     with_cached_flag: bool,
 }
 
-/// # Attributes
-/// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
-/// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCached` or `TimedSizedCache`.
-/// - `sync_writes`: (optional, bool) specify whether to synchronize the execution of writing of uncached values.
-/// - `result`: (optional, bool) If your function returns a `Result`, only cache `Ok` values returned by the function.
-/// - `option`: (optional, bool) If your function returns an `Option`, only cache `Some` values returned by the function.
-/// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
-///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let attr_args = parse_macro_input!(args as AttributeArgs);
     let args = match OnceMacroArgs::from_list(&attr_args) {
