@@ -83,10 +83,18 @@ impl<K: Hash + Eq, V> MyCache<K, V> {
     }
 }
 impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
-    fn cache_get(&mut self, k: &K) -> Option<&V> {
+    fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.store.get(k)
     }
-    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
+    fn cache_get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.store.get_mut(k)
     }
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
@@ -95,7 +103,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         self.store.insert(k, v)
     }
-    fn cache_remove(&mut self, k: &K) -> Option<V> {
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.store.remove(k)
     }
     fn cache_clear(&mut self) {

@@ -35,7 +35,11 @@ impl<K: Clone + Hash + Eq, V: CanExpire> ExpiringValueCache<K, V> {
         }
     }
 
-    fn status(&mut self, k: &K) -> Status {
+    fn status<Q>(&mut self, k: &Q) -> Status
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let v = self.store.cache_get(k);
         match v {
             Some(v) => {
@@ -57,7 +61,11 @@ impl<K: Clone + Hash + Eq, V: CanExpire> ExpiringValueCache<K, V> {
 
 // https://docs.rs/cached/latest/cached/trait.Cached.html
 impl<K: Hash + Eq + Clone, V: CanExpire> Cached<K, V> for ExpiringValueCache<K, V> {
-    fn cache_get(&mut self, k: &K) -> Option<&V> {
+    fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         match self.status(k) {
             Status::NotFound => {
                 self.misses += 1;
@@ -75,7 +83,11 @@ impl<K: Hash + Eq + Clone, V: CanExpire> Cached<K, V> for ExpiringValueCache<K, 
         }
     }
 
-    fn cache_get_mut(&mut self, k: &K) -> Option<&mut V> {
+    fn cache_get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         match self.status(k) {
             Status::NotFound => {
                 self.misses += 1;
@@ -107,7 +119,11 @@ impl<K: Hash + Eq + Clone, V: CanExpire> Cached<K, V> for ExpiringValueCache<K, 
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         self.store.cache_set(k, v)
     }
-    fn cache_remove(&mut self, k: &K) -> Option<V> {
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.store.cache_remove(k)
     }
     fn cache_clear(&mut self) {
