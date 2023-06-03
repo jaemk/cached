@@ -453,12 +453,28 @@ mod async_redis {
             }
         }
 
+        /// Create a multiplexed redis connection. This is a single connection that can
+        /// be used asynchronously by multiple futures.
+        #[cfg(not(feature = "redis_connection_manager"))]
         async fn create_multiplexed_connection(
             &self,
         ) -> Result<redis::aio::MultiplexedConnection, RedisCacheBuildError> {
             let s = self.connection_string()?;
             let client = redis::Client::open(s)?;
             let conn = client.get_multiplexed_async_connection().await?;
+            Ok(conn)
+        }
+
+        /// Create a multiplexed connection wrapped in a manager. The manager provides access
+        /// to a multiplexed connection and will automatically reconnect to the server when
+        /// necessary.
+        #[cfg(feature = "redis_connection_manager")]
+        async fn create_connection_manager(
+            &self,
+        ) -> Result<redis::aio::ConnectionManager, RedisCacheBuildError> {
+            let s = self.connection_string()?;
+            let client = redis::Client::open(s)?;
+            let conn = redis::aio::ConnectionManager::new(client).await?;
             Ok(conn)
         }
 
@@ -472,7 +488,10 @@ mod async_redis {
                 seconds: self.seconds,
                 refresh: self.refresh,
                 connection_string: self.connection_string()?,
-                multiplexed_connection: self.create_multiplexed_connection().await?,
+                #[cfg(not(feature = "redis_connection_manager"))]
+                connection: self.create_multiplexed_connection().await?,
+                #[cfg(feature = "redis_connection_manager")]
+                connection: self.create_connection_manager().await?,
                 namespace: self.namespace,
                 prefix: self.prefix,
                 _phantom: PhantomData::default(),
@@ -483,14 +502,18 @@ mod async_redis {
     /// Cache store backed by redis
     ///
     /// Values have a ttl applied and enforced by redis.
-    /// Uses a `redis::aio::MultiplexedConnection` under the hood.
+    /// Uses a `redis::aio::MultiplexedConnection` or `redis::aio::ConnectionManager`
+    /// under the hood depending if feature `redis_connection_manager` is used or not.
     pub struct AsyncRedisCache<K, V> {
         pub(super) seconds: u64,
         pub(super) refresh: bool,
         pub(super) namespace: String,
         pub(super) prefix: String,
         connection_string: String,
-        multiplexed_connection: redis::aio::MultiplexedConnection,
+        #[cfg(not(feature = "redis_connection_manager"))]
+        connection: redis::aio::MultiplexedConnection,
+        #[cfg(feature = "redis_connection_manager")]
+        connection: redis::aio::ConnectionManager,
         _phantom: PhantomData<(K, V)>,
     }
 
@@ -526,7 +549,7 @@ mod async_redis {
 
         /// Get a cached value
         async fn cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
-            let mut conn = self.multiplexed_connection.clone();
+            let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
             let key = self.generate_key(key);
 
@@ -551,7 +574,7 @@ mod async_redis {
 
         /// Set a cached value
         async fn cache_set(&self, key: K, val: V) -> Result<Option<V>, Self::Error> {
-            let mut conn = self.multiplexed_connection.clone();
+            let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
 
@@ -582,7 +605,7 @@ mod async_redis {
 
         /// Remove a cached value
         async fn cache_remove(&self, key: &K) -> Result<Option<V>, Self::Error> {
-            let mut conn = self.multiplexed_connection.clone();
+            let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
             let key = self.generate_key(key);
 
