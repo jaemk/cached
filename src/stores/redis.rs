@@ -453,6 +453,8 @@ mod async_redis {
             }
         }
 
+        /// Create a multiplexed redis connection. This is a single connection that can
+        /// be used asynchronously by multiple futures.
         #[cfg(not(feature = "redis_connection_manager"))]
         async fn create_multiplexed_connection(
             &self,
@@ -463,6 +465,9 @@ mod async_redis {
             Ok(conn)
         }
 
+        /// Create a multiplexed connection wrapped in a manager. The manager provides access
+        /// to a multiplexed connection and will automatically reconnect to the server when
+        /// necessary.
         #[cfg(feature = "redis_connection_manager")]
         async fn create_connection_manager(
             &self,
