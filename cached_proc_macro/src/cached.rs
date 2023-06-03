@@ -35,32 +35,6 @@ struct MacroArgs {
     cache_create: Option<String>,
 }
 
-/// # Attributes
-/// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
-/// - `size`: (optional, usize) specify an LRU max size, implies the cache type is a `SizedCache` or `TimedSizedCache`.
-/// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCache` or `TimedSizedCache`.
-/// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
-/// - `sync_writes`: (optional, bool) specify whether to synchronize the execution of writing of uncached values.
-/// - `type`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
-///   specified, defaults to `UnboundCache`. When `size` is specified, defaults to `SizedCache`.
-///   When `time` is specified, defaults to `TimedCached`.
-///   When `size` and `time` are specified, defaults to `TimedSizedCache`. When `type` is
-///   specified, `create` must also be specified.
-/// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
-/// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `key = "u32"`.
-///    When `key` is specified, `convert` must also be specified.
-/// - `convert`: (optional, string expr) specify an expression used to convert function arguments to a cache
-///   key, e.g. `convert = r##"{ format!("{}:{}", arg1, arg2) }"##`. When `convert` is specified,
-///   `key` or `type` must also be set.
-/// - `result`: (optional, bool) If your function returns a `Result`, only cache `Ok` values returned by the function.
-/// - `option`: (optional, bool) If your function returns an `Option`, only cache `Some` values returned by the function.
-/// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
-///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
-///
-/// ## Note
-/// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
-/// This is because darling, which is used for parsing the attributes, does not support directly parsing
-/// attributes into `Type`s or `Block`s.
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let attr_args = parse_macro_input!(args as AttributeArgs);
     let args = match MacroArgs::from_list(&attr_args) {

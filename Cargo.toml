@@ -13,11 +13,12 @@ edition = "2018"
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["proc_macro", "async"]
 proc_macro = ["tokio", "cached_proc_macro", "cached_proc_macro_types"]
-async = ["futures", "tokio", "async-trait", "async_once", "lazy_static"]
+async = ["futures", "tokio", "async-trait"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_connection_manager = ["redis_store", "redis/connection-manager"]
@@ -43,14 +44,6 @@ features = ["raw", "inline-more"]
 
 [dependencies.once_cell]
 version = "1"
-
-[dependencies.lazy_static]
-version = "1"
-optional = true
-
-[dependencies.async_once]
-version = "0.2"
-optional = true
 
 [dependencies.thiserror]
 version = "1"
@@ -84,7 +77,7 @@ optional = true
 
 [dependencies.tokio]
 version = "1"
-features = ["macros", "time", "sync"]
+features = ["macros", "time", "sync", "parking_lot"]
 optional = true
 
 [dependencies.instant]
@@ -95,9 +88,6 @@ version = "1.6"
 features = ["attributes"]
 
 [dev-dependencies.smartstring]
-version = "1"
-
-[dev-dependencies.lazy_static]
 version = "1"
 
 [dev-dependencies.serial_test]

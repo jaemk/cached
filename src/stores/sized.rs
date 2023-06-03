@@ -142,7 +142,11 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         self.order.iter().map(|(_k, v)| v)
     }
 
-    fn hash(&self, key: &K) -> u64 {
+    fn hash<Q>(&self, key: &Q) -> u64
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let hasher = &mut self.hash_builder.build_hasher();
         key.hash(hasher);
         hasher.finish()
@@ -166,18 +170,28 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         });
     }
 
-    fn get_index(&self, hash: u64, key: &K) -> Option<usize> {
+    fn get_index<Q>(&self, hash: u64, key: &Q) -> Option<usize>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let Self { store, order, .. } = self;
         // Get the `order` index store under `hash`, the closure provided
         // is used to compare against matching hashes - we lookup the original
         // `key` value from the `order` list.
         // This pattern is repeated in other lookup situations.
-        store.get(hash, |&i| *key == order.get(i).0).copied()
+        store
+            .get(hash, |&i| key == order.get(i).0.borrow())
+            .copied()
     }
 
-    fn remove_index(&mut self, hash: u64, key: &K) -> Option<usize> {
+    fn remove_index<Q>(&mut self, hash: u64, key: &Q) -> Option<usize>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let Self { store, order, .. } = self;
-        store.remove_entry(hash, |&i| *key == order.get(i).0)
+        store.remove_entry(hash, |&i| key == order.get(i).0.borrow())
     }
 
     fn check_capacity(&mut self) {
@@ -206,7 +220,11 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         }
     }
 
-    pub(super) fn get_if<F: FnOnce(&V) -> bool>(&mut self, key: &K, is_valid: F) -> Option<&V> {
+    pub(super) fn get_if<F: FnOnce(&V) -> bool, Q>(&mut self, key: &Q, is_valid: F) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         if let Some(index) = self.get_index(self.hash(key), key) {
             if is_valid(&self.order.get(index).1) {
                 self.order.move_to_front(index);
@@ -218,11 +236,15 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         None
     }
 
-    pub(super) fn get_mut_if<F: FnOnce(&V) -> bool>(
+    pub(super) fn get_mut_if<F: FnOnce(&V) -> bool, Q>(
         &mut self,
-        key: &K,
+        key: &Q,
         is_valid: F,
-    ) -> Option<&mut V> {
+    ) -> Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         if let Some(index) = self.get_index(self.hash(key), key) {
             if is_valid(&self.order.get(index).1) {
                 self.order.move_to_front(index);
@@ -395,11 +417,19 @@ where
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
-    fn cache_get(&mut self, key: &K) -> Option<&V> {
+    fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.get_if(key, |_| true)
     }
 
-    fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
+    fn cache_get_mut<Q>(&mut self, key: &Q) -> std::option::Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         self.get_mut_if(key, |_| true)
     }
 
@@ -421,7 +451,11 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
         v
     }
 
-    fn cache_remove(&mut self, k: &K) -> Option<V> {
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         // try and remove item from mapping, and then from order list if it was in mapping
         let hash = self.hash(k);
         if let Some(index) = self.remove_index(hash, k) {

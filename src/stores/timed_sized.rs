@@ -130,7 +130,11 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
-    fn cache_get(&mut self, key: &K) -> Option<&V> {
+    fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let status = {
             let mut val = self.store.get_mut_if(key, |_| true);
             if let Some(&mut (instant, _)) = val.as_mut() {
@@ -163,7 +167,11 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         }
     }
 
-    fn cache_get_mut(&mut self, key: &K) -> std::option::Option<&mut V> {
+    fn cache_get_mut<Q>(&mut self, key: &Q) -> std::option::Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let status = {
             let mut val = self.store.get_mut_if(key, |_| true);
             if let Some(&mut (instant, _)) = val.as_mut() {
@@ -225,7 +233,11 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         })
     }
 
-    fn cache_remove(&mut self, k: &K) -> Option<V> {
+    fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let stamped = self.store.cache_remove(k);
         stamped.and_then(|(instant, v)| {
             if instant.elapsed().as_secs() < self.seconds {

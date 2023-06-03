@@ -159,7 +159,7 @@ Due to the requirements of storing arguments and return values in a global cache
   where arguments are formatted into `Strings` and values are de/serialized.
 - Macro-defined functions should not be used to produce side-effectual results!
 - Macro-defined functions cannot live directly under `impl` blocks since macros expand to a
-  `once_cell`/`lazy_static` initialization and one or more function definitions.
+  `once_cell` initialization and one or more function definitions.
 - Macro-defined functions cannot accept `Self` types as a parameter.
 
 

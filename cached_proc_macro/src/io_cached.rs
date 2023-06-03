@@ -33,32 +33,6 @@ struct IOMacroArgs {
     cache_create: Option<String>,
 }
 
-/// # Attributes
-/// - `map_error`: (string, expr closure) specify a closure used to map any IO-store errors into
-///   the error type returned by your function.
-/// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
-/// - `redis`: (optional, bool) default to a `RedisCache` or `AsyncRedisCache`
-/// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCached` or `TimedSizedCache`.
-/// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
-/// - `type`: (optional, string type) explicitly specify the cache store type to use.
-/// - `cache_prefix_block`: (optional, string expr) specify an expression used to create the string used as a
-///   prefix for all cache keys of this function, e.g. `cache_prefix_block = r##"{ "my_prefix" }"##`.
-///   When not specified, the cache prefix will be constructed from the name of the function. This
-///   could result in unexpected conflicts between io_cached-functions of the same name, so it's
-///   recommended that you specify a prefix you're sure will be unique.
-/// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
-/// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `type = "TimedCached<u32, u32>"`.
-///    When `key` is specified, `convert` must also be specified.
-/// - `convert`: (optional, string expr) specify an expression used to convert function arguments to a cache
-///   key, e.g. `convert = r##"{ format!("{}:{}", arg1, arg2) }"##`. When `convert` is specified,
-///   `key` or `type` must also be set.
-/// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
-///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
-///
-/// ## Note
-/// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
-/// This is because darling, which is used for parsing the attributes, does not support directly parsing
-/// attributes into `Type`s or `Block`s.
 pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let attr_args = parse_macro_input!(args as AttributeArgs);
     let args = match IOMacroArgs::from_list(&attr_args) {
@@ -337,7 +311,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             // run the function and cache the result
             async fn inner(#inputs) #output #body;
             let result = inner(#(#input_names),*).await;
-            let cache = &#cache_ident.get().await;
+            let cache = &#cache_ident.get_or_init(init).await;
             #set_cache_block
             result
         }
@@ -373,17 +347,16 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Cached static
             #[doc = #cache_ident_doc]
-            ::cached::lazy_static::lazy_static! {
-                #visibility static ref #cache_ident: ::cached::async_once::AsyncOnce<#cache_ty> = ::cached::async_once::AsyncOnce::new(async move { #cache_create });
-            }
+            #visibility static #cache_ident: ::cached::async_sync::OnceCell<#cache_ty> = ::cached::async_sync::OnceCell::const_new();
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
+                let init = || async { #cache_create };
                 use cached::IOCachedAsync;
                 let key = #key_convert_block;
                 {
                     // check if the result is cached
-                    let cache = &#cache_ident.get().await;
+                    let cache = &#cache_ident.get_or_init(init).await;
                     if let Some(result) = cache.cache_get(&key).await.map_err(#map_error)? {
                         #return_cache_block
                     }
@@ -395,6 +368,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::IOCachedAsync;
+                let init = || async { #cache_create };
                 let key = #key_convert_block;
                 #do_set_return_block
             }
