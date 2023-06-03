@@ -17,6 +17,7 @@ mod timed_sized;
 mod unbound;
 
 #[cfg(feature = "redis_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{
     RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
@@ -31,6 +32,14 @@ pub use unbound::UnboundCache;
     feature = "redis_store",
     any(feature = "redis_async_std", feature = "redis_tokio")
 ))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(all(
+        feature = "async",
+        feature = "redis_store",
+        any(feature = "redis_async_std", feature = "redis_tokio")
+    )))
+)]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 
 impl<K, V, S> Cached<K, V> for HashMap<K, V, S>

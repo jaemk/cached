@@ -1,8 +1,10 @@
+/// Used to wrap a function result so callers can see whether the result was cached.
 #[derive(Clone)]
 pub struct Return<T> {
     pub was_cached: bool,
     pub value: T,
 }
+
 impl<T> Return<T> {
     pub fn new(value: T) -> Self {
         Self {

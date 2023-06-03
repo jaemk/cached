@@ -673,6 +673,13 @@ mod async_redis {
     feature = "async",
     any(feature = "redis_async_std", feature = "redis_tokio")
 ))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(all(
+        feature = "async",
+        any(feature = "redis_async_std", feature = "redis_tokio")
+    )))
+)]
 pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 
 #[cfg(test)]
