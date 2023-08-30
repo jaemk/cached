@@ -191,10 +191,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         result
     };
 
-    let origin_fn_ident = Ident::new(&format!("{}_origin", &fn_ident), fn_ident.span());
+    let no_cache_fn_ident = Ident::new(&format!("{}_no_cache", &fn_ident), fn_ident.span());
 
     let lock;
-    let function_origin;
+    let function_no_cache;
     let function_call;
     let cache_type;
     if asyncness.is_some() {
@@ -202,12 +202,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let mut cache = #cache_ident.lock().await;
         };
 
-        function_origin = quote! {
-            async fn #origin_fn_ident(#inputs) #output #body
+        function_no_cache = quote! {
+            async fn #no_cache_fn_ident(#inputs) #output #body
         };
 
         function_call = quote! {
-            let result = #origin_fn_ident(#(#input_names),*).await;
+            let result = #no_cache_fn_ident(#(#input_names),*).await;
         };
 
         cache_type = quote! {
@@ -218,12 +218,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let mut cache = #cache_ident.lock().unwrap();
         };
 
-        function_origin = quote! {
-            fn #origin_fn_ident(#inputs) #output #body
+        function_no_cache = quote! {
+            fn #no_cache_fn_ident(#inputs) #output #body
         };
 
         function_call = quote! {
-            let result = #origin_fn_ident(#(#input_names),*);
+            let result = #no_cache_fn_ident(#(#input_names),*);
         };
 
         cache_type = quote! {
@@ -271,7 +271,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make cached static, cached function and prime cached function doc comments
     let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
-    let origin_fn_indent_doc = format!("Origin of the cached function [`{}`].", fn_ident);
+    let no_cache_fn_indent_doc = format!("Origin of the cached function [`{}`].", fn_ident);
     let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
     let cache_fn_doc_extra = format!(
         "This is a cached function that uses the [`{}`] cached static.",
@@ -284,9 +284,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         // Cached static
         #[doc = #cache_ident_doc]
         #cache_type
-        // Origin function
-        #[doc = #origin_fn_indent_doc]
-        #visibility #function_origin
+        // No cache function (origin of the cached function)
+        #[doc = #no_cache_fn_indent_doc]
+        #visibility #function_no_cache
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {
