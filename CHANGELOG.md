@@ -7,7 +7,8 @@
 
 ## [Unreleased]
 ## Added
-- Also generate `*_origin` function for every cached function to allow calling the original function without caching.
+- Also generate `*_origin` function for every cached function to allow calling the original function
+  without caching. It can be backward incompatible, if you have a function with the same name.
 ## Changed
 ## Removed
 

@@ -11,9 +11,6 @@ path ="../.."
 default_features = false
 features = ["proc_macro", "wasm"]
 
-[dependencies.web-sys]
-version = "0.3"
-
 [dependencies.chrono]
 version = "0.4"
 features = [
