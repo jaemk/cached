@@ -201,7 +201,7 @@ pub mod stores;
 #[doc(hidden)]
 pub use instant;
 
-#[cfg(any(feature = "proc_macro", feature = "async"))]
+#[cfg(feature = "async")]
 #[doc(hidden)]
 pub mod async_sync {
     pub use tokio::sync::Mutex;

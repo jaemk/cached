@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.45.0]
+## Added
+## Changed
+- `tokio` dependency has been removed from `proc_macro` feature.
+- Also `async` feature has been removed from the `default` feature. It is a backward incompatible change.
+  If you want to use `async` feature, you need to enable it explicitly.
+## Removed
+
 ## [0.44.0] / [cached_proc_macro[0.17.0]]
 ## Added
 - Option to enable redis multiplex-connection manager on `AsyncRedisCache`
