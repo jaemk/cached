@@ -24,8 +24,3 @@ proc-macro2 = "1.0.49"
 [dependencies.syn]
 version = "1.0.27"
 features = ["full"]
-
-[dependencies.cached_proc_macro_types]
-version = "0.1.0"
-path = "../cached_proc_macro_types"
-

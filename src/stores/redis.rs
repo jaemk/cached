@@ -52,7 +52,7 @@ where
             pool_min_idle: None,
             pool_max_lifetime: None,
             pool_idle_timeout: None,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 
@@ -187,7 +187,7 @@ where
             pool: self.create_pool()?,
             namespace: self.namespace,
             prefix: self.prefix,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         })
     }
 }
@@ -391,7 +391,7 @@ mod async_redis {
                 namespace: DEFAULT_NAMESPACE.to_string(),
                 prefix: prefix.as_ref().to_string(),
                 connection_string: None,
-                _phantom: PhantomData::default(),
+                _phantom: PhantomData,
             }
         }
 
@@ -494,7 +494,7 @@ mod async_redis {
                 connection: self.create_connection_manager().await?,
                 namespace: self.namespace,
                 prefix: self.prefix,
-                _phantom: PhantomData::default(),
+                _phantom: PhantomData,
             })
         }
     }
