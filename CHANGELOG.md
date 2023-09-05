@@ -2,14 +2,12 @@
 
 ## [Unreleased]
 ## Added
+- Generate `*_no_cache` function for every cached function to allow calling the original function
+  without caching. This is backwards incompatible if you have a function with the same name.
 ## Changed
-## Removed
-
-## [Unreleased]
-## Added
-- Also generate `*_origin` function for every cached function to allow calling the original function
-  without caching. It can be backward incompatible, if you have a function with the same name.
-## Changed
+- `tokio` dependency has been removed from `proc_macro` feature (originally unecessarily included).
+- `async` feature has been removed from the `default` feature. This is a backwards incompatible change.
+  If you want to use `async` features, you need to enable `async` explicitly.
 ## Removed
 
 ## [0.44.0] / [cached_proc_macro[0.17.0]]

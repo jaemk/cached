@@ -16,8 +16,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["proc_macro", "async"]
-proc_macro = ["tokio", "cached_proc_macro", "cached_proc_macro_types"]
+default = ["proc_macro"]
+proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
 async = ["futures", "tokio", "async-trait"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
@@ -99,3 +99,15 @@ members = ["cached_proc_macro","examples/wasm"]
 [[example]]
 name = "redis"
 required-features = ["redis_store", "proc_macro"]
+
+[[example]]
+name = "redis-async"
+required-features = ["async", "proc_macro"]
+
+[[example]]
+name = "tokio"
+required-features = ["async", "proc_macro"]
+
+[[example]]
+name = "async_std"
+required-features = ["async", "proc_macro"]
