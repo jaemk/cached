@@ -196,7 +196,6 @@ mod lru_list;
 pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
-#[doc(hidden)]
 pub mod stores;
 #[doc(hidden)]
 pub use instant;
