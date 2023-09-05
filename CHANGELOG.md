@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [Unreleased]
+## Added
+- Also generate `*_origin` function for every cached function to allow calling the original function
+  without caching. It can be backward incompatible, if you have a function with the same name.
+## Changed
+## Removed
+
 ## [0.44.0] / [cached_proc_macro[0.17.0]]
 ## Added
 - Option to enable redis multiplex-connection manager on `AsyncRedisCache`
