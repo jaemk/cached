@@ -28,7 +28,7 @@ redis_ahash = ["redis_store", "redis/ahash"]
 wasm = ["instant/wasm-bindgen"]
 
 [dependencies.cached_proc_macro]
-version = "0.17.0"
+version = "0.18.0"
 path = "cached_proc_macro"
 optional = true
 

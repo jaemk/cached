@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.45.1] / [cached_proc_macro[0.18.0]]
+## Added
+## Changed
+- Release `*_no_cache` changes from `0.45.0`. The change is in the proc macro crate which
+  I forgot to release a new version of.
+## Removed
+
 ## [0.45.0]
 ## Added
 - Generate `*_no_cache` function for every cached function to allow calling the original function
