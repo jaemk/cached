@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.45.0"
+version = "0.45.1"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
