@@ -1,9 +1,12 @@
+use instant::Instant;
 use std::cmp::Eq;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::hash::Hash;
 
-use instant::Instant;
+#[cfg(feature = "ahash")]
+use hashbrown::{hash_map::Entry, HashMap};
+
+#[cfg(not(feature = "ahash"))]
+use std::collections::{hash_map::Entry, HashMap};
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};

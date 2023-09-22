@@ -16,8 +16,9 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["proc_macro"]
+default = ["proc_macro", "ahash"]
 proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
+ahash = ["dep:ahash", "hashbrown/default"]
 async = ["futures", "tokio", "async-trait"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
@@ -47,6 +48,11 @@ version = "1"
 
 [dependencies.thiserror]
 version = "1"
+
+[dependencies.ahash]
+version = "0.8"
+default-features = false
+optional = true
 
 [dependencies.futures]
 version = "0.3"
@@ -94,7 +100,7 @@ version = "1"
 version = "2"
 
 [workspace]
-members = ["cached_proc_macro","examples/wasm"]
+members = ["cached_proc_macro", "examples/wasm"]
 
 [[example]]
 name = "redis"

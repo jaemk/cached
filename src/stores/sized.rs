@@ -2,9 +2,14 @@ use super::Cached;
 use crate::lru_list::LRUList;
 use hashbrown::raw::RawTable;
 use std::cmp::Eq;
-use std::collections::hash_map::RandomState;
 use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
+
+#[cfg(feature = "ahash")]
+use ahash::RandomState;
+
+#[cfg(not(feature = "ahash"))]
+use std::collections::hash_map::RandomState;
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
