@@ -38,7 +38,7 @@ path = "cached_proc_macro_types"
 optional = true
 
 [dependencies.hashbrown]
-version = "0.13"
+version = "0.14"
 default-features = false
 features = ["raw", "inline-more"]
 
