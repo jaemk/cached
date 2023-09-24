@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 ## Added
-- Adds the `ahash` feature this uses the faster [ahash](https://github.com/tkaitchuck/aHash) algorithm.
-- Sets `ahash` as a default feature.
+## Changed
+## Removed
+
+## [0.46.0]
+## Added
+- Add `ahash` feature to use the faster [ahash](https://github.com/tkaitchuck/aHash) algorithm.
+- Set `ahash` as a default feature.
+- Update hashbrown `0.13.0` -> `0.14.0`
 ## Changed
 ## Removed
 
