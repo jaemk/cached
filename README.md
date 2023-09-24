@@ -22,8 +22,9 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 
 **Features**
 
-- `default`: Include `proc_macro` feature
+- `default`: Include `proc_macro` and `ahash` features
 - `proc_macro`: Include proc macros
+- `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async`: Include support for async functions and async cache stores
 - `async_tokio_rt_multi_thread`: Enable `tokio`'s optional `rt-multi-thread` feature.
 - `redis_store`: Include Redis cache store
