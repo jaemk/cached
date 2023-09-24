@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 ## Added
+- Adds the `ahash` feature this uses the faster [ahash](https://github.com/tkaitchuck/aHash) algorithm.
+- Sets `ahash` as a default feature.
 ## Changed
 ## Removed
 
