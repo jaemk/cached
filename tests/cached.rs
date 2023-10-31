@@ -898,6 +898,33 @@ async fn test_cached_sync_writes_a() {
     assert_eq!(a, c.await.unwrap());
 }
 
+#[cfg(feature = "async")]
+#[once(sync_writes = true)]
+async fn once_sync_writes_a(s: &tokio::sync::Mutex<String>) -> String {
+    let mut guard = s.lock().await;
+    let results: String = (*guard).clone().to_string();
+    *guard = "consumed".to_string();
+    results.to_string()
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn test_once_sync_writes_a() {
+    let a_mutex = tokio::sync::Mutex::new("a".to_string());
+    let b_mutex = tokio::sync::Mutex::new("b".to_string());
+    let fut_a = once_sync_writes_a(&a_mutex);
+    let fut_b = once_sync_writes_a(&b_mutex);
+    let a = fut_a.await;
+    let b = fut_b.await;
+    assert_eq!(a, b);
+    assert_eq!("a", a);
+
+    //check if cache function is executed for a
+    assert_eq!("consumed", a_mutex.lock().await.to_string());
+    //check if cache inner is not executed for b (not executed second time)
+    assert_eq!("b", b_mutex.lock().await.to_string());
+}
+
 #[cached(size = 2)]
 fn cached_smartstring(s: smartstring::alias::String) -> smartstring::alias::String {
     if s == "very stringy" {
