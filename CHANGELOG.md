@@ -5,13 +5,19 @@
 ## Changed
 ## Removed
 
+## [0.46.1 / [cached_proc_macro[0.18.1]]
+## Added
+## Changed
+- Fix #once sync_writes bug causing a deadlock after ttl expiry, https://github.com/jaemk/cached/issues/174
+## Removed
+
 ## [0.46.0]
 ## Added
 - Add `ahash` feature to use the faster [ahash](https://github.com/tkaitchuck/aHash) algorithm.
 - Set `ahash` as a default feature.
 - Update hashbrown `0.13.0` -> `0.14.0`
 ## Changed
-## Removed
+## Removed,
 
 ## [0.45.1] / [cached_proc_macro[0.18.0]]
 ## Added
