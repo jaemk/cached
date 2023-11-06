@@ -205,7 +205,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         #set_cache_and_return
     };
 
-    let return_cache_block = quote! {
+    let r_lock_return_cache_block = quote! {
         {
             #r_lock
             if let Some(result) = &*cached {
@@ -216,7 +216,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let do_set_return_block = if args.sync_writes {
         quote! {
-            #return_cache_block
+            #r_lock_return_cache_block
             #w_lock
             if let Some(result) = &*cached {
                 #return_cache_block
@@ -226,7 +226,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            #return_cache_block
+            #r_lock_return_cache_block
             #function_call
             #w_lock
             #set_cache_and_return
