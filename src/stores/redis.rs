@@ -271,7 +271,7 @@ where
 
         pipe.get(key.clone());
         if self.refresh {
-            pipe.expire(key, self.seconds as usize).ignore();
+            pipe.expire(key, self.seconds as i64).ignore();
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
@@ -300,7 +300,7 @@ where
             key,
             serde_json::to_string(&val)
                 .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-            self.seconds as usize,
+            self.seconds,
         )
         .ignore();
 
@@ -555,7 +555,7 @@ mod async_redis {
 
             pipe.get(key.clone());
             if self.refresh {
-                pipe.expire(key, self.seconds as usize).ignore();
+                pipe.expire(key, self.seconds as i64).ignore();
             }
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
@@ -584,7 +584,7 @@ mod async_redis {
                 key,
                 serde_json::to_string(&val)
                     .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-                self.seconds as usize,
+                self.seconds as u64,
             )
             .ignore();
 
