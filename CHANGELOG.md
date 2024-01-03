@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.47.0]
+## Added
+## Changed
+- Update redis `0.23.0` -> `0.24.0`
+## Removed
+
 ## [0.46.1 / [cached_proc_macro[0.18.1]]
 ## Added
 ## Changed
@@ -17,7 +23,7 @@
 - Set `ahash` as a default feature.
 - Update hashbrown `0.13.0` -> `0.14.0`
 ## Changed
-## Removed,
+## Removed
 
 ## [0.45.1] / [cached_proc_macro[0.18.0]]
 ## Added
