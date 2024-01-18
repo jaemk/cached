@@ -1480,7 +1480,7 @@ fn test_result_fallback() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
     
-    // Pretend it succeeded once and will now never return an error again
+    // Pretend it succeeded once
     ALWAYS_FAILING.lock().unwrap().cache_set((), 1);
     assert_eq!(always_failing(), Ok(1));
     {
@@ -1491,6 +1491,7 @@ fn test_result_fallback() {
 
     std::thread::sleep(std::time::Duration::from_millis(2000));
 
+    // Even though the cache should've expired, the `result_fallback` flag means it refreshes the cache with the last valid result
     assert_eq!(always_failing(), Ok(1));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
