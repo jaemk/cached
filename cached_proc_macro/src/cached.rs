@@ -33,6 +33,8 @@ struct MacroArgs {
     cache_type: Option<String>,
     #[darling(default, rename = "create")]
     cache_create: Option<String>,
+    #[darling(default)]
+    result_fallback: bool,
 }
 
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -249,16 +251,38 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #set_cache_and_return
         }
     } else {
-        quote! {
-            {
+        if args.result_fallback {
+            quote! {
+                let old_val = {
+                    #lock
+                    let old_val = cache.get_store().get(&key).cloned();
+                    if let Some(result) = cache.cache_get(&key) {
+                        #return_cache_block
+                    }
+                    old_val
+                };
+                #function_call
                 #lock
-                if let Some(result) = cache.cache_get(&key) {
-                    #return_cache_block
-                }
+                let result = match (result.is_err(), old_val) {
+                    (true, Some((_, result))) => {
+                        Ok(result)
+                    }
+                    _ => result
+                };
+                #set_cache_and_return
             }
-            #function_call
-            #lock
-            #set_cache_and_return
+        } else {
+            quote! {
+                {
+                    #lock
+                    if let Some(result) = cache.cache_get(&key) {
+                        #return_cache_block
+                    }
+                }
+                #function_call
+                #lock
+                #set_cache_and_return
+            }
         }
     };
 
