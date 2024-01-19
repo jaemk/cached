@@ -29,6 +29,9 @@ use proc_macro::TokenStream;
 /// - `option`: (optional, bool) If your function returns an `Option`, only cache `Some` values returned by the function.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
 ///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
+/// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead refresh the recently expired `Ok` value.
+///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
+///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
 ///
 /// ## Note
 /// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
