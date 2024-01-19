@@ -1479,7 +1479,7 @@ fn test_result_fallback() {
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
-    
+
     // Pretend it succeeded once
     ALWAYS_FAILING.lock().unwrap().cache_set((), 1);
     assert_eq!(always_failing(), Ok(1));
