@@ -1,5 +1,5 @@
 use super::{Cached, SizedCache};
-use crate::stores::timed::Status;
+use crate::{stores::timed::Status, CloneCached};
 use std::hash::Hash;
 
 /// The `CanExpire` trait defines a function for implementations to determine if
@@ -144,6 +144,29 @@ impl<K: Hash + Eq + Clone, V: CanExpire> Cached<K, V> for ExpiringValueCache<K, 
     fn cache_reset_metrics(&mut self) {
         self.hits = 0;
         self.misses = 0;
+    }
+}
+
+impl<K: Hash + Eq + Clone, V: CanExpire + Clone> CloneCached<K, V> for ExpiringValueCache<K, V> {
+    fn cache_get_expired<Q>(&mut self, k: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        match self.status(k) {
+            Status::NotFound => {
+                self.misses += 1;
+                (None, false)
+            }
+            Status::Found => {
+                self.hits += 1;
+                (self.store.cache_get(k).cloned(), false)
+            }
+            Status::Expired => {
+                self.misses += 1;
+                (self.store.cache_remove(k), true)
+            }
+        }
     }
 }
 

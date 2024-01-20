@@ -255,16 +255,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             quote! {
                 let old_val = {
                     #lock
-                    let old_val = cache.get_store().get(&key).cloned();
-                    if let Some(result) = cache.cache_get(&key) {
+                    let (result, has_expired) = cache.cache_get_expired(&key);
+                    if let (Some(result), false) = (result, has_expired) {
                         #return_cache_block
                     }
-                    old_val
+                    result
                 };
                 #function_call
                 #lock
                 let result = match (result.is_err(), old_val) {
-                    (true, Some((_, result))) => {
+                    (true, Some(result)) => {
                         Ok(result)
                     }
                     _ => result
@@ -315,6 +315,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #(#attributes)*
         #visibility #signature_no_muts {
             use cached::Cached;
+            use cached::CloneCached;
             let key = #key_convert_block;
             #do_set_return_block
         }
