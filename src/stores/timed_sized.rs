@@ -177,22 +177,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        let status = {
-            let mut val = self.store.get_mut_if(key, |_| true);
-            if let Some(&mut (instant, _)) = val.as_mut() {
-                if instant.elapsed().as_secs() < self.seconds {
-                    if self.refresh {
-                        *instant = Instant::now();
-                    }
-                    Status::Found
-                } else {
-                    Status::Expired
-                }
-            } else {
-                Status::NotFound
-            }
-        };
-        match status {
+        match self.status(key) {
             Status::NotFound => {
                 self.misses += 1;
                 None
