@@ -264,8 +264,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 #function_call
                 #lock
                 let result = match (result.is_err(), old_val) {
-                    (true, Some(result)) => {
-                        Ok(result)
+                    (true, Some(old_val)) => {
+                        Ok(old_val)
                     }
                     _ => result
                 };
