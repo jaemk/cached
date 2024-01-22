@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.48.0 / [cached_proc_macro[0.19.0]]]
+## Added
+- Add `CloneCached` trait with additional methods when the cache value type implements `Clone`
+- Add `result_fallback` option to `cached` proc_macro to support re-using expired cache values
+  when utilizing an expiring cache store and a fallible function.
+## Changed
+## Removed
+
 ## [0.47.0]
 ## Added
 ## Changed

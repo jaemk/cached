@@ -32,6 +32,7 @@ use proc_macro::TokenStream;
 /// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead refresh the recently expired `Ok` value.
 ///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
 ///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
+///   *Note*, this option requires the cache type implements `CloneCached`.
 ///
 /// ## Note
 /// The `type`, `create`, `key`, and `convert` attributes must be in a `String`

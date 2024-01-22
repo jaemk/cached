@@ -584,7 +584,7 @@ mod async_redis {
                 key,
                 serde_json::to_string(&val)
                     .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-                self.seconds as u64,
+                self.seconds,
             )
             .ignore();
 
