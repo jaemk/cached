@@ -33,6 +33,8 @@ struct MacroArgs {
     cache_type: Option<String>,
     #[darling(default, rename = "create")]
     cache_create: Option<String>,
+    #[darling(default)]
+    result_fallback: bool,
 }
 
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -249,16 +251,38 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #set_cache_and_return
         }
     } else {
-        quote! {
-            {
+        if args.result_fallback {
+            quote! {
+                let old_val = {
+                    #lock
+                    let (result, has_expired) = cache.cache_get_expired(&key);
+                    if let (Some(result), false) = (result, has_expired) {
+                        #return_cache_block
+                    }
+                    result
+                };
+                #function_call
                 #lock
-                if let Some(result) = cache.cache_get(&key) {
-                    #return_cache_block
-                }
+                let result = match (result.is_err(), old_val) {
+                    (true, Some(old_val)) => {
+                        Ok(old_val)
+                    }
+                    _ => result
+                };
+                #set_cache_and_return
             }
-            #function_call
-            #lock
-            #set_cache_and_return
+        } else {
+            quote! {
+                {
+                    #lock
+                    if let Some(result) = cache.cache_get(&key) {
+                        #return_cache_block
+                    }
+                }
+                #function_call
+                #lock
+                #set_cache_and_return
+            }
         }
     };
 
@@ -291,6 +315,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #(#attributes)*
         #visibility #signature_no_muts {
             use cached::Cached;
+            use cached::CloneCached;
             let key = #key_convert_block;
             #do_set_return_block
         }

@@ -326,6 +326,15 @@ pub trait Cached<K, V> {
     }
 }
 
+/// Extra cache operations for types that implement `Clone`
+pub trait CloneCached<K, V> {
+    /// Attempt to retrieve a cached value and indicate whether that value was evicted.
+    fn cache_get_expired<Q>(&mut self, _key: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized;
+}
+
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 #[async_trait]

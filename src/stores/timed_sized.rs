@@ -6,7 +6,7 @@ use instant::Instant;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
-use crate::stores::timed::Status;
+use crate::{stores::timed::Status, CloneCached};
 
 use super::{Cached, SizedCache};
 
@@ -127,6 +127,26 @@ impl<K: Hash + Eq + Clone, V> TimedSizedCache<K, V> {
         self.store
             .retain(|_, (instant, _)| instant.elapsed().as_secs() < seconds);
     }
+
+    fn status<Q>(&mut self, key: &Q) -> Status
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        let mut val = self.store.get_mut_if(key, |_| true);
+        if let Some(&mut (instant, _)) = val.as_mut() {
+            if instant.elapsed().as_secs() < self.seconds {
+                if self.refresh {
+                    *instant = Instant::now();
+                }
+                Status::Found
+            } else {
+                Status::Expired
+            }
+        } else {
+            Status::NotFound
+        }
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
@@ -135,22 +155,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        let status = {
-            let mut val = self.store.get_mut_if(key, |_| true);
-            if let Some(&mut (instant, _)) = val.as_mut() {
-                if instant.elapsed().as_secs() < self.seconds {
-                    if self.refresh {
-                        *instant = Instant::now();
-                    }
-                    Status::Found
-                } else {
-                    Status::Expired
-                }
-            } else {
-                Status::NotFound
-            }
-        };
-        match status {
+        match self.status(key) {
             Status::NotFound => {
                 self.misses += 1;
                 None
@@ -172,22 +177,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        let status = {
-            let mut val = self.store.get_mut_if(key, |_| true);
-            if let Some(&mut (instant, _)) = val.as_mut() {
-                if instant.elapsed().as_secs() < self.seconds {
-                    if self.refresh {
-                        *instant = Instant::now();
-                    }
-                    Status::Found
-                } else {
-                    Status::Expired
-                }
-            } else {
-                Status::NotFound
-            }
-        };
-        match status {
+        match self.status(key) {
             Status::NotFound => {
                 self.misses += 1;
                 None
@@ -276,6 +266,32 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         let old = self.seconds;
         self.seconds = seconds;
         Some(old)
+    }
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TimedSizedCache<K, V> {
+    fn cache_get_expired<Q>(&mut self, k: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        match self.status(k) {
+            Status::NotFound => {
+                self.misses += 1;
+                (None, false)
+            }
+            Status::Found => {
+                self.hits += 1;
+                (
+                    self.store.cache_get(k).map(|stamped| stamped.1.clone()),
+                    false,
+                )
+            }
+            Status::Expired => {
+                self.misses += 1;
+                (self.store.cache_remove(k).map(|stamped| stamped.1), true)
+            }
+        }
     }
 }
 
