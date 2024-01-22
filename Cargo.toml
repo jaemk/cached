@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.48.0"
+version = "0.48.1"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -29,12 +29,12 @@ redis_ahash = ["redis_store", "redis/ahash"]
 wasm = ["instant/wasm-bindgen"]
 
 [dependencies.cached_proc_macro]
-version = "0.19.0"
+version = "0.19.1"
 path = "cached_proc_macro"
 optional = true
 
 [dependencies.cached_proc_macro_types]
-version = "0.1.0"
+version = "0.1.1"
 path = "cached_proc_macro_types"
 optional = true
 
