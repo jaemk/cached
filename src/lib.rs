@@ -187,11 +187,11 @@ pub use stores::AsyncRedisCache;
 pub use stores::{
     CanExpire, ExpiringValueCache, SizedCache, TimedCache, TimedSizedCache, UnboundCache,
 };
+#[cfg(feature = "disk_store")]
+pub use stores::{DiskCache, DiskCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use stores::{RedisCache, RedisCacheError};
-#[cfg(feature = "disk_store")]
-pub use stores::{DiskCache, DiskCacheError};
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 use {async_trait::async_trait, futures::Future};
