@@ -38,12 +38,12 @@ where
     V: Serialize + DeserializeOwned,
 {
     /// Initialize a `DiskCacheBuilder`
-    pub fn new(cache_name: &str) -> DiskCacheBuilder<K, V> {
+    pub fn new<S: AsRef<str>>(cache_name: S) -> DiskCacheBuilder<K, V> {
         Self {
             seconds: None,
             refresh: false,
             disk_dir: None,
-            cache_name: cache_name.to_string(),
+            cache_name: cache_name.as_ref().to_string(),
             _phantom: Default::default(),
         }
     }
@@ -108,7 +108,7 @@ pub struct DiskCache<K, V> {
     version: u64,
     #[allow(unused)]
     disk_path: PathBuf,
-    connection: sled::Db,
+    connection: Db,
     _phantom: PhantomData<(K, V)>,
 }
 
@@ -167,6 +167,10 @@ impl<V> CachedDiskValue<V> {
             version: 1,
         }
     }
+
+    fn refresh_created_at(&mut self) {
+        self.created_at = SystemTime::now();
+    }
 }
 
 impl<K, V> IOCached<K, V> for DiskCache<K, V>
@@ -177,24 +181,39 @@ where
     type Error = DiskCacheError;
 
     fn cache_get(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
-        let key_s = key.to_string();
-        if let Some(data) = self.connection.get(key_s)? {
-            let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
-
-            if let Some(lifetime_seconds) = self.seconds {
-                if SystemTime::now()
-                    .duration_since(cached.created_at)
-                    .unwrap_or(Duration::from_secs(0))
-                    < Duration::from_secs(lifetime_seconds)
-                {
-                    Ok(Some(cached.value))
-                } else {
-                    self.cache_remove(key)?;
-                    Ok(None)
-                }
-            } else {
-                Ok(Some(cached.value))
+        let key = key.to_string();
+        let seconds = self.seconds;
+        let refresh = self.refresh;
+        let update = |old: Option<&[u8]>| -> Option<Vec<u8>> {
+            if old.is_none() {
+                return None;
             }
+            let old = old.unwrap();
+            if seconds.is_none() {
+                return Some(old.to_vec());
+            }
+            let seconds = seconds.unwrap();
+            let mut cached = rmp_serde::from_slice::<CachedDiskValue<V>>(old)
+                .expect("error deserializing cached disk value");
+            if SystemTime::now()
+                .duration_since(cached.created_at)
+                .unwrap_or(Duration::from_secs(0))
+                < Duration::from_secs(seconds)
+            {
+                if refresh {
+                    cached.refresh_created_at();
+                }
+                let cache_val =
+                    rmp_serde::to_vec(&cached).expect("error serializing cached disk value");
+                Some(cache_val)
+            } else {
+                None
+            }
+        };
+
+        if let Some(data) = self.connection.update_and_fetch(&key, update)? {
+            let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
+            Ok(Some(cached.value))
         } else {
             Ok(None)
         }
@@ -281,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_cache_set_get_remove() {
+    fn disk_set_get_remove() {
         let cache: DiskCache<u32, u32> =
             DiskCache::new(&format!("{}:disk-cache-test-sgr", now_millis()))
                 .set_disk_directory(std::env::temp_dir().join("cachedtest-sgr"))
@@ -310,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_cache() {
+    fn disk_expire() {
         let mut c: DiskCache<u32, u32> =
             DiskCache::new(&format!("{}:disk-cache-test", now_millis()))
                 .set_lifespan(2)
@@ -341,10 +360,26 @@ mod tests {
     }
 
     #[test]
-    fn remove() {
+    fn disk_remove() {
         let cache: DiskCache<u32, u32> =
             DiskCache::new(&format!("{}:disk-cache-test-remove", now_millis()))
                 .set_disk_directory(std::env::temp_dir().join("cachedtest-remove"))
+                .build()
+                .unwrap();
+
+        assert!(cache.cache_set(1, 100).unwrap().is_none());
+        assert!(cache.cache_set(2, 200).unwrap().is_none());
+        assert!(cache.cache_set(3, 300).unwrap().is_none());
+
+        assert_eq!(100, cache.cache_remove(&1).unwrap().unwrap());
+
+        drop(cache);
+    }
+
+    #[test]
+    fn disk_default_cache_dir() {
+        let cache: DiskCache<u32, u32> =
+            DiskCache::new(&format!("{}:disk-cache-test-default-dir", now_millis()))
                 .build()
                 .unwrap();
 

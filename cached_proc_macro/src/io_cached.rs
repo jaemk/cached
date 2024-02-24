@@ -12,6 +12,10 @@ use syn::{
 struct IOMacroArgs {
     map_error: String,
     #[darling(default)]
+    disk: bool,
+    #[darling(default)]
+    disk_dir: Option<String>,
+    #[darling(default)]
     redis: bool,
     #[darling(default)]
     cache_prefix_block: Option<String>,
@@ -149,6 +153,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         Some(ref name) => Ident::new(name, fn_ident.span()),
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
+    let cache_name = cache_ident.to_string();
 
     let (cache_key_ty, key_convert_block) = make_cache_key_type(
         &args.key,
@@ -161,13 +166,15 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // make the cache type and create statement
     let (cache_ty, cache_create) = match (
         &args.redis,
+        &args.disk,
         &args.time,
         &args.time_refresh,
         &args.cache_prefix_block,
         &args.cache_type,
         &args.cache_create,
     ) {
-        (true, time, time_refresh, cache_prefix, cache_type, cache_create) => {
+        // redis
+        (true, false, time, time_refresh, cache_prefix, cache_type, cache_create) => {
             let cache_ty = match cache_type {
                 Some(cache_type) => {
                     let cache_type =
@@ -234,7 +241,63 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             };
             (cache_ty, cache_create)
         }
-        (_, time, time_refresh, cache_prefix, cache_type, cache_create) => {
+        // disk
+        (false, true, time, time_refresh, _, cache_type, cache_create) => {
+            let cache_ty = match cache_type {
+                Some(cache_type) => {
+                    let cache_type =
+                        parse_str::<Type>(cache_type).expect("unable to parse cache type");
+                    quote! { #cache_type }
+                }
+                None => {
+                    // https://github.com/spacejam/sled?tab=readme-ov-file#interaction-with-async
+                    quote! { cached::DiskCache<#cache_key_ty, #cache_value_ty> }
+                }
+            };
+            let cache_create = match cache_create {
+                Some(cache_create) => {
+                    if time.is_some() || time_refresh.is_some() {
+                        panic!(
+                            "cannot specify `time` or `time_refresh` when passing `create block"
+                        );
+                    } else {
+                        let cache_create = parse_str::<Block>(cache_create.as_ref())
+                            .expect("unable to parse cache create block");
+                        quote! { #cache_create }
+                    }
+                }
+                None => {
+                    let create = quote! {
+                        cached::DiskCache::new(#cache_name)
+                    };
+                    let create = match time {
+                        None => create,
+                        Some(time) => {
+                            quote! {
+                                (#create).set_lifespan(#time)
+                            }
+                        }
+                    };
+                    let create = match time_refresh {
+                        None => create,
+                        Some(time_refresh) => {
+                            quote! {
+                                (#create).set_refresh(#time_refresh)
+                            }
+                        }
+                    };
+                    let create = match args.disk_dir {
+                        None => create,
+                        Some(disk_dir) => {
+                            quote! { (#create).set_disk_directory(#disk_dir) }
+                        }
+                    };
+                    quote! { (#create).build().expect("error constructing DiskCache in #[io_cached] macro") }
+                }
+            };
+            (cache_ty, cache_create)
+        }
+        (_, _, time, time_refresh, cache_prefix, cache_type, cache_create) => {
             let cache_ty = match cache_type {
                 Some(cache_type) => {
                     let cache_type =
@@ -270,7 +333,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let (set_cache_block, return_cache_block) = {
         let (set_cache_block, return_cache_block) = if args.with_cached_flag {
             (
-                if asyncness.is_some() {
+                if asyncness.is_some() && !args.disk {
                     quote! {
                         if let Ok(result) = &result {
                             cache.cache_set(key, result.value.clone()).await.map_err(#map_error)?;
@@ -287,7 +350,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             )
         } else {
             (
-                if asyncness.is_some() {
+                if asyncness.is_some() && !args.disk {
                     quote! {
                         if let Ok(result) = &result {
                             cache.cache_set(key, result.clone()).await.map_err(#map_error)?;
@@ -342,6 +405,29 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     );
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
+    let async_trait = if asyncness.is_some() && !args.disk {
+        quote! {
+            use cached::IOCachedAsync;
+        }
+    } else {
+        quote! {
+            use cached::IOCached;
+        }
+    };
+
+    let async_cache_get_return = if asyncness.is_some() && !args.disk {
+        quote! {
+            if let Some(result) = cache.cache_get(&key).await.map_err(#map_error)? {
+                #return_cache_block
+            }
+        }
+    } else {
+        quote! {
+            if let Some(result) = cache.cache_get(&key).map_err(#map_error)? {
+                #return_cache_block
+            }
+        }
+    };
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
@@ -352,14 +438,12 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #(#attributes)*
             #visibility #signature_no_muts {
                 let init = || async { #cache_create };
-                use cached::IOCachedAsync;
+                #async_trait
                 let key = #key_convert_block;
                 {
                     // check if the result is cached
                     let cache = &#cache_ident.get_or_init(init).await;
-                    if let Some(result) = cache.cache_get(&key).await.map_err(#map_error)? {
-                        #return_cache_block
-                    }
+                    #async_cache_get_return
                 }
                 #do_set_return_block
             }
@@ -367,7 +451,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
             #visibility #prime_sig {
-                use cached::IOCachedAsync;
+                #async_trait
                 let init = || async { #cache_create };
                 let key = #key_convert_block;
                 #do_set_return_block
