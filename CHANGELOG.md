@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.49.1]
+## Added
+## Changed
+- Fix `DiskCache::remove_expired_entries` signature
+## Removed
+
 ## [0.49.0 / [cached_proc_macro[0.20.0]] ]
 ## Added
 - Add DiskCache store

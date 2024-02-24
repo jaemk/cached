@@ -123,10 +123,10 @@ where
         DiskCacheBuilder::new(cache_name)
     }
 
-    pub fn remove_expired_entries(&self, connection: &Db) {
+    pub fn remove_expired_entries(&self) {
         let now = SystemTime::now();
 
-        for (key, value) in connection.iter().flatten() {
+        for (key, value) in self.connection.iter().flatten() {
             if let Ok(cached) = rmp_serde::from_slice::<CachedDiskValue<V>>(&value) {
                 if let Some(lifetime_seconds) = self.seconds {
                     if now
@@ -134,7 +134,7 @@ where
                         .unwrap_or(Duration::from_secs(0))
                         < Duration::from_secs(lifetime_seconds)
                     {
-                        let _ = connection.remove(key);
+                        let _ = self.connection.remove(key);
                     }
                 }
             }
