@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.49.2]
+## Added
+## Changed
+- While handling cache refreshes in `DiskCache::cache_get`, treat deserialization failures as non-existent values
+## Removed
+
 ## [0.49.1]
 ## Added
 ## Changed

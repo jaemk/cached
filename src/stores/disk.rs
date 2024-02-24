@@ -185,16 +185,18 @@ where
         let seconds = self.seconds;
         let refresh = self.refresh;
         let update = |old: Option<&[u8]>| -> Option<Vec<u8>> {
-            if old.is_none() {
-                return None;
-            }
-            let old = old.unwrap();
+            let old = old?;
             if seconds.is_none() {
                 return Some(old.to_vec());
             }
             let seconds = seconds.unwrap();
-            let mut cached = rmp_serde::from_slice::<CachedDiskValue<V>>(old)
-                .expect("error deserializing cached disk value");
+            let mut cached = match rmp_serde::from_slice::<CachedDiskValue<V>>(old) {
+                Ok(cached) => cached,
+                Err(_) => {
+                    // unable to deserialize, treat it as not existing
+                    return None;
+                }
+            };
             if SystemTime::now()
                 .duration_since(cached.created_at)
                 .unwrap_or(Duration::from_secs(0))
@@ -211,7 +213,7 @@ where
             }
         };
 
-        if let Some(data) = self.connection.update_and_fetch(&key, update)? {
+        if let Some(data) = self.connection.update_and_fetch(key, update)? {
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
             Ok(Some(cached.value))
         } else {
