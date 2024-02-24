@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.49.0 / [cached_proc_macro[0.20.0]] ]
+## Added
+- Add DiskCache store
+- Add `disk=true` (and company) flags to `#[io_cached]`
+## Changed
+## Removed
+
 ## [0.48.1 / [cached_proc_macro[0.19.1]] / [cached_proc_macro_types[0.1.1]]]
 ## Added
 - Include LICENSE file in `cached_proc_macro` and `cached_proc_macro_types`
