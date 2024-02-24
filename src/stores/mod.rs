@@ -8,6 +8,8 @@ use std::hash::Hash;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
+#[cfg(feature = "disk_store")]
+mod disk;
 mod expiring_value_cache;
 #[cfg(feature = "redis_store")]
 mod redis;
@@ -16,6 +18,8 @@ mod timed;
 mod timed_sized;
 mod unbound;
 
+#[cfg(feature = "disk_store")]
+pub use crate::stores::disk::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{

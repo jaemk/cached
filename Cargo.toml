@@ -7,7 +7,7 @@ repository = "https://github.com/jaemk/cached"
 documentation = "https://docs.rs/cached"
 readme = "README.md"
 categories = ["caching", "data-structures"]
-keywords = ["caching", "cache", "memoize", "lru", "redis"]
+keywords = ["caching", "cache", "memoize", "lru", "redis", "disk"]
 license = "MIT"
 edition = "2018"
 
@@ -26,6 +26,7 @@ redis_connection_manager = ["redis_store", "redis/connection-manager"]
 redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
 redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
 redis_ahash = ["redis_store", "redis/ahash"]
+disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = ["instant/wasm-bindgen"]
 
 [dependencies.cached_proc_macro]
@@ -66,6 +67,18 @@ optional = true
 [dependencies.redis]
 version = "0.24"
 features = ["r2d2"]
+optional = true
+
+[dependencies.sled]
+version = "0.34"
+optional = true
+
+[dependencies.rmp-serde]
+version ="1.1"
+optional = true
+
+[dependencies.directories]
+version ="4.0"
 optional = true
 
 [dependencies.r2d2]

@@ -1208,6 +1208,111 @@ fn test_mutable_args_once() {
     assert_eq!((2, 2), mutable_args_once(5, 6));
 }
 
+#[cfg(feature = "disk_store")]
+mod disk_tests {
+    use super::*;
+    use cached::proc_macro::io_cached;
+    use cached::DiskCache;
+    use thiserror::Error;
+
+    #[derive(Error, Debug, PartialEq, Clone)]
+    enum TestError {
+        #[error("error with disk cache `{0}`")]
+        DiskError(String),
+        #[error("count `{0}`")]
+        Count(u32),
+    }
+
+    #[io_cached(
+        disk = true,
+        time = 1,
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
+    )]
+    fn cached_disk(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk() {
+        assert_eq!(cached_disk(1), Ok(1));
+        assert_eq!(cached_disk(1), Ok(1));
+        assert_eq!(cached_disk(5), Err(TestError::Count(5)));
+        assert_eq!(cached_disk(6), Err(TestError::Count(6)));
+    }
+
+    #[io_cached(
+        disk = true,
+        time = 1,
+        with_cached_flag = true,
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
+    )]
+    fn cached_disk_cached_flag(n: u32) -> Result<cached::Return<u32>, TestError> {
+        if n < 5 {
+            Ok(cached::Return::new(n))
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk_cached_flag() {
+        assert!(!cached_disk_cached_flag(1).unwrap().was_cached);
+        assert!(cached_disk_cached_flag(1).unwrap().was_cached);
+        assert!(cached_disk_cached_flag(5).is_err());
+        assert!(cached_disk_cached_flag(6).is_err());
+    }
+
+    #[io_cached(
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
+        type = "cached::DiskCache<u32, u32>",
+        create = r##" { DiskCache::new("cached_disk_cache_create").set_lifespan(1).set_refresh(true).build().expect("error building disk cache") } "##
+    )]
+    fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk_cache_create() {
+        assert_eq!(cached_disk_cache_create(1), Ok(1));
+        assert_eq!(cached_disk_cache_create(1), Ok(1));
+        assert_eq!(cached_disk_cache_create(5), Err(TestError::Count(5)));
+        assert_eq!(cached_disk_cache_create(6), Err(TestError::Count(6)));
+    }
+
+    #[cfg(feature = "async")]
+    mod async_test {
+        use super::*;
+
+        #[io_cached(
+            disk = true,
+            map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
+        )]
+        async fn async_cached_disk(n: u32) -> Result<u32, TestError> {
+            if n < 5 {
+                Ok(n)
+            } else {
+                Err(TestError::Count(n))
+            }
+        }
+
+        #[tokio::test]
+        async fn test_async_cached_disk() {
+            assert_eq!(async_cached_disk(1).await, Ok(1));
+            assert_eq!(async_cached_disk(1).await, Ok(1));
+            assert_eq!(async_cached_disk(5).await, Err(TestError::Count(5)));
+            assert_eq!(async_cached_disk(6).await, Err(TestError::Count(6)));
+        }
+    }
+}
+
 #[cfg(feature = "redis_store")]
 mod redis_tests {
     use super::*;
