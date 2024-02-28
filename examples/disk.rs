@@ -11,7 +11,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
 enum ExampleError {
-    #[error("error with redis cache `{0}`")]
+    #[error("error with disk cache `{0}`")]
     DiskError(String),
 }
 
