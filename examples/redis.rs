@@ -61,7 +61,7 @@ static CONFIG: Lazy<Config> = Lazy::new(Config::load);
 
 #[io_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
-    type = "cached::RedisCache<u64, String>",
+    ty = "cached::RedisCache<u64, String>",
     create = r##" {
         RedisCache::new("cache_redis_example_cached_sleep_secs_config", 1)
             .set_refresh(true)
