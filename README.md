@@ -71,7 +71,7 @@ use cached::SizedCache;
 
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
-    type = "SizedCache<String, usize>",
+    ty = "SizedCache<String, usize>",
     create = "{ SizedCache::with_size(100) }",
     convert = r#"{ format!("{}{}", a, b) }"#
 )]
@@ -123,7 +123,7 @@ enum ExampleError {
 /// by your function. All `io_cached` functions must return `Result`s.
 #[io_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
-    type = "AsyncRedisCache<u64, String>",
+    ty = "AsyncRedisCache<u64, String>",
     create = r##" {
         AsyncRedisCache::new("cached_redis_prefix", 1)
             .set_refresh(true)

@@ -14,17 +14,17 @@ use proc_macro::TokenStream;
 /// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCache` or `TimedSizedCache`.
 /// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
 /// - `sync_writes`: (optional, bool) specify whether to synchronize the execution of writing of uncached values.
-/// - `type`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
+/// - `ty`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
 ///   specified, defaults to `UnboundCache`. When `size` is specified, defaults to `SizedCache`.
 ///   When `time` is specified, defaults to `TimedCached`.
-///   When `size` and `time` are specified, defaults to `TimedSizedCache`. When `type` is
+///   When `size` and `time` are specified, defaults to `TimedSizedCache`. When `ty` is
 ///   specified, `create` must also be specified.
 /// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
 /// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `key = "u32"`.
 ///    When `key` is specified, `convert` must also be specified.
 /// - `convert`: (optional, string expr) specify an expression used to convert function arguments to a cache
 ///   key, e.g. `convert = r##"{ format!("{}:{}", arg1, arg2) }"##`. When `convert` is specified,
-///   `key` or `type` must also be set.
+///   `key` or `ty` must also be set.
 /// - `result`: (optional, bool) If your function returns a `Result`, only cache `Ok` values returned by the function.
 /// - `option`: (optional, bool) If your function returns an `Option`, only cache `Some` values returned by the function.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
@@ -35,7 +35,7 @@ use proc_macro::TokenStream;
 ///   *Note*, this option requires the cache type implements `CloneCached`.
 ///
 /// ## Note
-/// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
+/// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
 /// This is because darling, which is used for parsing the attributes, does not support directly parsing
 /// attributes into `Type`s or `Block`s.
 #[proc_macro_attribute]
@@ -71,23 +71,23 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `disk`: (optional, bool) use a `DiskCache`, this must be set to true even if `type` and `create` are specified.
 /// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCached` or `TimedSizedCache`.
 /// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
-/// - `type`: (optional, string type) explicitly specify the cache store type to use.
+/// - `ty`: (optional, string type) explicitly specify the cache store type to use.
 /// - `cache_prefix_block`: (optional, string expr) specify an expression used to create the string used as a
 ///   prefix for all cache keys of this function, e.g. `cache_prefix_block = r##"{ "my_prefix" }"##`.
 ///   When not specified, the cache prefix will be constructed from the name of the function. This
 ///   could result in unexpected conflicts between io_cached-functions of the same name, so it's
 ///   recommended that you specify a prefix you're sure will be unique.
 /// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
-/// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `type = "TimedCached<u32, u32>"`.
+/// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `ty = "TimedCached<u32, u32>"`.
 ///    When `key` is specified, `convert` must also be specified.
 /// - `convert`: (optional, string expr) specify an expression used to convert function arguments to a cache
 ///   key, e.g. `convert = r##"{ format!("{}:{}", arg1, arg2) }"##`. When `convert` is specified,
-///   `key` or `type` must also be set.
+///   `key` or `ty` must also be set.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
 ///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
 ///
 /// ## Note
-/// The `type`, `create`, `key`, and `convert` attributes must be in a `String`
+/// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
 /// This is because darling, which is used for parsing the attributes, does not support directly parsing
 /// attributes into `Type`s or `Block`s.
 #[proc_macro_attribute]

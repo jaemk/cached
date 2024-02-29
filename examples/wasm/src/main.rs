@@ -46,7 +46,7 @@ fn app() -> Html {
 }
 
 #[cached(
-    type = "TimedCache<String, Option<String>>",
+    ty = "TimedCache<String, Option<String>>",
     create = "{ TimedCache::with_lifespan(5) }"
 )]
 async fn fetch(body: String) -> Option<String> {

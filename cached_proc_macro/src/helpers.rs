@@ -96,22 +96,23 @@ pub(super) fn find_value_type(
 pub(super) fn make_cache_key_type(
     key: &Option<String>,
     convert: &Option<String>,
-    cache_type: &Option<String>,
+    ty: &Option<String>,
     input_tys: Vec<Type>,
     input_names: &Vec<Pat>,
 ) -> (TokenStream2, TokenStream2) {
-    match (key, convert, cache_type) {
+    match (key, convert, ty) {
         (Some(key_str), Some(convert_str), _) => {
-            let cache_key_ty = parse_str::<Type>(key_str).expect("unable to parse cache key type");
+            let cache_key_ty =
+                parse_str::<Type>(key_str.as_str()).expect("unable to parse cache key type");
 
-            let key_convert_block =
-                parse_str::<Block>(convert_str).expect("unable to parse key convert block");
+            let key_convert_block = parse_str::<Block>(convert_str.as_str())
+                .expect("unable to parse key convert block");
 
             (quote! {#cache_key_ty}, quote! {#key_convert_block})
         }
         (None, Some(convert_str), Some(_)) => {
-            let key_convert_block =
-                parse_str::<Block>(convert_str).expect("unable to parse key convert block");
+            let key_convert_block = parse_str::<Block>(convert_str.as_str())
+                .expect("unable to parse key convert block");
 
             (quote! {}, quote! {#key_convert_block})
         }
@@ -145,7 +146,7 @@ pub(super) fn get_input_names(inputs: &Punctuated<FnArg, Comma>) -> Vec<Pat> {
 }
 
 pub(super) fn fill_in_attributes(attributes: &mut Vec<Attribute>, cache_fn_doc_extra: String) {
-    if attributes.iter().any(|attr| attr.path.is_ident("doc")) {
+    if attributes.iter().any(|attr| attr.path().is_ident("doc")) {
         attributes.push(parse_quote! { #[doc = ""] });
         attributes.push(parse_quote! { #[doc = "# Caching"] });
         attributes.push(parse_quote! { #[doc = #cache_fn_doc_extra] });

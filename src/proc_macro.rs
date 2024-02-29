@@ -210,7 +210,7 @@ use cached::SizedCache;
 
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
-    type = "SizedCache<String, usize>",
+    ty = "SizedCache<String, usize>",
     create = "{ SizedCache::with_size(100) }",
     convert = r#"{ format!("{}{}", a, b) }"#
 )]

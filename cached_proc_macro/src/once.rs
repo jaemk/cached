@@ -1,9 +1,10 @@
 use crate::helpers::*;
+use darling::ast::NestedMeta;
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, AttributeArgs, Ident, ItemFn, ReturnType};
+use syn::{parse_macro_input, Ident, ItemFn, ReturnType};
 
 #[derive(FromMeta)]
 struct OnceMacroArgs {
@@ -22,7 +23,12 @@ struct OnceMacroArgs {
 }
 
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = parse_macro_input!(args as AttributeArgs);
+    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(darling::Error::from(e).write_errors());
+        }
+    };
     let args = match OnceMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -156,7 +162,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let r_lock;
     let w_lock;
     let function_call;
-    let cache_type;
+    let ty;
     if asyncness.is_some() {
         w_lock = quote! {
             // try to get a write lock
@@ -174,7 +180,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = inner(#(#input_names),*).await;
         };
 
-        cache_type = quote! {
+        ty = quote! {
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::RwLock::new(#cache_create));
         };
     } else {
@@ -194,7 +200,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = inner(#(#input_names),*);
         };
 
-        cache_type = quote! {
+        ty = quote! {
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::RwLock::new(#cache_create));
         };
     }
@@ -252,7 +258,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let expanded = quote! {
         // Cached static
         #[doc = #cache_ident_doc]
-        #cache_type
+        #ty
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {

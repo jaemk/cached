@@ -8,7 +8,7 @@ use std::thread::{sleep, spawn};
 use std::time::Duration;
 
 // cached shorthand, uses the default unbounded cache.
-// Equivalent to specifying `type = "UnboundCache<(u32), u32>", create= "{ UnboundCache::new() }"`
+// Equivalent to specifying `ty = "UnboundCache<(u32), u32>", create= "{ UnboundCache::new() }"`
 #[cached]
 fn fib(n: u32) -> u32 {
     if n == 0 || n == 1 {
@@ -27,7 +27,7 @@ fn fib_2(n: u32) -> u32 {
 
 // Same as above, but preallocates some space.
 #[cached(
-    type = "UnboundCache<u32, u32>",
+    ty = "UnboundCache<u32, u32>",
     create = "{ UnboundCache::with_capacity(50) }"
 )]
 fn fib_specific(n: u32) -> u32 {
@@ -40,7 +40,7 @@ fn fib_specific(n: u32) -> u32 {
 // Specify a specific cache type
 // Note that the cache key type is a tuple of function argument types.
 #[cached(
-    type = "SizedCache<(u32, u32), u32>",
+    ty = "SizedCache<(u32, u32), u32>",
     create = "{ SizedCache::with_size(100) }"
 )]
 fn slow(a: u32, b: u32) -> u32 {
@@ -52,7 +52,7 @@ fn slow(a: u32, b: u32) -> u32 {
 // Note that the cache key type is a `String` created from the borrow arguments
 // Note that key is not used, convert requires either key or type to be set.
 #[cached(
-    type = "SizedCache<String, usize>",
+    ty = "SizedCache<String, usize>",
     create = "{ SizedCache::with_size(100) }",
     convert = r#"{ format!("{}{}", a, b) }"#
 )]
@@ -122,7 +122,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 }
 
 // Specify our custom cache and supply an instance to use
-#[cached(type = "MyCache<u32, ()>", create = "{ MyCache::with_capacity(50) }")]
+#[cached(ty = "MyCache<u32, ()>", create = "{ MyCache::with_capacity(50) }")]
 fn custom(n: u32) {
     if n == 0 {
         return;
