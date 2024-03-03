@@ -105,6 +105,22 @@ fn keyed(a: String) -> Option<usize> {
 
 ----
 
+```compile_fail
+use cached::proc_macro::cached;
+
+/// Cannot use sync_writes and result_fallback together
+#[cached(
+    result = true,
+    time = 1,
+    sync_writes = true,
+    result_fallback = true
+)]
+fn doesnt_compile() -> Result<String, ()> {
+    Ok("a".to_string())
+}
+```
+----
+
 ```rust,no_run,ignore
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
