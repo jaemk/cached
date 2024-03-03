@@ -188,6 +188,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("the result and option attributes are mutually exclusive"),
     };
 
+    if args.result_fallback && args.sync_writes {
+        panic!("the result_fallback and sync_writes attributes are mutually exclusive");
+    }
+
     let set_cache_and_return = quote! {
         #set_cache_block
         result
@@ -255,7 +259,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let old_val = {
                 #lock
                 let (result, has_expired) = cache.cache_get_expired(&key);
-                if let (Some(result), false) = (result, has_expired) {
+                if let (Some(result), false) = (result.clone(), has_expired) {
                     #return_cache_block
                 }
                 result

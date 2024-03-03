@@ -1572,7 +1572,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 }
 
 #[cached::proc_macro::cached(result = true, time = 1, result_fallback = true)]
-fn always_failing() -> Result<i64, ()> {
+fn always_failing() -> Result<String, ()> {
     Err(())
 }
 
@@ -1586,8 +1586,11 @@ fn test_result_fallback() {
     }
 
     // Pretend it succeeded once
-    ALWAYS_FAILING.lock().unwrap().cache_set((), 1);
-    assert_eq!(always_failing(), Ok(1));
+    ALWAYS_FAILING
+        .lock()
+        .unwrap()
+        .cache_set((), "abc".to_string());
+    assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(1));
@@ -1597,14 +1600,14 @@ fn test_result_fallback() {
     std::thread::sleep(std::time::Duration::from_millis(2000));
 
     // Even though the cache should've expired, the `result_fallback` flag means it refreshes the cache with the last valid result
-    assert_eq!(always_failing(), Ok(1));
+    assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
 
-    assert_eq!(always_failing(), Ok(1));
+    assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(2));
