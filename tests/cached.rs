@@ -1571,11 +1571,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
     }
 }
 
-#[cached::proc_macro::cached(
-    result = true,
-    time = 1,
-    result_fallback = true
-)]
+#[cached::proc_macro::cached(result = true, time = 1, result_fallback = true)]
 fn always_failing() -> Result<String, ()> {
     Err(())
 }
@@ -1590,7 +1586,10 @@ fn test_result_fallback() {
     }
 
     // Pretend it succeeded once
-    ALWAYS_FAILING.lock().unwrap().cache_set((), "abc".to_string());
+    ALWAYS_FAILING
+        .lock()
+        .unwrap()
+        .cache_set((), "abc".to_string());
     assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
