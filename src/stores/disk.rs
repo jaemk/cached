@@ -393,4 +393,48 @@ mod tests {
 
         drop(cache);
     }
+
+    #[test]
+    fn disk_refreshing_cache_delays_cache_expiry() {
+        let cache: DiskCache<u32, u32> = DiskCache::new(&format!(
+            "{}:disk-cache-test-refreshing_cache_delays_cache_expiry",
+            now_millis()
+        ))
+        .set_disk_directory(
+            std::env::temp_dir()
+                .join("cachedtest-refresh-cache-test-refreshing_cache_delays_cache_expiry"),
+        )
+        .set_lifespan(2)
+        .set_refresh(true) // ENABLE REFRESH - this is what we're testing
+        .build()
+        .unwrap();
+
+        assert!(cache.cache_set(1, 100).unwrap().is_none());
+
+        // retrieve before expiry, this should refresh the created_at so we don't expire just yet
+        sleep(Duration::from_secs(1));
+        assert_eq!(
+            Some(100),
+            cache.cache_get(&1).unwrap(),
+            "Expected Some val when retrieving before the initial expiry"
+        );
+
+        // This is after the initial expiry, but since we refreshed the created_at, we should still get the value
+        sleep(Duration::from_millis(1500));
+        assert_eq!(
+            Some(100),
+            cache.cache_get(&1).unwrap(),
+            "Expected Some val when retrieving after the initial expiry as we have refreshed"
+        );
+
+        // This is after the new refresh expiry, we should get None
+        sleep(Duration::from_secs(2));
+        assert_eq!(
+            None,
+            cache.cache_get(&1).unwrap(),
+            "Expected None val when retrieving after the refresh expiry"
+        );
+
+        drop(cache);
+    }
 }
