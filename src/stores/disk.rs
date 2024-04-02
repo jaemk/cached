@@ -225,7 +225,7 @@ where
         let key = key.to_string();
         let value = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
 
-        if let Some(data) = self.connection.insert(key, value)? {
+        let result = if let Some(data) = self.connection.insert(key, value)? {
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
 
             if let Some(lifetime_seconds) = self.seconds {
@@ -243,7 +243,13 @@ where
             }
         } else {
             Ok(None)
-        }
+        };
+
+        // sync the data to disk immediately by calling flush
+        // Also, we are only flushing on cache set, so this does not affect the refresh functionality.
+        self.connection.flush()?;
+
+        result
     }
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
