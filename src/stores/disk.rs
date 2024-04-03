@@ -642,94 +642,172 @@ mod test_DiskCache {
             }
         }
 
-        #[test]
-        fn value_does_not_persist_after_recovery_when_set_to_false_and_not_automatically_flushed() {
-            let original_cache_tmp_dir = temp_dir!();
-            let copied_cache_tmp_dir = temp_dir!(no_exist);
-            const CACHE_NAME: &str = "test-cache";
+        mod when_no_auto_flushing {
+            use super::super::*;
 
-            let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
-                .set_disk_directory(original_cache_tmp_dir.path())
-                .set_sync_to_disk_on_cache_change(false) // WHAT'S BEING TESTED
-                // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
-                .build_with_connection_config(sled::Config::new().flush_every_ms(None))
-                .unwrap();
+            fn check_on_recovered_cache(
+                set_sync_to_disk_on_cache_change: bool,
+                run_on_original_cache: fn(&DiskCache<u32, u32>) -> (),
+                run_on_recovered_cache: fn(&DiskCache<u32, u32>) -> (),
+            ) {
+                let original_cache_tmp_dir = temp_dir!();
+                let copied_cache_tmp_dir = temp_dir!(no_exist);
+                const CACHE_NAME: &str = "test-cache";
 
-            // flush the cache to disk before any cache setting, so that when we create the recovered cache
-            // it has something to recover from, even if set_cache doesn't write to disk as we'd like.
-            cache
-                .connection
-                .flush()
-                .expect("error flushing cache before any cache setting");
+                let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
+                    .set_disk_directory(original_cache_tmp_dir.path())
+                    .set_sync_to_disk_on_cache_change(set_sync_to_disk_on_cache_change) // WHAT'S BEING TESTED
+                    // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
+                    .build_with_connection_config(sled::Config::new().flush_every_ms(None))
+                    .unwrap();
 
-            // write to the cache, we expect this to persist if the connection is flushed on cache_set
-            cache
-                .cache_set(TEST_KEY, TEST_VAL)
-                .expect("error setting cache in assemble stage");
+                // flush the cache to disk before any cache setting, so that when we create the recovered cache
+                // it has something to recover from, even if set_cache doesn't write to disk as we'd like.
+                cache
+                    .connection
+                    .flush()
+                    .expect("error flushing cache before any cache setting");
 
-            // freeze the current state of the cache files by copying them to a new location
-            // we do this before dropping the cache, as dropping the cache seems to flush to the disk
-            let recovered_cache = clone_cache_to_new_location_no_flushing(
-                CACHE_NAME,
-                &cache,
-                copied_cache_tmp_dir.path(),
-            );
+                run_on_original_cache(&cache);
 
-            assert_that!(recovered_cache.connection.was_recovered(), eq(true));
+                // freeze the current state of the cache files by copying them to a new location
+                // we do this before dropping the cache, as dropping the cache seems to flush to the disk
+                let recovered_cache = clone_cache_to_new_location_no_flushing(
+                    CACHE_NAME,
+                    &cache,
+                    copied_cache_tmp_dir.path(),
+                );
 
-            assert_that!(recovered_cache.cache_get(&TEST_KEY), ok(none()));
-        }
+                assert_that!(recovered_cache.connection.was_recovered(), eq(true));
 
-        #[test]
-        fn value_persists_after_recovery_when_set_to_true_and_not_automatically_flushed() {
-            let original_cache_tmp_dir = temp_dir!();
-            let copied_cache_tmp_dir = temp_dir!(no_exist);
-            const CACHE_NAME: &str = "test-cache";
+                run_on_recovered_cache(&recovered_cache);
+            }
 
-            let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
-                .set_disk_directory(original_cache_tmp_dir.path())
-                .set_sync_to_disk_on_cache_change(true)
-                // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
-                .build_with_connection_config(sled::Config::new().flush_every_ms(None))
-                .unwrap();
+            mod changes_persist_after_recovery_when_set_to_true {
+                use super::*;
 
-            // flush the cache to disk before any cache setting, so that when we create the recovered cache
-            // it has something to recover from, even if set_cache doesn't write to disk as we'd like.
-            cache
-                .connection
-                .flush()
-                .expect("error flushing cache before any cache setting");
+                #[test]
+                fn for_cache_set() {
+                    check_on_recovered_cache(
+                        false,
+                        |cache| {
+                            // write to the cache, we expect this to persist if the connection is flushed on cache_set
+                            cache
+                                .cache_set(TEST_KEY, TEST_VAL)
+                                .expect("error setting cache in assemble stage");
+                        },
+                        |recovered_cache| {
+                            assert_that!(
+                                    recovered_cache.cache_get(&TEST_KEY),
+                                    ok(none()),
+                                    "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache should not have persisted"
+                                );
+                        },
+                    )
+                }
 
-            // write to the cache, we expect this to persist if the connection is flushed on cache_set
-            cache
-                .cache_set(TEST_KEY, TEST_VAL)
-                .expect("error setting cache in assemble stage");
+                #[test]
+                fn for_cache_remove() {
+                    check_on_recovered_cache(
+                        false,
+                        |cache| {
+                            // write to the cache, we expect this to persist if the connection is flushed on cache_set
+                            cache
+                                .cache_set(TEST_KEY, TEST_VAL)
+                                .expect("error setting cache in assemble stage");
 
-            // freeze the current state of the cache files by copying them to a new location
-            // we do this before dropping the cache, as dropping the cache seems to flush to the disk
-            let recovered_cache = clone_cache_to_new_location_no_flushing(
-                CACHE_NAME,
-                &cache,
-                copied_cache_tmp_dir.path(),
-            );
+                            // manually flush the cache so that we only test cache_remove
+                            cache.connection.flush().expect("error flushing cache");
 
-            assert_that!(recovered_cache.connection.was_recovered(), eq(true));
+                            cache
+                                .cache_remove(&TEST_KEY)
+                                .expect("error removing cache in assemble stage");
+                        },
+                        |recovered_cache| {
+                            assert_that!(
+                                    recovered_cache.cache_get(&TEST_KEY),
+                                    ok(some(eq(TEST_VAL))),
+                                    "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache_remove should not have persisted"
+                                );
+                        },
+                    )
+                }
 
-            assert_that!(recovered_cache.cache_get(&TEST_KEY), ok(some(eq(TEST_VAL))));
-        }
+                #[ignore = "Not implemented"]
+                #[test]
+                fn for_cache_get_when_refreshing() {
+                    todo!("Test not implemented.")
+                }
+            }
 
-        fn clone_cache_to_new_location_no_flushing(
-            cache_name: &str,
-            cache: &DiskCache<u32, u32>,
-            new_location: &Path,
-        ) -> DiskCache<u32, u32> {
-            copy_dir::copy_dir(cache.disk_path.parent().unwrap(), new_location)
-                .expect("error copying cache files to new location");
+            /// This is the anti-test
+            mod changes_do_not_persist_after_recovery_when_set_to_false {
+                use super::*;
 
-            DiskCache::new(cache_name)
-                .set_disk_directory(new_location)
-                .build()
-                .expect("error building cache from copied files")
+                #[test]
+                fn for_cache_set() {
+                    check_on_recovered_cache(
+                        true,
+                        |cache| {
+                            // write to the cache, we expect this to persist if the connection is flushed on cache_set
+                            cache
+                                .cache_set(TEST_KEY, TEST_VAL)
+                                .expect("error setting cache in assemble stage");
+                        },
+                        |recovered_cache| {
+                            assert_that!(
+                                recovered_cache.cache_get(&TEST_KEY),
+                                ok(some(eq(TEST_VAL))),
+                                "Getting a set key should return the value"
+                            );
+                        },
+                    )
+                }
+
+                #[test]
+                fn for_cache_remove() {
+                    check_on_recovered_cache(
+                        true,
+                        |cache| {
+                            // write to the cache, we expect this to persist if the connection is flushed on cache_set
+                            cache
+                                .cache_set(TEST_KEY, TEST_VAL)
+                                .expect("error setting cache in assemble stage");
+
+                            cache
+                                .cache_remove(&TEST_KEY)
+                                .expect("error removing cache in assemble stage");
+                        },
+                        |recovered_cache| {
+                            assert_that!(
+                                recovered_cache.cache_get(&TEST_KEY),
+                                ok(none()),
+                                "Getting a removed key should return None"
+                            );
+                        },
+                    )
+                }
+
+                #[ignore = "Not implemented"]
+                #[test]
+                fn for_cache_get_when_refreshing() {
+                    todo!("Test not implemented.")
+                }
+            }
+
+            fn clone_cache_to_new_location_no_flushing(
+                cache_name: &str,
+                cache: &DiskCache<u32, u32>,
+                new_location: &Path,
+            ) -> DiskCache<u32, u32> {
+                copy_dir::copy_dir(cache.disk_path.parent().unwrap(), new_location)
+                    .expect("error copying cache files to new location");
+
+                DiskCache::new(cache_name)
+                    .set_disk_directory(new_location)
+                    .build()
+                    .expect("error building cache from copied files")
+            }
         }
     }
 }
