@@ -190,6 +190,17 @@ where
             let _ = self.connection.flush();
         }
     }
+
+    /// Provide access to the underlying [sled::Db] connection
+    /// This is useful for i.e. manually flushing the cache to disk.
+    pub fn connection(&self) -> &Db {
+        &self.connection
+    }
+
+    /// Provide mutable access to the underlying [sled::Db] connection
+    pub fn connection_mut(&mut self) -> &mut Db {
+        &mut self.connection
+    }
 }
 
 #[derive(Error, Debug)]
