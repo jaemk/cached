@@ -11,7 +11,7 @@ use std::{fmt::Display, path::PathBuf, time::SystemTime};
 pub struct DiskCacheBuilder<K, V> {
     seconds: Option<u64>,
     refresh: bool,
-    sync_to_disk_on_cache_set: bool,
+    sync_to_disk_on_cache_change: bool,
     disk_dir: Option<PathBuf>,
     cache_name: String,
     _phantom: PhantomData<(K, V)>,
@@ -43,7 +43,7 @@ where
         Self {
             seconds: None,
             refresh: false,
-            sync_to_disk_on_cache_set: false,
+            sync_to_disk_on_cache_change: false,
             disk_dir: None,
             cache_name: cache_name.as_ref().to_string(),
             _phantom: Default::default(),
@@ -72,8 +72,8 @@ where
     /// [sled] flushes every [sled::Config::flush_every_ms] which has a default value of 500ms.
     /// In some use cases, this may not be quick enough, or a user may want to provide their own [sled::Db]
     /// used for cache creation which may have a low flush frequency geared towards a manual flush strategy.
-    pub fn set_sync_to_disk_on_cache_set(mut self, sync_to_disk_on_cache_set: bool) -> Self {
-        self.sync_to_disk_on_cache_set = sync_to_disk_on_cache_set;
+    pub fn set_sync_to_disk_on_cache_change(mut self, sync_to_disk_on_cache_change: bool) -> Self {
+        self.sync_to_disk_on_cache_change = sync_to_disk_on_cache_change;
         self
     }
 
@@ -103,7 +103,7 @@ where
         Ok(DiskCache {
             seconds: self.seconds,
             refresh: self.refresh,
-            sync_to_disk_on_cache_set: self.sync_to_disk_on_cache_set,
+            sync_to_disk_on_cache_change: self.sync_to_disk_on_cache_change,
             version: DISK_FILE_VERSION,
             disk_path,
             connection,
@@ -116,7 +116,7 @@ where
 pub struct DiskCache<K, V> {
     pub(super) seconds: Option<u64>,
     pub(super) refresh: bool,
-    sync_to_disk_on_cache_set: bool,
+    sync_to_disk_on_cache_change: bool,
     #[allow(unused)]
     version: u64,
     #[allow(unused)]
@@ -151,6 +151,13 @@ where
                     }
                 }
             }
+        }
+
+        if self.sync_to_disk_on_cache_change {
+            // NOTE: we are not returning any error here so as not to change the function signature,
+            // and break backwards compatibility
+            // TODO: Review changing the function signature to return a Result<(), DiskCacheError> - this would be a breaking change
+            let _ = self.connection.flush();
         }
     }
 }
@@ -197,6 +204,7 @@ where
         let key = key.to_string();
         let seconds = self.seconds;
         let refresh = self.refresh;
+        let mut cache_updated = false;
         let update = |old: Option<&[u8]>| -> Option<Vec<u8>> {
             let old = old?;
             if seconds.is_none() {
@@ -217,6 +225,7 @@ where
             {
                 if refresh {
                     cached.refresh_created_at();
+                    cache_updated = true;
                 }
                 let cache_val =
                     rmp_serde::to_vec(&cached).expect("error serializing cached disk value");
@@ -226,12 +235,18 @@ where
             }
         };
 
-        if let Some(data) = self.connection.update_and_fetch(key, update)? {
+        let result = if let Some(data) = self.connection.update_and_fetch(key, update)? {
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
             Ok(Some(cached.value))
         } else {
             Ok(None)
+        };
+
+        if cache_updated && self.sync_to_disk_on_cache_change {
+            self.connection.flush()?;
         }
+
+        result
     }
 
     fn cache_set(&self, key: K, value: V) -> Result<Option<V>, DiskCacheError> {
@@ -258,9 +273,7 @@ where
             Ok(None)
         };
 
-        if self.sync_to_disk_on_cache_set {
-            // sync the data to disk immediately by calling flush
-            // Also, we are only flushing on cache set, so this does not affect the refresh functionality.
+        if self.sync_to_disk_on_cache_change {
             self.connection.flush()?;
         }
 
@@ -269,7 +282,7 @@ where
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
         let key = key.to_string();
-        if let Some(data) = self.connection.remove(key)? {
+        let result = if let Some(data) = self.connection.remove(key)? {
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
 
             if let Some(lifetime_seconds) = self.seconds {
@@ -287,7 +300,13 @@ where
             }
         } else {
             Ok(None)
+        };
+
+        if self.sync_to_disk_on_cache_change {
+            self.connection.flush()?;
         }
+
+        result
     }
 
     fn cache_lifespan(&self) -> Option<u64> {
@@ -592,7 +611,7 @@ mod test_DiskCache {
         std::fs::remove_dir_all(cache.disk_path).expect("error in clean up removeing the cache dir")
     }
 
-    mod set_sync_to_disk_on_cache_set {
+    mod set_sync_to_disk_on_cache_change {
         use super::*;
 
         impl<K, V> DiskCacheBuilder<K, V>
@@ -614,7 +633,7 @@ mod test_DiskCache {
                 Ok(DiskCache {
                     seconds: self.seconds,
                     refresh: self.refresh,
-                    sync_to_disk_on_cache_set: self.sync_to_disk_on_cache_set,
+                    sync_to_disk_on_cache_change: self.sync_to_disk_on_cache_change,
                     version: DISK_FILE_VERSION,
                     disk_path,
                     connection,
@@ -631,7 +650,7 @@ mod test_DiskCache {
 
             let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
                 .set_disk_directory(original_cache_tmp_dir.path())
-                .set_sync_to_disk_on_cache_set(false) // WHAT'S BEING TESTED
+                .set_sync_to_disk_on_cache_change(false) // WHAT'S BEING TESTED
                 // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
                 .build_with_connection_config(sled::Config::new().flush_every_ms(None))
                 .unwrap();
@@ -669,7 +688,7 @@ mod test_DiskCache {
 
             let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
                 .set_disk_directory(original_cache_tmp_dir.path())
-                .set_sync_to_disk_on_cache_set(true)
+                .set_sync_to_disk_on_cache_change(true)
                 // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
                 .build_with_connection_config(sled::Config::new().flush_every_ms(None))
                 .unwrap();

@@ -37,7 +37,7 @@ struct IOMacroArgs {
     #[darling(default)]
     create: Option<String>,
     #[darling(default)]
-    sync_to_disk_on_cache_set: Option<bool>,
+    sync_to_disk_on_cache_change: Option<bool>,
 }
 
 pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -175,7 +175,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.cache_prefix_block,
         &args.ty,
         &args.create,
-        &args.sync_to_disk_on_cache_set,
+        &args.sync_to_disk_on_cache_change,
     ) {
         // redis
         (true, false, time, time_refresh, cache_prefix, ty, cache_create, _) => {
@@ -245,7 +245,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (cache_ty, cache_create)
         }
         // disk
-        (false, true, time, time_refresh, _, ty, cache_create, sync_to_disk_on_cache_set) => {
+        (false, true, time, time_refresh, _, ty, cache_create, sync_to_disk_on_cache_change) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
@@ -288,11 +288,11 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                             }
                         }
                     };
-                    let create = match sync_to_disk_on_cache_set {
+                    let create = match sync_to_disk_on_cache_change {
                         None => create,
-                        Some(sync_to_disk_on_cache_set) => {
+                        Some(sync_to_disk_on_cache_change) => {
                             quote! {
-                                (#create).set_sync_on_cache_set(#sync_to_disk_on_cache_set)
+                                (#create).set_sync_to_disk_on_cache_change(#sync_to_disk_on_cache_change)
                             }
                         }
                     };
