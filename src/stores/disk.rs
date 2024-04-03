@@ -70,10 +70,11 @@ where
         self
     }
 
-    /// Specify whether the cache should sync to disk on each call to [DiskCache::cache_set].
-    /// [sled] flushes every [sled::Config::flush_every_ms] which has a default value of 500ms.
-    /// In some use cases, this may not be quick enough, or a user may want to provide their own [sled::Db]
-    /// used for cache creation which may have a low flush frequency geared towards a manual flush strategy.
+    /// Specify whether the cache should sync to disk on each cache change.
+    /// [sled] flushes every [sled::Config::flush_every_ms] which has a default value.
+    /// In some use cases, the default value may not be quick enough,
+    /// or a user may want to reduce the flush rate / turn off auto-flushing to reduce IO (and only flush on cache changes).
+    /// (see [DiskCacheBuilder::set_connection_config] for more control over the sled connection)
     pub fn set_sync_to_disk_on_cache_change(mut self, sync_to_disk_on_cache_change: bool) -> Self {
         self.sync_to_disk_on_cache_change = sync_to_disk_on_cache_change;
         self
