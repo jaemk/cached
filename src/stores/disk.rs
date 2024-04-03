@@ -11,6 +11,7 @@ use std::{fmt::Display, path::PathBuf, time::SystemTime};
 pub struct DiskCacheBuilder<K, V> {
     seconds: Option<u64>,
     refresh: bool,
+    sync_to_disk_on_cache_set: bool,
     disk_dir: Option<PathBuf>,
     cache_name: String,
     _phantom: PhantomData<(K, V)>,
@@ -42,6 +43,7 @@ where
         Self {
             seconds: None,
             refresh: false,
+            sync_to_disk_on_cache_set: false,
             disk_dir: None,
             cache_name: cache_name.as_ref().to_string(),
             _phantom: Default::default(),
@@ -63,6 +65,15 @@ where
     /// Set the disk path for where the data will be stored
     pub fn set_disk_directory<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.disk_dir = Some(dir.as_ref().into());
+        self
+    }
+
+    /// Specify whether the cache should sync to disk on each call to [DiskCache::cache_set].
+    /// [sled] flushes every [sled::Config::flush_every_ms] which has a default value of 500ms.
+    /// In some use cases, this may not be quick enough, or a user may want to provide their own [sled::Db]
+    /// used for cache creation which may have a low flush frequency geared towards a manual flush strategy.
+    pub fn set_sync_to_disk_on_cache_set(mut self, sync_to_disk_on_cache_set: bool) -> Self {
+        self.sync_to_disk_on_cache_set = sync_to_disk_on_cache_set;
         self
     }
 
@@ -92,6 +103,7 @@ where
         Ok(DiskCache {
             seconds: self.seconds,
             refresh: self.refresh,
+            sync_to_disk_on_cache_set: self.sync_to_disk_on_cache_set,
             version: DISK_FILE_VERSION,
             disk_path,
             connection,
@@ -104,6 +116,7 @@ where
 pub struct DiskCache<K, V> {
     pub(super) seconds: Option<u64>,
     pub(super) refresh: bool,
+    sync_to_disk_on_cache_set: bool,
     #[allow(unused)]
     version: u64,
     #[allow(unused)]
@@ -245,9 +258,11 @@ where
             Ok(None)
         };
 
-        // sync the data to disk immediately by calling flush
-        // Also, we are only flushing on cache set, so this does not affect the refresh functionality.
-        self.connection.flush()?;
+        if self.sync_to_disk_on_cache_set {
+            // sync the data to disk immediately by calling flush
+            // Also, we are only flushing on cache set, so this does not affect the refresh functionality.
+            self.connection.flush()?;
+        }
 
         result
     }
