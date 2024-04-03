@@ -36,6 +36,8 @@ struct IOMacroArgs {
     ty: Option<String>,
     #[darling(default)]
     create: Option<String>,
+    #[darling(default)]
+    sync_to_disk_on_cache_set: Option<bool>,
 }
 
 pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -173,9 +175,10 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.cache_prefix_block,
         &args.ty,
         &args.create,
+        &args.sync_to_disk_on_cache_set,
     ) {
         // redis
-        (true, false, time, time_refresh, cache_prefix, ty, cache_create) => {
+        (true, false, time, time_refresh, cache_prefix, ty, cache_create, _) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
@@ -242,7 +245,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (cache_ty, cache_create)
         }
         // disk
-        (false, true, time, time_refresh, _, ty, cache_create) => {
+        (false, true, time, time_refresh, _, ty, cache_create, sync_to_disk_on_cache_set) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
@@ -285,6 +288,14 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                             }
                         }
                     };
+                    let create = match sync_to_disk_on_cache_set {
+                        None => create,
+                        Some(sync_to_disk_on_cache_set) => {
+                            quote! {
+                                (#create).set_sync_on_cache_set(#sync_to_disk_on_cache_set)
+                            }
+                        }
+                    };
                     let create = match args.disk_dir {
                         None => create,
                         Some(disk_dir) => {
@@ -296,7 +307,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             };
             (cache_ty, cache_create)
         }
-        (_, _, time, time_refresh, cache_prefix, ty, cache_create) => {
+        (_, _, time, time_refresh, cache_prefix, ty, cache_create, _) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
