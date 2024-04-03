@@ -368,7 +368,7 @@ mod test_DiskCache {
     #[test]
     fn values_expire_when_lifespan_elapses_returning_none() {
         let tmp_dir = temp_dir!();
-        let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
+        let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
             .set_lifespan(LIFE_SPAN_2_SECS)
             .build()
