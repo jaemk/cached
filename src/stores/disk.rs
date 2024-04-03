@@ -287,8 +287,8 @@ where
 }
 
 #[cfg(test)]
-/// Cache store tests
-mod tests {
+#[allow(non_snake_case)]
+mod test_DiskCache {
     use googletest::{
         assert_that,
         matchers::{anything, eq, none, ok, some},
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_set_get_remove() {
+    fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_expire() {
+    fn values_expire_when_lifespan_elapses_returning_none() {
         const LIFE_SPAN_0: u64 = 2;
         const LIFE_SPAN_1: u64 = 1;
         let tmp_dir = temp_dir!();
@@ -383,7 +383,41 @@ mod tests {
         assert_that!(
             cache.cache_get(&1),
             ok(some(anything())),
-            "Getting an existing key-value should return the value"
+            "Getting an existing key-value before it expires should return the value"
+        );
+
+        // Let the lifespan expire
+        sleep(Duration::from_secs(LIFE_SPAN_0));
+        sleep(Duration::from_micros(500)); // a bit extra for good measure
+        assert_that!(
+            cache.cache_get(&1),
+            ok(none()),
+            "Getting an expired key-value should return None"
+        );
+    }
+
+    #[test]
+    fn set_lifespan_to_a_different_lifespan_is_respected() {
+        // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
+        const LIFE_SPAN_0: u64 = 2;
+        const LIFE_SPAN_1: u64 = 1;
+        let tmp_dir = temp_dir!();
+        let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
+            .set_disk_directory(tmp_dir.path())
+            .set_lifespan(LIFE_SPAN_0)
+            .build()
+            .unwrap();
+
+        assert_that!(
+            cache.cache_get(&1),
+            ok(none()),
+            "Getting a non-existent key-value should return None"
+        );
+
+        assert_that!(
+            cache.cache_set(1, 100),
+            ok(none()),
+            "Setting a new key-value should return None"
         );
 
         // Let the lifespan expire
@@ -397,7 +431,7 @@ mod tests {
 
         let old_from_setting_lifespan = cache
             .cache_set_lifespan(LIFE_SPAN_1)
-            .expect("error setting lifespan");
+            .expect("error setting new lifespan");
         assert_that!(
             old_from_setting_lifespan,
             eq(LIFE_SPAN_0),
@@ -450,45 +484,34 @@ mod tests {
     }
 
     #[test]
-    fn disk_remove() {
-        let tmp_dir = temp_dir!();
-        let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
-            .set_disk_directory(tmp_dir.path())
-            .build()
-            .unwrap();
-
-        assert_that!(cache.cache_set(1, 100), ok(none()));
-        assert_that!(cache.cache_set(2, 200), ok(none()));
-        assert_that!(cache.cache_set(3, 300), ok(none()));
-
-        assert_that!(
-            cache.cache_remove(&1),
-            ok(some(eq(100))),
-            "Removing an existing key-value should return the value"
-        );
-
-        drop(cache);
-    }
-
-    #[test]
-    fn disk_default_cache_dir() {
-        let tmp_dir = temp_dir!();
+    // TODO: Consider removing this test, as it's not really testing anything.
+    // If we want to check that setting a different disk directory to the default doesn't change anything,
+    // we should design the tests to run all the same tests but paramaterized with different conditions.
+    fn does_not_break_when_constructed_using_default_disk_directory() {
         let cache: DiskCache<u32, u32> =
             DiskCache::new(&format!("{}:disk-cache-test-default-dir", now_millis()))
                 // use the default disk directory
                 .build()
                 .unwrap();
 
-        assert_that!(cache.cache_set(1, 100), ok(none()));
-        assert_that!(cache.cache_set(2, 200), ok(none()));
-        assert_that!(cache.cache_set(3, 300), ok(none()));
-
+        let cached = cache.cache_get(&6).unwrap();
         assert_that!(
-            cache.cache_remove(&1),
-            ok(some(eq(100))),
-            "Removing an existing key-value should return the value"
+            cached,
+            none(),
+            "Getting a non-existent key-value should return None"
         );
 
-        drop(cache);
+        let cached = cache.cache_set(6, 4444).unwrap();
+        assert_that!(cached, none(), "Setting a new key-value should return None");
+
+        let cached = cache.cache_set(6, 5555).unwrap();
+        assert_that!(
+            cached,
+            some(eq(4444)),
+            "Setting an existing key-value should return the old value"
+        );
+
+        // remove the cache dir to clean up the test as we're not using a temp dir
+        std::fs::remove_dir_all(cache.disk_path).expect("error in clean up removeing the cache dir")
     }
 }
