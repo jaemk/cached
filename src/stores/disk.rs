@@ -14,6 +14,7 @@ pub struct DiskCacheBuilder<K, V> {
     sync_to_disk_on_cache_change: bool,
     disk_dir: Option<PathBuf>,
     cache_name: String,
+    connection_config: Option<sled::Config>,
     _phantom: PhantomData<(K, V)>,
 }
 
@@ -46,6 +47,7 @@ where
             sync_to_disk_on_cache_change: false,
             disk_dir: None,
             cache_name: cache_name.as_ref().to_string(),
+            connection_config: None,
             _phantom: Default::default(),
         }
     }
@@ -77,6 +79,31 @@ where
         self
     }
 
+    /// Specify the [sled::Config] to use for the connection to the disk cache.
+    ///
+    /// ### Note
+    /// Don't use [sled::Config::path] as any value set here will be overwritten by either
+    /// the path specified in [DiskCacheBuilder::set_disk_directory], or the default value calculated by [DiskCacheBuilder].
+    ///
+    /// ### Example Use Case
+    /// By default [sled] automatically syncs to disk at a frequency specified in [sled::Config::flush_every_ms].
+    /// A user may want to reduce IO by setting a lower flush frequency, or by setting [sled::Config::flush_every_ms] to [None].
+    /// Also see [DiskCacheBuilder::set_sync_to_disk_on_cache_change] which allows for syncing to disk on each cache change.
+    /// ```rust
+    /// use cached::stores::{DiskCacheBuilder, DiskCache};
+    ///
+    /// let config = sled::Config::new().flush_every_ms(None);
+    /// let cache: DiskCache<String, String> = DiskCacheBuilder::new("my-cache")
+    ///     .set_connection_config(config)
+    ///     .set_sync_to_disk_on_cache_change(true)
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn set_connection_config(mut self, config: sled::Config) -> Self {
+        self.connection_config = Some(config);
+        self
+    }
+
     fn default_disk_dir() -> PathBuf {
         BaseDirs::new()
             .map(|base_dirs| {
@@ -98,7 +125,10 @@ where
     pub fn build(self) -> Result<DiskCache<K, V>, DiskCacheBuildError> {
         let disk_dir = self.disk_dir.unwrap_or_else(|| Self::default_disk_dir());
         let disk_path = disk_dir.join(format!("{}_v{}", self.cache_name, DISK_FILE_VERSION));
-        let connection = sled::open(disk_path.clone())?;
+        let connection = match self.connection_config {
+            Some(config) => config.path(disk_path.clone()).open()?,
+            None => sled::open(disk_path.clone())?,
+        };
 
         Ok(DiskCache {
             seconds: self.seconds,
@@ -612,35 +642,6 @@ mod test_DiskCache {
     }
 
     mod set_sync_to_disk_on_cache_change {
-        use super::*;
-
-        impl<K, V> DiskCacheBuilder<K, V>
-        where
-            K: Display,
-            V: Serialize + DeserializeOwned,
-        {
-            /// Adaptation of the build method to allow for the connection to be passed in
-            // TODO: Remove this and use the public method if/when we have control over the sled db connection in the builder
-            fn build_with_connection_config(
-                self,
-                config: sled::Config,
-            ) -> Result<DiskCache<K, V>, DiskCacheBuildError> {
-                let disk_dir = self.disk_dir.unwrap_or_else(|| Self::default_disk_dir());
-                let disk_path =
-                    disk_dir.join(format!("{}_v{}", self.cache_name, DISK_FILE_VERSION));
-                let connection = config.path(disk_path.clone()).open()?;
-
-                Ok(DiskCache {
-                    seconds: self.seconds,
-                    refresh: self.refresh,
-                    sync_to_disk_on_cache_change: self.sync_to_disk_on_cache_change,
-                    version: DISK_FILE_VERSION,
-                    disk_path,
-                    connection,
-                    _phantom: self._phantom,
-                })
-            }
-        }
 
         mod when_no_auto_flushing {
             use super::super::*;
@@ -658,7 +659,8 @@ mod test_DiskCache {
                     .set_disk_directory(original_cache_tmp_dir.path())
                     .set_sync_to_disk_on_cache_change(set_sync_to_disk_on_cache_change) // WHAT'S BEING TESTED
                     // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
-                    .build_with_connection_config(sled::Config::new().flush_every_ms(None))
+                    .set_connection_config(sled::Config::new().flush_every_ms(None))
+                    .build()
                     .unwrap();
 
                 // flush the cache to disk before any cache setting, so that when we create the recovered cache
