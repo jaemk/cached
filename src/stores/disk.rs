@@ -321,10 +321,19 @@ mod test_DiskCache {
 
     use super::*;
 
+    /// If passing `no_exist` to the macro:
+    /// This gives you a TempDir where the directory does not exist
+    /// so you can copy / move things to the returned TmpDir.path()
+    /// and those files will be removed when the TempDir is dropped
     macro_rules! temp_dir {
         () => {
             TempDir::new().expect("Error creating temp dir")
         };
+        (no_exist) => {{
+            let tmp_dir = TempDir::new().expect("Error creating temp dir");
+            std::fs::remove_dir_all(tmp_dir.path()).expect("error emptying the tmp dir");
+            tmp_dir
+        }};
     }
 
     fn now_millis() -> u128 {
@@ -581,5 +590,127 @@ mod test_DiskCache {
 
         // remove the cache dir to clean up the test as we're not using a temp dir
         std::fs::remove_dir_all(cache.disk_path).expect("error in clean up removeing the cache dir")
+    }
+
+    mod set_sync_to_disk_on_cache_set {
+        use super::*;
+
+        impl<K, V> DiskCacheBuilder<K, V>
+        where
+            K: Display,
+            V: Serialize + DeserializeOwned,
+        {
+            /// Adaptation of the build method to allow for the connection to be passed in
+            // TODO: Remove this and use the public method if/when we have control over the sled db connection in the builder
+            fn build_with_connection_config(
+                self,
+                config: sled::Config,
+            ) -> Result<DiskCache<K, V>, DiskCacheBuildError> {
+                let disk_dir = self.disk_dir.unwrap_or_else(|| Self::default_disk_dir());
+                let disk_path =
+                    disk_dir.join(format!("{}_v{}", self.cache_name, DISK_FILE_VERSION));
+                let connection = config.path(disk_path.clone()).open()?;
+
+                Ok(DiskCache {
+                    seconds: self.seconds,
+                    refresh: self.refresh,
+                    sync_to_disk_on_cache_set: self.sync_to_disk_on_cache_set,
+                    version: DISK_FILE_VERSION,
+                    disk_path,
+                    connection,
+                    _phantom: self._phantom,
+                })
+            }
+        }
+
+        #[test]
+        fn value_does_not_persist_after_recovery_when_set_to_false_and_not_automatically_flushed() {
+            let original_cache_tmp_dir = temp_dir!();
+            let copied_cache_tmp_dir = temp_dir!(no_exist);
+            const CACHE_NAME: &str = "test-cache";
+
+            let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
+                .set_disk_directory(original_cache_tmp_dir.path())
+                .set_sync_to_disk_on_cache_set(false) // WHAT'S BEING TESTED
+                // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
+                .build_with_connection_config(sled::Config::new().flush_every_ms(None))
+                .unwrap();
+
+            // flush the cache to disk before any cache setting, so that when we create the recovered cache
+            // it has something to recover from, even if set_cache doesn't write to disk as we'd like.
+            cache
+                .connection
+                .flush()
+                .expect("error flushing cache before any cache setting");
+
+            // write to the cache, we expect this to persist if the connection is flushed on cache_set
+            cache
+                .cache_set(TEST_KEY, TEST_VAL)
+                .expect("error setting cache in assemble stage");
+
+            // freeze the current state of the cache files by copying them to a new location
+            // we do this before dropping the cache, as dropping the cache seems to flush to the disk
+            let recovered_cache = clone_cache_to_new_location_no_flushing(
+                CACHE_NAME,
+                &cache,
+                copied_cache_tmp_dir.path(),
+            );
+
+            assert_that!(recovered_cache.connection.was_recovered(), eq(true));
+
+            assert_that!(recovered_cache.cache_get(&TEST_KEY), ok(none()));
+        }
+
+        #[test]
+        fn value_persists_after_recovery_when_set_to_true_and_not_automatically_flushed() {
+            let original_cache_tmp_dir = temp_dir!();
+            let copied_cache_tmp_dir = temp_dir!(no_exist);
+            const CACHE_NAME: &str = "test-cache";
+
+            let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
+                .set_disk_directory(original_cache_tmp_dir.path())
+                .set_sync_to_disk_on_cache_set(true)
+                // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
+                .build_with_connection_config(sled::Config::new().flush_every_ms(None))
+                .unwrap();
+
+            // flush the cache to disk before any cache setting, so that when we create the recovered cache
+            // it has something to recover from, even if set_cache doesn't write to disk as we'd like.
+            cache
+                .connection
+                .flush()
+                .expect("error flushing cache before any cache setting");
+
+            // write to the cache, we expect this to persist if the connection is flushed on cache_set
+            cache
+                .cache_set(TEST_KEY, TEST_VAL)
+                .expect("error setting cache in assemble stage");
+
+            // freeze the current state of the cache files by copying them to a new location
+            // we do this before dropping the cache, as dropping the cache seems to flush to the disk
+            let recovered_cache = clone_cache_to_new_location_no_flushing(
+                CACHE_NAME,
+                &cache,
+                copied_cache_tmp_dir.path(),
+            );
+
+            assert_that!(recovered_cache.connection.was_recovered(), eq(true));
+
+            assert_that!(recovered_cache.cache_get(&TEST_KEY), ok(some(eq(TEST_VAL))));
+        }
+
+        fn clone_cache_to_new_location_no_flushing(
+            cache_name: &str,
+            cache: &DiskCache<u32, u32>,
+            new_location: &Path,
+        ) -> DiskCache<u32, u32> {
+            copy_dir::copy_dir(cache.disk_path.parent().unwrap(), new_location)
+                .expect("error copying cache files to new location");
+
+            DiskCache::new(cache_name)
+                .set_disk_directory(new_location)
+                .build()
+                .expect("error building cache from copied files")
+        }
     }
 }
