@@ -317,8 +317,8 @@ mod test_DiskCache {
     const TEST_VAL: u32 = 100;
     const TEST_KEY_1: u32 = 2;
     const TEST_VAL_1: u32 = 200;
-    const LIFE_SPAN_0: u64 = 2;
-    const LIFE_SPAN_1: u64 = 1;
+    const LIFE_SPAN_2_SECS: u64 = 2;
+    const LIFE_SPAN_1_SEC: u64 = 1;
 
     #[test]
     fn cache_get_after_cache_remove_returns_none() {
@@ -370,7 +370,7 @@ mod test_DiskCache {
         let tmp_dir = temp_dir!();
         let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
-            .set_lifespan(LIFE_SPAN_0)
+            .set_lifespan(LIFE_SPAN_2_SECS)
             .build()
             .unwrap();
 
@@ -392,7 +392,7 @@ mod test_DiskCache {
         );
 
         // Let the lifespan expire
-        sleep(Duration::from_secs(LIFE_SPAN_0));
+        sleep(Duration::from_secs(LIFE_SPAN_2_SECS));
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
             cache.cache_get(&TEST_KEY),
@@ -407,7 +407,7 @@ mod test_DiskCache {
         let tmp_dir = temp_dir!();
         let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
-            .set_lifespan(LIFE_SPAN_0)
+            .set_lifespan(LIFE_SPAN_2_SECS)
             .build()
             .unwrap();
 
@@ -424,7 +424,7 @@ mod test_DiskCache {
         );
 
         // Let the lifespan expire
-        sleep(Duration::from_secs(LIFE_SPAN_0));
+        sleep(Duration::from_secs(LIFE_SPAN_2_SECS));
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
             cache.cache_get(&TEST_KEY),
@@ -433,11 +433,11 @@ mod test_DiskCache {
         );
 
         let old_from_setting_lifespan = cache
-            .cache_set_lifespan(LIFE_SPAN_1)
+            .cache_set_lifespan(LIFE_SPAN_1_SEC)
             .expect("error setting new lifespan");
         assert_that!(
             old_from_setting_lifespan,
-            eq(LIFE_SPAN_0),
+            eq(LIFE_SPAN_2_SECS),
             "Setting lifespan should return the old lifespan"
         );
         assert_that!(
@@ -452,7 +452,7 @@ mod test_DiskCache {
         );
 
         // Let the new lifespan expire
-        sleep(Duration::from_secs(LIFE_SPAN_1));
+        sleep(Duration::from_secs(LIFE_SPAN_1_SEC));
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
             cache.cache_get(&TEST_KEY),
@@ -486,6 +486,48 @@ mod test_DiskCache {
             ok(some(eq(TEST_VAL))),
             "Getting the same value again should return the value"
         );
+    }
+
+    #[test]
+    fn refreshing_on_cache_get_delays_cache_expiry() {
+        // NOTE: Here we're relying on the fact that setting then sleeping for 2 secs and getting takes longer than 2 secs.
+        const LIFE_SPAN: u64 = 2;
+        const HALF_LIFE_SPAN: u64 = 1;
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
+            .set_disk_directory(tmp_dir.path())
+            .set_lifespan(LIFE_SPAN)
+            .set_refresh(true) // ENABLE REFRESH - this is what we're testing
+            .build()
+            .unwrap();
+
+        assert_that!(cache.cache_set(TEST_KEY, TEST_VAL), ok(none()));
+
+        // retrieve before expiry, this should refresh the created_at so we don't expire just yet
+        sleep(Duration::from_secs(HALF_LIFE_SPAN));
+        assert_that!(
+            cache.cache_get(&TEST_KEY),
+            ok(some(eq(TEST_VAL))),
+            "Getting a value before expiry should return the value"
+        );
+
+        // This is after the initial expiry, but since we refreshed the created_at, we should still get the value
+        sleep(Duration::from_secs(HALF_LIFE_SPAN));
+        assert_that!(
+            cache.cache_get(&TEST_KEY),
+            ok(some(eq(TEST_VAL))),
+            "Getting a value after the initial expiry should return the value as we have refreshed"
+        );
+
+        // This is after the new refresh expiry, we should get None
+        sleep(Duration::from_secs(LIFE_SPAN));
+        assert_that!(
+            cache.cache_get(&TEST_KEY),
+            ok(none()),
+            "Getting a value after the refreshed expiry should return None"
+        );
+
+        drop(cache);
     }
 
     #[test]
