@@ -291,8 +291,15 @@ where
 mod tests {
     use std::thread::sleep;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     use super::*;
+
+    macro_rules! temp_dir {
+        () => {
+            TempDir::new().expect("Error creating temp dir")
+        };
+    }
 
     fn now_millis() -> u128 {
         std::time::SystemTime::now()
@@ -303,11 +310,11 @@ mod tests {
 
     #[test]
     fn disk_set_get_remove() {
-        let cache: DiskCache<u32, u32> =
-            DiskCache::new(&format!("{}:disk-cache-test-sgr", now_millis()))
-                .set_disk_directory(std::env::temp_dir().join("cachedtest-sgr"))
-                .build()
-                .unwrap();
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
+            .set_disk_directory(tmp_dir.path())
+            .build()
+            .unwrap();
 
         let cached = cache.cache_get(&6).unwrap();
         assert!(cached.is_none());
@@ -332,11 +339,12 @@ mod tests {
 
     #[test]
     fn disk_expire() {
-        let mut c: DiskCache<u32, u32> =
-            DiskCache::new(&format!("{}:disk-cache-test", now_millis()))
-                .set_lifespan(2)
-                .build()
-                .unwrap();
+        let tmp_dir = temp_dir!();
+        let mut c: DiskCache<u32, u32> = DiskCache::new("test-cache")
+            .set_disk_directory(tmp_dir.path())
+            .set_lifespan(2)
+            .build()
+            .unwrap();
 
         assert!(c.cache_get(&1).unwrap().is_none());
 
@@ -363,11 +371,11 @@ mod tests {
 
     #[test]
     fn disk_remove() {
-        let cache: DiskCache<u32, u32> =
-            DiskCache::new(&format!("{}:disk-cache-test-remove", now_millis()))
-                .set_disk_directory(std::env::temp_dir().join("cachedtest-remove"))
-                .build()
-                .unwrap();
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
+            .set_disk_directory(tmp_dir.path())
+            .build()
+            .unwrap();
 
         assert!(cache.cache_set(1, 100).unwrap().is_none());
         assert!(cache.cache_set(2, 200).unwrap().is_none());
@@ -380,8 +388,10 @@ mod tests {
 
     #[test]
     fn disk_default_cache_dir() {
+        let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> =
             DiskCache::new(&format!("{}:disk-cache-test-default-dir", now_millis()))
+                // use the default disk directory
                 .build()
                 .unwrap();
 
