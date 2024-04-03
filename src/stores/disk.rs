@@ -313,6 +313,13 @@ mod test_DiskCache {
             .as_millis()
     }
 
+    const TEST_KEY: u32 = 1;
+    const TEST_VAL: u32 = 100;
+    const TEST_KEY_1: u32 = 2;
+    const TEST_VAL_1: u32 = 200;
+    const LIFE_SPAN_0: u64 = 2;
+    const LIFE_SPAN_1: u64 = 1;
+
     #[test]
     fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
@@ -321,38 +328,38 @@ mod test_DiskCache {
             .build()
             .unwrap();
 
-        let cached = cache.cache_get(&6).unwrap();
+        let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(
             cached,
             none(),
             "Getting a non-existent key-value should return None"
         );
 
-        let cached = cache.cache_set(6, 4444).unwrap();
+        let cached = cache.cache_set(TEST_KEY, TEST_VAL).unwrap();
         assert_that!(cached, none(), "Setting a new key-value should return None");
 
-        let cached = cache.cache_set(6, 5555).unwrap();
+        let cached = cache.cache_set(TEST_KEY, TEST_VAL_1).unwrap();
         assert_that!(
             cached,
-            some(eq(4444)),
+            some(eq(TEST_VAL)),
             "Setting an existing key-value should return the old value"
         );
 
-        let cached = cache.cache_get(&6).unwrap();
+        let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(
             cached,
-            some(eq(5555)),
+            some(eq(TEST_VAL_1)),
             "Getting an existing key-value should return the value"
         );
 
-        let cached = cache.cache_remove(&6).unwrap();
+        let cached = cache.cache_remove(&TEST_KEY).unwrap();
         assert_that!(
             cached,
-            some(eq(5555)),
+            some(eq(TEST_VAL_1)),
             "Removing an existing key-value should return the value"
         );
 
-        let cached = cache.cache_get(&6).unwrap();
+        let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(cached, none(), "Getting a removed key should return None");
 
         drop(cache);
@@ -360,8 +367,6 @@ mod test_DiskCache {
 
     #[test]
     fn values_expire_when_lifespan_elapses_returning_none() {
-        const LIFE_SPAN_0: u64 = 2;
-        const LIFE_SPAN_1: u64 = 1;
         let tmp_dir = temp_dir!();
         let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
@@ -370,18 +375,18 @@ mod test_DiskCache {
             .unwrap();
 
         assert_that!(
-            cache.cache_get(&1),
+            cache.cache_get(&TEST_KEY),
             ok(none()),
             "Getting a non-existent key-value should return None"
         );
 
         assert_that!(
-            cache.cache_set(1, 100),
+            cache.cache_set(TEST_KEY, 100),
             ok(none()),
             "Setting a new key-value should return None"
         );
         assert_that!(
-            cache.cache_get(&1),
+            cache.cache_get(&TEST_KEY),
             ok(some(anything())),
             "Getting an existing key-value before it expires should return the value"
         );
@@ -390,7 +395,7 @@ mod test_DiskCache {
         sleep(Duration::from_secs(LIFE_SPAN_0));
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
-            cache.cache_get(&1),
+            cache.cache_get(&TEST_KEY),
             ok(none()),
             "Getting an expired key-value should return None"
         );
@@ -399,8 +404,6 @@ mod test_DiskCache {
     #[test]
     fn set_lifespan_to_a_different_lifespan_is_respected() {
         // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
-        const LIFE_SPAN_0: u64 = 2;
-        const LIFE_SPAN_1: u64 = 1;
         let tmp_dir = temp_dir!();
         let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
@@ -409,13 +412,13 @@ mod test_DiskCache {
             .unwrap();
 
         assert_that!(
-            cache.cache_get(&1),
+            cache.cache_get(&TEST_KEY),
             ok(none()),
             "Getting a non-existent key-value should return None"
         );
 
         assert_that!(
-            cache.cache_set(1, 100),
+            cache.cache_set(TEST_KEY, TEST_VAL),
             ok(none()),
             "Setting a new key-value should return None"
         );
@@ -424,7 +427,7 @@ mod test_DiskCache {
         sleep(Duration::from_secs(LIFE_SPAN_0));
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
-            cache.cache_get(&1),
+            cache.cache_get(&TEST_KEY),
             ok(none()),
             "Getting an expired key-value should return None"
         );
@@ -438,13 +441,13 @@ mod test_DiskCache {
             "Setting lifespan should return the old lifespan"
         );
         assert_that!(
-            cache.cache_set(1, 100),
+            cache.cache_set(TEST_KEY, TEST_VAL),
             ok(none()),
             "Setting a previously expired key-value should return None"
         );
         assert_that!(
-            cache.cache_get(&1),
-            ok(some(eq(100))),
+            cache.cache_get(&TEST_KEY),
+            ok(some(eq(TEST_VAL))),
             "Getting a newly set (previously expired) key-value should return the value"
         );
 
@@ -452,7 +455,7 @@ mod test_DiskCache {
         sleep(Duration::from_secs(LIFE_SPAN_1));
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
-            cache.cache_get(&1),
+            cache.cache_get(&TEST_KEY),
             ok(none()),
             "Getting an expired key-value should return None"
         );
@@ -461,24 +464,26 @@ mod test_DiskCache {
             .cache_set_lifespan(10)
             .expect("error setting lifespan");
         assert_that!(
-            cache.cache_set(1, 100),
+            cache.cache_set(TEST_KEY, TEST_VAL),
             ok(none()),
             "Setting a previously expired key-value should return None"
         );
+
+        // TODO: Why are we now setting an irrelevant key?
         assert_that!(
-            cache.cache_set(2, 100),
+            cache.cache_set(TEST_KEY_1, TEST_VAL),
             ok(none()),
-            "Setting a new key-value should return None"
+            "Setting a new, separate, key-value should return None"
         );
 
         assert_that!(
-            cache.cache_get(&1),
-            ok(some(eq(100))),
+            cache.cache_get(&TEST_KEY),
+            ok(some(eq(TEST_VAL))),
             "Getting a newly set (previously expired) key-value should return the value"
         );
         assert_that!(
-            cache.cache_get(&1),
-            ok(some(eq(100))),
+            cache.cache_get(&TEST_KEY),
+            ok(some(eq(TEST_VAL))),
             "Getting the same value again should return the value"
         );
     }
@@ -494,20 +499,20 @@ mod test_DiskCache {
                 .build()
                 .unwrap();
 
-        let cached = cache.cache_get(&6).unwrap();
+        let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(
             cached,
             none(),
             "Getting a non-existent key-value should return None"
         );
 
-        let cached = cache.cache_set(6, 4444).unwrap();
+        let cached = cache.cache_set(TEST_KEY, TEST_VAL).unwrap();
         assert_that!(cached, none(), "Setting a new key-value should return None");
 
-        let cached = cache.cache_set(6, 5555).unwrap();
+        let cached = cache.cache_set(TEST_KEY, TEST_VAL_1).unwrap();
         assert_that!(
             cached,
-            some(eq(4444)),
+            some(eq(TEST_VAL)),
             "Setting an existing key-value should return the old value"
         );
 
