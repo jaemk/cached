@@ -88,7 +88,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make the cache identifier
     let cache_ident = match args.name {
-        Some(ref name) => Ident::new(name.as_str(), fn_ident.span()),
+        Some(ref name) => Ident::new(name, fn_ident.span()),
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 
@@ -131,10 +131,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (cache_ty, cache_create)
         }
         (false, None, None, Some(type_str), Some(create_str), _) => {
-            let ty = parse_str::<Type>(type_str.as_str()).expect("unable to parse cache type");
+            let ty = parse_str::<Type>(type_str).expect("unable to parse cache type");
 
-            let cache_create = parse_str::<Block>(create_str.as_str())
-                .expect("unable to parse cache create block");
+            let cache_create =
+                parse_str::<Block>(create_str).expect("unable to parse cache create block");
 
             (quote! { #ty }, quote! { #cache_create })
         }

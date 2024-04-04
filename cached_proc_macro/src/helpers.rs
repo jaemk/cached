@@ -102,17 +102,16 @@ pub(super) fn make_cache_key_type(
 ) -> (TokenStream2, TokenStream2) {
     match (key, convert, ty) {
         (Some(key_str), Some(convert_str), _) => {
-            let cache_key_ty =
-                parse_str::<Type>(key_str.as_str()).expect("unable to parse cache key type");
+            let cache_key_ty = parse_str::<Type>(key_str).expect("unable to parse cache key type");
 
-            let key_convert_block = parse_str::<Block>(convert_str.as_str())
-                .expect("unable to parse key convert block");
+            let key_convert_block =
+                parse_str::<Block>(convert_str).expect("unable to parse key convert block");
 
             (quote! {#cache_key_ty}, quote! {#key_convert_block})
         }
         (None, Some(convert_str), Some(_)) => {
-            let key_convert_block = parse_str::<Block>(convert_str.as_str())
-                .expect("unable to parse key convert block");
+            let key_convert_block =
+                parse_str::<Block>(convert_str).expect("unable to parse key convert block");
 
             (quote! {}, quote! {#key_convert_block})
         }
