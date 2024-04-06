@@ -221,7 +221,7 @@ where
         }
     }
 
-    fn cache_set(&self, key: K, value: V) -> Result<Option<V>, DiskCacheError> {
+    fn cache_set(&self, key: &K, value: &V) -> Result<Option<V>, DiskCacheError> {
         let key = key.to_string();
         let value = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
 
@@ -312,10 +312,10 @@ mod tests {
         let cached = cache.cache_get(&6).unwrap();
         assert!(cached.is_none());
 
-        let cached = cache.cache_set(6, 4444).unwrap();
+        let cached = cache.cache_set(&6, &4444).unwrap();
         assert_eq!(cached, None);
 
-        let cached = cache.cache_set(6, 5555).unwrap();
+        let cached = cache.cache_set(&6, &5555).unwrap();
         assert_eq!(cached, Some(4444));
 
         let cached = cache.cache_get(&6).unwrap();
@@ -340,7 +340,7 @@ mod tests {
 
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
         sleep(Duration::new(2, 500000));
@@ -348,15 +348,15 @@ mod tests {
 
         let old = c.cache_set_lifespan(1).unwrap();
         assert_eq!(2, old);
-        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
         sleep(Duration::new(1, 600000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
         c.cache_set_lifespan(10).unwrap();
-        assert!(c.cache_set(1, 100).unwrap().is_none());
-        assert!(c.cache_set(2, 100).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
+        assert!(c.cache_set(&2, &100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
     }
@@ -369,9 +369,9 @@ mod tests {
                 .build()
                 .unwrap();
 
-        assert!(cache.cache_set(1, 100).unwrap().is_none());
-        assert!(cache.cache_set(2, 200).unwrap().is_none());
-        assert!(cache.cache_set(3, 300).unwrap().is_none());
+        assert!(cache.cache_set(&1, &100).unwrap().is_none());
+        assert!(cache.cache_set(&2, &200).unwrap().is_none());
+        assert!(cache.cache_set(&3, &300).unwrap().is_none());
 
         assert_eq!(100, cache.cache_remove(&1).unwrap().unwrap());
 
@@ -385,9 +385,9 @@ mod tests {
                 .build()
                 .unwrap();
 
-        assert!(cache.cache_set(1, 100).unwrap().is_none());
-        assert!(cache.cache_set(2, 200).unwrap().is_none());
-        assert!(cache.cache_set(3, 300).unwrap().is_none());
+        assert!(cache.cache_set(&1, &100).unwrap().is_none());
+        assert!(cache.cache_set(&2, &200).unwrap().is_none());
+        assert!(cache.cache_set(&3, &300).unwrap().is_none());
 
         assert_eq!(100, cache.cache_remove(&1).unwrap().unwrap());
 

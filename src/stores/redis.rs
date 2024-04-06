@@ -289,10 +289,10 @@ where
         }
     }
 
-    fn cache_set(&self, key: K, val: V) -> Result<Option<V>, RedisCacheError> {
+    fn cache_set(&self, key: &K, val: &V) -> Result<Option<V>, RedisCacheError> {
         let mut conn = self.pool.get()?;
         let mut pipe = redis::pipe();
-        let key = self.generate_key(&key);
+        let key = self.generate_key(key);
 
         let val = CachedRedisValue::new(val);
         pipe.get(key.clone());
@@ -573,10 +573,10 @@ mod async_redis {
         }
 
         /// Set a cached value
-        async fn cache_set(&self, key: K, val: V) -> Result<Option<V>, Self::Error> {
+        async fn cache_set(&self, key: &K, val: &V) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
-            let key = self.generate_key(&key);
+            let key = self.generate_key(key);
 
             let val = CachedRedisValue::new(val);
             pipe.get(key.clone());
@@ -669,7 +669,7 @@ mod async_redis {
 
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            assert!(c.cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.cache_set(&1, &100).await.unwrap().is_none());
             assert!(c.cache_get(&1).await.unwrap().is_some());
 
             sleep(Duration::new(2, 500_000));
@@ -677,15 +677,15 @@ mod async_redis {
 
             let old = c.cache_set_lifespan(1).unwrap();
             assert_eq!(2, old);
-            assert!(c.cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.cache_set(&1, &100).await.unwrap().is_none());
             assert!(c.cache_get(&1).await.unwrap().is_some());
 
             sleep(Duration::new(1, 600_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
             c.cache_set_lifespan(10).unwrap();
-            assert!(c.cache_set(1, 100).await.unwrap().is_none());
-            assert!(c.cache_set(2, 100).await.unwrap().is_none());
+            assert!(c.cache_set(&1, &100).await.unwrap().is_none());
+            assert!(c.cache_set(&2, &100).await.unwrap().is_none());
             assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
             assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
         }
@@ -730,7 +730,7 @@ mod tests {
 
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
         sleep(Duration::new(2, 500_000));
@@ -738,15 +738,15 @@ mod tests {
 
         let old = c.cache_set_lifespan(1).unwrap();
         assert_eq!(2, old);
-        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
         sleep(Duration::new(1, 600_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
         c.cache_set_lifespan(10).unwrap();
-        assert!(c.cache_set(1, 100).unwrap().is_none());
-        assert!(c.cache_set(2, 100).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
+        assert!(c.cache_set(&2, &100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
     }
@@ -758,9 +758,9 @@ mod tests {
                 .build()
                 .unwrap();
 
-        assert!(c.cache_set(1, 100).unwrap().is_none());
-        assert!(c.cache_set(2, 200).unwrap().is_none());
-        assert!(c.cache_set(3, 300).unwrap().is_none());
+        assert!(c.cache_set(&1, &100).unwrap().is_none());
+        assert!(c.cache_set(&2, &200).unwrap().is_none());
+        assert!(c.cache_set(&3, &300).unwrap().is_none());
 
         assert_eq!(100, c.cache_remove(&1).unwrap().unwrap());
     }

@@ -139,7 +139,7 @@ fn slow_result(a: u32, b: u32) -> Result<u32, ()> {
 
 // return a flag indicated whether the result was cached
 #[cached(with_cached_flag = true)]
-fn with_cached_flag(a: String) -> Return<String> {
+fn with_cached_flag(a: &str) -> Return<&String> {
     sleep(Duration::new(1, 0));
     Return::new(a)
 }

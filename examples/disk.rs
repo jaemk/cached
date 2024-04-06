@@ -22,25 +22,25 @@ enum ExampleError {
     time = 30,
     map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##
 )]
-fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
-    std::thread::sleep(Duration::from_secs(secs));
+fn cached_sleep_secs(secs: &u64) -> Result<(), ExampleError> {
+    std::thread::sleep(Duration::from_secs(*secs));
     Ok(())
 }
 
 fn main() {
     print!("1. first sync call with a 2 seconds sleep...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs(2).unwrap();
+    cached_sleep_secs(&2).unwrap();
     println!("done");
     print!("second sync call with a 2 seconds sleep (it should be fast)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs(2).unwrap();
+    cached_sleep_secs(&2).unwrap();
     println!("done");
 
     use cached::IOCached;
     CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs(2).unwrap();
+    cached_sleep_secs(&2).unwrap();
     println!("done");
 }

@@ -29,8 +29,8 @@ enum ExampleError {
     cache_prefix_block = r##"{ "cache-redis-example-1" }"##,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
-fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
-    std::thread::sleep(Duration::from_secs(secs));
+fn cached_sleep_secs(secs: &u64) -> Result<(), ExampleError> {
+    std::thread::sleep(Duration::from_secs(*secs));
     Ok(())
 }
 
@@ -41,8 +41,8 @@ fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     time = 30,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
-fn cached_sleep_secs_example_2(secs: u64) -> Result<(), ExampleError> {
-    std::thread::sleep(Duration::from_secs(secs));
+fn cached_sleep_secs_example_2(secs: &u64) -> Result<(), ExampleError> {
+    std::thread::sleep(Duration::from_secs(*secs));
     Ok(())
 }
 
@@ -70,8 +70,8 @@ static CONFIG: Lazy<Config> = Lazy::new(Config::load);
             .expect("error building example redis cache")
     } "##
 )]
-fn cached_sleep_secs_config(secs: u64) -> Result<String, ExampleError> {
-    std::thread::sleep(Duration::from_secs(secs));
+fn cached_sleep_secs_config(secs: &u64) -> Result<String, ExampleError> {
+    std::thread::sleep(Duration::from_secs(*secs));
     Ok(secs.to_string())
 }
 
@@ -79,36 +79,36 @@ fn cached_sleep_secs_config(secs: u64) -> Result<String, ExampleError> {
 async fn main() {
     print!("1. first sync call with a 2 seconds sleep...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs(2).unwrap();
+    cached_sleep_secs(&2).unwrap();
     println!("done");
     print!("second sync call with a 2 seconds sleep (it should be fast)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs(2).unwrap();
+    cached_sleep_secs(&2).unwrap();
     println!("done");
 
     use cached::IOCached;
     CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs(2).unwrap();
+    cached_sleep_secs(&2).unwrap();
     println!("done");
 
     print!("2. first sync call with a 2 seconds sleep...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs_example_2(2).unwrap();
+    cached_sleep_secs_example_2(&2).unwrap();
     println!("done");
     print!("second sync call with a 2 seconds sleep (it should be fast)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs_example_2(2).unwrap();
+    cached_sleep_secs_example_2(&2).unwrap();
     println!("done");
 
-    cached_sleep_secs_config_prime_cache(2).unwrap();
+    cached_sleep_secs_config_prime_cache(&2).unwrap();
     print!("3. first primed async call with a 2 seconds sleep (should be fast)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs_config(2).unwrap();
+    cached_sleep_secs_config(&2).unwrap();
     println!("done");
     print!("second async call with a 2 seconds sleep (it should be fast)...");
     io::stdout().flush().unwrap();
-    cached_sleep_secs_config(2).unwrap();
+    cached_sleep_secs_config(&2).unwrap();
     println!("done");
 }

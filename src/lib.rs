@@ -401,7 +401,7 @@ pub trait IOCached<K, V> {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
-    fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
+    fn cache_set(&self, k: &K, v: &V) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached value
     ///
@@ -431,7 +431,7 @@ pub trait IOCachedAsync<K, V> {
     type Error;
     async fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
-    async fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
+    async fn cache_set(&self, k: &K, v: &V) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached value
     async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
