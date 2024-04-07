@@ -1268,7 +1268,7 @@ mod disk_tests {
 
     #[io_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
-        type = "cached::DiskCache<u32, u32>",
+        ty = "cached::DiskCache<u32, u32>",
         create = r##" { DiskCache::new("cached_disk_cache_create").set_lifespan(1).set_refresh(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
@@ -1374,7 +1374,7 @@ mod redis_tests {
 
     #[io_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
-        type = "cached::RedisCache<u32, u32>",
+        ty = "cached::RedisCache<u32, u32>",
         create = r##" { RedisCache::new("cache_redis_test_cache_create", 1).set_refresh(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
@@ -1444,7 +1444,7 @@ mod redis_tests {
         use cached::AsyncRedisCache;
         #[io_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
-            type = "cached::AsyncRedisCache<u32, u32>",
+            ty = "cached::AsyncRedisCache<u32, u32>",
             create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", 1).set_refresh(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
@@ -1487,7 +1487,7 @@ const EXPIRED_SLUG: &str = "expired_slug";
 const UNEXPIRED_SLUG: &str = "unexpired_slug";
 
 #[cached(
-    type = "ExpiringValueCache<String, NewsArticle>",
+    ty = "ExpiringValueCache<String, NewsArticle>",
     create = "{ ExpiringValueCache::with_size(3) }",
     result = true
 )]
@@ -1572,7 +1572,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 }
 
 #[cached::proc_macro::cached(result = true, time = 1, result_fallback = true)]
-fn always_failing() -> Result<i64, ()> {
+fn always_failing() -> Result<String, ()> {
     Err(())
 }
 
@@ -1586,8 +1586,11 @@ fn test_result_fallback() {
     }
 
     // Pretend it succeeded once
-    ALWAYS_FAILING.lock().unwrap().cache_set((), 1);
-    assert_eq!(always_failing(), Ok(1));
+    ALWAYS_FAILING
+        .lock()
+        .unwrap()
+        .cache_set((), "abc".to_string());
+    assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(1));
@@ -1597,14 +1600,14 @@ fn test_result_fallback() {
     std::thread::sleep(std::time::Duration::from_millis(2000));
 
     // Even though the cache should've expired, the `result_fallback` flag means it refreshes the cache with the last valid result
-    assert_eq!(always_failing(), Ok(1));
+    assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
 
-    assert_eq!(always_failing(), Ok(1));
+    assert_eq!(always_failing(), Ok("abc".to_string()));
     {
         let cache = ALWAYS_FAILING.lock().unwrap();
         assert_eq!(cache.cache_hits(), Some(2));
