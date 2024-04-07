@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.49.3]
+## Added
+## Changed
+- Fix `DiskCache` expired value logic
+## Removed
+
 ## [0.49.2]
 ## Added
 ## Changed
