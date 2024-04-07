@@ -259,7 +259,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let old_val = {
                 #lock
                 let (result, has_expired) = cache.cache_get_expired(&key);
-                if let (Some(result), false) = (result.clone(), has_expired) {
+                if let (Some(result), false) = (&result, has_expired) {
                     #return_cache_block
                 }
                 result
