@@ -167,7 +167,7 @@ where
         DiskCacheBuilder::new(cache_name)
     }
 
-    pub fn remove_expired_entries(&self) {
+    pub fn remove_expired_entries(&self) -> Result<(), DiskCacheError> {
         let now = SystemTime::now();
 
         for (key, value) in self.connection.iter().flatten() {
@@ -185,11 +185,9 @@ where
         }
 
         if self.sync_to_disk_on_cache_change {
-            // NOTE: we are not returning any error here so as not to change the function signature,
-            // and break backwards compatibility
-            // TODO: Review changing the function signature to return a Result<(), DiskCacheError> - this would be a breaking change
-            let _ = self.connection.flush();
+            self.connection.flush()?;
         }
+        Ok(())
     }
 
     /// Provide access to the underlying [sled::Db] connection
