@@ -178,7 +178,7 @@ where
                         .unwrap_or(Duration::from_secs(0))
                         >= Duration::from_secs(lifetime_seconds)
                     {
-                        let _ = self.connection.remove(key);
+                        self.connection.remove(key)?;
                     }
                 }
             }
