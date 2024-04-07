@@ -142,7 +142,7 @@ The common macro syntax is:
 cached_key!{
     CACHE_NAME: CacheType = CacheInstance;
     Key = KeyExpression;
-    fn func_name(arg1: arg_type, arg2: arg_type) -> return_type = {
+    fn func_name(arg1: arg_type, arg2: arg_type) -> return_ty = {
         // do stuff like normal
         return_type
     }

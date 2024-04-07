@@ -1,11 +1,12 @@
 use crate::helpers::*;
+use darling::ast::NestedMeta;
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, parse_str, AttributeArgs, Block, ExprClosure, GenericArgument, Ident,
-    ItemFn, PathArguments, ReturnType, Type,
+    parse_macro_input, parse_str, Block, ExprClosure, GenericArgument, Ident, ItemFn,
+    PathArguments, ReturnType, Type,
 };
 
 #[derive(FromMeta)]
@@ -31,14 +32,19 @@ struct IOMacroArgs {
     convert: Option<String>,
     #[darling(default)]
     with_cached_flag: bool,
-    #[darling(default, rename = "type")]
-    cache_type: Option<String>,
-    #[darling(default, rename = "create")]
-    cache_create: Option<String>,
+    #[darling(default)]
+    ty: Option<String>,
+    #[darling(default)]
+    create: Option<String>,
 }
 
 pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = parse_macro_input!(args as AttributeArgs);
+    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(darling::Error::from(e).write_errors());
+        }
+    };
     let args = match IOMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -155,13 +161,8 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     let cache_name = cache_ident.to_string();
 
-    let (cache_key_ty, key_convert_block) = make_cache_key_type(
-        &args.key,
-        &args.convert,
-        &args.cache_type,
-        input_tys,
-        &input_names,
-    );
+    let (cache_key_ty, key_convert_block) =
+        make_cache_key_type(&args.key, &args.convert, &args.ty, input_tys, &input_names);
 
     // make the cache type and create statement
     let (cache_ty, cache_create) = match (
@@ -170,16 +171,15 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.time,
         &args.time_refresh,
         &args.cache_prefix_block,
-        &args.cache_type,
-        &args.cache_create,
+        &args.ty,
+        &args.create,
     ) {
         // redis
-        (true, false, time, time_refresh, cache_prefix, cache_type, cache_create) => {
-            let cache_ty = match cache_type {
-                Some(cache_type) => {
-                    let cache_type =
-                        parse_str::<Type>(cache_type).expect("unable to parse cache type");
-                    quote! { #cache_type }
+        (true, false, time, time_refresh, cache_prefix, ty, cache_create) => {
+            let cache_ty = match ty {
+                Some(ty) => {
+                    let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
+                    quote! { #ty }
                 }
                 None => {
                     if asyncness.is_some() {
@@ -242,12 +242,11 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (cache_ty, cache_create)
         }
         // disk
-        (false, true, time, time_refresh, _, cache_type, cache_create) => {
-            let cache_ty = match cache_type {
-                Some(cache_type) => {
-                    let cache_type =
-                        parse_str::<Type>(cache_type).expect("unable to parse cache type");
-                    quote! { #cache_type }
+        (false, true, time, time_refresh, _, ty, cache_create) => {
+            let cache_ty = match ty {
+                Some(ty) => {
+                    let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
+                    quote! { #ty }
                 }
                 None => {
                     // https://github.com/spacejam/sled?tab=readme-ov-file#interaction-with-async
@@ -297,14 +296,13 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             };
             (cache_ty, cache_create)
         }
-        (_, _, time, time_refresh, cache_prefix, cache_type, cache_create) => {
-            let cache_ty = match cache_type {
-                Some(cache_type) => {
-                    let cache_type =
-                        parse_str::<Type>(cache_type).expect("unable to parse cache type");
-                    quote! { #cache_type }
+        (_, _, time, time_refresh, cache_prefix, ty, cache_create) => {
+            let cache_ty = match ty {
+                Some(ty) => {
+                    let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
+                    quote! { #ty }
                 }
-                None => panic!("#[io_cached] cache `type` must be specified"),
+                None => panic!("#[io_cached] cache `ty` must be specified"),
             };
             let cache_create = match cache_create {
                 Some(cache_create) => {
