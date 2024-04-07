@@ -1,9 +1,10 @@
 use crate::helpers::*;
+use darling::ast::NestedMeta;
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, parse_str, AttributeArgs, Block, Ident, ItemFn, ReturnType, Type};
+use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Type};
 
 #[derive(FromMeta)]
 struct MacroArgs {
@@ -29,16 +30,21 @@ struct MacroArgs {
     sync_writes: bool,
     #[darling(default)]
     with_cached_flag: bool,
-    #[darling(default, rename = "type")]
-    cache_type: Option<String>,
-    #[darling(default, rename = "create")]
-    cache_create: Option<String>,
+    #[darling(default)]
+    ty: Option<String>,
+    #[darling(default)]
+    create: Option<String>,
     #[darling(default)]
     result_fallback: bool,
 }
 
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = parse_macro_input!(args as AttributeArgs);
+    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(darling::Error::from(e).write_errors());
+        }
+    };
     let args = match MacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -86,21 +92,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 
-    let (cache_key_ty, key_convert_block) = make_cache_key_type(
-        &args.key,
-        &args.convert,
-        &args.cache_type,
-        input_tys,
-        &input_names,
-    );
+    let (cache_key_ty, key_convert_block) =
+        make_cache_key_type(&args.key, &args.convert, &args.ty, input_tys, &input_names);
 
     // make the cache type and create statement
     let (cache_ty, cache_create) = match (
         &args.unbound,
         &args.size,
         &args.time,
-        &args.cache_type,
-        &args.cache_create,
+        &args.ty,
+        &args.create,
         &args.time_refresh,
     ) {
         (true, None, None, None, None, _) => {
@@ -130,12 +131,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (cache_ty, cache_create)
         }
         (false, None, None, Some(type_str), Some(create_str), _) => {
-            let cache_type = parse_str::<Type>(type_str).expect("unable to parse cache type");
+            let ty = parse_str::<Type>(type_str).expect("unable to parse cache type");
 
             let cache_create =
                 parse_str::<Block>(create_str).expect("unable to parse cache create block");
 
-            (quote! { #cache_type }, quote! { #cache_create })
+            (quote! { #ty }, quote! { #cache_create })
         }
         (false, None, None, Some(_), None, _) => {
             panic!("type requires create to also be set")
@@ -153,9 +154,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (false, false) => {
             let set_cache_block = quote! { cache.cache_set(key, result.clone()); };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut r = result.clone(); r.was_cached = true; return r }
+                quote! { let mut r = result.to_owned(); r.was_cached = true; return r }
             } else {
-                quote! { return result.clone() }
+                quote! { return result.to_owned() }
             };
             (set_cache_block, return_cache_block)
         }
@@ -166,9 +167,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut r = result.clone(); r.was_cached = true; return Ok(r) }
+                quote! { let mut r = result.to_owned(); r.was_cached = true; return Ok(r) }
             } else {
-                quote! { return Ok(result.clone()) }
+                quote! { return Ok(result.to_owned()) }
             };
             (set_cache_block, return_cache_block)
         }
@@ -179,7 +180,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut r = result.clone(); r.was_cached = true; return Some(r) }
+                quote! { let mut r = result.to_owned(); r.was_cached = true; return Some(r) }
             } else {
                 quote! { return Some(result.clone()) }
             };
@@ -198,7 +199,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let lock;
     let function_no_cache;
     let function_call;
-    let cache_type;
+    let ty;
     if asyncness.is_some() {
         lock = quote! {
             let mut cache = #cache_ident.lock().await;
@@ -212,7 +213,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = #no_cache_fn_ident(#(#input_names),*).await;
         };
 
-        cache_type = quote! {
+        ty = quote! {
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::Mutex::new(#cache_create));
         };
     } else {
@@ -228,7 +229,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = #no_cache_fn_ident(#(#input_names),*);
         };
 
-        cache_type = quote! {
+        ty = quote! {
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
         };
     }
@@ -305,7 +306,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let expanded = quote! {
         // Cached static
         #[doc = #cache_ident_doc]
-        #cache_type
+        #ty
         // No cache function (origin of the cached function)
         #[doc = #no_cache_fn_indent_doc]
         #visibility #function_no_cache

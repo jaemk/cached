@@ -132,7 +132,7 @@ where
                     if now
                         .duration_since(cached.created_at)
                         .unwrap_or(Duration::from_secs(0))
-                        < Duration::from_secs(lifetime_seconds)
+                        >= Duration::from_secs(lifetime_seconds)
                     {
                         let _ = self.connection.remove(key);
                     }
