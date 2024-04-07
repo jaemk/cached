@@ -334,34 +334,34 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 if asyncness.is_some() && !args.disk {
                     quote! {
                         if let Ok(result) = &result {
-                            cache.cache_set(key, result.value.clone()).await.map_err(#map_error)?;
+                            cache.cache_set(key, result.value).await.map_err(#map_error)?;
                         }
                     }
                 } else {
                     quote! {
                         if let Ok(result) = &result {
-                            cache.cache_set(key, result.value.clone()).map_err(#map_error)?;
+                            cache.cache_set(key, result.value).map_err(#map_error)?;
                         }
                     }
                 },
-                quote! { let mut r = ::cached::Return::new(result.clone()); r.was_cached = true; return Ok(r) },
+                quote! { let mut r = ::cached::Return::new(result); r.was_cached = true; return Ok(r) },
             )
         } else {
             (
                 if asyncness.is_some() && !args.disk {
                     quote! {
                         if let Ok(result) = &result {
-                            cache.cache_set(key, result.clone()).await.map_err(#map_error)?;
+                            cache.cache_set(key, result).await.map_err(#map_error)?;
                         }
                     }
                 } else {
                     quote! {
                         if let Ok(result) = &result {
-                            cache.cache_set(key, result.clone()).map_err(#map_error)?;
+                            cache.cache_set(key, result).map_err(#map_error)?;
                         }
                     }
                 },
-                quote! { return Ok(result.clone()) },
+                quote! { return Ok(result) },
             )
         };
         (set_cache_block, return_cache_block)

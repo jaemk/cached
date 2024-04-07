@@ -5,6 +5,8 @@ use quote::quote;
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
 use syn::token::Comma;
+use syn::TypeReference;
+use syn::TypeTuple;
 use syn::{
     parse_quote, parse_str, Attribute, Block, FnArg, Pat, PatType, PathArguments, ReturnType,
     Signature, Type,
@@ -102,7 +104,9 @@ pub(super) fn make_cache_key_type(
 ) -> (TokenStream2, TokenStream2) {
     match (key, convert, ty) {
         (Some(key_str), Some(convert_str), _) => {
-            let cache_key_ty = parse_str::<Type>(key_str).expect("unable to parse cache key type");
+            let cache_key_ty = dereference_type(
+                parse_str::<Type>(key_str).expect("unable to parse cache key type"),
+            );
 
             let key_convert_block =
                 parse_str::<Block>(convert_str).expect("unable to parse key convert block");
@@ -115,12 +119,31 @@ pub(super) fn make_cache_key_type(
 
             (quote! {}, quote! {#key_convert_block})
         }
-        (None, None, _) => (
-            quote! {(#(#input_tys),*)},
-            quote! {(#(#input_names.clone()),*)},
-        ),
+        (None, None, _) => {
+            let input_tys = input_tys.into_iter().map(dereference_type);
+            (quote! {(#(#input_tys),*)}, quote! {(#(#input_names),*)})
+        }
         (Some(_), None, _) => panic!("key requires convert to be set"),
         (None, Some(_), None) => panic!("convert requires key or type to be set"),
+    }
+}
+
+/// Convert a type `&T` into a type `T`.
+///
+/// If the input is a tuple, the elements are dereferenced.
+///
+/// Otherwise, the input is returned unchanged.
+pub(super) fn dereference_type(ty: Type) -> Type {
+    match ty {
+        Type::Reference(TypeReference { elem, .. }) => *elem,
+        Type::Tuple(TypeTuple { paren_token, elems }) => Type::Tuple(TypeTuple {
+            paren_token,
+            elems: elems
+                .iter()
+                .map(|ty| dereference_type(ty.clone()))
+                .collect(),
+        }),
+        _ => ty,
     }
 }
 
