@@ -5,6 +5,7 @@
 ## Changed
 - [Breaking] `type` attribute is now `ty`
 - Upgrade to syn2 
+- Corrected a typo in DiskCacheError (de)serialization variants
 ## Removed
 
 ## [0.49.3]
