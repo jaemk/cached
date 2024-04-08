@@ -284,6 +284,10 @@ where
         self.refresh = refresh;
         old
     }
+
+    fn cache_unset_lifespan(&mut self) -> Option<u64> {
+        self.seconds.take()
+    }
 }
 
 #[cfg(test)]

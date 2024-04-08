@@ -357,6 +357,14 @@ pub trait Cached<K, V> {
     fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
         None
     }
+
+    /// Remove the lifespan for cached values, returns the old value.
+    ///
+    /// For cache implementations that don't support retaining values indefinitely, this method is
+    /// a no-op.
+    fn cache_unset_lifespan(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// Extra cache operations for types that implement `Clone`
@@ -418,8 +426,16 @@ pub trait IOCached<K, V> {
         None
     }
 
-    /// Set the lifespan of cached values, returns the old value
+    /// Set the lifespan of cached values, returns the old value.
     fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
+        None
+    }
+
+    /// Remove the lifespan for cached values, returns the old value.
+    ///
+    /// For cache implementations that don't support retaining values indefinitely, this method is
+    /// a no-op.
+    fn cache_unset_lifespan(&mut self) -> Option<u64> {
         None
     }
 }
@@ -446,6 +462,14 @@ pub trait IOCachedAsync<K, V> {
 
     /// Set the lifespan of cached values, returns the old value
     fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
+        None
+    }
+
+    /// Remove the lifespan for cached values, returns the old value.
+    ///
+    /// For cache implementations that don't support retaining values indefinitely, this method is
+    /// a no-op.
+    fn cache_unset_lifespan(&mut self) -> Option<u64> {
         None
     }
 }
