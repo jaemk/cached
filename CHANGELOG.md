@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ## Added
+- proc_macro now supports `&T` and/or `Option<&T>` in the function inputs.
 ## Changed
 ## Removed
 
