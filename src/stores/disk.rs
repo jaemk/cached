@@ -409,7 +409,7 @@ mod test_DiskCache {
     const LIFE_SPAN_2_SECS: u64 = 2;
     const LIFE_SPAN_1_SEC: u64 = 1;
 
-    #[test]
+    #[googletest::test]
     fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
@@ -454,7 +454,7 @@ mod test_DiskCache {
         drop(cache);
     }
 
-    #[test]
+    #[googletest::test]
     fn values_expire_when_lifespan_elapses_returning_none() {
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
@@ -490,7 +490,7 @@ mod test_DiskCache {
         );
     }
 
-    #[test]
+    #[googletest::test]
     fn set_lifespan_to_a_different_lifespan_is_respected() {
         // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
         let tmp_dir = temp_dir!();
@@ -577,7 +577,7 @@ mod test_DiskCache {
         );
     }
 
-    #[test]
+    #[googletest::test]
     fn refreshing_on_cache_get_delays_cache_expiry() {
         // NOTE: Here we're relying on the fact that setting then sleeping for 2 secs and getting takes longer than 2 secs.
         const LIFE_SPAN: u64 = 2;
@@ -619,7 +619,7 @@ mod test_DiskCache {
         drop(cache);
     }
 
-    #[test]
+    #[googletest::test]
     // TODO: Consider removing this test, as it's not really testing anything.
     // If we want to check that setting a different disk directory to the default doesn't change anything,
     // we should design the tests to run all the same tests but paramaterized with different conditions.
@@ -698,7 +698,7 @@ mod test_DiskCache {
             mod changes_persist_after_recovery_when_set_to_true {
                 use super::*;
 
-                #[test]
+                #[googletest::test]
                 fn for_cache_set() {
                     check_on_recovered_cache(
                         false,
@@ -718,7 +718,7 @@ mod test_DiskCache {
                     )
                 }
 
-                #[test]
+                #[googletest::test]
                 fn for_cache_remove() {
                     check_on_recovered_cache(
                         false,
@@ -746,7 +746,7 @@ mod test_DiskCache {
                 }
 
                 #[ignore = "Not implemented"]
-                #[test]
+                #[googletest::test]
                 fn for_cache_get_when_refreshing() {
                     todo!("Test not implemented.")
                 }
@@ -756,7 +756,7 @@ mod test_DiskCache {
             mod changes_do_not_persist_after_recovery_when_set_to_false {
                 use super::*;
 
-                #[test]
+                #[googletest::test]
                 fn for_cache_set() {
                     check_on_recovered_cache(
                         true,
@@ -776,7 +776,7 @@ mod test_DiskCache {
                     )
                 }
 
-                #[test]
+                #[googletest::test]
                 fn for_cache_remove() {
                     check_on_recovered_cache(
                         true,
@@ -801,7 +801,7 @@ mod test_DiskCache {
                 }
 
                 #[ignore = "Not implemented"]
-                #[test]
+                #[googletest::test]
                 fn for_cache_get_when_refreshing() {
                     todo!("Test not implemented.")
                 }
