@@ -85,6 +85,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   `key` or `ty` must also be set.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return` or `Result<cached::Return, E>`,
 ///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
+/// - `sync_to_disk_on_cache_change`: (optional, bool) in the case of `DiskCache` specify whether to synchronize the cache to disk each
+///   time the cache changes.
+/// - connection_config: (optional, string expr) specify an expression which returns a `sled::Config`
+///   to give more control over the connection to the disk cache, i.e. useful for controlling the rate at which the cache syncs to disk.
+///   See the docs of `cached::stores::DiskCacheBuilder::connection_config` for more info.
 ///
 /// ## Note
 /// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`

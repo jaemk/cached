@@ -2,10 +2,16 @@
 
 ## [Unreleased]
 ## Added
+- Add `DiskCacheBuilder::set_sync_to_disk_on_cache_change` to specify that the cache changes should be written to disk on every cache change.
+- Add `sync_to_disk_on_cache_change` to `#[io_cached]` to allow setting `DiskCacheBuilder::set_sync_to_disk_on_cache_change` from the proc macro.
+- Add `DiskCacheBuilder::set_connection_config` to give more control over the sled connection.
+- Add `connection_config` to `#[io_cached]` to allow setting `DiskCacheBuilder::set_connection_config` from the proc macro.
+- Add `DiskCache::connection()` and `DiskCache::connection_mut()` to give access to the underlying sled connection.
 ## Changed
 - [Breaking] `type` attribute is now `ty`
 - Upgrade to syn2 
 - Corrected a typo in DiskCacheError (de)serialization variants
+- Signature or `DiskCache::remove_expired_entries`: this now returns `Result<(), DiskCacheError>` instead of `()`, returning an `Err(sled::Error)` on removing and flushing from the connection.
 ## Removed
 
 ## [0.49.3]
