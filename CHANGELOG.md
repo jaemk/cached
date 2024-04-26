@@ -10,6 +10,7 @@
 ## Changed
 - [Breaking] `type` attribute is now `ty`
 - Upgrade to syn2 
+- Corrected a typo in DiskCacheError (de)serialization variants
 - Signature or `DiskCache::remove_expired_entries`: this now returns `Result<(), DiskCacheError>` instead of `()`, returning an `Err(sled::Error)` on removing and flushing from the connection.
 ## Removed
 
