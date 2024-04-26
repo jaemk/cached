@@ -2,11 +2,17 @@
 
 ## [Unreleased]
 ## Added
+## Changed
+## Removed
+
+## [0.50.0 / [cached_proc_macro[0.21.0]] ]
+## Added
 - Add `DiskCacheBuilder::set_sync_to_disk_on_cache_change` to specify that the cache changes should be written to disk on every cache change.
 - Add `sync_to_disk_on_cache_change` to `#[io_cached]` to allow setting `DiskCacheBuilder::set_sync_to_disk_on_cache_change` from the proc macro.
 - Add `DiskCacheBuilder::set_connection_config` to give more control over the sled connection.
 - Add `connection_config` to `#[io_cached]` to allow setting `DiskCacheBuilder::set_connection_config` from the proc macro.
 - Add `DiskCache::connection()` and `DiskCache::connection_mut()` to give access to the underlying sled connection.
+- Add `cache_unset_lifespan` to cached traits for un-setting expiration on types that support it
 ## Changed
 - [Breaking] `type` attribute is now `ty`
 - Upgrade to syn2 
