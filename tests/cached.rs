@@ -1287,6 +1287,37 @@ mod disk_tests {
         assert_eq!(cached_disk_cache_create(6), Err(TestError::Count(6)));
     }
 
+    /// Just calling the macro with connection_config to test it doesn't break with an expected string
+    /// for connection_config.
+    /// There are no simple tests to test this here
+    #[io_cached(
+        disk = true,
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
+        connection_config = r##"sled::Config::new().flush_every_ms(None)"##
+    )]
+    fn cached_disk_connection_config(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    /// Just calling the macro with sync_to_disk_on_cache_change to test it doesn't break with an expected value
+    /// There are no simple tests to test this here
+    #[io_cached(
+        disk = true,
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
+        sync_to_disk_on_cache_change = true
+    )]
+    fn cached_disk_sync_to_disk_on_cache_change(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
     #[cfg(feature = "async")]
     mod async_test {
         use super::*;

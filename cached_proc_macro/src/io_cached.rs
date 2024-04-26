@@ -5,7 +5,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, parse_str, Block, ExprClosure, GenericArgument, Ident, ItemFn,
+    parse_macro_input, parse_str, Block, Expr, ExprClosure, GenericArgument, Ident, ItemFn,
     PathArguments, ReturnType, Type,
 };
 
@@ -36,6 +36,10 @@ struct IOMacroArgs {
     ty: Option<String>,
     #[darling(default)]
     create: Option<String>,
+    #[darling(default)]
+    sync_to_disk_on_cache_change: Option<bool>,
+    #[darling(default)]
+    connection_config: Option<String>,
 }
 
 pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -173,9 +177,11 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         &args.cache_prefix_block,
         &args.ty,
         &args.create,
+        &args.sync_to_disk_on_cache_change,
+        &args.connection_config,
     ) {
         // redis
-        (true, false, time, time_refresh, cache_prefix, ty, cache_create) => {
+        (true, false, time, time_refresh, cache_prefix, ty, cache_create, _, _) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
@@ -242,7 +248,17 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (cache_ty, cache_create)
         }
         // disk
-        (false, true, time, time_refresh, _, ty, cache_create) => {
+        (
+            false,
+            true,
+            time,
+            time_refresh,
+            _,
+            ty,
+            cache_create,
+            sync_to_disk_on_cache_change,
+            connection_config,
+        ) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
@@ -252,6 +268,14 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     // https://github.com/spacejam/sled?tab=readme-ov-file#interaction-with-async
                     quote! { cached::DiskCache<#cache_key_ty, #cache_value_ty> }
                 }
+            };
+            let connection_config = match connection_config {
+                Some(connection_config) => {
+                    let connection_config = parse_str::<Expr>(connection_config)
+                        .expect("unable to parse connection_config block");
+                    Some(quote! { #connection_config })
+                }
+                None => None,
             };
             let cache_create = match cache_create {
                 Some(cache_create) => {
@@ -285,6 +309,22 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                             }
                         }
                     };
+                    let create = match sync_to_disk_on_cache_change {
+                        None => create,
+                        Some(sync_to_disk_on_cache_change) => {
+                            quote! {
+                                (#create).set_sync_to_disk_on_cache_change(#sync_to_disk_on_cache_change)
+                            }
+                        }
+                    };
+                    let create = match connection_config {
+                        None => create,
+                        Some(connection_config) => {
+                            quote! {
+                                (#create).set_connection_config(#connection_config)
+                            }
+                        }
+                    };
                     let create = match args.disk_dir {
                         None => create,
                         Some(disk_dir) => {
@@ -296,7 +336,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             };
             (cache_ty, cache_create)
         }
-        (_, _, time, time_refresh, cache_prefix, ty, cache_create) => {
+        (_, _, time, time_refresh, cache_prefix, ty, cache_create, _, _) => {
             let cache_ty = match ty {
                 Some(ty) => {
                     let ty = parse_str::<Type>(ty).expect("unable to parse cache type");
