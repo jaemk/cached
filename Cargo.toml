@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.49.2"
+version = "0.49.3"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -65,7 +65,7 @@ version = "0.1"
 optional = true
 
 [dependencies.redis]
-version = "0.24"
+version = "0.25"
 features = ["r2d2"]
 optional = true
 
@@ -78,7 +78,7 @@ version = "1.1"
 optional = true
 
 [dependencies.directories]
-version = "4.0"
+version = "5.0"
 optional = true
 
 [dependencies.r2d2]
@@ -102,6 +102,11 @@ optional = true
 [dependencies.instant]
 version = "0.1"
 
+[dev-dependencies]
+copy_dir = "0.1.3"
+googletest = "0.11.0"
+tempfile = "3.10.1"
+
 [dev-dependencies.async-std]
 version = "1.6"
 features = ["attributes"]
@@ -110,7 +115,7 @@ features = ["attributes"]
 version = "1"
 
 [dev-dependencies.serial_test]
-version = "2"
+version = "3"
 
 [workspace]
 members = ["cached_proc_macro", "examples/wasm"]
