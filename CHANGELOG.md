@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.51.0]
+## Added
+- Add `ExpiringSizedCache` intended for high read scenarios. Currently incompatible with the cached trait and macros.
+## Changed
+## Removed
+
 ## [0.50.0 / [cached_proc_macro[0.21.0]] ]
 ## Added
 - Add `DiskCacheBuilder::set_sync_to_disk_on_cache_change` to specify that the cache changes should be written to disk on every cache change.
