@@ -8,6 +8,7 @@ use std::hash::Hash;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
+mod concurrent_timed;
 #[cfg(feature = "disk_store")]
 mod disk;
 mod expiring_value_cache;
@@ -25,6 +26,7 @@ pub use crate::stores::disk::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, 
 pub use crate::stores::redis::{
     RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
+pub use concurrent_timed::ConcurrentTimedCache;
 pub use expiring_value_cache::{CanExpire, ExpiringValueCache};
 pub use sized::SizedCache;
 pub use timed::TimedCache;
