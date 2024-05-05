@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.51.1]
+## Added
+- Update documentation and add missing methods to `ExpiringSizedCache` (clear, configuration methods)
+## Changed
+- `ExpiringSizedCache`: When allocating using `with_capacity`, allocate enough space to account for
+  the default max number of tombstone entries
+## Removed
+
 ## [0.51.0]
 ## Added
 - Add `ExpiringSizedCache` intended for high read scenarios. Currently incompatible with the cached trait and macros.

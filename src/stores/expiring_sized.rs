@@ -4,8 +4,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Eq)]
+#[derive(Eq)]
 struct CacheArc<T>(Arc<T>);
+
+impl<T> Clone for CacheArc<T> {
+    fn clone(&self) -> Self {
+        CacheArc(self.0.clone())
+    }
+}
 
 impl<T: PartialEq> PartialEq for CacheArc<T> {
     fn eq(&self, other: &Self) -> bool {
@@ -48,16 +54,17 @@ struct Entry<V> {
 /// A cache enforcing time expiration and an optional maximum size.
 /// When a maximum size is specified, the values are dropped in the
 /// order of expiration date, e.g. the next value to expire is dropped.
-///
 /// This cache is intended for high read scenarios to allow for concurrent
 /// reads while still enforcing expiration and an optional maximum cache size.
-/// The trade-offs are:
+///
+/// To accomplish this, there are a few trade-offs:
 ///  - Maximum cache size logic cannot support "LRU", instead dropping the next value to expire
 ///  - The cache's size, reported by `.len` is only guaranteed to be accurate immediately
 ///    after a call to either `.evict` or `.retain_latest`
 ///  - Eviction must be explicitly requested, either on its own or while inserting
-///  - Writing to existing keys will generate tombstones that must eventually be cleared,
-///    requiring a full traversal to rewrite internal indices. This happens automatically
+///  - Writing to existing keys, removing, evict, or dropping (with `.retain_latest`) will
+///    generate tombstones that must eventually be cleared. Clearing tombstones requires
+///    a full traversal (`O(n)`) to rewrite internal indices. This happens automatically
 ///    when the number of tombstones reaches a certain threshold.
 pub struct ExpiringSizedCache<K, V> {
     // k/v where entry contains index into `key`
@@ -72,7 +79,7 @@ pub struct ExpiringSizedCache<K, V> {
     pub(self) tombstone_count: usize,
     pub(self) max_tombstone_limit: usize,
 }
-impl<K: Hash + Eq + Clone, V> ExpiringSizedCache<K, V> {
+impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
     pub fn new(ttl_millis: u64) -> Self {
         Self {
             map: HashMap::new(),
@@ -86,13 +93,26 @@ impl<K: Hash + Eq + Clone, V> ExpiringSizedCache<K, V> {
 
     pub fn with_capacity(ttl_millis: u64, size: usize) -> Self {
         let mut new = Self::new(ttl_millis);
-        new.reserve(size);
+        new.map.reserve(size);
+        new.keys.reserve(size + new.max_tombstone_limit);
         new
     }
 
-    /// Set a size limit. When reached, the oldest entries are evicted.
-    pub fn size_limit(&mut self, size: usize) {
+    /// Set a size limit. When reached, the next entries to expire are evicted.
+    /// Returns the previous value if one was set.
+    pub fn size_limit(&mut self, size: usize) -> Option<usize> {
+        let prev = self.size_limit;
         self.size_limit = Some(size);
+        prev
+    }
+
+    /// Set the max tombstone limit. When reached, tombstones will be cleared and
+    /// a full traversal will occur (`O(n)`) to rewrite internal indices
+    /// Returns the previous value that was set.
+    pub fn max_tombstone_limit(&mut self, limit: usize) -> usize {
+        let prev = self.max_tombstone_limit;
+        self.max_tombstone_limit = limit;
+        prev
     }
 
     /// Increase backing stores with enough capacity to store `more`
@@ -236,7 +256,9 @@ impl<K: Hash + Eq + Clone, V> ExpiringSizedCache<K, V> {
         cleared
     }
 
-    /// Remove an entry, returning the value if it was present
+    /// Remove an entry, returning the value if it was present.
+    /// Note, the value is not checked for expiry. If returning
+    /// only non-expired values is desired, run `.evict` prior.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         match self.map.remove(key) {
             None => None,
@@ -253,6 +275,7 @@ impl<K: Hash + Eq + Clone, V> ExpiringSizedCache<K, V> {
 
     /// Retrieve unexpired entry
     pub fn get(&self, key: &K) -> Option<&V> {
+        // todo: support keys being borrowed types like the underlying map
         let cutoff = Instant::now();
         self.map.get(key).and_then(|entry| {
             if entry.expiry < cutoff {
@@ -264,14 +287,18 @@ impl<K: Hash + Eq + Clone, V> ExpiringSizedCache<K, V> {
     }
 
     /// Insert k/v pair without running eviction logic. If a `size_limit` was specified, the
-    /// next entry to expire will be evicted to make space.
-    pub fn insert(&mut self, key: K, value: V) -> Result<(), Error> {
+    /// next entry to expire will be evicted to make space. Returns any existing value.
+    /// Note, the existing value is not checked for expiry. If returning
+    /// only non-expired values is desired, run `.evict` prior or use `.insert_evict(..., true)`
+    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, Error> {
         self.insert_evict(key, value, false)
     }
 
     /// Optionally run eviction logic before inserting a k/v pair. If a `size_limit` was specified,
-    /// the next entry to expire will be evicted to make space.
-    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<(), Error> {
+    /// next entry to expire will be evicted to make space. Returns any existing value.
+    /// Note, the existing value is not checked for expiry. If returning
+    /// only non-expired values is desired, run `.evict` prior or pass `evict = true`
+    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, Error> {
         // todo: allow specifying ttl on individual entries, will require
         //       inserting stamped-keys in-place instead of pushing to end
 
@@ -303,14 +330,20 @@ impl<K: Hash + Eq + Clone, V> ExpiringSizedCache<K, V> {
                 value,
             },
         );
-        if let Some(old) = old {
+        if let Some(old) = &old {
             if let Some(old_stamped) = self.keys.get_mut(old.stamp_index) {
                 old_stamped.tombstone = true;
                 self.tombstone_count += 1;
                 self.check_clear_tombstones();
             }
         }
-        Ok(())
+        Ok(old.map(|entry| entry.value))
+    }
+
+    /// Clear all cache entries. Does not release underlying containers
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.keys.clear();
     }
 
     /// Return cache size. Note, this does not evict so may return
