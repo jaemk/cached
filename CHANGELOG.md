@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.51.2]
+## Added
+- Add `get_borrowed` methods to `ExpiringSizedCache` to support cache retrieval using `&str` / `&[T]`
+  when the key types are `String` / `Vec<T>`. This is a workaround for issues implementing `Borrow`
+  for a generic wrapper type.
+## Changed
+## Removed
+
 ## [0.51.1]
 ## Added
 - Update documentation and add missing methods to `ExpiringSizedCache` (clear, configuration methods)

@@ -31,6 +31,18 @@ impl<T> Borrow<T> for CacheArc<T> {
     }
 }
 
+impl Borrow<str> for CacheArc<String> {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl<T> Borrow<[T]> for CacheArc<Vec<T>> {
+    fn borrow(&self) -> &[T] {
+        self.0.as_slice()
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     /// Calculating expiration `Instant`s resulted in a
@@ -49,6 +61,19 @@ struct Entry<V> {
     stamp_index: usize,
     expiry: Instant,
     value: V,
+}
+
+macro_rules! impl_get {
+    ($_self:expr, $key:expr) => {{
+        let cutoff = Instant::now();
+        $_self.map.get($key).and_then(|entry| {
+            if entry.expiry < cutoff {
+                None
+            } else {
+                Some(&entry.value)
+            }
+        })
+    }};
 }
 
 /// A cache enforcing time expiration and an optional maximum size.
@@ -273,19 +298,6 @@ impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
         }
     }
 
-    /// Retrieve unexpired entry
-    pub fn get(&self, key: &K) -> Option<&V> {
-        // todo: support keys being borrowed types like the underlying map
-        let cutoff = Instant::now();
-        self.map.get(key).and_then(|entry| {
-            if entry.expiry < cutoff {
-                None
-            } else {
-                Some(&entry.value)
-            }
-        })
-    }
-
     /// Insert k/v pair without running eviction logic. If a `size_limit` was specified, the
     /// next entry to expire will be evicted to make space. Returns any existing value.
     /// Note, the existing value is not checked for expiry. If returning
@@ -356,12 +368,55 @@ impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Retrieve unexpired entry
+    pub fn get(&self, key: &K) -> Option<&V> {
+        // todo: generically support keys being borrowed types like the underlying map
+        impl_get!(self, key)
+    }
+}
+
+impl<V> ExpiringSizedCache<String, V> {
+    /// Retrieve unexpired entry, accepting `&str` to check against `String` keys
+    /// ```rust
+    /// # use cached::stores::ExpiringSizedCache;
+    /// let mut cache = ExpiringSizedCache::<String, &str>::new(2_000);
+    /// cache.insert(String::from("a"), "a").unwrap();
+    /// assert_eq!(cache.get_borrowed("a").unwrap(), &"a");
+    /// ```
+    pub fn get_borrowed(&self, key: &str) -> Option<&V> {
+        impl_get!(self, key)
+    }
+}
+
+impl<T: Hash + Eq + PartialEq, V> ExpiringSizedCache<Vec<T>, V> {
+    /// Retrieve unexpired entry, accepting `&[T]` to check against `Vec<T>` keys
+    /// ```rust
+    /// # use cached::stores::ExpiringSizedCache;
+    /// let mut cache = ExpiringSizedCache::<Vec<usize>, &str>::new(2_000);
+    /// cache.insert(vec![0], "a").unwrap();
+    /// assert_eq!(cache.get_borrowed(&[0]).unwrap(), &"a");
+    /// ```
+    pub fn get_borrowed(&self, key: &[T]) -> Option<&V> {
+        impl_get!(self, key)
+    }
 }
 
 #[cfg(test)]
 mod test {
     use crate::stores::ExpiringSizedCache;
     use std::time::Duration;
+
+    #[test]
+    fn borrow_keys() {
+        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
+        cache.insert(String::from("a"), "a").unwrap();
+        assert_eq!(cache.get_borrowed("a").unwrap(), &"a");
+
+        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
+        cache.insert(vec![0], "a").unwrap();
+        assert_eq!(cache.get_borrowed(&[0]).unwrap(), &"a");
+    }
 
     #[test]
     fn kitchen_sink() {
