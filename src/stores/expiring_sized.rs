@@ -1,11 +1,21 @@
 use std::borrow::Borrow;
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
+use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Wrap keys so they don't need to implement Clone
 #[derive(Eq)]
+// todo: can we switch to an Rc?
 struct CacheArc<T>(Arc<T>);
+
+impl<T> CacheArc<T> {
+    fn new(key: T) -> Self {
+        CacheArc(Arc::new(key))
+    }
+}
 
 impl<T> Clone for CacheArc<T> {
     fn clone(&self) -> Self {
@@ -16,6 +26,17 @@ impl<T> Clone for CacheArc<T> {
 impl<T: PartialEq> PartialEq for CacheArc<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0.eq(&other.0)
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for CacheArc<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+impl<T: Ord> Ord for CacheArc<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
     }
 }
 
@@ -50,24 +71,58 @@ pub enum Error {
     TimeBounds,
 }
 
-#[derive(Hash, Eq, PartialEq)]
+/// A timestamped key to allow identifying key ranges
+#[derive(Hash, Eq, PartialEq, Ord, PartialOrd)]
 struct Stamped<K> {
-    tombstone: bool,
+    // note: the field order matters here since the derived ord traits
+    //       generate lexicographic ordering based on the top-to-bottom
+    //       declaration order
     expiry: Instant,
-    key: CacheArc<K>,
+
+    // wrapped in an option so it's easy to generate
+    // a range bound containing None
+    key: Option<CacheArc<K>>,
 }
 
-struct Entry<V> {
-    stamp_index: usize,
+impl<K> Clone for Stamped<K> {
+    fn clone(&self) -> Self {
+        Self {
+            expiry: self.expiry,
+            key: self.key.clone(),
+        }
+    }
+}
+
+impl<K> Stamped<K> {
+    fn bound(expiry: Instant) -> Stamped<K> {
+        Stamped { expiry, key: None }
+    }
+}
+
+/// A timestamped value to allow re-building a timestamped key
+struct Entry<K, V> {
     expiry: Instant,
+    key: CacheArc<K>,
     value: V,
+}
+
+impl<K, V> Entry<K, V> {
+    fn as_stamped(&self) -> Stamped<K> {
+        Stamped {
+            expiry: self.expiry,
+            key: Some(self.key.clone()),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.expiry < Instant::now()
+    }
 }
 
 macro_rules! impl_get {
     ($_self:expr, $key:expr) => {{
-        let cutoff = Instant::now();
         $_self.map.get($key).and_then(|entry| {
-            if entry.expiry < cutoff {
+            if entry.is_expired() {
                 None
             } else {
                 Some(&entry.value)
@@ -84,42 +139,40 @@ macro_rules! impl_get {
 ///
 /// To accomplish this, there are a few trade-offs:
 ///  - Maximum cache size logic cannot support "LRU", instead dropping the next value to expire
+///  - Cache keys must implement `Ord`
 ///  - The cache's size, reported by `.len` is only guaranteed to be accurate immediately
 ///    after a call to either `.evict` or `.retain_latest`
 ///  - Eviction must be explicitly requested, either on its own or while inserting
-///  - Writing to existing keys, removing, evict, or dropping (with `.retain_latest`) will
-///    generate tombstones that must eventually be cleared. Clearing tombstones requires
-///    a full traversal (`O(n)`) to rewrite internal indices. This happens automatically
-///    when the number of tombstones reaches a certain threshold.
 pub struct ExpiringSizedCache<K, V> {
-    // k/v where entry contains index into `key`
-    map: HashMap<CacheArc<K>, Entry<V>>,
+    // a minimum instant to compare ranges against since
+    // all keys must logically expire after the creation
+    // of the cache
+    min_instant: Instant,
 
-    // deque ordered in ascending expiration `Instant`s
+    // k/v where entry contains corresponds to an ordered value in `keys`
+    map: HashMap<CacheArc<K>, Entry<K, V>>,
+
+    // ordered in ascending expiration `Instant`s
     // to support retaining/evicting without full traversal
-    keys: VecDeque<Stamped<K>>,
+    keys: BTreeSet<Stamped<K>>,
 
     pub ttl_millis: u64,
     pub size_limit: Option<usize>,
-    pub(self) tombstone_count: usize,
-    pub(self) max_tombstone_limit: usize,
 }
-impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
+impl<K: Hash + Eq + Ord, V> ExpiringSizedCache<K, V> {
     pub fn new(ttl_millis: u64) -> Self {
         Self {
+            min_instant: Instant::now(),
             map: HashMap::new(),
-            keys: VecDeque::new(),
+            keys: BTreeSet::new(),
             ttl_millis,
             size_limit: None,
-            tombstone_count: 0,
-            max_tombstone_limit: 50,
         }
     }
 
     pub fn with_capacity(ttl_millis: u64, size: usize) -> Self {
         let mut new = Self::new(ttl_millis);
         new.map.reserve(size);
-        new.keys.reserve(size + new.max_tombstone_limit);
         new
     }
 
@@ -131,19 +184,9 @@ impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
         prev
     }
 
-    /// Set the max tombstone limit. When reached, tombstones will be cleared and
-    /// a full traversal will occur (`O(n)`) to rewrite internal indices
-    /// Returns the previous value that was set.
-    pub fn max_tombstone_limit(&mut self, limit: usize) -> usize {
-        let prev = self.max_tombstone_limit;
-        self.max_tombstone_limit = limit;
-        prev
-    }
-
     /// Increase backing stores with enough capacity to store `more`
     pub fn reserve(&mut self, more: usize) {
         self.map.reserve(more);
-        self.keys.reserve(more);
     }
 
     /// Set ttl millis, return previous value
@@ -157,163 +200,104 @@ impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
     /// Returns number of dropped items.
     pub fn evict(&mut self) -> usize {
         let cutoff = Instant::now();
-        let remove = match self
-            .keys
-            .binary_search_by_key(&cutoff, |stamped| stamped.expiry)
-        {
-            Ok(mut i) => {
-                // move past any duplicates
-                while self.keys[i].expiry == cutoff {
-                    i += 1;
-                }
-                i
-            }
-            Err(i) => {
-                // index to insert at, drop those prior
-                i
-            }
-        };
-        let mut count = 0;
-        for stamped in self.keys.iter() {
-            if count >= remove {
-                break;
-            }
-            if !stamped.tombstone {
-                self.map.remove(&stamped.key);
-                count += 1;
-            }
-        }
-        self.entomb_head(remove);
-        self.check_clear_tombstones();
-        count
-    }
+        let min = Stamped::bound(self.min_instant);
+        let max = Stamped::bound(cutoff);
+        let min = Included(&min);
+        let max = Excluded(&max);
 
-    fn entomb_head(&mut self, remove: usize) {
-        let mut stamp_index = 0;
+        let remove = self.keys.range((min, max)).count();
         let mut count = 0;
-        loop {
-            if count >= remove || stamp_index >= self.keys.len() {
-                break;
-            }
-            let stamped = self.keys.get_mut(stamp_index);
-            match stamped {
+        while count < remove {
+            match self.keys.pop_first() {
                 None => break,
                 Some(stamped) => {
-                    if !stamped.tombstone {
-                        count += 1;
-                        stamped.tombstone = true;
-                        self.tombstone_count += 1;
-                    }
-                    stamp_index += 1;
+                    self.map.remove(
+                        &stamped
+                            .key
+                            .expect("evicting: only artificial bounds are none"),
+                    );
+                    count += 1;
                 }
             }
         }
+        count
     }
 
     /// Retain only the latest `count` values, dropping the next values to expire.
     /// If `evict`, then also evict values that have expired.
     /// Returns number of dropped items.
     pub fn retain_latest(&mut self, count: usize, evict: bool) -> usize {
-        let count_index = self.len().saturating_sub(count);
+        let retain_drop_count = self.len().saturating_sub(count);
 
         let remove = if evict {
             let cutoff = Instant::now();
-            match self
-                .keys
-                .binary_search_by_key(&cutoff, |stamped| stamped.expiry)
-            {
-                Ok(mut i) => {
-                    while self.keys[i].expiry == cutoff {
-                        i += 1;
-                    }
-                    count_index.max(i)
-                }
-                Err(i) => count_index.max(i),
-            }
+            let min = Stamped::bound(self.min_instant);
+            let max = Stamped::bound(cutoff);
+            let min = Included(&min);
+            let max = Excluded(&max);
+            let to_evict_count = self.keys.range((min, max)).count();
+            retain_drop_count.max(to_evict_count)
         } else {
-            count_index
+            retain_drop_count
         };
 
         let mut count = 0;
-        for stamped in self.keys.iter() {
-            if count >= remove {
-                break;
-            }
-            if !stamped.tombstone {
-                self.map.remove(&stamped.key);
-                count += 1;
+        while count < remove {
+            match self.keys.pop_first() {
+                None => break,
+                Some(stamped) => {
+                    self.map.remove(
+                        &stamped
+                            .key
+                            .expect("retaining: only artificial bounds are none"),
+                    );
+                    count += 1;
+                }
             }
         }
-        self.entomb_head(remove);
-        self.check_clear_tombstones();
         count
     }
 
-    fn should_clear_tombstones(&self) -> bool {
-        // todo: consider some percentage of `self.size_limit`?
-        self.tombstone_count > self.max_tombstone_limit
-    }
-
-    fn check_clear_tombstones(&mut self) -> usize {
-        if !self.should_clear_tombstones() {
-            return 0;
-        }
-
-        let mut cleared = 0;
-        let mut stamp_index = 0;
-        loop {
-            if stamp_index >= self.keys.len() {
-                break;
-            }
-            if self.keys[stamp_index].tombstone {
-                self.keys
-                    .remove(stamp_index)
-                    .expect("already checked stamped key exists");
-                cleared += 1;
-                self.tombstone_count -= 1;
-            } else {
-                if let Some(entry) = self.map.get_mut(&self.keys[stamp_index].key) {
-                    entry.stamp_index = stamp_index;
-                }
-                stamp_index += 1;
-            }
-        }
-        cleared
-    }
-
-    /// Remove an entry, returning the value if it was present.
-    /// Note, the value is not checked for expiry. If returning
-    /// only non-expired values is desired, run `.evict` prior.
+    /// Remove an entry, returning an unexpired value if it was present.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         match self.map.remove(key) {
             None => None,
             Some(removed) => {
-                if let Some(stamped) = self.keys.get_mut(removed.stamp_index) {
-                    stamped.tombstone = true;
-                    self.tombstone_count += 1;
+                self.keys.remove(&removed.as_stamped());
+                if removed.is_expired() {
+                    None
+                } else {
+                    Some(removed.value)
                 }
-                self.check_clear_tombstones();
-                Some(removed.value)
             }
         }
     }
 
-    /// Insert k/v pair without running eviction logic. If a `size_limit` was specified, the
-    /// next entry to expire will be evicted to make space. Returns any existing value.
-    /// Note, the existing value is not checked for expiry. If returning
-    /// only non-expired values is desired, run `.evict` prior or use `.insert_evict(..., true)`
+    /// Insert k/v pair without running eviction logic. See `.insert_ttl_evict`
     pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, Error> {
-        self.insert_evict(key, value, false)
+        self.insert_ttl_evict(key, value, None, false)
     }
 
-    /// Optionally run eviction logic before inserting a k/v pair. If a `size_limit` was specified,
-    /// next entry to expire will be evicted to make space. Returns any existing value.
-    /// Note, the existing value is not checked for expiry. If returning
-    /// only non-expired values is desired, run `.evict` prior or pass `evict = true`
-    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, Error> {
-        // todo: allow specifying ttl on individual entries, will require
-        //       inserting stamped-keys in-place instead of pushing to end
+    /// Insert k/v pair with explicit ttl. See `.insert_ttl_evict`
+    pub fn insert_ttl(&mut self, key: K, value: V, ttl_millis: u64) -> Result<Option<V>, Error> {
+        self.insert_ttl_evict(key, value, Some(ttl_millis), false)
+    }
 
+    /// Insert k/v pair and run eviction logic. See `.insert_ttl_evict`
+    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, Error> {
+        self.insert_ttl_evict(key, value, None, evict)
+    }
+
+    /// Optionally run eviction logic before inserting a k/v pair with an optional explicit TTL.
+    /// If a `size_limit` was specified, the next entry to expire will be evicted to make space.
+    /// Returns any existing unexpired value.
+    pub fn insert_ttl_evict(
+        &mut self,
+        key: K,
+        value: V,
+        ttl_millis: Option<u64>,
+        evict: bool,
+    ) -> Result<Option<V>, Error> {
         // optionally evict and retain to size
         if let Some(size_limit) = self.size_limit {
             if self.len() > size_limit - 1 {
@@ -323,33 +307,31 @@ impl<K: Hash + Eq, V> ExpiringSizedCache<K, V> {
             self.evict();
         }
 
-        let key = CacheArc(Arc::new(key));
+        let key = CacheArc::new(key);
         let expiry = Instant::now()
-            .checked_add(Duration::from_millis(self.ttl_millis))
+            .checked_add(Duration::from_millis(ttl_millis.unwrap_or(self.ttl_millis)))
             .ok_or(Error::TimeBounds)?;
 
-        self.keys.push_back(Stamped {
-            tombstone: false,
+        let new_stamped = Stamped {
             expiry,
-            key: key.clone(),
-        });
-        let stamp_index = self.keys.len() - 1;
-        let old = self.map.insert(
-            key,
-            Entry {
-                stamp_index,
-                expiry,
-                value,
-            },
-        );
+            key: Some(key.clone()),
+        };
+        self.keys.insert(new_stamped.clone());
+        let old = self.map.insert(key.clone(), Entry { expiry, key, value });
         if let Some(old) = &old {
-            if let Some(old_stamped) = self.keys.get_mut(old.stamp_index) {
-                old_stamped.tombstone = true;
-                self.tombstone_count += 1;
-                self.check_clear_tombstones();
+            let old_stamped = old.as_stamped();
+            // new-stamped didn't already replace an existing entry, delete it now
+            if old_stamped != new_stamped {
+                self.keys.remove(&old_stamped);
             }
         }
-        Ok(old.map(|entry| entry.value))
+        Ok(old.and_then(|entry| {
+            if entry.is_expired() {
+                None
+            } else {
+                Some(entry.value)
+            }
+        }))
     }
 
     /// Clear all cache entries. Does not release underlying containers
@@ -430,7 +412,6 @@ mod test {
         assert_eq!(cache.len(), 1);
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(1, cache.evict());
-        assert_eq!(1, cache.tombstone_count);
         assert!(cache.get(&"a".into()).is_none());
         assert_eq!(cache.len(), 0);
 
@@ -444,7 +425,6 @@ mod test {
         // in size until eviction
         assert_eq!(cache.len(), 1);
         assert_eq!(1, cache.retain_latest(1, true));
-        assert_eq!(2, cache.tombstone_count);
         assert!(cache.get(&"a".into()).is_none());
         assert_eq!(cache.len(), 0);
 
@@ -455,7 +435,6 @@ mod test {
         cache.insert("e".to_string(), "e".to_string()).unwrap();
         assert_eq!(3, cache.retain_latest(2, false));
         assert_eq!(2, cache.len());
-        assert_eq!(5, cache.tombstone_count);
         assert_eq!(cache.get(&"a".into()), None);
         assert_eq!(cache.get(&"b".into()), None);
         assert_eq!(cache.get(&"c".into()), None);
@@ -467,7 +446,6 @@ mod test {
         cache.insert("b".to_string(), "b".to_string()).unwrap();
         cache.insert("b".to_string(), "b".to_string()).unwrap();
         assert_eq!(4, cache.len());
-        assert_eq!(7, cache.tombstone_count);
 
         assert_eq!(2, cache.retain_latest(2, false));
         assert_eq!(cache.get(&"d".into()), None);
@@ -475,10 +453,35 @@ mod test {
         assert_eq!(cache.get(&"a".into()), Some("a".to_string()).as_ref());
         assert_eq!(cache.get(&"b".into()), Some("b".to_string()).as_ref());
         assert_eq!(2, cache.len());
-        assert_eq!(9, cache.tombstone_count);
 
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(cache.remove(&"a".into()), None);
+        // trying to get something expired will expire values
+        assert_eq!(1, cache.len());
+
+        cache.insert("a".to_string(), "a".to_string()).unwrap();
         assert_eq!(cache.remove(&"a".into()), Some("a".to_string()));
-        assert_eq!(10, cache.tombstone_count);
+        // we haven't done anything to evict "b" so there's still one entry
+        assert_eq!(1, cache.len());
+
+        assert_eq!(1, cache.evict());
+        assert_eq!(0, cache.len());
+
+        // default ttl is 100ms
+        cache
+            .insert_ttl("a".to_string(), "a".to_string(), 300)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(cache.get(&"a".into()), Some("a".to_string()).as_ref());
+        assert_eq!(1, cache.len());
+
+        std::thread::sleep(Duration::from_millis(200));
+        cache
+            .insert_ttl_evict("b".to_string(), "b".to_string(), Some(300), true)
+            .unwrap();
+        // a should now be evicted
+        assert_eq!(1, cache.len());
+        assert_eq!(cache.get_borrowed("a"), None);
     }
 
     #[test]
@@ -500,17 +503,5 @@ mod test {
         assert_eq!(cache.get(&"b".into()), Some("B".to_string()).as_ref());
         assert_eq!(cache.get(&"c".into()), Some("C".to_string()).as_ref());
         assert_eq!(cache.get(&"a".into()), None);
-    }
-
-    #[test]
-    fn tombstones() {
-        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
-        cache.size_limit(2);
-        for _ in 0..=cache.max_tombstone_limit {
-            cache.insert("a".to_string(), "A".to_string()).unwrap();
-        }
-        assert_eq!(cache.tombstone_count, cache.max_tombstone_limit);
-        cache.insert("a".to_string(), "A".to_string()).unwrap();
-        assert_eq!(cache.tombstone_count, 0);
     }
 }

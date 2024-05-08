@@ -5,6 +5,15 @@
 ## Changed
 ## Removed
 
+## [0.51.3]
+## Added
+- `ExpiringSizedCache`: Allow specifying explicit TTL when inserting
+## Changed
+- Refactor `ExpiringSizedCache` internals to not require tombstones
+- `ExpiringSizedCache` keys must impl `Ord`
+- `ExpiringSizedCache` `remove` and `insert` updated to return only unexpired values
+## Removed
+
 ## [0.51.2]
 ## Added
 - Add `get_borrowed` methods to `ExpiringSizedCache` to support cache retrieval using `&str` / `&[T]`

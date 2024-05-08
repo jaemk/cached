@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.51.2"
+version = "0.51.3"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -135,3 +135,7 @@ required-features = ["async", "proc_macro"]
 [[example]]
 name = "async_std"
 required-features = ["async", "proc_macro"]
+
+[[example]]
+name = "expiring_sized_cache"
+required-features = ["async_tokio_rt_multi_thread"]

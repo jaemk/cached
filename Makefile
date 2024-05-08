@@ -15,7 +15,8 @@ CACHED_BASIC_EXAMPLES = async_std \
                         basic_proc_macro \
                         kitchen_sink \
                         kitchen_sink_proc_macro \
-                        tokio
+                        tokio \
+                        expiring_sized_cache
 # Same as `CACHED_BASIC_EXAMPLES`, but these examples require the `docker/redis`
 # goal
 CACHED_REDIS_EXAMPLES = redis \
