@@ -6,7 +6,7 @@ use serde::Serialize;
 use sled::Db;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::{fmt::Display, path::PathBuf, time::SystemTime};
+use std::{path::PathBuf, time::SystemTime};
 
 pub struct DiskCacheBuilder<K, V> {
     seconds: Option<u64>,
@@ -36,7 +36,7 @@ const DISK_FILE_VERSION: u64 = 1;
 
 impl<K, V> DiskCacheBuilder<K, V>
 where
-    K: Display,
+    K: ToString,
     V: Serialize + DeserializeOwned,
 {
     /// Initialize a `DiskCacheBuilder`
@@ -158,7 +158,7 @@ pub struct DiskCache<K, V> {
 
 impl<K, V> DiskCache<K, V>
 where
-    K: Display,
+    K: ToString,
     V: Serialize + DeserializeOwned,
 {
     #[allow(clippy::new_ret_no_self)]
@@ -235,7 +235,7 @@ impl<V> CachedDiskValue<V> {
 
 impl<K, V> IOCached<K, V> for DiskCache<K, V>
 where
-    K: Display,
+    K: ToString,
     V: Serialize + DeserializeOwned,
 {
     type Error = DiskCacheError;
