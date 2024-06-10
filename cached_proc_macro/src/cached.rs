@@ -64,6 +64,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let inputs = signature.inputs.clone();
     let output = signature.output.clone();
     let asyncness = signature.asyncness;
+    let generics = signature.generics.clone();
 
     let input_tys = get_input_types(&inputs);
     let input_names = get_input_names(&inputs);
@@ -210,7 +211,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
         function_no_cache = quote! {
-            async fn #no_cache_fn_ident(#inputs) #output #body
+            async fn #no_cache_fn_ident #generics (#inputs) #output #body
         };
 
         function_call = quote! {
@@ -226,7 +227,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
         function_no_cache = quote! {
-            fn #no_cache_fn_ident(#inputs) #output #body
+            fn #no_cache_fn_ident #generics (#inputs) #output #body
         };
 
         function_call = quote! {
