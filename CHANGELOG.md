@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.52.0 / [cached_proc_macro[0.22.0]] ]
+## Added
+## Changed
+- Propagate function generics to generated inner cache function 
+## Removed
+
+
 ## [0.51.4]
 ## Added
 ## Changed
