@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.51.4]
+## Added
+## Changed
+- Update `DiskCache` to require `ToString` instead of `Display`
+## Removed
+
 ## [0.51.3]
 ## Added
 - `ExpiringSizedCache`: Allow specifying explicit TTL when inserting
