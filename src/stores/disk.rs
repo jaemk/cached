@@ -1,6 +1,6 @@
 use crate::IOCached;
 use directories::BaseDirs;
-use instant::Duration;
+use web_time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sled::Db;

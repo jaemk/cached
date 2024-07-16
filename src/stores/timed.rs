@@ -1,4 +1,4 @@
-use instant::Instant;
+use web_time::Instant;
 use std::cmp::Eq;
 use std::hash::Hash;
 

@@ -248,7 +248,7 @@ pub mod macros;
 pub mod proc_macro;
 pub mod stores;
 #[doc(hidden)]
-pub use instant;
+pub use web_time;
 
 #[cfg(feature = "async")]
 #[doc(hidden)]

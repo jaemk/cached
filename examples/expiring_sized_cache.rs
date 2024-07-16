@@ -1,5 +1,5 @@
 use cached::stores::ExpiringSizedCache;
-use instant::Instant;
+use web_time::Instant;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
