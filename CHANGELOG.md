@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.53.0]
+## Added
+## Changed
+- Replace unmaintained `instant` crate with `web_time`
+## Removed
+
 ## [0.52.0 / [cached_proc_macro[0.22.0]] ]
 ## Added
 ## Changed
