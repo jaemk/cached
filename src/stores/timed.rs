@@ -1,6 +1,6 @@
-use web_time::Instant;
 use std::cmp::Eq;
 use std::hash::Hash;
+use web_time::Instant;
 
 #[cfg(feature = "ahash")]
 use hashbrown::{hash_map::Entry, HashMap};
