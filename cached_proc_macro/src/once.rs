@@ -80,7 +80,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let (cache_ty, cache_create) = match &args.time {
         None => (quote! { Option<#cache_value_ty> }, quote! { None }),
         Some(_) => (
-            quote! { Option<(::cached::instant::Instant, #cache_value_ty)> },
+            quote! { Option<(::cached::web_time::Instant, #cache_value_ty)> },
             quote! { None },
         ),
     };
@@ -262,14 +262,14 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {
-            let now = ::cached::instant::Instant::now();
+            let now = ::cached::web_time::Instant::now();
             #do_set_return_block
         }
         // Prime cached function
         #[doc = #prime_fn_indent_doc]
         #[allow(dead_code)]
         #visibility #prime_sig {
-            let now = ::cached::instant::Instant::now();
+            let now = ::cached::web_time::Instant::now();
             #prime_do_set_return_block
         }
     };

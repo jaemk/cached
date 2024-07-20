@@ -1,7 +1,7 @@
 use std::cmp::Eq;
 use std::hash::Hash;
 
-use instant::Instant;
+use web_time::Instant;
 
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};

@@ -1,12 +1,12 @@
 use crate::IOCached;
 use directories::BaseDirs;
-use instant::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sled::Db;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::{path::PathBuf, time::SystemTime};
+use web_time::Duration;
 
 pub struct DiskCacheBuilder<K, V> {
     seconds: Option<u64>,
