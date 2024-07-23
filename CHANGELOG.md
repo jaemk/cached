@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.53.1 / [cached_proc_macro[0.23.0]]]
+## Added
+## Changed
+- Replace `instant` with `web_time` in proc macro, update cached_proc_macro version
+## Removed
+
 ## [0.53.0]
 ## Added
 ## Changed
