@@ -1,4 +1,5 @@
 use crate::IOCached;
+use redis::Commands;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Display;
@@ -217,7 +218,7 @@ where
         RedisCacheBuilder::new(prefix, seconds)
     }
 
-    fn generate_key(&self, key: &K) -> String {
+    fn generate_key(&self, key: impl Display) -> String {
         format!("{}{}{}", self.namespace, self.prefix, key)
     }
 
@@ -339,6 +340,19 @@ where
                 Ok(Some(v.value))
             }
         }
+    }
+
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        // `scan_match` takes `&mut self`, so we need two connection objects to scan and
+        // delete...?
+        let mut scan = self.pool.get()?;
+        let mut delete = self.pool.get()?;
+
+        for key in scan.scan_match::<_, String>(self.generate_key("*"))? {
+            delete.del(key)?;
+        }
+
+        Ok(())
     }
 
     fn cache_lifespan(&self) -> Option<u64> {
@@ -624,6 +638,15 @@ mod async_redis {
                     Ok(Some(v.value))
                 }
             }
+        }
+
+        async fn cache_clear(&self) -> Result<(), Self::Error> {
+            let mut conn = self.connection.clone();
+
+            // https://redis.io/commands/flushdb/
+            let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await?;
+
+            Ok(())
         }
 
         /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value
