@@ -290,47 +290,32 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
                 None => {
-                    let create = quote! {
+                    let mut create = quote! {
                         cached::DiskCache::new(#cache_name)
                     };
-                    let create = match time {
-                        None => create,
-                        Some(time) => {
-                            quote! {
-                                (#create).set_lifespan(#time)
-                            }
-                        }
+                    if let Some(time) = time {
+                        create = quote! {
+                            (#create).set_lifespan(#time)
+                        };
                     };
-                    let create = match time_refresh {
-                        None => create,
-                        Some(time_refresh) => {
-                            quote! {
-                                (#create).set_refresh(#time_refresh)
-                            }
-                        }
+                    if let Some(time_refresh) = time_refresh {
+                        create = quote! {
+                            (#create).set_refresh(#time_refresh)
+                        };
+                    }
+                    if let Some(sync_to_disk_on_cache_change) = sync_to_disk_on_cache_change {
+                        create = quote! {
+                            (#create).set_sync_to_disk_on_cache_change(#sync_to_disk_on_cache_change)
+                        };
                     };
-                    let create = match sync_to_disk_on_cache_change {
-                        None => create,
-                        Some(sync_to_disk_on_cache_change) => {
-                            quote! {
-                                (#create).set_sync_to_disk_on_cache_change(#sync_to_disk_on_cache_change)
-                            }
-                        }
+                    if let Some(connection_config) = connection_config {
+                        create = quote! {
+                            (#create).set_connection_config(#connection_config)
+                        };
                     };
-                    let create = match connection_config {
-                        None => create,
-                        Some(connection_config) => {
-                            quote! {
-                                (#create).set_connection_config(#connection_config)
-                            }
-                        }
-                    };
-                    let create = match args.disk_dir {
-                        None => create,
-                        Some(disk_dir) => {
-                            quote! { (#create).set_disk_directory(#disk_dir) }
-                        }
-                    };
+                    if let Some(disk_dir) = args.disk_dir {
+                        create = quote! { (#create).set_disk_directory(#disk_dir) };
+                    }
                     quote! { (#create).build().expect("error constructing DiskCache in #[io_cached] macro") }
                 }
             };
@@ -523,6 +508,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #ty
         // No cache function (origin of the cached function)
         #[doc = #no_cache_fn_indent_doc]
+        #(#attributes)*
         #visibility #function_no_cache
         // Cached function
         #(#attributes)*
