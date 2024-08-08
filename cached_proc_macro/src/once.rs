@@ -48,8 +48,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let inputs = signature.inputs.clone();
     let output = signature.output.clone();
     let asyncness = signature.asyncness;
+    let generics = signature.generics.clone();
 
-    // pull out the names and types of the function inputs
     let input_names = get_input_names(&inputs);
 
     // pull out the output type
@@ -89,13 +89,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
         (false, false) => {
             let set_cache_block = if args.time.is_some() {
-                quote! {
-                    *cached = Some((now, result.clone()));
-                }
+                quote! { *cached = Some((now, result.clone())); }
             } else {
-                quote! {
-                    *cached = Some(result.clone());
-                }
+                quote! { *cached = Some(result.clone()); }
             };
 
             let return_cache_block = if args.with_cached_flag {
@@ -159,8 +155,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         #set_cache_block
         result
     };
+
+    let no_cache_fn_ident = Ident::new(&format!("{}_no_cache", &fn_ident), fn_ident.span());
+
     let r_lock;
     let w_lock;
+    let function_no_cache;
     let function_call;
     let ty;
     if asyncness.is_some() {
@@ -174,10 +174,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             let mut cached = #cache_ident.read().await;
         };
 
+        function_no_cache = quote! {
+            async fn #no_cache_fn_ident #generics (#inputs) #output #body
+        };
+
         function_call = quote! {
-            // run the function and cache the result
-            async fn inner(#inputs) #output #body;
-            let result = inner(#(#input_names),*).await;
+            let result = #no_cache_fn_ident(#(#input_names),*).await;
         };
 
         ty = quote! {
@@ -194,10 +196,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             let mut cached = #cache_ident.read().unwrap();
         };
 
+        function_no_cache = quote! {
+            fn #no_cache_fn_ident #generics (#inputs) #output #body
+        };
+
         function_call = quote! {
-            // run the function and cache the result
-            fn inner(#inputs) #output #body;
-            let result = inner(#(#input_names),*);
+            let result = #no_cache_fn_ident(#(#input_names),*);
         };
 
         ty = quote! {
@@ -206,7 +210,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     let prime_do_set_return_block = quote! {
+        // try to get a lock first
         #w_lock
+        // run the function and cache the result
         #function_call
         #set_cache_and_return
     };
@@ -247,6 +253,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make cached static, cached function and prime cached function doc comments
     let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
+    let no_cache_fn_indent_doc = format!("Origin of the cached function [`{}`].", fn_ident);
     let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
     let cache_fn_doc_extra = format!(
         "This is a cached function that uses the [`{}`] cached static.",
@@ -259,6 +266,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         // Cached static
         #[doc = #cache_ident_doc]
         #ty
+        // No cache function (origin of the cached function)
+        #[doc = #no_cache_fn_indent_doc]
+        #visibility #function_no_cache
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {
@@ -268,6 +278,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         // Prime cached function
         #[doc = #prime_fn_indent_doc]
         #[allow(dead_code)]
+        #(#attributes)*
         #visibility #prime_sig {
             let now = ::cached::web_time::Instant::now();
             #prime_do_set_return_block

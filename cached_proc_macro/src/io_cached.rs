@@ -68,9 +68,9 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let inputs = signature.inputs.clone();
     let output = signature.output.clone();
     let asyncness = signature.asyncness;
+    let generics = signature.generics.clone();
 
     let input_tys = get_input_types(&inputs);
-
     let input_names = get_input_names(&inputs);
 
     // pull out the output type
@@ -407,25 +407,12 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (set_cache_block, return_cache_block)
     };
 
-    let do_set_return_block = if asyncness.is_some() {
-        quote! {
-            // run the function and cache the result
-            async fn inner(#inputs) #output #body;
-            let result = inner(#(#input_names),*).await;
-            let cache = &#cache_ident.get_or_init(init).await;
-            #set_cache_block
-            result
-        }
-    } else {
-        quote! {
-            // run the function and cache the result
-            fn inner(#inputs) #output #body;
-            let result = inner(#(#input_names),*);
-            let cache = &#cache_ident;
-            #set_cache_block
-            result
-        }
+    let set_cache_and_return = quote! {
+        #set_cache_block
+        result
     };
+
+    let no_cache_fn_ident = Ident::new(&format!("{}_no_cache", &fn_ident), fn_ident.span());
 
     let signature_no_muts = get_mut_signature(signature);
 
@@ -436,22 +423,13 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make cached static, cached function and prime cached function doc comments
     let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
+    let no_cache_fn_indent_doc = format!("Origin of the cached function [`{}`].", fn_ident);
     let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
     let cache_fn_doc_extra = format!(
         "This is a cached function that uses the [`{}`] cached static.",
         cache_ident
     );
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
-
-    let async_trait = if asyncness.is_some() && !args.disk {
-        quote! {
-            use cached::IOCachedAsync;
-        }
-    } else {
-        quote! {
-            use cached::IOCached;
-        }
-    };
 
     let async_cache_get_return = if asyncness.is_some() && !args.disk {
         quote! {
@@ -466,62 +444,107 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
     };
-    // put it all together
-    let expanded = if asyncness.is_some() {
-        quote! {
-            // Cached static
-            #[doc = #cache_ident_doc]
+
+    let use_trait = if asyncness.is_some() && !args.disk {
+        quote! { use cached::IOCachedAsync; }
+    } else {
+        quote! { use cached::IOCached; }
+    };
+
+    let init;
+    let function_no_cache;
+    let function_call;
+    let ty;
+    let logic;
+    if asyncness.is_some() {
+        init = quote! {
+            let init = || async { #cache_create };
+        };
+
+        function_no_cache = quote! {
+            async fn #no_cache_fn_ident #generics (#inputs) #output #body
+        };
+
+        function_call = quote! {
+            let result = #no_cache_fn_ident(#(#input_names),*).await;
+        };
+
+        ty = quote! {
             #visibility static #cache_ident: ::cached::async_sync::OnceCell<#cache_ty> = ::cached::async_sync::OnceCell::const_new();
-            // Cached function
-            #(#attributes)*
-            #visibility #signature_no_muts {
-                let init = || async { #cache_create };
-                #async_trait
-                let key = #key_convert_block;
-                {
-                    // check if the result is cached
-                    let cache = &#cache_ident.get_or_init(init).await;
-                    #async_cache_get_return
-                }
-                #do_set_return_block
+        };
+
+        logic = quote! {
+            let cache = &#cache_ident.get_or_init(init).await;
+            #async_cache_get_return
+        };
+    } else {
+        init = quote! {};
+
+        function_no_cache = quote! {
+            fn #no_cache_fn_ident #generics (#inputs) #output #body
+        };
+
+        function_call = quote! {
+            let result = #no_cache_fn_ident(#(#input_names),*);
+        };
+
+        ty = quote! {
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<#cache_ty> = ::cached::once_cell::sync::Lazy::new(|| #cache_create);
+        };
+
+        logic = quote! {
+            let cache = &#cache_ident;
+            if let Some(result) = cache.cache_get(&key).map_err(#map_error)? {
+                #return_cache_block
             }
-            // Prime cached function
-            #[doc = #prime_fn_indent_doc]
-            #[allow(dead_code)]
-            #visibility #prime_sig {
-                #async_trait
-                let init = || async { #cache_create };
-                let key = #key_convert_block;
-                #do_set_return_block
-            }
+        };
+    }
+
+    let do_set_return_block = if asyncness.is_some() {
+        quote! {
+            // run the function and cache the result
+            #function_call
+            let cache = &#cache_ident.get_or_init(init).await;
+            #set_cache_and_return
         }
     } else {
         quote! {
-            // Cached static
-            #[doc = #cache_ident_doc]
-            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<#cache_ty> = ::cached::once_cell::sync::Lazy::new(|| #cache_create);
-            // Cached function
-            #(#attributes)*
-            #visibility #signature_no_muts {
-                use cached::IOCached;
-                let key = #key_convert_block;
-                {
-                    // check if the result is cached
-                    let cache = &#cache_ident;
-                    if let Some(result) = cache.cache_get(&key).map_err(#map_error)? {
-                        #return_cache_block
-                    }
-                }
-                #do_set_return_block
+            // run the function and cache the result
+            #function_call
+            let cache = &#cache_ident;
+            #set_cache_and_return
+        }
+    };
+
+    // put it all together
+    let expanded = quote! {
+        // Cached static
+        #[doc = #cache_ident_doc]
+        #ty
+        // No cache function (origin of the cached function)
+        #[doc = #no_cache_fn_indent_doc]
+        #visibility #function_no_cache
+        // Cached function
+        #(#attributes)*
+        #visibility #signature_no_muts {
+            #init
+            #use_trait
+            let key = #key_convert_block;
+            {
+                // check if the result is cached
+                #logic
             }
-            // Prime cached function
-            #[doc = #prime_fn_indent_doc]
-            #[allow(dead_code)]
-            #visibility #prime_sig {
-                use cached::IOCached;
-                let key = #key_convert_block;
-                #do_set_return_block
-            }
+            #do_set_return_block
+        }
+        // Prime cached function
+        #[doc = #prime_fn_indent_doc]
+        #[allow(dead_code)]
+        #(#attributes)*
+        #visibility #prime_sig {
+            #use_trait
+            #init
+            let key = #key_convert_block;
+            #do_set_return_block
         }
     };
 
