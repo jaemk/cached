@@ -314,6 +314,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #ty
         // No cache function (origin of the cached function)
         #[doc = #no_cache_fn_indent_doc]
+        #(#attributes)*
         #visibility #function_no_cache
         // Cached function
         #(#attributes)*

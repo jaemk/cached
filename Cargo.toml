@@ -23,14 +23,28 @@ async = ["futures", "tokio", "async-trait"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_connection_manager = ["redis_store", "redis/connection-manager"]
-redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
-redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_async_std = [
+    "redis_store",
+    "async",
+    "redis/aio",
+    "redis/async-std-comp",
+    "redis/tls",
+    "redis/async-std-tls-comp",
+]
+redis_tokio = [
+    "redis_store",
+    "async",
+    "redis/aio",
+    "redis/tokio-comp",
+    "redis/tls",
+    "redis/tokio-native-tls-comp",
+]
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = []
 
 [dependencies.cached_proc_macro]
-version = "0.22.0"
+version = "0.23.0"
 path = "cached_proc_macro"
 optional = true
 
@@ -65,7 +79,7 @@ version = "0.1"
 optional = true
 
 [dependencies.redis]
-version = "0.25"
+version = "0.26"
 features = ["r2d2"]
 optional = true
 
@@ -104,7 +118,7 @@ version = "^1.1.0"
 
 [dev-dependencies]
 copy_dir = "0.1.3"
-googletest = "0.11.0"
+googletest = "0.12.0"
 tempfile = "3.10.1"
 
 [dev-dependencies.async-std]
