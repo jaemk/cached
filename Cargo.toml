@@ -9,7 +9,7 @@ readme = "README.md"
 categories = ["caching", "data-structures"]
 keywords = ["cache", "memoize", "lru", "redis", "disk"]
 license = "MIT"
-edition = "2018"
+edition = "2021"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -17,16 +17,30 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["proc_macro", "ahash"]
-proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
+proc_macro = ["dep:cached_proc_macro", "dep:cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
-async = ["futures", "tokio", "async-trait"]
+async = ["dep:futures", "dep:tokio", "dep:async-trait"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
-redis_store = ["redis", "r2d2", "serde", "serde_json"]
+redis_store = ["dep:redis", "dep:r2d2", "dep:serde", "dep:serde_json"]
 redis_connection_manager = ["redis_store", "redis/connection-manager"]
-redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
-redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_async_std = [
+    "redis_store",
+    "async",
+    "redis/aio",
+    "redis/async-std-comp",
+    "redis/tls",
+    "redis/async-std-tls-comp",
+]
+redis_tokio = [
+    "redis_store",
+    "async",
+    "redis/aio",
+    "redis/tokio-comp",
+    "redis/tls",
+    "redis/tokio-native-tls-comp",
+]
 redis_ahash = ["redis_store", "redis/ahash"]
-disk_store = ["sled", "serde", "rmp-serde", "directories"]
+disk_store = ["dep:sled", "dep:serde", "dep:rmp-serde", "dep:directories"]
 wasm = []
 
 [dependencies.cached_proc_macro]
@@ -139,3 +153,7 @@ required-features = ["async", "proc_macro"]
 [[example]]
 name = "expiring_sized_cache"
 required-features = ["async_tokio_rt_multi_thread"]
+
+[[example]]
+name = "disk"
+required-features = ["disk_store"]
