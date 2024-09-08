@@ -2,7 +2,7 @@ use cached::proc_macro::cached;
 use cached::Return;
 use cached::{Cached, SizedCache, UnboundCache};
 use std::cmp::Eq;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::hash::Hash;
 use std::thread::{sleep, spawn};
 use std::time::Duration;
@@ -99,6 +99,18 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     }
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
         self.store.entry(k).or_insert_with(f)
+    }
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        k: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        let v = match self.store.entry(k) {
+            Entry::Occupied(occupied) => occupied.into_mut(),
+            Entry::Vacant(vacant) => vacant.insert(f()?),
+        };
+
+        Ok(v)
     }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         self.store.insert(k, v)

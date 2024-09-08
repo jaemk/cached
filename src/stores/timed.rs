@@ -191,6 +191,33 @@ impl<K: Hash + Eq, V> Cached<K, V> for TimedCache<K, V> {
         }
     }
 
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        key: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        match self.store.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                if occupied.get().0.elapsed().as_secs() < self.seconds {
+                    if self.refresh {
+                        occupied.get_mut().0 = Instant::now();
+                    }
+                    self.hits += 1;
+                } else {
+                    self.misses += 1;
+                    let val = f()?;
+                    occupied.insert((Instant::now(), val));
+                }
+                Ok(&mut occupied.into_mut().1)
+            }
+            Entry::Vacant(vacant) => {
+                self.misses += 1;
+                let val = f()?;
+                Ok(&mut vacant.insert((Instant::now(), val)).1)
+            }
+        }
+    }
+
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let stamped = (Instant::now(), val);
         self.store.insert(key, stamped).and_then(|(instant, v)| {
@@ -539,5 +566,25 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 42), &42);
 
         assert_eq!(c.cache_misses(), Some(7));
+
+        c.cache_reset();
+        fn _try_get(n: usize) -> Result<usize, String> {
+            if n < 10 {
+                Ok(n)
+            } else {
+                Err("dead".to_string())
+            }
+        }
+
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        assert!(res.is_err());
+
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        assert_eq!(res.unwrap(), &1);
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        assert_eq!(res.unwrap(), &1);
+        sleep(Duration::new(2, 0));
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        assert_eq!(res.unwrap(), &5);
     }
 }

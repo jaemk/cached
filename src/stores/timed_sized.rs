@@ -212,6 +212,28 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for TimedSizedCache<K, V> {
         &mut stamped.1
     }
 
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        key: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        let setter = || Ok((Instant::now(), f()?));
+        let max_seconds = self.seconds;
+        let (was_present, was_valid, stamped) =
+            self.store.try_get_or_set_with_if(key, setter, |stamped| {
+                stamped.0.elapsed().as_secs() < max_seconds
+            })?;
+        if was_present && was_valid {
+            if self.refresh {
+                stamped.0 = Instant::now();
+            }
+            self.hits += 1;
+        } else {
+            self.misses += 1;
+        }
+        Ok(&mut stamped.1)
+    }
+
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let stamped = self.store.cache_set(key, (Instant::now(), val));
         stamped.and_then(|(instant, v)| {
@@ -634,6 +656,27 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(6, || 42), &6);
 
         assert_eq!(c.cache_misses(), Some(11));
+
+        c.cache_reset();
+        fn _try_get(n: usize) -> Result<usize, String> {
+            if n < 10 {
+                Ok(n)
+            } else {
+                Err("dead".to_string())
+            }
+        }
+
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        assert!(res.is_err());
+        assert!(c.key_order().next().is_none());
+
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        assert_eq!(res.unwrap(), &1);
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        assert_eq!(res.unwrap(), &1);
+        sleep(Duration::new(2, 0));
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        assert_eq!(res.unwrap(), &5);
     }
 
     #[cfg(feature = "async")]
