@@ -86,7 +86,7 @@ async fn only_cached_once_per_second(s: String) -> Vec<String> {
 /// _one_ call will be "executed" and all others will be synchronized
 /// to return the cached result of the one call instead of all
 /// concurrently un-cached tasks executing and writing concurrently.
-#[once(time = 2, sync_writes = true)]
+#[once(time = 2, sync_writes = "default")]
 async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }

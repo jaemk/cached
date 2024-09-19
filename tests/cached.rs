@@ -10,7 +10,7 @@ use cached::{
 };
 use serial_test::serial;
 use std::thread::{self, sleep};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 cached! {
     UNBOUND_FIB;
@@ -896,6 +896,49 @@ async fn test_cached_sync_writes_a() {
     let a = a.await.unwrap();
     assert_eq!(a, b.await.unwrap());
     assert_eq!(a, c.await.unwrap());
+}
+
+#[cached(time = 2, sync_writes_by_key = true, key = "u32", convert = "{ 1 }")]
+fn cached_sync_writes_by_key(s: String) -> Vec<String> {
+    sleep(Duration::new(1, 0));
+    vec![s]
+}
+
+#[test]
+fn test_cached_sync_writes_by_key() {
+    let a = std::thread::spawn(|| cached_sync_writes_by_key("a".to_string()));
+    let b = std::thread::spawn(|| cached_sync_writes_by_key("b".to_string()));
+    let c = std::thread::spawn(|| cached_sync_writes_by_key("c".to_string()));
+    let start = Instant::now();
+    let a = a.join().unwrap();
+    let b = b.join().unwrap();
+    let c = c.join().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(feature = "async")]
+#[cached(
+    time = 5,
+    sync_writes_by_key = true,
+    key = "String",
+    convert = r#"{ format!("{}", s) }"#
+)]
+async fn cached_sync_writes_by_key_a(s: String) -> Vec<String> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    vec![s]
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn test_cached_sync_writes_by_key_a() {
+    let a = tokio::spawn(cached_sync_writes_by_key_a("a".to_string()));
+    let b = tokio::spawn(cached_sync_writes_by_key_a("b".to_string()));
+    let c = tokio::spawn(cached_sync_writes_by_key_a("c".to_string()));
+    let start = Instant::now();
+    a.await.unwrap();
+    b.await.unwrap();
+    c.await.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[cfg(feature = "async")]

@@ -29,6 +29,8 @@ struct MacroArgs {
     #[darling(default)]
     sync_writes: bool,
     #[darling(default)]
+    sync_writes_by_key: bool,
+    #[darling(default)]
     with_cached_flag: bool,
     #[darling(default)]
     ty: Option<String>,
@@ -91,6 +93,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let cache_ident = match args.name {
         Some(ref name) => Ident::new(name, fn_ident.span()),
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
+    };
+    let cache_ident_key = match args.name {
+        Some(ref name) => Ident::new(&format!("{}_key", name), fn_ident.span()),
+        None => Ident::new(
+            &format!("{}_key", fn_ident.to_string().to_uppercase()),
+            fn_ident.span(),
+        ),
     };
 
     let (cache_key_ty, key_convert_block) =
@@ -194,6 +203,14 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         panic!("the result_fallback and sync_writes attributes are mutually exclusive");
     }
 
+    if args.result_fallback && args.sync_writes_by_key {
+        panic!("the result_fallback and sync_writes_by_key attributes are mutually exclusive");
+    }
+
+    if args.sync_writes && args.sync_writes_by_key {
+        panic!("the sync_writes and sync_writes_by_key attributes are mutually exclusive");
+    }
+
     let set_cache_and_return = quote! {
         #set_cache_block
         result
@@ -202,12 +219,23 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let no_cache_fn_ident = Ident::new(&format!("{}_no_cache", &fn_ident), fn_ident.span());
 
     let lock;
+    let lock_key;
     let function_no_cache;
     let function_call;
     let ty;
     if asyncness.is_some() {
         lock = quote! {
             let mut cache = #cache_ident.lock().await;
+        };
+
+        lock_key = quote! {
+            let mut locks = #cache_ident_key.lock().await;
+            let lock = locks
+                .entry(key.clone())
+                .or_insert_with(|| std::sync::Arc::new(::cached::async_sync::Mutex::new(#cache_create)))
+                .clone();
+            drop(locks);
+            let mut cache = lock.lock().await;
         };
 
         function_no_cache = quote! {
@@ -220,10 +248,18 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
         ty = quote! {
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::Mutex::new(#cache_create));
+            #visibility static #cache_ident_key: ::cached::once_cell::sync::Lazy<::cached::async_sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<::cached::async_sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::Mutex::new(std::collections::HashMap::new()));
         };
     } else {
         lock = quote! {
             let mut cache = #cache_ident.lock().unwrap();
+        };
+
+        lock_key = quote! {
+            let mut locks = #cache_ident_key.lock().unwrap();
+            let lock = locks.entry(key.clone()).or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(#cache_create))).clone();
+            drop(locks);
+            let mut cache = lock.lock().unwrap();
         };
 
         function_no_cache = quote! {
@@ -236,6 +272,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
         ty = quote! {
             #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
+            #visibility static #cache_ident_key: ::cached::once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<std::sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
         };
     }
 
@@ -247,7 +284,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #set_cache_and_return
     };
 
-    let do_set_return_block = if args.sync_writes {
+    let do_set_return_block = if args.sync_writes_by_key {
+        quote! {
+            #lock_key
+            if let Some(result) = cache.cache_get(&key) {
+                #return_cache_block
+            }
+            #function_call
+            #set_cache_and_return
+        }
+    } else if args.sync_writes {
         quote! {
             #lock
             if let Some(result) = cache.cache_get(&key) {
