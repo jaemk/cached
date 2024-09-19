@@ -848,7 +848,7 @@ async fn test_only_cached_option_once_per_second_a() {
 /// to return the cached result of the one call instead of all
 /// concurrently un-cached tasks executing and writing concurrently.
 #[cfg(feature = "async")]
-#[once(time = 2, sync_writes = true)]
+#[once(time = 2, sync_writes = "default")]
 async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }
@@ -862,7 +862,7 @@ async fn test_only_cached_once_per_second_sync_writes() {
     assert_eq!(a.await.unwrap(), b.await.unwrap());
 }
 
-#[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
+#[cached(time = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
 fn cached_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }
@@ -881,7 +881,7 @@ fn test_cached_sync_writes() {
 }
 
 #[cfg(feature = "async")]
-#[cached(time = 2, sync_writes = true, key = "u32", convert = "{ 1 }")]
+#[cached(time = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
 async fn cached_sync_writes_a(s: String) -> Vec<String> {
     vec![s]
 }
@@ -898,7 +898,7 @@ async fn test_cached_sync_writes_a() {
     assert_eq!(a, c.await.unwrap());
 }
 
-#[cached(time = 2, sync_writes_by_key = true, key = "u32", convert = "{ 1 }")]
+#[cached(time = 2, sync_writes = "by_key", key = "u32", convert = "{ 1 }")]
 fn cached_sync_writes_by_key(s: String) -> Vec<String> {
     sleep(Duration::new(1, 0));
     vec![s]
@@ -919,7 +919,7 @@ fn test_cached_sync_writes_by_key() {
 #[cfg(feature = "async")]
 #[cached(
     time = 5,
-    sync_writes_by_key = true,
+    sync_writes = "by_key",
     key = "String",
     convert = r#"{ format!("{}", s) }"#
 )]
@@ -942,7 +942,7 @@ async fn test_cached_sync_writes_by_key_a() {
 }
 
 #[cfg(feature = "async")]
-#[once(sync_writes = true)]
+#[once(sync_writes = "default")]
 async fn once_sync_writes_a(s: &tokio::sync::Mutex<String>) -> String {
     let mut guard = s.lock().await;
     let results: String = (*guard).clone().to_string();

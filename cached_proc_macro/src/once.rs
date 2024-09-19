@@ -6,6 +6,13 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, Ident, ItemFn, ReturnType};
 
+#[derive(Debug, Default, FromMeta)]
+enum SyncWriteMode {
+    #[default]
+    Disabled,
+    Default,
+}
+
 #[derive(FromMeta)]
 struct OnceMacroArgs {
     #[darling(default)]
@@ -13,7 +20,7 @@ struct OnceMacroArgs {
     #[darling(default)]
     time: Option<u64>,
     #[darling(default)]
-    sync_writes: bool,
+    sync_writes: SyncWriteMode,
     #[darling(default)]
     result: bool,
     #[darling(default)]
@@ -220,8 +227,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let do_set_return_block = if args.sync_writes {
-        quote! {
+    let do_set_return_block = match args.sync_writes {
+        SyncWriteMode::Default => quote! {
             #r_lock_return_cache_block
             #w_lock
             if let Some(result) = &*cached {
@@ -229,14 +236,13 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             #function_call
             #set_cache_and_return
-        }
-    } else {
-        quote! {
+        },
+        SyncWriteMode::Disabled => quote! {
             #r_lock_return_cache_block
             #function_call
             #w_lock
             #set_cache_and_return
-        }
+        },
     };
 
     let signature_no_muts = get_mut_signature(signature);
