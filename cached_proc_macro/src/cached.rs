@@ -10,7 +10,6 @@ use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Type};
 #[derive(Debug, Default, FromMeta, Eq, PartialEq)]
 enum SyncWriteMode {
     #[default]
-    Disabled,
     Default,
     ByKey,
 }
@@ -36,7 +35,7 @@ struct MacroArgs {
     #[darling(default)]
     option: bool,
     #[darling(default)]
-    sync_writes: SyncWriteMode,
+    sync_writes: Option<SyncWriteMode>,
     #[darling(default)]
     with_cached_flag: bool,
     #[darling(default)]
@@ -199,7 +198,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("the result and option attributes are mutually exclusive"),
     };
 
-    if args.result_fallback && args.sync_writes != SyncWriteMode::Disabled {
+    if args.result_fallback && args.sync_writes.is_some() {
         panic!("result_fallback and sync_writes are mutually exclusive");
     }
 
@@ -216,7 +215,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let ty;
     if asyncness.is_some() {
         lock = match args.sync_writes {
-            SyncWriteMode::ByKey => quote! {
+            Some(SyncWriteMode::ByKey) => quote! {
                 let mut locks = #cache_ident.lock().await;
                 let lock = locks
                     .entry(key.clone())
@@ -239,7 +238,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
         ty = match args.sync_writes {
-            SyncWriteMode::ByKey => quote! {
+            Some(SyncWriteMode::ByKey) => quote! {
                 #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<::cached::async_sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::Mutex::new(std::collections::HashMap::new()));
             },
             _ => quote! {
@@ -248,7 +247,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         };
     } else {
         lock = match args.sync_writes {
-            SyncWriteMode::ByKey => quote! {
+            Some(SyncWriteMode::ByKey) => quote! {
                 let mut locks = #cache_ident.lock().unwrap();
                 let lock = locks.entry(key.clone()).or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(#cache_create))).clone();
                 drop(locks);
@@ -268,7 +267,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
         ty = match args.sync_writes {
-            SyncWriteMode::ByKey => quote! {
+            Some(SyncWriteMode::ByKey) => quote! {
                 #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<std::sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
             },
             _ => quote! {
@@ -285,7 +284,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #set_cache_and_return
     };
 
-    let do_set_return_block = if args.sync_writes != SyncWriteMode::Disabled {
+    let do_set_return_block = if args.sync_writes.is_some() {
         quote! {
             #lock
             if let Some(result) = cache.cache_get(&key) {
