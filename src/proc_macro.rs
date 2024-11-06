@@ -115,7 +115,7 @@ use cached::proc_macro::cached;
 /// When called concurrently, duplicate argument-calls will be
 /// synchronized so as to only run once - the remaining concurrent
 /// calls return a cached value.
-#[cached(size=1, option = true, sync_writes = true)]
+#[cached(size=1, option = true, sync_writes = "default")]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -233,7 +233,7 @@ use cached::proc_macro::once;
 /// When no (or expired) cache, concurrent calls
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
-#[once(time=10, option = true, sync_writes = true)]
+#[once(time=10, option = true, sync_writes = "default")]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())

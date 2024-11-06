@@ -14,6 +14,7 @@ use proc_macro::TokenStream;
 /// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCache` or `TimedSizedCache`.
 /// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
 /// - `sync_writes`: (optional, bool) specify whether to synchronize the execution of writing of uncached values.
+/// - `sync_writes_by_key`: (optional, bool) specify whether to synchronize the execution of writing of uncached values by key.
 /// - `ty`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
 ///   specified, defaults to `UnboundCache`. When `size` is specified, defaults to `SizedCache`.
 ///   When `time` is specified, defaults to `TimedCached`.
