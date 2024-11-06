@@ -295,8 +295,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         }
     }
 
-    #[allow(dead_code)]
-    fn try_get_or_set_with_if<E, F: FnOnce() -> Result<V, E>, FC: FnOnce(&V) -> bool>(
+    pub(super) fn try_get_or_set_with_if<E, F: FnOnce() -> Result<V, E>, FC: FnOnce(&V) -> bool>(
         &mut self,
         key: K,
         f: F,
@@ -454,6 +453,15 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for SizedCache<K, V> {
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         let (_, _, v) = self.get_or_set_with_if(key, f, |_| true);
         v
+    }
+
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        k: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        let (_, _, v) = self.try_get_or_set_with_if(k, f, |_| true)?;
+        Ok(v)
     }
 
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
@@ -759,6 +767,23 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
 
         assert_eq!(c.cache_misses(), Some(8));
+
+        c.cache_reset();
+        fn _try_get(n: usize) -> Result<usize, String> {
+            if n < 10 {
+                Ok(n)
+            } else {
+                Err("dead".to_string())
+            }
+        }
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        assert!(res.is_err());
+        assert!(c.key_order().next().is_none());
+
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        assert_eq!(res.unwrap(), &1);
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        assert_eq!(res.unwrap(), &1);
     }
 
     #[cfg(feature = "async")]

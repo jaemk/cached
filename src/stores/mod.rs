@@ -1,6 +1,5 @@
 use crate::Cached;
 use std::cmp::Eq;
-#[cfg(feature = "async")]
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -72,6 +71,18 @@ where
     }
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         self.entry(key).or_insert_with(f)
+    }
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        k: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        let v = match self.entry(k) {
+            Entry::Occupied(occupied) => occupied.into_mut(),
+            Entry::Vacant(vacant) => vacant.insert(f()?),
+        };
+
+        Ok(v)
     }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where

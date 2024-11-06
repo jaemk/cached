@@ -120,6 +120,23 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
             }
         }
     }
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        k: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        match self.store.entry(k) {
+            Entry::Occupied(occupied) => {
+                self.hits += 1;
+                Ok(occupied.into_mut())
+            }
+
+            Entry::Vacant(vacant) => {
+                self.misses += 1;
+                Ok(vacant.insert(f()?))
+            }
+        }
+    }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
@@ -345,5 +362,21 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
 
         assert_eq!(c.cache_misses(), Some(6));
+
+        c.cache_reset();
+        fn _try_get(n: usize) -> Result<usize, String> {
+            if n < 10 {
+                Ok(n)
+            } else {
+                Err("dead".to_string())
+            }
+        }
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        assert!(res.is_err());
+
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        assert_eq!(res.unwrap(), &1);
+        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        assert_eq!(res.unwrap(), &1);
     }
 }
