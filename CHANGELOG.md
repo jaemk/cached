@@ -5,6 +5,14 @@
 ## Changed
 ## Removed
 
+## [0.54.0]
+## Added
+- Add `Cached::cache_try_get_or_set_with` for parity with async trait
+## Changed
+- Remove unnecessary string clones in redis cache store
+- Update cargo default features manifest key
+## Removed
+
 ## [0.53.1 / [cached_proc_macro[0.23.0]]]
 ## Added
 ## Changed
