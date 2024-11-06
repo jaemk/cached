@@ -446,10 +446,12 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let async_trait = if asyncness.is_some() && !args.disk {
         quote! {
             use cached::IOCachedAsync;
+            use cached::proc_macro::__private::ToFullyOwned as _;
         }
     } else {
         quote! {
             use cached::IOCached;
+            use cached::proc_macro::__private::ToFullyOwned as _;
         }
     };
 
@@ -475,6 +477,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
+                use cached::proc_macro::__private::ToFullyOwned as _;
                 let init = || async { #cache_create };
                 #async_trait
                 let key = #key_convert_block;
@@ -504,6 +507,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #(#attributes)*
             #visibility #signature_no_muts {
                 use cached::IOCached;
+                use cached::proc_macro::__private::ToFullyOwned as _;
                 let key = #key_convert_block;
                 {
                     // check if the result is cached
@@ -519,6 +523,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #[allow(dead_code)]
             #visibility #prime_sig {
                 use cached::IOCached;
+                use cached::proc_macro::__private::ToFullyOwned as _;
                 let key = #key_convert_block;
                 #do_set_return_block
             }
