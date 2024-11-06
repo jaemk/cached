@@ -116,6 +116,21 @@ impl<K: Hash + Eq + Clone, V: CanExpire> Cached<K, V> for ExpiringValueCache<K, 
         }
         v
     }
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        k: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        let (was_present, was_valid, v) = self
+            .store
+            .try_get_or_set_with_if(k, f, |v| !v.is_expired())?;
+        if was_present && was_valid {
+            self.hits += 1;
+        } else {
+            self.misses += 1;
+        }
+        Ok(v)
+    }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         self.store.cache_set(k, v)
     }
@@ -276,6 +291,29 @@ mod tests {
         assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
         assert_eq!(c.cache_hits(), Some(0));
         assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn expiring_value_cache_try_get_or_set_with_missing() {
+        let mut c: ExpiringValueCache<u8, ExpiredU8> = ExpiringValueCache::with_size(3);
+
+        assert_eq!(
+            c.cache_try_get_or_set_with(1, || Ok::<_, ()>(1)),
+            Ok(&mut 1)
+        );
+        assert_eq!(c.cache_hits(), Some(0));
+        assert_eq!(c.cache_misses(), Some(1));
+
+        assert_eq!(c.cache_try_get_or_set_with(1, || Err(())), Ok(&mut 1));
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(1));
+
+        assert_eq!(
+            c.cache_try_get_or_set_with(2, || Ok::<_, ()>(2)),
+            Ok(&mut 2)
+        );
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(2));
     }
 
     #[test]
