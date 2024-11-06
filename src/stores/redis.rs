@@ -269,7 +269,7 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(key);
 
-        pipe.get(key.clone());
+        pipe.get(&key);
         if self.refresh {
             pipe.expire(key, self.seconds as i64).ignore();
         }
@@ -295,7 +295,7 @@ where
         let key = self.generate_key(&key);
 
         let val = CachedRedisValue::new(val);
-        pipe.get(key.clone());
+        pipe.get(&key);
         pipe.set_ex::<String, String>(
             key,
             serde_json::to_string(&val)
@@ -324,7 +324,7 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(key);
 
-        pipe.get(key.clone());
+        pipe.get(&key);
         pipe.del::<String>(key).ignore();
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
         match res.0 {
@@ -553,7 +553,7 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(key);
 
-            pipe.get(key.clone());
+            pipe.get(&key);
             if self.refresh {
                 pipe.expire(key, self.seconds as i64).ignore();
             }
@@ -579,7 +579,7 @@ mod async_redis {
             let key = self.generate_key(&key);
 
             let val = CachedRedisValue::new(val);
-            pipe.get(key.clone());
+            pipe.get(&key);
             pipe.set_ex::<String, String>(
                 key,
                 serde_json::to_string(&val)
@@ -609,7 +609,7 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(key);
 
-            pipe.get(key.clone());
+            pipe.get(&key);
             pipe.del::<String>(key).ignore();
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
