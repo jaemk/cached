@@ -7,8 +7,8 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies.cached]
-path ="../.."
-default_features = false
+path = "../.."
+default-features = false
 features = ["proc_macro", "wasm", "async"]
 
 [dependencies.chrono]
