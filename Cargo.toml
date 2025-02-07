@@ -65,7 +65,7 @@ version = "0.1"
 optional = true
 
 [dependencies.redis]
-version = "0.27"
+version = "0.28"
 features = ["r2d2"]
 optional = true
 
