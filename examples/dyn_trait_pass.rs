@@ -1,6 +1,7 @@
 use cached::proc_macro::cached;
 use thiserror::Error;
 
+#[allow(dead_code)]
 #[derive(Error, Debug, PartialEq, Clone)]
 enum ProcessorError {
     #[error("error wile processing task :{0}")]
@@ -38,7 +39,7 @@ fn cached_execute(
     Ok(result)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>>{
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mean_delay = 100u128;
 
     let custom_processor = CustomProcessor {};
