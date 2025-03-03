@@ -5,7 +5,7 @@
 ## Changed
 ## Removed
 
-## [0.55.0]
+## [0.55.1 / [cached_proc_macro[0.24.0]]]
 ## Added
 - Add `sync_writes = "by_key"` support to `#[cached]
 ## Changed
