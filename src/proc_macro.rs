@@ -233,7 +233,7 @@ use cached::proc_macro::once;
 /// When no (or expired) cache, concurrent calls
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
-#[once(time=10, option = true, sync_writes = "default")]
+#[once(time=10, option = true, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())

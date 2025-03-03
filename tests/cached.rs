@@ -328,6 +328,7 @@ cached_control! {
     Key = { input.to_owned() };
     PostGet(cached_val) = return Ok(cached_val.clone());
     PostExec(body_result) = {
+        #[allow(clippy::question_mark)]
         match body_result {
             Ok(v) => v,
             Err(e) => return Err(e),
@@ -848,7 +849,7 @@ async fn test_only_cached_option_once_per_second_a() {
 /// to return the cached result of the one call instead of all
 /// concurrently un-cached tasks executing and writing concurrently.
 #[cfg(feature = "async")]
-#[once(time = 2, sync_writes = "default")]
+#[once(time = 2, sync_writes)]
 async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }
@@ -910,9 +911,9 @@ fn test_cached_sync_writes_by_key() {
     let b = std::thread::spawn(|| cached_sync_writes_by_key("b".to_string()));
     let c = std::thread::spawn(|| cached_sync_writes_by_key("c".to_string()));
     let start = Instant::now();
-    let a = a.join().unwrap();
-    let b = b.join().unwrap();
-    let c = c.join().unwrap();
+    let _ = a.join().unwrap();
+    let _ = b.join().unwrap();
+    let _ = c.join().unwrap();
     assert!(start.elapsed() < Duration::from_secs(2));
 }
 
@@ -942,7 +943,7 @@ async fn test_cached_sync_writes_by_key_a() {
 }
 
 #[cfg(feature = "async")]
-#[once(sync_writes = "default")]
+#[once(sync_writes = true)]
 async fn once_sync_writes_a(s: &tokio::sync::Mutex<String>) -> String {
     let mut guard = s.lock().await;
     let results: String = (*guard).clone().to_string();

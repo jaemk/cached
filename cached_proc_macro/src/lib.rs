@@ -13,8 +13,10 @@ use proc_macro::TokenStream;
 /// - `size`: (optional, usize) specify an LRU max size, implies the cache type is a `SizedCache` or `TimedSizedCache`.
 /// - `time`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TimedCache` or `TimedSizedCache`.
 /// - `time_refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
-/// - `sync_writes`: (optional, bool) specify whether to synchronize the execution of writing of uncached values.
-/// - `sync_writes_by_key`: (optional, bool) specify whether to synchronize the execution of writing of uncached values by key.
+/// - `sync_writes`: (optional, string) specify whether to synchronize the execution and writing of uncached values.
+///    When not specified, the `"default"` behavior will synchronize all keys, locking the whole cache during an
+///    uncached execution. When set to `"by_key"` a per-key lock is used to synchronize uncached execution of
+///    duplicate keys only.
 /// - `ty`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
 ///   specified, defaults to `UnboundCache`. When `size` is specified, defaults to `SizedCache`.
 ///   When `time` is specified, defaults to `TimedCached`.

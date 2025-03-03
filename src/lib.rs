@@ -13,7 +13,7 @@ function-cache wrapped in a mutex/rwlock, or externally synchronized in the case
 By default, the function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
 the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`. To synchronize the execution and caching
-of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(sync_writes = "default")]` (not supported by `#[io_cached]`.
+of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(sync_writes = true)]` (not supported by `#[io_cached]`.
 
 - See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 - See [`proc_macro`](https://docs.rs/cached/latest/cached/proc_macro/index.html) for more procedural macro examples.
@@ -94,7 +94,7 @@ use cached::proc_macro::once;
 /// When no (or expired) cache, concurrent calls
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
-#[once(time=10, option = true, sync_writes = "default")]
+#[once(time=10, option = true, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())

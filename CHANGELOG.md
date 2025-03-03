@@ -5,6 +5,17 @@
 ## Changed
 ## Removed
 
+## [0.55.0]
+## Added
+- Add `sync_writes = "by_key"` support to `#[cached]
+## Changed
+- Update `redis` to 0.29.0
+- Update `directories` to 6.0
+- Update `thiserror` to 2.0
+- With the `sync_writes = "by_key"` addition, the argument values changed from a boolean
+  to strings. The equivalent of `sync_writes = true` is now `sync_writes = "default"`
+## Removed
+
 ## [0.54.0]
 ## Added
 - Add `Cached::cache_try_get_or_set_with` for parity with async trait
