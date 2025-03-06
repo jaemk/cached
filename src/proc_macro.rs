@@ -331,3 +331,7 @@ pub fn main() {
 pub use cached_proc_macro::{cached, io_cached, once};
 #[doc(inline)]
 pub use cached_proc_macro_types::Return;
+
+pub mod __private {
+    pub use cached_proc_macro_types::__private::ToFullyOwned;
+}
