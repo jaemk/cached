@@ -1,79 +1,57 @@
 use crate::helpers::*;
-use darling::ast::NestedMeta;
-use darling::FromMeta;
+use attrs::*;
 use proc_macro::TokenStream;
 use quote::quote;
 use std::cmp::PartialEq;
-use syn::spanned::Spanned;
+use syn::{parse::Parser as _, spanned::Spanned as _};
 use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Signature, Type};
 
-#[derive(Debug, Default, FromMeta, Eq, PartialEq)]
-enum SyncWriteMode {
-    #[default]
-    Default,
-    ByKey,
-}
-
-#[derive(FromMeta)]
-struct MacroArgs {
-    #[darling(default)]
-    name: Option<String>,
-    #[darling(default)]
-    unbound: bool,
-    #[darling(default)]
-    size: Option<usize>,
-    #[darling(default)]
-    time: Option<u64>,
-    #[darling(default)]
-    time_refresh: bool,
-    #[darling(default)]
-    key: Option<String>,
-    #[darling(default)]
-    convert: Option<String>,
-    #[darling(default)]
-    result: bool,
-    #[darling(default)]
-    option: bool,
-    #[darling(default)]
-    sync_writes: Option<SyncWriteMode>,
-    #[darling(default)]
-    with_cached_flag: bool,
-    #[darling(default)]
-    ty: Option<String>,
-    #[darling(default)]
-    create: Option<String>,
-    #[darling(default)]
-    result_fallback: bool,
+strum_lite::strum! {
+    #[derive(Debug, Default, Eq, PartialEq)]
+    enum SyncWriteMode {
+        #[default]
+        Default = "default",
+        ByKey = "by_key",
+    }
 }
 
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(darling::Error::from(e).write_errors());
-        }
-    };
-    let MacroArgs {
-        name,
-        unbound,
-        size,
-        time,
-        time_refresh,
-        key,
-        convert,
-        result,
-        option,
-        sync_writes,
-        with_cached_flag,
-        ty,
-        create,
-        result_fallback,
-    } = match MacroArgs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(e.write_errors());
-        }
-    };
+    let mut time = None::<u64>;
+    let mut size = None::<usize>;
+    let mut name = None::<String>;
+    let mut key = None::<String>;
+    let mut convert = None::<String>;
+    let mut ty = None::<String>;
+    let mut create = None::<String>;
+    let mut sync_writes = None::<SyncWriteMode>;
+    let mut unbound = false;
+    let mut time_refresh = false;
+    let mut result = false;
+    let mut option = false;
+    let mut with_cached_flag = false;
+    let mut result_fallback = false;
+
+    match Attrs::new()
+        .once("time", with::eq(set::lit(&mut time)))
+        .once("size", with::eq(set::lit(&mut size)))
+        .once("name", with::eq(set::from_str(&mut name)))
+        .once("key", with::eq(set::from_str(&mut key)))
+        .once("convert", with::eq(set::from_str(&mut convert)))
+        .once("ty", with::eq(set::from_str(&mut ty)))
+        .once("create", with::eq(set::from_str(&mut create)))
+        .once("sync_writes", with::eq(set::from_str(&mut sync_writes)))
+        .once("unbound", with::eq(on::lit(&mut unbound)))
+        .once("time_refresh", with::eq(on::lit(&mut time_refresh)))
+        .once("result", with::eq(on::lit(&mut result)))
+        .once("option", with::eq(on::lit(&mut option)))
+        .once("with_cached_flag", with::eq(on::lit(&mut with_cached_flag)))
+        .once("result_fallback", with::eq(on::lit(&mut result_fallback)))
+        .parse(args)
+    {
+        Ok(()) => {}
+        Err(e) => return e.into_compile_error().into(),
+    }
+
     let ItemFn {
         attrs: mut attributes,
         vis: visibility,
