@@ -6,7 +6,7 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
     parse_macro_input, parse_str, Block, Expr, ExprClosure, GenericArgument, Ident, ItemFn,
-    PathArguments, ReturnType, Type,
+    PathArguments, ReturnType, Signature, Type,
 };
 
 #[derive(FromMeta)]
@@ -49,25 +49,44 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
-    let args = match IOMacroArgs::from_list(&attr_args) {
+    let IOMacroArgs {
+        map_error,
+        disk,
+        disk_dir,
+        redis,
+        cache_prefix_block,
+        name,
+        time,
+        time_refresh,
+        key,
+        convert,
+        with_cached_flag,
+        ty,
+        create,
+        sync_to_disk_on_cache_change,
+        connection_config,
+    } = match IOMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
             return TokenStream::from(e.write_errors());
         }
     };
-    let input = parse_macro_input!(input as ItemFn);
+    let ItemFn {
+        attrs: mut attributes,
+        vis: visibility,
+        sig: signature,
+        block: body,
+    } = parse_macro_input!(input as _);
 
-    // pull out the parts of the input
-    let mut attributes = input.attrs;
-    let visibility = input.vis;
-    let signature = input.sig;
-    let body = input.block;
+    let signature_no_muts = get_mut_signature(signature.clone());
 
-    // pull out the parts of the function signature
-    let fn_ident = signature.ident.clone();
-    let inputs = signature.inputs.clone();
-    let output = signature.output.clone();
-    let asyncness = signature.asyncness;
+    let Signature {
+        ident: fn_ident,
+        inputs,
+        output,
+        asyncness,
+        ..
+    } = signature;
 
     let input_tys = get_input_types(&inputs);
 
@@ -88,7 +107,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // if `with_cached_flag = true`, then enforce that the return type
     // is something wrapped in `Return`. Either `Return<T>` or the
     // fully qualified `cached::Return<T>`
-    if args.with_cached_flag
+    if with_cached_flag
         && !output_string.contains("Return")
         && !output_string.contains("cached::Return")
     {
@@ -159,26 +178,26 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the cache identifier
-    let cache_ident = match args.name {
+    let cache_ident = match name {
         Some(ref name) => Ident::new(name, fn_ident.span()),
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
     let cache_name = cache_ident.to_string();
 
     let (cache_key_ty, key_convert_block) =
-        make_cache_key_type(&args.key, &args.convert, &args.ty, input_tys, &input_names);
+        make_cache_key_type(&key, &convert, &ty, input_tys, &input_names);
 
     // make the cache type and create statement
     let (cache_ty, cache_create) = match (
-        &args.redis,
-        &args.disk,
-        &args.time,
-        &args.time_refresh,
-        &args.cache_prefix_block,
-        &args.ty,
-        &args.create,
-        &args.sync_to_disk_on_cache_change,
-        &args.connection_config,
+        &redis,
+        &disk,
+        &time,
+        &time_refresh,
+        &cache_prefix_block,
+        &ty,
+        &create,
+        &sync_to_disk_on_cache_change,
+        &connection_config,
     ) {
         // redis
         (true, false, time, time_refresh, cache_prefix, ty, cache_create, _, _) => {
@@ -325,7 +344,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                             }
                         }
                     };
-                    let create = match args.disk_dir {
+                    let create = match disk_dir {
                         None => create,
                         Some(disk_dir) => {
                             quote! { (#create).set_disk_directory(#disk_dir) }
@@ -364,14 +383,14 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("#[io_cached] cache types cache type could not be determined"),
     };
 
-    let map_error = &args.map_error;
+    let map_error = &map_error;
     let map_error = parse_str::<ExprClosure>(map_error).expect("unable to parse map_error block");
 
     // make the set cache and return cache blocks
     let (set_cache_block, return_cache_block) = {
-        let (set_cache_block, return_cache_block) = if args.with_cached_flag {
+        let (set_cache_block, return_cache_block) = if with_cached_flag {
             (
-                if asyncness.is_some() && !args.disk {
+                if asyncness.is_some() && !disk {
                     quote! {
                         if let Ok(result) = &result {
                             cache.cache_set(key, result.value.clone()).await.map_err(#map_error)?;
@@ -388,7 +407,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             )
         } else {
             (
-                if asyncness.is_some() && !args.disk {
+                if asyncness.is_some() && !disk {
                     quote! {
                         if let Ok(result) = &result {
                             cache.cache_set(key, result.clone()).await.map_err(#map_error)?;
@@ -427,8 +446,6 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let signature_no_muts = get_mut_signature(signature);
-
     // create a signature for the cache-priming function
     let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());
     let mut prime_sig = signature_no_muts.clone();
@@ -443,7 +460,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     );
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
-    let async_trait = if asyncness.is_some() && !args.disk {
+    let async_trait = if asyncness.is_some() && !disk {
         quote! {
             use cached::IOCachedAsync;
         }
@@ -453,7 +470,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let async_cache_get_return = if asyncness.is_some() && !args.disk {
+    let async_cache_get_return = if asyncness.is_some() && !disk {
         quote! {
             if let Some(result) = cache.cache_get(&key).await.map_err(#map_error)? {
                 #return_cache_block
