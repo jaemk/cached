@@ -1,47 +1,29 @@
 use crate::helpers::*;
-use darling::ast::NestedMeta;
-use darling::FromMeta;
+use attrs::*;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::spanned::Spanned;
+use syn::{parse::Parser as _, spanned::Spanned as _};
 use syn::{parse_macro_input, Ident, ItemFn, ReturnType, Signature};
 
-#[derive(FromMeta)]
-struct OnceMacroArgs {
-    #[darling(default)]
-    name: Option<String>,
-    #[darling(default)]
-    time: Option<u64>,
-    #[darling(default)]
-    sync_writes: bool,
-    #[darling(default)]
-    result: bool,
-    #[darling(default)]
-    option: bool,
-    #[darling(default)]
-    with_cached_flag: bool,
-}
-
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(darling::Error::from(e).write_errors());
-        }
-    };
-    let OnceMacroArgs {
-        name,
-        time,
-        sync_writes,
-        result,
-        option,
-        with_cached_flag,
-    } = match OnceMacroArgs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(e.write_errors());
-        }
-    };
+    let mut name = None::<String>;
+    let mut time = None::<u64>;
+    let mut sync_writes = false;
+    let mut result = false;
+    let mut option = false;
+    let mut with_cached_flag = false;
+    match Attrs::new()
+        .once("name", with::eq(set::lit(&mut name)))
+        .once("time", with::eq(set::lit(&mut time)))
+        .once("sync_writes", with::eq(on::lit(&mut sync_writes)))
+        .once("result", with::eq(on::lit(&mut result)))
+        .once("option", with::eq(on::lit(&mut option)))
+        .once("with_cached_flag", with::eq(on::lit(&mut with_cached_flag)))
+        .parse(args)
+    {
+        Ok(()) => {}
+        Err(e) => return e.into_compile_error().into(),
+    }
     let ItemFn {
         attrs: mut attributes,
         vis: visibility,
