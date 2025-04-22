@@ -4,7 +4,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use std::cmp::PartialEq;
 use syn::{parse::Parser as _, spanned::Spanned as _};
-use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Signature, Type};
+use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Signature, Token, Type};
 
 strum_lite::strum! {
     #[derive(Debug, Default, Eq, PartialEq)]
@@ -39,7 +39,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .once("convert", with::eq(set::from_str(&mut convert)))
         .once("ty", with::eq(set::from_str(&mut ty)))
         .once("create", with::eq(set::from_str(&mut create)))
-        .once("sync_writes", with::eq(set::from_str(&mut sync_writes)))
+        .once("sync_writes", |input| match input.peek(Token![=]) {
+            true => with::eq(set::from_str(&mut sync_writes))(input),
+            false => {
+                sync_writes = Some(SyncWriteMode::Default);
+                Ok(())
+            }
+        })
         .once("unbound", with::eq(on::lit(&mut unbound)))
         .once("time_refresh", with::eq(on::lit(&mut time_refresh)))
         .once("result", with::eq(on::lit(&mut result)))

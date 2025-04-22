@@ -15,7 +15,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     match Attrs::new()
         .once("name", with::eq(set::lit(&mut name)))
         .once("time", with::eq(set::lit(&mut time)))
-        .once("sync_writes", with::eq(on::lit(&mut sync_writes)))
+        .once("sync_writes", flag::or_eq(&mut sync_writes))
         .once("result", with::eq(on::lit(&mut result)))
         .once("option", with::eq(on::lit(&mut option)))
         .once("with_cached_flag", with::eq(on::lit(&mut with_cached_flag)))
