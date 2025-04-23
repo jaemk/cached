@@ -9,7 +9,7 @@ use std::{path::PathBuf, time::SystemTime};
 use web_time::Duration;
 
 pub struct DiskCacheBuilder<K, V> {
-    seconds: Option<u64>,
+    ttl: Option<Duration>,
     refresh: bool,
     sync_to_disk_on_cache_change: bool,
     disk_dir: Option<PathBuf>,
@@ -42,7 +42,7 @@ where
     /// Initialize a `DiskCacheBuilder`
     pub fn new<S: AsRef<str>>(cache_name: S) -> DiskCacheBuilder<K, V> {
         Self {
-            seconds: None,
+            ttl: None,
             refresh: false,
             sync_to_disk_on_cache_change: false,
             disk_dir: None,
@@ -53,8 +53,8 @@ where
     }
 
     /// Specify the cache TTL/lifespan in seconds
-    pub fn set_lifespan(mut self, seconds: u64) -> Self {
-        self.seconds = Some(seconds);
+    pub fn set_lifespan(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
         self
     }
 
@@ -132,7 +132,7 @@ where
         };
 
         Ok(DiskCache {
-            seconds: self.seconds,
+            ttl: self.ttl,
             refresh: self.refresh,
             sync_to_disk_on_cache_change: self.sync_to_disk_on_cache_change,
             version: DISK_FILE_VERSION,
@@ -145,7 +145,7 @@ where
 
 /// Cache store backed by disk
 pub struct DiskCache<K, V> {
-    pub(super) seconds: Option<u64>,
+    pub(super) ttl: Option<Duration>,
     pub(super) refresh: bool,
     sync_to_disk_on_cache_change: bool,
     #[allow(unused)]
@@ -172,11 +172,11 @@ where
 
         for (key, value) in self.connection.iter().flatten() {
             if let Ok(cached) = rmp_serde::from_slice::<CachedDiskValue<V>>(&value) {
-                if let Some(lifetime_seconds) = self.seconds {
+                if let Some(ttl) = self.ttl {
                     if now
                         .duration_since(cached.created_at)
                         .unwrap_or(Duration::from_secs(0))
-                        >= Duration::from_secs(lifetime_seconds)
+                        >= ttl
                     {
                         self.connection.remove(key)?;
                     }
@@ -242,15 +242,15 @@ where
 
     fn cache_get(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
         let key = key.to_string();
-        let seconds = self.seconds;
+        let ttl = self.ttl;
         let refresh = self.refresh;
         let mut cache_updated = false;
         let update = |old: Option<&[u8]>| -> Option<Vec<u8>> {
             let old = old?;
-            if seconds.is_none() {
+            if ttl.is_none() {
                 return Some(old.to_vec());
             }
-            let seconds = seconds.unwrap();
+            let ttl = ttl.unwrap();
             let mut cached = match rmp_serde::from_slice::<CachedDiskValue<V>>(old) {
                 Ok(cached) => cached,
                 Err(_) => {
@@ -261,7 +261,7 @@ where
             if SystemTime::now()
                 .duration_since(cached.created_at)
                 .unwrap_or(Duration::from_secs(0))
-                < Duration::from_secs(seconds)
+                < ttl
             {
                 if refresh {
                     cached.refresh_created_at();
@@ -296,11 +296,11 @@ where
         let result = if let Some(data) = self.connection.insert(key, value)? {
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
 
-            if let Some(lifetime_seconds) = self.seconds {
+            if let Some(ttl) = self.ttl {
                 if SystemTime::now()
                     .duration_since(cached.created_at)
                     .unwrap_or(Duration::from_secs(0))
-                    < Duration::from_secs(lifetime_seconds)
+                    < ttl
                 {
                     Ok(Some(cached.value))
                 } else {
@@ -325,11 +325,11 @@ where
         let result = if let Some(data) = self.connection.remove(key)? {
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
 
-            if let Some(lifetime_seconds) = self.seconds {
+            if let Some(ttl) = self.ttl {
                 if SystemTime::now()
                     .duration_since(cached.created_at)
                     .unwrap_or(Duration::from_secs(0))
-                    < Duration::from_secs(lifetime_seconds)
+                    < ttl
                 {
                     Ok(Some(cached.value))
                 } else {
@@ -349,13 +349,13 @@ where
         result
     }
 
-    fn cache_lifespan(&self) -> Option<u64> {
-        self.seconds
+    fn cache_lifespan(&self) -> Option<Duration> {
+        self.ttl
     }
 
-    fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
-        let old = self.seconds;
-        self.seconds = Some(seconds);
+    fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
+        let old = self.ttl;
+        self.ttl = Some(ttl);
         old
     }
 
@@ -365,8 +365,8 @@ where
         old
     }
 
-    fn cache_unset_lifespan(&mut self) -> Option<u64> {
-        self.seconds.take()
+    fn cache_unset_lifespan(&mut self) -> Option<Duration> {
+        self.ttl.take()
     }
 }
 
@@ -410,9 +410,8 @@ mod test_DiskCache {
     const TEST_VAL: u32 = 100;
     const TEST_KEY_1: u32 = 2;
     const TEST_VAL_1: u32 = 200;
-    const LIFE_SPAN_2_SECS: u64 = 2;
-    const LIFE_SPAN_1_SEC: u64 = 1;
-
+    const LIFE_SPAN_2_SECS: Duration = Duration::from_secs(2);
+    const LIFE_SPAN_1_SEC: Duration = Duration::from_secs(1);
     #[googletest::test]
     fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
@@ -485,7 +484,7 @@ mod test_DiskCache {
         );
 
         // Let the lifespan expire
-        sleep(Duration::from_secs(LIFE_SPAN_2_SECS));
+        sleep(LIFE_SPAN_2_SECS);
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
             cache.cache_get(&TEST_KEY),
@@ -517,7 +516,7 @@ mod test_DiskCache {
         );
 
         // Let the lifespan expire
-        sleep(Duration::from_secs(LIFE_SPAN_2_SECS));
+        sleep(LIFE_SPAN_2_SECS);
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
             cache.cache_get(&TEST_KEY),
@@ -545,7 +544,7 @@ mod test_DiskCache {
         );
 
         // Let the new lifespan expire
-        sleep(Duration::from_secs(LIFE_SPAN_1_SEC));
+        sleep(LIFE_SPAN_1_SEC);
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
             cache.cache_get(&TEST_KEY),
@@ -554,7 +553,7 @@ mod test_DiskCache {
         );
 
         cache
-            .cache_set_lifespan(10)
+            .cache_set_lifespan(Duration::from_secs(10))
             .expect("error setting lifespan");
         assert_that!(
             cache.cache_set(TEST_KEY, TEST_VAL),
@@ -584,8 +583,8 @@ mod test_DiskCache {
     #[googletest::test]
     fn refreshing_on_cache_get_delays_cache_expiry() {
         // NOTE: Here we're relying on the fact that setting then sleeping for 2 secs and getting takes longer than 2 secs.
-        const LIFE_SPAN: u64 = 2;
-        const HALF_LIFE_SPAN: u64 = 1;
+        const LIFE_SPAN: Duration = LIFE_SPAN_2_SECS;
+        const HALF_LIFE_SPAN: Duration = LIFE_SPAN_1_SEC;
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .set_disk_directory(tmp_dir.path())
@@ -597,7 +596,7 @@ mod test_DiskCache {
         assert_that!(cache.cache_set(TEST_KEY, TEST_VAL), ok(none()));
 
         // retrieve before expiry, this should refresh the created_at so we don't expire just yet
-        sleep(Duration::from_secs(HALF_LIFE_SPAN));
+        sleep(HALF_LIFE_SPAN);
         assert_that!(
             cache.cache_get(&TEST_KEY),
             ok(some(eq(TEST_VAL))),
@@ -605,7 +604,7 @@ mod test_DiskCache {
         );
 
         // This is after the initial expiry, but since we refreshed the created_at, we should still get the value
-        sleep(Duration::from_secs(HALF_LIFE_SPAN));
+        sleep(HALF_LIFE_SPAN);
         assert_that!(
             cache.cache_get(&TEST_KEY),
             ok(some(eq(TEST_VAL))),
@@ -613,7 +612,7 @@ mod test_DiskCache {
         );
 
         // This is after the new refresh expiry, we should get None
-        sleep(Duration::from_secs(LIFE_SPAN));
+        sleep(LIFE_SPAN);
         assert_that!(
             cache.cache_get(&TEST_KEY),
             ok(none()),

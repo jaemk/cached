@@ -156,22 +156,22 @@ pub struct ExpiringSizedCache<K, V> {
     // to support retaining/evicting without full traversal
     keys: BTreeSet<Stamped<K>>,
 
-    pub ttl_millis: u64,
+    pub ttl: Duration,
     pub size_limit: Option<usize>,
 }
 impl<K: Hash + Eq + Ord, V> ExpiringSizedCache<K, V> {
-    pub fn new(ttl_millis: u64) -> Self {
+    pub fn new(ttl: Duration) -> Self {
         Self {
             min_instant: Instant::now(),
             map: HashMap::new(),
             keys: BTreeSet::new(),
-            ttl_millis,
+            ttl,
             size_limit: None,
         }
     }
 
-    pub fn with_capacity(ttl_millis: u64, size: usize) -> Self {
-        let mut new = Self::new(ttl_millis);
+    pub fn with_capacity(ttl: Duration, size: usize) -> Self {
+        let mut new = Self::new(ttl);
         new.map.reserve(size);
         new
     }
@@ -190,9 +190,9 @@ impl<K: Hash + Eq + Ord, V> ExpiringSizedCache<K, V> {
     }
 
     /// Set ttl millis, return previous value
-    pub fn ttl_millis(&mut self, ttl_millis: u64) -> u64 {
-        let prev = self.ttl_millis;
-        self.ttl_millis = ttl_millis;
+    pub fn ttl_millis(&mut self, ttl: Duration) -> Duration {
+        let prev = self.ttl;
+        self.ttl = ttl;
         prev
     }
 
@@ -279,8 +279,8 @@ impl<K: Hash + Eq + Ord, V> ExpiringSizedCache<K, V> {
     }
 
     /// Insert k/v pair with explicit ttl. See `.insert_ttl_evict`
-    pub fn insert_ttl(&mut self, key: K, value: V, ttl_millis: u64) -> Result<Option<V>, Error> {
-        self.insert_ttl_evict(key, value, Some(ttl_millis), false)
+    pub fn insert_ttl(&mut self, key: K, value: V, ttl: Duration) -> Result<Option<V>, Error> {
+        self.insert_ttl_evict(key, value, Some(ttl), false)
     }
 
     /// Insert k/v pair and run eviction logic. See `.insert_ttl_evict`
@@ -295,7 +295,7 @@ impl<K: Hash + Eq + Ord, V> ExpiringSizedCache<K, V> {
         &mut self,
         key: K,
         value: V,
-        ttl_millis: Option<u64>,
+        ttl: Option<Duration>,
         evict: bool,
     ) -> Result<Option<V>, Error> {
         // optionally evict and retain to size
@@ -309,7 +309,7 @@ impl<K: Hash + Eq + Ord, V> ExpiringSizedCache<K, V> {
 
         let key = CacheArc::new(key);
         let expiry = Instant::now()
-            .checked_add(Duration::from_millis(ttl_millis.unwrap_or(self.ttl_millis)))
+            .checked_add(ttl.unwrap_or(self.ttl))
             .ok_or(Error::TimeBounds)?;
 
         let new_stamped = Stamped {
@@ -362,7 +362,8 @@ impl<V> ExpiringSizedCache<String, V> {
     /// Retrieve unexpired entry, accepting `&str` to check against `String` keys
     /// ```rust
     /// # use cached::stores::ExpiringSizedCache;
-    /// let mut cache = ExpiringSizedCache::<String, &str>::new(2_000);
+    /// # use std::time::Duration;
+    /// let mut cache = ExpiringSizedCache::<String, &str>::new(Duration::from_millis(2_000));
     /// cache.insert(String::from("a"), "a").unwrap();
     /// assert_eq!(cache.get_borrowed("a").unwrap(), &"a");
     /// ```
@@ -375,7 +376,8 @@ impl<T: Hash + Eq + PartialEq, V> ExpiringSizedCache<Vec<T>, V> {
     /// Retrieve unexpired entry, accepting `&[T]` to check against `Vec<T>` keys
     /// ```rust
     /// # use cached::stores::ExpiringSizedCache;
-    /// let mut cache = ExpiringSizedCache::<Vec<usize>, &str>::new(2_000);
+    /// # use std::time::Duration;
+    /// let mut cache = ExpiringSizedCache::<Vec<usize>, &str>::new(Duration::from_millis(2_000));
     /// cache.insert(vec![0], "a").unwrap();
     /// assert_eq!(cache.get_borrowed(&[0]).unwrap(), &"a");
     /// ```
@@ -391,18 +393,18 @@ mod test {
 
     #[test]
     fn borrow_keys() {
-        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
+        let mut cache = ExpiringSizedCache::with_capacity(Duration::from_millis(100), 100);
         cache.insert(String::from("a"), "a").unwrap();
         assert_eq!(cache.get_borrowed("a").unwrap(), &"a");
 
-        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
+        let mut cache = ExpiringSizedCache::with_capacity(Duration::from_millis(100), 100);
         cache.insert(vec![0], "a").unwrap();
         assert_eq!(cache.get_borrowed(&[0]).unwrap(), &"a");
     }
 
     #[test]
     fn kitchen_sink() {
-        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
+        let mut cache = ExpiringSizedCache::with_capacity(Duration::from_millis(100), 100);
         assert_eq!(0, cache.evict());
         assert_eq!(0, cache.retain_latest(100, true));
         assert!(cache.get(&"a".into()).is_none());
@@ -469,7 +471,7 @@ mod test {
 
         // default ttl is 100ms
         cache
-            .insert_ttl("a".to_string(), "a".to_string(), 300)
+            .insert_ttl("a".to_string(), "a".to_string(), Duration::from_millis(300))
             .unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(cache.get(&"a".into()), Some("a".to_string()).as_ref());
@@ -477,7 +479,12 @@ mod test {
 
         std::thread::sleep(Duration::from_millis(200));
         cache
-            .insert_ttl_evict("b".to_string(), "b".to_string(), Some(300), true)
+            .insert_ttl_evict(
+                "b".to_string(),
+                "b".to_string(),
+                Some(Duration::from_millis(300)),
+                true,
+            )
             .unwrap();
         // a should now be evicted
         assert_eq!(1, cache.len());
@@ -486,7 +493,7 @@ mod test {
 
     #[test]
     fn size_limit() {
-        let mut cache = ExpiringSizedCache::with_capacity(100, 100);
+        let mut cache = ExpiringSizedCache::with_capacity(Duration::from_millis(100), 100);
         cache.size_limit(2);
         assert_eq!(0, cache.evict());
         assert_eq!(0, cache.retain_latest(100, true));

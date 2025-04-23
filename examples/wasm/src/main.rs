@@ -47,7 +47,7 @@ fn app() -> Html {
 
 #[cached(
     ty = "TimedCache<String, Option<String>>",
-    create = "{ TimedCache::with_lifespan(5) }"
+    create = "{ TimedCache::with_lifespan(std::time::Duration::from_secs(5)) }"
 )]
 async fn fetch(body: String) -> Option<String> {
     Request::post(URL)
