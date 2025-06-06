@@ -1,6 +1,6 @@
 use super::Cached;
 use crate::lru_list::LRUList;
-use hashbrown::raw::RawTable;
+use hashbrown::HashTable;
 use std::cmp::Eq;
 use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -23,7 +23,7 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 #[derive(Clone)]
 pub struct SizedCache<K, V> {
     // `store` contains a hash of K -> index of (K, V) tuple in `order`
-    pub(super) store: RawTable<usize>,
+    pub(super) store: HashTable<usize>,
     pub(super) hash_builder: RandomState,
     pub(super) order: LRUList<(K, V)>,
     pub(super) capacity: usize,
@@ -88,7 +88,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             panic!("`size` of `SizedCache` must be greater than zero.");
         }
         SizedCache {
-            store: RawTable::with_capacity(size),
+            store: HashTable::with_capacity(size),
             hash_builder: RandomState::new(),
             order: LRUList::<(K, V)>::with_capacity(size),
             capacity: size,
@@ -108,18 +108,20 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             return Err(std::io::Error::from_raw_os_error(22));
         }
 
-        let store = match RawTable::try_with_capacity(size) {
-            Ok(store) => store,
-            Err(e) => {
-                let errcode = match e {
-                    // ENOMEM
-                    hashbrown::TryReserveError::AllocError { .. } => 12,
-                    // EINVAL
-                    hashbrown::TryReserveError::CapacityOverflow => 22,
-                };
-                return Err(std::io::Error::from_raw_os_error(errcode));
-            }
-        };
+        let mut store = HashTable::new();
+        if let Err(e) = store.try_reserve(size, |&index: &usize| {
+            let hasher = &mut RandomState::new().build_hasher();
+            index.hash(hasher);
+            hasher.finish()
+        }) {
+            let errcode = match e {
+                // ENOMEM
+                hashbrown::TryReserveError::AllocError { .. } => 12,
+                // EINVAL
+                hashbrown::TryReserveError::CapacityOverflow => 22,
+            };
+            return Err(std::io::Error::from_raw_os_error(errcode));
+        }
 
         Ok(SizedCache {
             store,
@@ -166,7 +168,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         } = *self;
         // insert the value `index` at `hash`, the closure provided
         // is used to rehash values if a resize is necessary.
-        store.insert(hash, index, move |&i| {
+        store.insert_unique(hash, index, move |&i| {
             // rehash the "key" value stored at index `i` - requires looking
             // up the original "key" value in the `order` list.
             let hasher = &mut hash_builder.build_hasher();
@@ -186,7 +188,7 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         // `key` value from the `order` list.
         // This pattern is repeated in other lookup situations.
         store
-            .get(hash, |&i| key == order.get(i).0.borrow())
+            .find(hash, |&i| key == order.get(i).0.borrow())
             .copied()
     }
 
@@ -196,7 +198,10 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         let Self { store, order, .. } = self;
-        store.remove_entry(hash, |&i| key == order.get(i).0.borrow())
+        match store.find_entry(hash, |&i| key == order.get(i).0.borrow()) {
+            Ok(entry) => Some(entry.remove().0),
+            Err(_) => None,
+        }
     }
 
     fn check_capacity(&mut self) {
@@ -218,9 +223,14 @@ impl<K: Hash + Eq + Clone, V> SizedCache<K, V> {
             let hash = hasher.finish();
 
             let order_ = &order;
-            let erased = store.erase_entry(hash, |&i| *key == order_.get(i).0);
-            assert!(erased, "SizedCache::cache_set failed evicting cache key");
-            store.remove_entry(hash, |&i| *key == order_.get(i).0);
+            match store.find_entry(hash, |&i| *key == order_.get(i).0) {
+                Ok(entry) => {
+                    entry.remove();
+                }
+                Err(_) => {
+                    panic!("SizedCache::cache_set failed evicting cache key");
+                }
+            }
             order.remove(index);
         }
     }
