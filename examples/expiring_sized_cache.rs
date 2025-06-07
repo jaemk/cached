@@ -6,7 +6,7 @@ use web_time::Instant;
 
 #[tokio::main]
 async fn main() {
-    let mut cache = ExpiringSizedCache::new(20_000);
+    let mut cache = ExpiringSizedCache::new(Duration::from_millis(20_000));
     cache.size_limit(100);
 
     let cache = Arc::new(RwLock::new(cache));

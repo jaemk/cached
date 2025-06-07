@@ -1,11 +1,11 @@
 use crate::IOCached;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fmt::Display;
 use std::marker::PhantomData;
+use std::{fmt::Display, time::Duration};
 
 pub struct RedisCacheBuilder<K, V> {
-    seconds: u64,
+    ttl: Duration,
     refresh: bool,
     namespace: String,
     prefix: String,
@@ -41,9 +41,9 @@ where
     V: Serialize + DeserializeOwned,
 {
     /// Initialize a `RedisCacheBuilder`
-    pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> RedisCacheBuilder<K, V> {
+    pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
         Self {
-            seconds,
+            ttl,
             refresh: false,
             namespace: DEFAULT_NAMESPACE.to_string(),
             prefix: prefix.as_ref().to_string(),
@@ -58,8 +58,8 @@ where
 
     /// Specify the cache TTL/lifespan in seconds
     #[must_use]
-    pub fn set_lifespan(mut self, seconds: u64) -> Self {
-        self.seconds = seconds;
+    pub fn set_lifespan(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
         self
     }
 
@@ -181,7 +181,7 @@ where
     /// Will return a `RedisCacheBuildError`, depending on the error
     pub fn build(self) -> Result<RedisCache<K, V>, RedisCacheBuildError> {
         Ok(RedisCache {
-            seconds: self.seconds,
+            ttl: self.ttl,
             refresh: self.refresh,
             connection_string: self.connection_string()?,
             pool: self.create_pool()?,
@@ -197,7 +197,7 @@ where
 /// Values have a ttl applied and enforced by redis.
 /// Uses an r2d2 connection pool under the hood.
 pub struct RedisCache<K, V> {
-    pub(super) seconds: u64,
+    pub(super) ttl: Duration,
     pub(super) refresh: bool,
     pub(super) namespace: String,
     pub(super) prefix: String,
@@ -213,8 +213,8 @@ where
 {
     #[allow(clippy::new_ret_no_self)]
     /// Initialize a `RedisCacheBuilder`
-    pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> RedisCacheBuilder<K, V> {
-        RedisCacheBuilder::new(prefix, seconds)
+    pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
+        RedisCacheBuilder::new(prefix, ttl)
     }
 
     fn generate_key(&self, key: &K) -> String {
@@ -271,7 +271,7 @@ where
 
         pipe.get(&key);
         if self.refresh {
-            pipe.expire(key, self.seconds as i64).ignore();
+            pipe.expire(key, self.ttl.as_secs() as i64).ignore();
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
@@ -300,7 +300,7 @@ where
             key,
             serde_json::to_string(&val)
                 .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-            self.seconds,
+            self.ttl.as_secs(),
         )
         .ignore();
 
@@ -341,13 +341,13 @@ where
         }
     }
 
-    fn cache_lifespan(&self) -> Option<u64> {
-        Some(self.seconds)
+    fn cache_lifespan(&self) -> Option<Duration> {
+        Some(self.ttl)
     }
 
-    fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
-        let old = self.seconds;
-        self.seconds = seconds;
+    fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
+        let old = self.ttl;
+        self.ttl = ttl;
         Some(old)
     }
 
@@ -363,6 +363,8 @@ where
     any(feature = "redis_async_std", feature = "redis_tokio")
 ))]
 mod async_redis {
+    use std::time::Duration;
+
     use super::{
         CachedRedisValue, DeserializeOwned, Display, PhantomData, RedisCacheBuildError,
         RedisCacheError, Serialize, DEFAULT_NAMESPACE, ENV_KEY,
@@ -370,7 +372,7 @@ mod async_redis {
     use {crate::IOCachedAsync, async_trait::async_trait};
 
     pub struct AsyncRedisCacheBuilder<K, V> {
-        seconds: u64,
+        ttl: Duration,
         refresh: bool,
         namespace: String,
         prefix: String,
@@ -384,9 +386,9 @@ mod async_redis {
         V: Serialize + DeserializeOwned,
     {
         /// Initialize a `RedisCacheBuilder`
-        pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> AsyncRedisCacheBuilder<K, V> {
+        pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
             Self {
-                seconds,
+                ttl,
                 refresh: false,
                 namespace: DEFAULT_NAMESPACE.to_string(),
                 prefix: prefix.as_ref().to_string(),
@@ -397,8 +399,8 @@ mod async_redis {
 
         /// Specify the cache TTL/lifespan in seconds
         #[must_use]
-        pub fn set_lifespan(mut self, seconds: u64) -> Self {
-            self.seconds = seconds;
+        pub fn set_lifespan(mut self, ttl: Duration) -> Self {
+            self.ttl = ttl;
             self
         }
 
@@ -485,7 +487,7 @@ mod async_redis {
         /// Will return a `RedisCacheBuildError`, depending on the error
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
             Ok(AsyncRedisCache {
-                seconds: self.seconds,
+                ttl: self.ttl,
                 refresh: self.refresh,
                 connection_string: self.connection_string()?,
                 #[cfg(not(feature = "redis_connection_manager"))]
@@ -505,7 +507,7 @@ mod async_redis {
     /// Uses a `redis::aio::MultiplexedConnection` or `redis::aio::ConnectionManager`
     /// under the hood depending if feature `redis_connection_manager` is used or not.
     pub struct AsyncRedisCache<K, V> {
-        pub(super) seconds: u64,
+        pub(super) ttl: Duration,
         pub(super) refresh: bool,
         pub(super) namespace: String,
         pub(super) prefix: String,
@@ -524,8 +526,8 @@ mod async_redis {
     {
         #[allow(clippy::new_ret_no_self)]
         /// Initialize an `AsyncRedisCacheBuilder`
-        pub fn new<S: AsRef<str>>(prefix: S, seconds: u64) -> AsyncRedisCacheBuilder<K, V> {
-            AsyncRedisCacheBuilder::new(prefix, seconds)
+        pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
+            AsyncRedisCacheBuilder::new(prefix, ttl)
         }
 
         fn generate_key(&self, key: &K) -> String {
@@ -555,7 +557,7 @@ mod async_redis {
 
             pipe.get(&key);
             if self.refresh {
-                pipe.expire(key, self.seconds as i64).ignore();
+                pipe.expire(key, self.ttl.as_secs() as i64).ignore();
             }
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
@@ -584,7 +586,7 @@ mod async_redis {
                 key,
                 serde_json::to_string(&val)
                     .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-                self.seconds,
+                self.ttl.as_secs(),
             )
             .ignore();
 
@@ -634,14 +636,14 @@ mod async_redis {
         }
 
         /// Return the lifespan of cached values (time to eviction)
-        fn cache_lifespan(&self) -> Option<u64> {
-            Some(self.seconds)
+        fn cache_lifespan(&self) -> Option<Duration> {
+            Some(self.ttl)
         }
 
         /// Set the lifespan of cached values, returns the old value
-        fn cache_set_lifespan(&mut self, seconds: u64) -> Option<u64> {
-            let old = self.seconds;
-            self.seconds = seconds;
+        fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
+            let old = self.ttl;
+            self.ttl = ttl;
             Some(old)
         }
     }
@@ -661,11 +663,13 @@ mod async_redis {
 
         #[tokio::test]
         async fn test_async_redis_cache() {
-            let mut c: AsyncRedisCache<u32, u32> =
-                AsyncRedisCache::new(format!("{}:async-redis-cache-test", now_millis()), 2)
-                    .build()
-                    .await
-                    .unwrap();
+            let mut c: AsyncRedisCache<u32, u32> = AsyncRedisCache::new(
+                format!("{}:async-redis-cache-test", now_millis()),
+                Duration::from_secs(2),
+            )
+            .build()
+            .await
+            .unwrap();
 
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
@@ -675,15 +679,15 @@ mod async_redis {
             sleep(Duration::new(2, 500_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            let old = c.cache_set_lifespan(1).unwrap();
-            assert_eq!(2, old);
+            let old = c.cache_set_lifespan(Duration::from_secs(1)).unwrap();
+            assert_eq!(2, old.as_secs());
             assert!(c.cache_set(1, 100).await.unwrap().is_none());
             assert!(c.cache_get(&1).await.unwrap().is_some());
 
             sleep(Duration::new(1, 600_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            c.cache_set_lifespan(10).unwrap();
+            c.cache_set_lifespan(Duration::from_secs(10)).unwrap();
             assert!(c.cache_set(1, 100).await.unwrap().is_none());
             assert!(c.cache_set(2, 100).await.unwrap().is_none());
             assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
@@ -722,11 +726,13 @@ mod tests {
 
     #[test]
     fn redis_cache() {
-        let mut c: RedisCache<u32, u32> =
-            RedisCache::new(format!("{}:redis-cache-test", now_millis()), 2)
-                .set_namespace("in-tests:")
-                .build()
-                .unwrap();
+        let mut c: RedisCache<u32, u32> = RedisCache::new(
+            format!("{}:redis-cache-test", now_millis()),
+            Duration::from_secs(2),
+        )
+        .set_namespace("in-tests:")
+        .build()
+        .unwrap();
 
         assert!(c.cache_get(&1).unwrap().is_none());
 
@@ -736,15 +742,15 @@ mod tests {
         sleep(Duration::new(2, 500_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        let old = c.cache_set_lifespan(1).unwrap();
-        assert_eq!(2, old);
+        let old = c.cache_set_lifespan(Duration::from_secs(1)).unwrap();
+        assert_eq!(2, old.as_secs());
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
         sleep(Duration::new(1, 600_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        c.cache_set_lifespan(10).unwrap();
+        c.cache_set_lifespan(Duration::from_secs(10)).unwrap();
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
@@ -753,10 +759,12 @@ mod tests {
 
     #[test]
     fn remove() {
-        let c: RedisCache<u32, u32> =
-            RedisCache::new(format!("{}:redis-cache-test-remove", now_millis()), 3600)
-                .build()
-                .unwrap();
+        let c: RedisCache<u32, u32> = RedisCache::new(
+            format!("{}:redis-cache-test-remove", now_millis()),
+            Duration::from_secs(3600),
+        )
+        .build()
+        .unwrap();
 
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 200).unwrap().is_none());

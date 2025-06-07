@@ -87,6 +87,7 @@ fn keyed(a: &str, b: &str) -> usize {
 
 ```rust,no_run
 use cached::proc_macro::once;
+use std::time::Duration;
 
 /// Only cache the initial function call.
 /// Function will be re-executed after the cache
@@ -126,6 +127,7 @@ fn doesnt_compile() -> Result<String, ()> {
 ```rust,no_run,ignore
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -143,7 +145,7 @@ enum ExampleError {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::new("cached_redis_prefix", 1)
+        AsyncRedisCache::new("cached_redis_prefix", Duration::from_secs(1))
             .set_refresh(true)
             .build()
             .await
@@ -219,6 +221,8 @@ Due to the requirements of storing arguments and return values in a global cache
 
 #[doc(hidden)]
 pub extern crate once_cell;
+
+use std::time::Duration;
 
 #[cfg(feature = "proc_macro")]
 #[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
@@ -372,12 +376,12 @@ pub trait Cached<K, V> {
     }
 
     /// Return the lifespan of cached values (time to eviction)
-    fn cache_lifespan(&self) -> Option<u64> {
+    fn cache_lifespan(&self) -> Option<Duration> {
         None
     }
 
     /// Set the lifespan of cached values, returns the old value
-    fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
+    fn cache_set_lifespan(&mut self, _ttl: Duration) -> Option<Duration> {
         None
     }
 
@@ -385,7 +389,7 @@ pub trait Cached<K, V> {
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
     /// a no-op.
-    fn cache_unset_lifespan(&mut self) -> Option<u64> {
+    fn cache_unset_lifespan(&mut self) -> Option<Duration> {
         None
     }
 }
@@ -445,12 +449,12 @@ pub trait IOCached<K, V> {
     fn cache_set_refresh(&mut self, refresh: bool) -> bool;
 
     /// Return the lifespan of cached values (time to eviction)
-    fn cache_lifespan(&self) -> Option<u64> {
+    fn cache_lifespan(&self) -> Option<Duration> {
         None
     }
 
     /// Set the lifespan of cached values, returns the old value.
-    fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
+    fn cache_set_lifespan(&mut self, _ttl: Duration) -> Option<Duration> {
         None
     }
 
@@ -458,7 +462,7 @@ pub trait IOCached<K, V> {
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
     /// a no-op.
-    fn cache_unset_lifespan(&mut self) -> Option<u64> {
+    fn cache_unset_lifespan(&mut self) -> Option<Duration> {
         None
     }
 }
@@ -479,12 +483,12 @@ pub trait IOCachedAsync<K, V> {
     fn cache_set_refresh(&mut self, refresh: bool) -> bool;
 
     /// Return the lifespan of cached values (time to eviction)
-    fn cache_lifespan(&self) -> Option<u64> {
+    fn cache_lifespan(&self) -> Option<Duration> {
         None
     }
 
     /// Set the lifespan of cached values, returns the old value
-    fn cache_set_lifespan(&mut self, _seconds: u64) -> Option<u64> {
+    fn cache_set_lifespan(&mut self, _ttl: Duration) -> Option<Duration> {
         None
     }
 
@@ -492,7 +496,7 @@ pub trait IOCachedAsync<K, V> {
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
     /// a no-op.
-    fn cache_unset_lifespan(&mut self) -> Option<u64> {
+    fn cache_unset_lifespan(&mut self) -> Option<Duration> {
         None
     }
 }
