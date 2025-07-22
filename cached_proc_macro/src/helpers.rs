@@ -201,7 +201,7 @@ pub(super) fn gen_return_cache_block(
     if let Some(time) = &time {
         quote! {
             let (created_sec, result) = result;
-            if now.duration_since(*created_sec).as_secs() < #time {
+            if now.duration_since(*created_sec) < Duration::from_secs(#time) {
                 #return_cache_block
             }
         }

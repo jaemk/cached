@@ -51,7 +51,7 @@ fn test_sized_cache() {
 }
 
 cached! {
-    TIMED: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(2, 5);
+    TIMED: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(Duration::from_secs(2), 5);
     fn timed(n: u32) -> u32 = {
         sleep(Duration::new(3, 0));
         n
@@ -76,7 +76,13 @@ fn test_timed_cache() {
     }
     {
         let mut cache = TIMED.lock().unwrap();
-        assert_eq!(2, cache.cache_set_lifespan(1).unwrap());
+        assert_eq!(
+            2,
+            cache
+                .cache_set_lifespan(Duration::from_secs(1))
+                .unwrap()
+                .as_secs()
+        );
     }
     timed(1);
     sleep(Duration::new(1, 0));
@@ -89,7 +95,7 @@ fn test_timed_cache() {
 }
 
 cached! {
-    TIMED_SIZED: TimedSizedCache<u32, u32> = TimedSizedCache::with_size_and_lifespan(3, 2);
+    TIMED_SIZED: TimedSizedCache<u32, u32> = TimedSizedCache::with_size_and_lifespan(3, Duration::from_secs(2));
     fn timefac(n: u32) -> u32 = {
         sleep(Duration::new(1, 0));
         if n > 1 {
@@ -118,7 +124,13 @@ fn test_timed_sized_cache() {
     }
     {
         let mut cache = TIMED_SIZED.lock().unwrap();
-        assert_eq!(2, cache.cache_set_lifespan(1).unwrap());
+        assert_eq!(
+            2,
+            cache
+                .cache_set_lifespan(Duration::from_secs(1))
+                .unwrap()
+                .as_secs()
+        );
     }
     timefac(1);
     sleep(Duration::new(1, 0));
@@ -130,7 +142,13 @@ fn test_timed_sized_cache() {
     }
     {
         let mut cache = TIMED_SIZED.lock().unwrap();
-        assert_eq!(1, cache.cache_set_lifespan(6).unwrap());
+        assert_eq!(
+            1,
+            cache
+                .cache_set_lifespan(Duration::from_secs(6))
+                .unwrap()
+                .as_secs()
+        );
     }
     timefac(2);
     {
@@ -190,7 +208,7 @@ fn test_string_cache() {
 }
 
 cached_key! {
-    TIMED_CACHE: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(2, 5);
+    TIMED_CACHE: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(Duration::from_secs(2), 5);
     Key = { n };
     fn timed_2(n: u32) -> u32 = {
         sleep(Duration::new(3, 0));
@@ -1313,7 +1331,7 @@ mod disk_tests {
     #[io_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         ty = "cached::DiskCache<u32, u32>",
-        create = r##" { DiskCache::new("cached_disk_cache_create").set_lifespan(1).set_refresh(true).build().expect("error building disk cache") } "##
+        create = r##" { DiskCache::new("cached_disk_cache_create").set_lifespan(Duration::from_secs(1)).set_refresh(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -1450,7 +1468,7 @@ mod redis_tests {
     #[io_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
         ty = "cached::RedisCache<u32, u32>",
-        create = r##" { RedisCache::new("cache_redis_test_cache_create", 1).set_refresh(true).build().expect("error building redis cache") } "##
+        create = r##" { RedisCache::new("cache_redis_test_cache_create", Duration::from_secs(1)).set_refresh(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -1520,7 +1538,7 @@ mod redis_tests {
         #[io_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
             ty = "cached::AsyncRedisCache<u32, u32>",
-            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", 1).set_refresh(true).build().await.expect("error building async redis cache") } "##
+            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", Duration::from_secs(1)).set_refresh(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
             if n < 5 {

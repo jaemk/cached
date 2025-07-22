@@ -3,6 +3,7 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- All timed/expiring caches now use std::time::Duration values instead of raw seconds/millis.
 ## Removed
 
 ## [0.55.1 / [cached_proc_macro[0.24.0]]]
