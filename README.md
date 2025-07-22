@@ -86,6 +86,7 @@ fn keyed(a: &str, b: &str) -> usize {
 
 ```rust
 use cached::proc_macro::once;
+use std::time::Duration;
 
 /// Only cache the initial function call.
 /// Function will be re-executed after the cache
@@ -124,6 +125,7 @@ fn doesnt_compile() -> Result<String, ()> {
 ```rust,no_run,ignore
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -141,7 +143,7 @@ enum ExampleError {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::new("cached_redis_prefix", 1)
+        AsyncRedisCache::new("cached_redis_prefix", Duration::from_secs(1))
             .set_refresh(true)
             .build()
             .await

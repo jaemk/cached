@@ -121,7 +121,7 @@ cached! {
 }
 
 cached! {
-    TIMED_REDIS: RedisCache<u32, u32> = RedisCache::with_lifespan(2);
+    TIMED_REDIS: RedisCache<u32, u32> = RedisCache::with_lifespan(Duration::from_secs(2));
     fn cached_timed_redis(n: u32) -> u32 = {
         sleep(Duration::new(3, 0));
         n
