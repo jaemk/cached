@@ -3,12 +3,19 @@
 ## [Unreleased]
 ## Added
 ## Changed
-- All timed/expiring caches now use std::time::Duration values instead of raw seconds/millis.
+## Removed
+
+## [0.56.0 / [cached_proc_macro[0.25.0]]]
+## Added
+## Changed
+- *BREAKING* All timed/expiring caches now use std::time::Duration values instead of raw seconds/millis.
+- Update `redis` to 0.32
+- Update `hashbrown` to 0.15
 ## Removed
 
 ## [0.55.1 / [cached_proc_macro[0.24.0]]]
 ## Added
-- Add `sync_writes = "by_key"` support to `#[cached]
+- Add `sync_writes = "by_key"` support to `#[cached]`
 ## Changed
 - Update `redis` to 0.29.0
 - Update `directories` to 6.0
