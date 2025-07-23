@@ -3,6 +3,7 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Refactor how attributes are parsed
 ## Removed
 
 ## [0.56.0 / [cached_proc_macro[0.25.0]]]

@@ -1,78 +1,80 @@
 use crate::helpers::*;
-use darling::ast::NestedMeta;
-use darling::FromMeta;
+use attrs::*;
 use proc_macro::TokenStream;
 use quote::quote;
 use std::cmp::PartialEq;
-use syn::spanned::Spanned;
-use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Type};
+use syn::{parse::Parser as _, spanned::Spanned as _};
+use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Signature, Token, Type};
 
-#[derive(Debug, Default, FromMeta, Eq, PartialEq)]
-enum SyncWriteMode {
-    #[default]
-    Default,
-    ByKey,
-}
-
-#[derive(FromMeta)]
-struct MacroArgs {
-    #[darling(default)]
-    name: Option<String>,
-    #[darling(default)]
-    unbound: bool,
-    #[darling(default)]
-    size: Option<usize>,
-    #[darling(default)]
-    time: Option<u64>,
-    #[darling(default)]
-    time_refresh: bool,
-    #[darling(default)]
-    key: Option<String>,
-    #[darling(default)]
-    convert: Option<String>,
-    #[darling(default)]
-    result: bool,
-    #[darling(default)]
-    option: bool,
-    #[darling(default)]
-    sync_writes: Option<SyncWriteMode>,
-    #[darling(default)]
-    with_cached_flag: bool,
-    #[darling(default)]
-    ty: Option<String>,
-    #[darling(default)]
-    create: Option<String>,
-    #[darling(default)]
-    result_fallback: bool,
+strum_lite::strum! {
+    #[derive(Debug, Default, Eq, PartialEq)]
+    enum SyncWriteMode {
+        #[default]
+        Default = "default",
+        ByKey = "by_key",
+    }
 }
 
 pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(darling::Error::from(e).write_errors());
-        }
-    };
-    let args = match MacroArgs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(e.write_errors());
-        }
-    };
-    let input = parse_macro_input!(input as ItemFn);
+    let mut time = None::<u64>;
+    let mut size = None::<usize>;
+    let mut name = None::<String>;
+    let mut key = None::<String>;
+    let mut convert = None::<String>;
+    let mut ty = None::<String>;
+    let mut create = None::<String>;
+    let mut sync_writes = None::<SyncWriteMode>;
+    let mut unbound = false;
+    let mut time_refresh = false;
+    let mut result = false;
+    let mut option = false;
+    let mut with_cached_flag = false;
+    let mut result_fallback = false;
 
-    // pull out the parts of the input
-    let mut attributes = input.attrs;
-    let visibility = input.vis;
-    let signature = input.sig;
-    let body = input.block;
+    match Attrs::new()
+        .once("time", with::eq(set::lit(&mut time)))
+        .once("size", with::eq(set::lit(&mut size)))
+        .once("name", with::eq(set::from_str(&mut name)))
+        .once("key", with::eq(set::from_str(&mut key)))
+        .once("convert", with::eq(set::from_str(&mut convert)))
+        .once("ty", with::eq(set::from_str(&mut ty)))
+        .once("create", with::eq(set::from_str(&mut create)))
+        .once("sync_writes", |input| match input.peek(Token![=]) {
+            true => with::eq(set::from_str(&mut sync_writes))(input),
+            false => {
+                sync_writes = Some(SyncWriteMode::Default);
+                Ok(())
+            }
+        })
+        .once("unbound", with::eq(on::lit(&mut unbound)))
+        .once("time_refresh", with::eq(on::lit(&mut time_refresh)))
+        .once("result", with::eq(on::lit(&mut result)))
+        .once("option", with::eq(on::lit(&mut option)))
+        .once("with_cached_flag", with::eq(on::lit(&mut with_cached_flag)))
+        .once("result_fallback", with::eq(on::lit(&mut result_fallback)))
+        .parse(args)
+    {
+        Ok(()) => {}
+        Err(e) => return e.into_compile_error().into(),
+    }
 
-    // pull out the parts of the function signature
-    let fn_ident = signature.ident.clone();
-    let inputs = signature.inputs.clone();
-    let output = signature.output.clone();
-    let asyncness = signature.asyncness;
-    let generics = signature.generics.clone();
+    let ItemFn {
+        attrs: mut attributes,
+        vis: visibility,
+        sig,
+        block: body,
+    } = parse_macro_input!(input as _);
+
+    let signature_no_muts = get_mut_signature(sig.clone());
+
+    let Signature {
+        ident: fn_ident,
+        inputs,
+        output,
+        asyncness,
+        generics,
+        ..
+    } = sig;
 
     let input_tys = get_input_types(&inputs);
     let input_names = get_input_names(&inputs);
@@ -89,30 +91,23 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let output_string = output_parts.join("::");
     let output_type_display = output_ts.to_string().replace(' ', "");
 
-    if check_with_cache_flag(args.with_cached_flag, output_string) {
+    if check_with_cache_flag(with_cached_flag, output_string) {
         return with_cache_flag_error(output_span, output_type_display);
     }
 
-    let cache_value_ty = find_value_type(args.result, args.option, &output, output_ty);
+    let cache_value_ty = find_value_type(result, option, &output, output_ty);
 
     // make the cache identifier
-    let cache_ident = match args.name {
+    let cache_ident = match name {
         Some(ref name) => Ident::new(name, fn_ident.span()),
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 
     let (cache_key_ty, key_convert_block) =
-        make_cache_key_type(&args.key, &args.convert, &args.ty, input_tys, &input_names);
+        make_cache_key_type(&key, &convert, &ty, input_tys, &input_names);
 
     // make the cache type and create statement
-    let (cache_ty, cache_create) = match (
-        &args.unbound,
-        &args.size,
-        &args.time,
-        &args.ty,
-        &args.create,
-        &args.time_refresh,
-    ) {
+    let (cache_ty, cache_create) = match (&unbound, &size, &time, &ty, &create, &time_refresh) {
         (true, None, None, None, None, _) => {
             let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
             let cache_create = quote! {cached::UnboundCache::new()};
@@ -158,10 +153,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the set cache and return cache blocks
-    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+    let (set_cache_block, return_cache_block) = match (&result, &option) {
         (false, false) => {
             let set_cache_block = quote! { cache.cache_set(key, result.clone()); };
-            let return_cache_block = if args.with_cached_flag {
+            let return_cache_block = if with_cached_flag {
                 quote! { let mut r = result.to_owned(); r.was_cached = true; return r }
             } else {
                 quote! { return result.to_owned() }
@@ -174,7 +169,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     cache.cache_set(key, result.clone());
                 }
             };
-            let return_cache_block = if args.with_cached_flag {
+            let return_cache_block = if with_cached_flag {
                 quote! { let mut r = result.to_owned(); r.was_cached = true; return Ok(r) }
             } else {
                 quote! { return Ok(result.to_owned()) }
@@ -187,7 +182,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     cache.cache_set(key, result.clone());
                 }
             };
-            let return_cache_block = if args.with_cached_flag {
+            let return_cache_block = if with_cached_flag {
                 quote! { let mut r = result.to_owned(); r.was_cached = true; return Some(r) }
             } else {
                 quote! { return Some(result.clone()) }
@@ -197,7 +192,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("the result and option attributes are mutually exclusive"),
     };
 
-    if args.result_fallback && args.sync_writes.is_some() {
+    if result_fallback && sync_writes.is_some() {
         panic!("result_fallback and sync_writes are mutually exclusive");
     }
 
@@ -213,7 +208,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let function_call;
     let ty;
     if asyncness.is_some() {
-        lock = match args.sync_writes {
+        lock = match sync_writes {
             Some(SyncWriteMode::ByKey) => quote! {
                 let mut locks = #cache_ident.lock().await;
                 let lock = locks
@@ -236,7 +231,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = #no_cache_fn_ident(#(#input_names),*).await;
         };
 
-        ty = match args.sync_writes {
+        ty = match sync_writes {
             Some(SyncWriteMode::ByKey) => quote! {
                 #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::async_sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<::cached::async_sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::async_sync::Mutex::new(std::collections::HashMap::new()));
             },
@@ -245,7 +240,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             },
         };
     } else {
-        lock = match args.sync_writes {
+        lock = match sync_writes {
             Some(SyncWriteMode::ByKey) => quote! {
                 let mut locks = #cache_ident.lock().unwrap();
                 let lock = locks.entry(key.clone()).or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(#cache_create))).clone();
@@ -265,7 +260,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = #no_cache_fn_ident(#(#input_names),*);
         };
 
-        ty = match args.sync_writes {
+        ty = match sync_writes {
             Some(SyncWriteMode::ByKey) => quote! {
                 #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<std::sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
             },
@@ -283,7 +278,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #set_cache_and_return
     };
 
-    let do_set_return_block = if args.sync_writes.is_some() {
+    let do_set_return_block = if sync_writes.is_some() {
         quote! {
             #lock
             if let Some(result) = cache.cache_get(&key) {
@@ -292,7 +287,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #function_call
             #set_cache_and_return
         }
-    } else if args.result_fallback {
+    } else if result_fallback {
         quote! {
             let old_val = {
                 #lock
@@ -325,8 +320,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #set_cache_and_return
         }
     };
-
-    let signature_no_muts = get_mut_signature(signature);
 
     // create a signature for the cache-priming function
     let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());

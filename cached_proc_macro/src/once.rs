@@ -1,53 +1,45 @@
 use crate::helpers::*;
-use darling::ast::NestedMeta;
-use darling::FromMeta;
+use attrs::*;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::spanned::Spanned;
-use syn::{parse_macro_input, Ident, ItemFn, ReturnType};
-
-#[derive(FromMeta)]
-struct OnceMacroArgs {
-    #[darling(default)]
-    name: Option<String>,
-    #[darling(default)]
-    time: Option<u64>,
-    #[darling(default)]
-    sync_writes: bool,
-    #[darling(default)]
-    result: bool,
-    #[darling(default)]
-    option: bool,
-    #[darling(default)]
-    with_cached_flag: bool,
-}
+use syn::{parse::Parser as _, spanned::Spanned as _};
+use syn::{parse_macro_input, Ident, ItemFn, ReturnType, Signature};
 
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(darling::Error::from(e).write_errors());
-        }
-    };
-    let args = match OnceMacroArgs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(e.write_errors());
-        }
-    };
-    let input = parse_macro_input!(input as ItemFn);
+    let mut name = None::<String>;
+    let mut time = None::<u64>;
+    let mut sync_writes = false;
+    let mut result = false;
+    let mut option = false;
+    let mut with_cached_flag = false;
+    match Attrs::new()
+        .once("name", with::eq(set::lit(&mut name)))
+        .once("time", with::eq(set::lit(&mut time)))
+        .once("sync_writes", flag::or_eq(&mut sync_writes))
+        .once("result", with::eq(on::lit(&mut result)))
+        .once("option", with::eq(on::lit(&mut option)))
+        .once("with_cached_flag", with::eq(on::lit(&mut with_cached_flag)))
+        .parse(args)
+    {
+        Ok(()) => {}
+        Err(e) => return e.into_compile_error().into(),
+    }
+    let ItemFn {
+        attrs: mut attributes,
+        vis: visibility,
+        sig,
+        block: body,
+    } = parse_macro_input!(input as ItemFn);
 
-    // pull out the parts of the input
-    let mut attributes = input.attrs;
-    let visibility = input.vis;
-    let signature = input.sig;
-    let body = input.block;
+    let signature_no_muts = get_mut_signature(sig.clone());
 
-    // pull out the parts of the function signature
-    let fn_ident = signature.ident.clone();
-    let inputs = signature.inputs.clone();
-    let output = signature.output.clone();
-    let asyncness = signature.asyncness;
+    let Signature {
+        ident: fn_ident,
+        inputs,
+        output,
+        asyncness,
+        ..
+    } = sig;
 
     // pull out the names and types of the function inputs
     let input_names = get_input_names(&inputs);
@@ -64,20 +56,20 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let output_string = output_parts.join("::");
     let output_type_display = output_ts.to_string().replace(' ', "");
 
-    if check_with_cache_flag(args.with_cached_flag, output_string) {
+    if check_with_cache_flag(with_cached_flag, output_string) {
         return with_cache_flag_error(output_span, output_type_display);
     }
 
-    let cache_value_ty = find_value_type(args.result, args.option, &output, output_ty);
+    let cache_value_ty = find_value_type(result, option, &output, output_ty);
 
     // make the cache identifier
-    let cache_ident = match args.name {
+    let cache_ident = match name {
         Some(name) => Ident::new(&name, fn_ident.span()),
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 
     // make the cache type and create statement
-    let (cache_ty, cache_create) = match &args.time {
+    let (cache_ty, cache_create) = match &time {
         None => (quote! { Option<#cache_value_ty> }, quote! { None }),
         Some(_) => (
             quote! { Option<(::cached::web_time::Instant, #cache_value_ty)> },
@@ -86,9 +78,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the set cache and return cache blocks
-    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+    let (set_cache_block, return_cache_block) = match (&result, &option) {
         (false, false) => {
-            let set_cache_block = if args.time.is_some() {
+            let set_cache_block = if time.is_some() {
                 quote! {
                     *cached = Some((now, result.clone()));
                 }
@@ -98,16 +90,16 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
 
-            let return_cache_block = if args.with_cached_flag {
+            let return_cache_block = if with_cached_flag {
                 quote! { let mut r = result.clone(); r.was_cached = true; return r }
             } else {
                 quote! { return result.clone() }
             };
-            let return_cache_block = gen_return_cache_block(args.time, return_cache_block);
+            let return_cache_block = gen_return_cache_block(time, return_cache_block);
             (set_cache_block, return_cache_block)
         }
         (true, false) => {
-            let set_cache_block = if args.time.is_some() {
+            let set_cache_block = if time.is_some() {
                 quote! {
                     if let Ok(result) = &result {
                         *cached = Some((now, result.clone()));
@@ -121,16 +113,16 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
 
-            let return_cache_block = if args.with_cached_flag {
+            let return_cache_block = if with_cached_flag {
                 quote! { let mut r = result.clone(); r.was_cached = true; return Ok(r) }
             } else {
                 quote! { return Ok(result.clone()) }
             };
-            let return_cache_block = gen_return_cache_block(args.time, return_cache_block);
+            let return_cache_block = gen_return_cache_block(time, return_cache_block);
             (set_cache_block, return_cache_block)
         }
         (false, true) => {
-            let set_cache_block = if args.time.is_some() {
+            let set_cache_block = if time.is_some() {
                 quote! {
                     if let Some(result) = &result {
                         *cached = Some((now, result.clone()));
@@ -144,12 +136,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
 
-            let return_cache_block = if args.with_cached_flag {
+            let return_cache_block = if with_cached_flag {
                 quote! { let mut r = result.clone(); r.was_cached = true; return Some(r) }
             } else {
                 quote! { return Some(result.clone()) }
             };
-            let return_cache_block = gen_return_cache_block(args.time, return_cache_block);
+            let return_cache_block = gen_return_cache_block(time, return_cache_block);
             (set_cache_block, return_cache_block)
         }
         _ => panic!("the result and option attributes are mutually exclusive"),
@@ -220,7 +212,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let do_set_return_block = if args.sync_writes {
+    let do_set_return_block = if sync_writes {
         quote! {
             #r_lock_return_cache_block
             #w_lock
@@ -238,8 +230,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             #set_cache_and_return
         }
     };
-
-    let signature_no_muts = get_mut_signature(signature);
 
     let prime_fn_ident = Ident::new(&format!("{}_prime_cache", &fn_ident), fn_ident.span());
     let mut prime_sig = signature_no_muts.clone();
