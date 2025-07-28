@@ -3,6 +3,7 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Using proc macros no longer require importing `std::time::Duration`
 ## Removed
 
 ## [0.56.0 / [cached_proc_macro[0.25.0]]]
