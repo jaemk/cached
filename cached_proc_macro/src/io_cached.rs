@@ -225,19 +225,19 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         match time_refresh {
                             Some(time_refresh) => {
                                 if asyncness.is_some() {
-                                    quote! { cached::AsyncRedisCache::new(#cache_prefix, Duration::from_secs(#time)).set_refresh(#time_refresh).build().await.expect("error constructing AsyncRedisCache in #[io_cached] macro") }
+                                    quote! { cached::AsyncRedisCache::new(#cache_prefix, std::time::Duration::from_secs(#time)).set_refresh(#time_refresh).build().await.expect("error constructing AsyncRedisCache in #[io_cached] macro") }
                                 } else {
                                     quote! {
-                                        cached::RedisCache::new(#cache_prefix, Duration::from_secs(#time)).set_refresh(#time_refresh).build().expect("error constructing RedisCache in #[io_cached] macro")
+                                        cached::RedisCache::new(#cache_prefix, std::time::Duration::from_secs(#time)).set_refresh(#time_refresh).build().expect("error constructing RedisCache in #[io_cached] macro")
                                     }
                                 }
                             }
                             None => {
                                 if asyncness.is_some() {
-                                    quote! { cached::AsyncRedisCache::new(#cache_prefix, Duration::from_secs(#time)).build().await.expect("error constructing AsyncRedisCache in #[io_cached] macro") }
+                                    quote! { cached::AsyncRedisCache::new(#cache_prefix, std::time::Duration::from_secs(#time)).build().await.expect("error constructing AsyncRedisCache in #[io_cached] macro") }
                                 } else {
                                     quote! {
-                                        cached::RedisCache::new(#cache_prefix, Duration::from_secs(#time)).build().expect("error constructing RedisCache in #[io_cached] macro")
+                                        cached::RedisCache::new(#cache_prefix, std::time::Duration::from_secs(#time)).build().expect("error constructing RedisCache in #[io_cached] macro")
                                     }
                                 }
                             }
@@ -297,7 +297,7 @@ pub fn io_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         None => create,
                         Some(time) => {
                             quote! {
-                                (#create).set_lifespan(Duration::from_secs(#time))
+                                (#create).set_lifespan(std::time::Duration::from_secs(#time))
                             }
                         }
                     };
