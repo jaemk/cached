@@ -356,6 +356,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #visibility #signature_no_muts {
             use cached::Cached;
             use cached::CloneCached;
+            use cached::proc_macro::__private::ToFullyOwned as _;
             let key = #key_convert_block;
             #do_set_return_block
         }
@@ -365,6 +366,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #(#attributes)*
         #visibility #prime_sig {
             use cached::Cached;
+            use cached::proc_macro::__private::ToFullyOwned as _;
             let key = #key_convert_block;
             #prime_do_set_return_block
         }

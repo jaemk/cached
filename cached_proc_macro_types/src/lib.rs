@@ -1,3 +1,11 @@
+mod to_fully_owned;
+
+// Not public API.
+#[doc(hidden)]
+pub mod __private {
+    pub use super::to_fully_owned::ToFullyOwned;
+}
+
 /// Used to wrap a function result so callers can see whether the result was cached.
 #[derive(Clone)]
 pub struct Return<T> {
