@@ -1,4 +1,5 @@
 use crate::IOCached;
+use redis::Commands;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -217,7 +218,7 @@ where
         RedisCacheBuilder::new(prefix, ttl)
     }
 
-    fn generate_key(&self, key: &K) -> String {
+    fn generate_key(&self, key: impl Display) -> String {
         format!("{}{}{}", self.namespace, self.prefix, key)
     }
 
@@ -345,6 +346,19 @@ where
         Some(self.ttl)
     }
 
+    fn cache_clear(&self) -> Result<(), RedisCacheError> {
+        // `scan_match` takes `&mut self`, so we need two connection objects to scan and
+        // delete...?
+        let mut scan = self.pool.get()?;
+        let mut delete = self.pool.get()?;
+
+        for key in scan.scan_match::<_, String>(self.generate_key("*"))? {
+            let () = delete.del(key)?;
+        }
+
+        Ok(())
+    }
+
     fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = ttl;
@@ -364,6 +378,8 @@ where
 ))]
 mod async_redis {
     use std::time::Duration;
+
+    use redis::AsyncCommands;
 
     use super::{
         CachedRedisValue, DeserializeOwned, Display, PhantomData, RedisCacheBuildError,
@@ -530,7 +546,7 @@ mod async_redis {
             AsyncRedisCacheBuilder::new(prefix, ttl)
         }
 
-        fn generate_key(&self, key: &K) -> String {
+        fn generate_key(&self, key: impl Display) -> String {
             format!("{}{}{}", self.namespace, self.prefix, key)
         }
 
@@ -626,6 +642,21 @@ mod async_redis {
                     Ok(Some(v.value))
                 }
             }
+        }
+
+        async fn cache_clear(&self) -> Result<(), Self::Error> {
+            // `scan_match` takes `&mut self`, so we need two connection objects to scan and
+            // delete...?
+            let mut scan = self.connection.clone();
+            let mut delete = self.connection.clone();
+
+            let mut scanner = scan.scan_match::<_, String>(self.generate_key("*")).await?;
+
+            while let Some(key) = scanner.next_item().await {
+                let () = delete.del(key).await?;
+            }
+
+            Ok(())
         }
 
         /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value

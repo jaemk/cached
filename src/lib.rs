@@ -445,6 +445,13 @@ pub trait IOCached<K, V> {
     /// Should return `Self::Error` if the operation fails
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
+    /// Remove all cached values
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails
+    fn cache_clear(&self) -> Result<(), Self::Error>;
+
     /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value
     fn cache_set_refresh(&mut self, refresh: bool) -> bool;
 
@@ -478,6 +485,9 @@ pub trait IOCachedAsync<K, V> {
 
     /// Remove a cached value
     async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
+
+    /// Remove all cached values
+    async fn cache_clear(&self) -> Result<(), Self::Error>;
 
     /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value
     fn cache_set_refresh(&mut self, refresh: bool) -> bool;
