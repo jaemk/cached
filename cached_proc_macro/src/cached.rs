@@ -125,12 +125,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
         (false, None, Some(time), None, None, time_refresh) => {
             let cache_ty = quote! {cached::TimedCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::TimedCache::with_lifespan_and_refresh(Duration::from_secs(#time), #time_refresh)};
+            let cache_create = quote! {cached::TimedCache::with_lifespan_and_refresh(std::time::Duration::from_secs(#time), #time_refresh)};
             (cache_ty, cache_create)
         }
         (false, Some(size), Some(time), None, None, time_refresh) => {
             let cache_ty = quote! {cached::TimedSizedCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::TimedSizedCache::with_size_and_lifespan_and_refresh(#size, Duration::from_secs(#time), #time_refresh)};
+            let cache_create = quote! {cached::TimedSizedCache::with_size_and_lifespan_and_refresh(#size, std::time::Duration::from_secs(#time), #time_refresh)};
             (cache_ty, cache_create)
         }
         (false, None, None, None, None, _) => {

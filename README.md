@@ -86,7 +86,6 @@ fn keyed(a: &str, b: &str) -> usize {
 
 ```rust
 use cached::proc_macro::once;
-use std::time::Duration;
 
 /// Only cache the initial function call.
 /// Function will be re-executed after the cache
