@@ -139,3 +139,7 @@ required-features = ["async", "proc_macro"]
 [[example]]
 name = "expiring_sized_cache"
 required-features = ["async_tokio_rt_multi_thread"]
+
+[[example]]
+name = "disk"
+required-features = ["disk_store"]
