@@ -106,7 +106,7 @@ impl<T> LRUList<T> {
         });
     }
 
-    pub fn iter(&self) -> LRUListIterator<T> {
+    pub fn iter(&self) -> LRUListIterator<'_, T> {
         LRUListIterator::<T> {
             list: self,
             index: Self::OCCUPIED,
