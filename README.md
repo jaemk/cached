@@ -28,14 +28,14 @@ of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(s
 - `async`: Include support for async functions and async cache stores
 - `async_tokio_rt_multi_thread`: Enable `tokio`'s optional `rt-multi-thread` feature.
 - `redis_store`: Include Redis cache store
-- `redis_async_std`: Include async Redis support using `async-std` and `async-std` tls support, implies `redis_store` and `async`
+- `redis_smol`: Include async Redis support using `smol` and `smol` tls support, implies `redis_store` and `async`
 - `redis_tokio`: Include async Redis support using `tokio` and `tokio` tls support, implies `redis_store` and `async`
 - `redis_connection_manager`: Enable the optional `connection-manager` feature of `redis`. Any async redis caches created
                               will use a connection manager instead of a `MultiplexedConnection`
 - `redis_ahash`: Enable the optional `ahash` feature of `redis`
 - `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
-   runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_async_std`, `redis_tokio`, `redis_ahash`)
+   runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_tokio`, `redis_ahash`)
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the

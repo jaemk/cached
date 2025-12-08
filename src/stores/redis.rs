@@ -360,7 +360,7 @@ where
 
 #[cfg(all(
     feature = "async",
-    any(feature = "redis_async_std", feature = "redis_tokio")
+    any(feature = "redis_smol", feature = "redis_tokio")
 ))]
 mod async_redis {
     use std::time::Duration;
@@ -698,13 +698,13 @@ mod async_redis {
 
 #[cfg(all(
     feature = "async",
-    any(feature = "redis_async_std", feature = "redis_tokio")
+    any(feature = "redis_smol", feature = "redis_tokio")
 ))]
 #[cfg_attr(
     docsrs,
     doc(cfg(all(
         feature = "async",
-        any(feature = "redis_async_std", feature = "redis_tokio")
+        any(feature = "redis_smol", feature = "redis_tokio")
     )))
 )]
 pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
