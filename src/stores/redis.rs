@@ -369,6 +369,8 @@ mod async_redis {
         CachedRedisValue, DeserializeOwned, Display, PhantomData, RedisCacheBuildError,
         RedisCacheError, Serialize, DEFAULT_NAMESPACE, ENV_KEY,
     };
+    #[cfg(feature = "redis_async_cache")]
+    use redis::IntoConnectionInfo;
     use {crate::IOCachedAsync, async_trait::async_trait};
 
     pub struct AsyncRedisCacheBuilder<K, V> {
@@ -377,6 +379,8 @@ mod async_redis {
         namespace: String,
         prefix: String,
         connection_string: Option<String>,
+        #[cfg(feature = "redis_async_cache")]
+        client_side_caching: bool,
         _phantom: PhantomData<(K, V)>,
     }
 
@@ -393,6 +397,8 @@ mod async_redis {
                 namespace: DEFAULT_NAMESPACE.to_string(),
                 prefix: prefix.as_ref().to_string(),
                 connection_string: None,
+                #[cfg(feature = "redis_async_cache")]
+                client_side_caching: false,
                 _phantom: PhantomData,
             }
         }
@@ -438,6 +444,14 @@ mod async_redis {
             self
         }
 
+        /// Enable client-side caching using RESP3 protocol
+        #[cfg(feature = "redis_async_cache")]
+        #[must_use]
+        pub fn set_client_side_caching(mut self, enable: bool) -> Self {
+            self.client_side_caching = enable;
+            self
+        }
+
         /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`
         ///
         /// # Errors
@@ -462,6 +476,25 @@ mod async_redis {
             &self,
         ) -> Result<redis::aio::MultiplexedConnection, RedisCacheBuildError> {
             let s = self.connection_string()?;
+
+            #[cfg(feature = "redis_async_cache")]
+            if self.client_side_caching {
+                let mut connection_info = s.into_connection_info()?;
+
+                let mut config = redis::AsyncConnectionConfig::default();
+                let redis_settings = connection_info
+                    .redis_settings()
+                    .clone()
+                    .set_protocol(redis::ProtocolVersion::RESP3);
+                connection_info = connection_info.set_redis_settings(redis_settings);
+                config = config.set_cache_config(redis::caching::CacheConfig::default());
+                let client = redis::Client::open(connection_info)?;
+                let conn = client
+                    .get_multiplexed_async_connection_with_config(&config)
+                    .await?;
+                return Ok(conn);
+            }
+
             let client = redis::Client::open(s)?;
             let conn = client.get_multiplexed_async_connection().await?;
             Ok(conn)
@@ -475,6 +508,24 @@ mod async_redis {
             &self,
         ) -> Result<redis::aio::ConnectionManager, RedisCacheBuildError> {
             let s = self.connection_string()?;
+            #[cfg(feature = "redis_async_cache")]
+            if self.client_side_caching {
+                let mut connection_info = s.into_connection_info()?;
+
+                let mut config = redis::aio::ConnectionManagerConfig::default();
+                if self.client_side_caching {
+                    let redis_settings = connection_info
+                        .redis_settings()
+                        .clone()
+                        .set_protocol(redis::ProtocolVersion::RESP3);
+                    connection_info = connection_info.set_redis_settings(redis_settings);
+                    config = config.set_cache_config(redis::caching::CacheConfig::new());
+                }
+                let client = redis::Client::open(connection_info)?;
+                let conn = redis::aio::ConnectionManager::new_with_config(client, config).await?;
+                return Ok(conn);
+            }
+
             let client = redis::Client::open(s)?;
             let conn = redis::aio::ConnectionManager::new(client).await?;
             Ok(conn)

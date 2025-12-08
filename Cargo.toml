@@ -33,8 +33,9 @@ redis_tokio = [
   "async",
   "redis/tokio-native-tls-comp",
 ]
-redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
-redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_async_cache = [
+  "redis/cache-aio",
+]
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = []
