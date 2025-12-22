@@ -24,7 +24,7 @@ cached! {
 fn test_unbound_cache() {
     fib0(20);
     {
-        let cache = UNBOUND_FIB.lock().unwrap();
+        let cache = UNBOUND_FIB.lock();
         assert_eq!(21, cache.cache_size());
     }
 }
@@ -41,7 +41,7 @@ cached! {
 fn test_sized_cache() {
     let last = fib1(20);
     {
-        let cache = SIZED_FIB.lock().unwrap();
+        let cache = SIZED_FIB.lock();
         assert_eq!(3, cache.cache_size());
         let items = cache.get_order().iter().collect::<Vec<_>>();
         assert_eq!(3, items.len());
@@ -63,19 +63,19 @@ fn test_timed_cache() {
     timed(1);
     timed(1);
     {
-        let cache = TIMED.lock().unwrap();
+        let cache = TIMED.lock();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
     sleep(Duration::new(3, 0));
     timed(1);
     {
-        let cache = TIMED.lock().unwrap();
+        let cache = TIMED.lock();
         assert_eq!(2, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
     {
-        let mut cache = TIMED.lock().unwrap();
+        let mut cache = TIMED.lock();
         assert_eq!(
             2,
             cache
@@ -88,7 +88,7 @@ fn test_timed_cache() {
     sleep(Duration::new(1, 0));
     timed(1);
     {
-        let cache = TIMED.lock().unwrap();
+        let cache = TIMED.lock();
         assert_eq!(3, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
     }
@@ -111,19 +111,19 @@ fn test_timed_sized_cache() {
     timefac(1);
     timefac(1);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
     sleep(Duration::new(3, 0));
     timefac(1);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(2, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
     {
-        let mut cache = TIMED_SIZED.lock().unwrap();
+        let mut cache = TIMED_SIZED.lock();
         assert_eq!(
             2,
             cache
@@ -136,12 +136,12 @@ fn test_timed_sized_cache() {
     sleep(Duration::new(1, 0));
     timefac(1);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(3, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
     }
     {
-        let mut cache = TIMED_SIZED.lock().unwrap();
+        let mut cache = TIMED_SIZED.lock();
         assert_eq!(
             1,
             cache
@@ -152,13 +152,13 @@ fn test_timed_sized_cache() {
     }
     timefac(2);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(4, cache.cache_misses().unwrap());
         assert_eq!(3, cache.cache_hits().unwrap());
     }
     timefac(3);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(5, cache.cache_misses().unwrap());
         assert_eq!(4, cache.cache_hits().unwrap());
     }
@@ -166,25 +166,25 @@ fn test_timed_sized_cache() {
     timefac(2);
     timefac(1);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(5, cache.cache_misses().unwrap());
         assert_eq!(7, cache.cache_hits().unwrap());
     }
     timefac(4);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(6, cache.cache_misses().unwrap());
         assert_eq!(8, cache.cache_hits().unwrap());
     }
     timefac(6);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(8, cache.cache_misses().unwrap());
         assert_eq!(9, cache.cache_hits().unwrap());
     }
     timefac(1);
     {
-        let cache = TIMED_SIZED.lock().unwrap();
+        let cache = TIMED_SIZED.lock();
         assert_eq!(9, cache.cache_misses().unwrap());
         assert_eq!(9, cache.cache_hits().unwrap());
         assert_eq!(3, cache.cache_size());
@@ -202,7 +202,7 @@ cached! {
 fn test_string_cache() {
     string_1("a".into(), "b".into());
     {
-        let cache = STRING_CACHE_EXPLICIT.lock().unwrap();
+        let cache = STRING_CACHE_EXPLICIT.lock();
         assert_eq!(1, cache.cache_size());
     }
 }
@@ -221,14 +221,14 @@ fn test_timed_cache_key() {
     timed_2(1);
     timed_2(1);
     {
-        let cache = TIMED_CACHE.lock().unwrap();
+        let cache = TIMED_CACHE.lock();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
     sleep(Duration::new(3, 0));
     timed_2(1);
     {
-        let cache = TIMED_CACHE.lock().unwrap();
+        let cache = TIMED_CACHE.lock();
         assert_eq!(2, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
@@ -249,21 +249,21 @@ fn test_sized_cache_key() {
     sized_key("a", "1");
     sized_key("a", "1");
     {
-        let cache = SIZED_CACHE.lock().unwrap();
+        let cache = SIZED_CACHE.lock();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
         assert_eq!(1, cache.cache_size());
     }
     sized_key("a", "1");
     {
-        let cache = SIZED_CACHE.lock().unwrap();
+        let cache = SIZED_CACHE.lock();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(1, cache.cache_size());
     }
     sized_key("a", "2");
     {
-        let cache = SIZED_CACHE.lock().unwrap();
+        let cache = SIZED_CACHE.lock();
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(2, cache.cache_size());
         assert_eq!(vec!["a2", "a1"], cache.key_order().collect::<Vec<_>>());
@@ -271,7 +271,7 @@ fn test_sized_cache_key() {
     }
     sized_key("a", "3");
     {
-        let cache = SIZED_CACHE.lock().unwrap();
+        let cache = SIZED_CACHE.lock();
         assert_eq!(2, cache.cache_size());
         assert_eq!(vec!["a3", "a2"], cache.key_order().collect::<Vec<_>>());
         assert_eq!(vec![&2, &2], cache.value_order().collect::<Vec<_>>());
@@ -279,7 +279,7 @@ fn test_sized_cache_key() {
     sized_key("a", "4");
     sized_key("a", "5");
     {
-        let cache = SIZED_CACHE.lock().unwrap();
+        let cache = SIZED_CACHE.lock();
         assert_eq!(2, cache.cache_size());
         assert_eq!(vec!["a5", "a4"], cache.key_order().collect::<Vec<_>>());
         assert_eq!(vec![&2, &2], cache.value_order().collect::<Vec<_>>());
@@ -287,7 +287,7 @@ fn test_sized_cache_key() {
     sized_key("a", "67");
     sized_key("a", "8");
     {
-        let cache = SIZED_CACHE.lock().unwrap();
+        let cache = SIZED_CACHE.lock();
         assert_eq!(2, cache.cache_size());
         assert_eq!(vec!["a8", "a67"], cache.key_order().collect::<Vec<_>>());
         assert_eq!(vec![&2, &3], cache.value_order().collect::<Vec<_>>());
@@ -311,7 +311,7 @@ fn cache_result_key() {
     assert!(test_result_key(2).is_ok());
     assert!(test_result_key(4).is_ok());
     {
-        let cache = RESULT_CACHE_KEY.lock().unwrap();
+        let cache = RESULT_CACHE_KEY.lock();
         assert_eq!(2, cache.cache_size());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(4, cache.cache_misses().unwrap());
@@ -334,7 +334,7 @@ fn cache_result_no_default() {
     assert!(test_result_no_default(2).is_ok());
     assert!(test_result_no_default(4).is_ok());
     {
-        let cache = RESULT_CACHE.lock().unwrap();
+        let cache = RESULT_CACHE.lock();
         assert_eq!(2, cache.cache_size());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(4, cache.cache_misses().unwrap());
@@ -369,12 +369,12 @@ fn test_can_fail() {
     assert_eq!(can_fail("ab"), Ok("ab-2".to_string()));
     assert_eq!(can_fail("abc"), Err("too big".to_string()));
     {
-        let cache = CONTROL_CACHE.lock().unwrap();
+        let cache = CONTROL_CACHE.lock();
         assert_eq!(2, cache.cache_misses().unwrap());
     }
     assert_eq!(can_fail("ab"), Ok("ab-2".to_string()));
     {
-        let cache = CONTROL_CACHE.lock().unwrap();
+        let cache = CONTROL_CACHE.lock();
         assert_eq!(1, cache.cache_hits().unwrap());
     }
 }
@@ -430,7 +430,7 @@ fn test_proc_cached_result() {
     assert!(proc_cached_result(2).is_ok());
     assert!(proc_cached_result(4).is_ok());
     {
-        let cache = PROC_CACHED_RESULT.lock().unwrap();
+        let cache = PROC_CACHED_RESULT.lock();
         assert_eq!(2, cache.cache_size());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(4, cache.cache_misses().unwrap());
@@ -457,7 +457,7 @@ fn test_proc_cached_option() {
     assert!(proc_cached_option(1).is_some());
     assert!(proc_cached_option(4).is_some());
     {
-        let cache = PROC_CACHED_OPTION.lock().unwrap();
+        let cache = PROC_CACHED_OPTION.lock();
         assert_eq!(3, cache.cache_size());
         assert_eq!(3, cache.cache_hits().unwrap());
         assert_eq!(5, cache.cache_misses().unwrap());
@@ -490,7 +490,7 @@ fn test_proc_timed_sized_cache() {
     proc_timed_sized_sleeper(1);
     proc_timed_sized_sleeper(1);
     {
-        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock();
         assert_eq!(1, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
     }
@@ -498,7 +498,7 @@ fn test_proc_timed_sized_cache() {
     sleep(Duration::new(1, 0));
     proc_timed_sized_sleeper(1);
     {
-        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock();
         assert_eq!(2, cache.cache_misses().unwrap());
         assert_eq!(1, cache.cache_hits().unwrap());
         assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1]);
@@ -506,13 +506,13 @@ fn test_proc_timed_sized_cache() {
     // sleep to expire the one entry
     sleep(Duration::new(1, 0));
     {
-        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock();
         assert!(cache.key_order().next().is_none());
     }
     proc_timed_sized_sleeper(1);
     proc_timed_sized_sleeper(1);
     {
-        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock();
         assert_eq!(3, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&1]);
@@ -520,7 +520,7 @@ fn test_proc_timed_sized_cache() {
     // lru size is 1, so this new thing evicts the existing key
     proc_timed_sized_sleeper(2);
     {
-        let cache = PROC_TIMED_SIZED_SLEEPER.lock().unwrap();
+        let cache = PROC_TIMED_SIZED_SLEEPER.lock();
         assert_eq!(4, cache.cache_misses().unwrap());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(cache.key_order().collect::<Vec<_>>(), vec![&2]);
@@ -543,7 +543,7 @@ fn test_cached_return_flag() {
     assert_eq!(*r, 1);
     assert!(r.is_positive());
     {
-        let cache = CACHED_RETURN_FLAG.lock().unwrap();
+        let cache = CACHED_RETURN_FLAG.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -571,7 +571,7 @@ fn test_cached_return_flag_result() {
     let r = cached_return_flag_result(10);
     assert!(r.is_err());
     {
-        let cache = CACHED_RETURN_FLAG_RESULT.lock().unwrap();
+        let cache = CACHED_RETURN_FLAG_RESULT.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -599,7 +599,7 @@ fn test_cached_return_flag_option() {
     let r = cached_return_flag_option(10);
     assert!(r.is_none());
     {
-        let cache = CACHED_RETURN_FLAG_OPTION.lock().unwrap();
+        let cache = CACHED_RETURN_FLAG_OPTION.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -1002,14 +1002,14 @@ fn test_cached_smartstring() {
     string.push_str("very stringy");
     assert_eq!("equal", cached_smartstring(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        let cache = CACHED_SMARTSTRING.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert_eq!("equal", cached_smartstring(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        let cache = CACHED_SMARTSTRING.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1017,7 +1017,7 @@ fn test_cached_smartstring() {
     let string = smartstring::alias::String::from("also stringy");
     assert_eq!("not equal", cached_smartstring(string));
     {
-        let cache = CACHED_SMARTSTRING.lock().unwrap();
+        let cache = CACHED_SMARTSTRING.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -1036,21 +1036,21 @@ fn cached_smartstring_from_str(s: &str) -> bool {
 fn test_cached_smartstring_from_str() {
     assert!(cached_smartstring_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
+        let cache = CACHED_SMARTSTRING_FROM_STR.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(cached_smartstring_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
+        let cache = CACHED_SMARTSTRING_FROM_STR.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(!cached_smartstring_from_str("false"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.lock().unwrap();
+        let cache = CACHED_SMARTSTRING_FROM_STR.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -1070,14 +1070,14 @@ fn cached_timed_refresh(s: &str) -> bool {
 fn test_cached_timed_refresh() {
     assert!(cached_timed_refresh("true"));
     {
-        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        let cache = CACHED_TIMED_REFRESH.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(cached_timed_refresh("true"));
     {
-        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        let cache = CACHED_TIMED_REFRESH.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1089,7 +1089,7 @@ fn test_cached_timed_refresh() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(cached_timed_refresh("true"));
     {
-        let cache = CACHED_TIMED_REFRESH.lock().unwrap();
+        let cache = CACHED_TIMED_REFRESH.lock();
         assert_eq!(cache.cache_hits(), Some(4));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1110,14 +1110,14 @@ fn cached_timed_sized_refresh(s: &str) -> bool {
 fn test_cached_timed_sized_refresh() {
     assert!(cached_timed_sized_refresh("true"));
     {
-        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(cached_timed_sized_refresh("true"));
     {
-        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1129,7 +1129,7 @@ fn test_cached_timed_sized_refresh() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(cached_timed_sized_refresh("true"));
     {
-        let cache = CACHED_TIMED_SIZED_REFRESH.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_REFRESH.lock();
         assert_eq!(cache.cache_hits(), Some(4));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1150,13 +1150,13 @@ fn cached_timed_sized_refresh_prime(s: &str) -> bool {
 fn test_cached_timed_sized_refresh_prime() {
     assert!(cached_timed_sized_refresh_prime("true"));
     {
-        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
     assert!(cached_timed_sized_refresh_prime("true"));
     {
-        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1171,7 +1171,7 @@ fn test_cached_timed_sized_refresh_prime() {
     // stats unchanged (other than this new hit) since we kept priming
     assert!(cached_timed_sized_refresh_prime("true"));
     {
-        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.lock();
         assert_eq!(cache.cache_hits(), Some(2));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1186,13 +1186,13 @@ fn cached_timed_sized_prime(s: &str) -> bool {
 fn test_cached_timed_sized_prime() {
     assert!(cached_timed_sized_prime("true"));
     {
-        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_PRIME.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
     assert!(cached_timed_sized_prime("true"));
     {
-        let cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        let cache = CACHED_TIMED_SIZED_PRIME.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1207,7 +1207,7 @@ fn test_cached_timed_sized_prime() {
     // stats unchanged (other than this new hit) since we kept priming
     assert!(cached_timed_sized_prime("true"));
     {
-        let mut cache = CACHED_TIMED_SIZED_PRIME.lock().unwrap();
+        let mut cache = CACHED_TIMED_SIZED_PRIME.lock();
         assert_eq!(cache.cache_hits(), Some(2));
         assert_eq!(cache.cache_misses(), Some(1));
         assert!(cache.cache_size() > 0);
@@ -1602,7 +1602,7 @@ fn fetch_article(slug: String) -> Result<NewsArticle, ()> {
 #[serial(ExpiringCacheTest)]
 fn test_expiring_value_expired_article_returned_with_miss() {
     {
-        let mut cache = FETCH_ARTICLE.lock().unwrap();
+        let mut cache = FETCH_ARTICLE.lock();
         cache.cache_reset();
         cache.cache_reset_metrics();
     }
@@ -1613,7 +1613,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 
     // The article was fetched due to a cache miss and the result cached.
     {
-        let cache = FETCH_ARTICLE.lock().unwrap();
+        let cache = FETCH_ARTICLE.lock();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -1623,7 +1623,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 
     // The article was fetched again as it had expired.
     {
-        let cache = FETCH_ARTICLE.lock().unwrap();
+        let cache = FETCH_ARTICLE.lock();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(2));
@@ -1634,7 +1634,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 #[serial(ExpiringCacheTest)]
 fn test_expiring_value_unexpired_article_returned_with_hit() {
     {
-        let mut cache = FETCH_ARTICLE.lock().unwrap();
+        let mut cache = FETCH_ARTICLE.lock();
         cache.cache_reset();
         cache.cache_reset_metrics();
     }
@@ -1645,7 +1645,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
     // The article was fetched due to a cache miss and the result cached.
     {
-        let cache = FETCH_ARTICLE.lock().unwrap();
+        let cache = FETCH_ARTICLE.lock();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -1657,7 +1657,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
     // The article was not fetched but returned as a hit from the cache.
     {
-        let cache = FETCH_ARTICLE.lock().unwrap();
+        let cache = FETCH_ARTICLE.lock();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -1673,19 +1673,16 @@ fn always_failing() -> Result<String, ()> {
 fn test_result_fallback() {
     assert!(always_failing().is_err());
     {
-        let cache = ALWAYS_FAILING.lock().unwrap();
+        let cache = ALWAYS_FAILING.lock();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     // Pretend it succeeded once
-    ALWAYS_FAILING
-        .lock()
-        .unwrap()
-        .cache_set((), "abc".to_string());
+    ALWAYS_FAILING.lock().cache_set((), "abc".to_string());
     assert_eq!(always_failing(), Ok("abc".to_string()));
     {
-        let cache = ALWAYS_FAILING.lock().unwrap();
+        let cache = ALWAYS_FAILING.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -1695,14 +1692,14 @@ fn test_result_fallback() {
     // Even though the cache should've expired, the `result_fallback` flag means it refreshes the cache with the last valid result
     assert_eq!(always_failing(), Ok("abc".to_string()));
     {
-        let cache = ALWAYS_FAILING.lock().unwrap();
+        let cache = ALWAYS_FAILING.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
 
     assert_eq!(always_failing(), Ok("abc".to_string()));
     {
-        let cache = ALWAYS_FAILING.lock().unwrap();
+        let cache = ALWAYS_FAILING.lock();
         assert_eq!(cache.cache_hits(), Some(2));
         assert_eq!(cache.cache_misses(), Some(2));
     }

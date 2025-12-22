@@ -261,6 +261,11 @@ pub mod async_sync {
     pub use tokio::sync::RwLock;
 }
 
+pub mod sync_sync {
+    pub use parking_lot::Mutex;
+    pub use parking_lot::RwLock;
+}
+
 /// Cache operations
 ///
 /// ```rust

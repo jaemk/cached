@@ -247,13 +247,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         lock = match args.sync_writes {
             Some(SyncWriteMode::ByKey) => quote! {
-                let mut locks = #cache_ident.lock().unwrap();
-                let lock = locks.entry(key.clone()).or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(#cache_create))).clone();
+                let mut locks = #cache_ident.lock();
+                let lock = locks.entry(key.clone()).or_insert_with(|| std::sync::Arc::new(::cached::sync_sync::Mutex::new(#cache_create))).clone();
                 drop(locks);
-                let mut cache = lock.lock().unwrap();
+                let mut cache = lock.lock();
             },
             _ => quote! {
-                let mut cache = #cache_ident.lock().unwrap();
+                let mut cache = #cache_ident.lock();
             },
         };
 
@@ -267,10 +267,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
         ty = match args.sync_writes {
             Some(SyncWriteMode::ByKey) => quote! {
-                #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<std::sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::sync_sync::Mutex<std::collections::HashMap<#cache_key_ty, std::sync::Arc<::cached::sync_sync::Mutex<#cache_ty>>>>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::sync_sync::Mutex::new(std::collections::HashMap::new()));
             },
             _ => quote! {
-                #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::Mutex::new(#cache_create));
+                #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::sync_sync::Mutex<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::sync_sync::Mutex::new(#cache_create));
             },
         }
     }

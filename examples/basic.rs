@@ -31,7 +31,7 @@ pub fn main() {
         use cached::Cached; // must be in scope to access cache
 
         println!(" ** Cache info **");
-        let cache = SLOW_FN.lock().unwrap();
+        let cache = SLOW_FN.lock();
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("hits=1 -> {:?}", cache.cache_hits().unwrap() == 1);
         assert_eq!(cache.cache_misses().unwrap(), 11);
