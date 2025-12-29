@@ -23,8 +23,22 @@ async = ["futures", "tokio", "async-trait"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_connection_manager = ["redis_store", "redis/connection-manager"]
-redis_async_std = ["redis_store", "async", "redis/aio", "redis/async-std-comp", "redis/tls", "redis/async-std-tls-comp"]
-redis_tokio = ["redis_store", "async", "redis/aio", "redis/tokio-comp", "redis/tls", "redis/tokio-native-tls-comp"]
+redis_async_std = [
+    "redis_store",
+    "async",
+    "redis/aio",
+    "redis/async-std-comp",
+    "redis/tls",
+    "redis/async-std-tls-comp",
+]
+redis_tokio = [
+    "redis_store",
+    "async",
+    "redis/aio",
+    "redis/tokio-comp",
+    "redis/tls",
+    "redis/tokio-native-tls-comp",
+]
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = []
@@ -104,7 +118,7 @@ version = "^1.1.0"
 
 [dev-dependencies]
 copy_dir = "0.1.3"
-googletest = "0.11.0"
+googletest.workspace = true
 tempfile = "3.10.1"
 
 [dev-dependencies.async-std]
@@ -116,6 +130,9 @@ version = "1"
 
 [dev-dependencies.serial_test]
 version = "3"
+
+[workspace.dependencies]
+googletest = "0.11.0"
 
 [workspace]
 members = ["cached_proc_macro", "examples/wasm"]

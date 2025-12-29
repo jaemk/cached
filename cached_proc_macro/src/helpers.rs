@@ -115,10 +115,17 @@ pub(super) fn make_cache_key_type(
 
             (quote! {}, quote! {#key_convert_block})
         }
-        (None, None, _) => (
-            quote! {(#(#input_tys),*)},
-            quote! {(#(#input_names.clone()),*)},
-        ),
+        (None, None, _) => {
+            let key_tys = input_tys
+                .into_iter()
+                .map(convert_option_of_ref_to_option_of_owned_type)
+                .map(convert_ref_to_owned_type)
+                .collect::<Vec<Type>>();
+            (
+                quote! {(#(#key_tys),*)},
+                quote! {(#(#input_names.to_fully_owned()),*)},
+            )
+        }
         (Some(_), None, _) => panic!("key requires convert to be set"),
         (None, Some(_), None) => panic!("convert requires key or type to be set"),
     }
@@ -217,4 +224,215 @@ pub(super) fn check_with_cache_flag(with_cached_flag: bool, output_string: Strin
     with_cached_flag
         && !output_string.contains("Return")
         && !output_string.contains("cached::Return")
+}
+
+use ref_inputs::*;
+mod ref_inputs {
+    use super::*;
+
+    pub(super) fn is_option(ty: &Type) -> bool {
+        if let Type::Path(typepath) = ty {
+            let segments = &typepath.path.segments;
+            if segments.len() == 1 {
+                let segment = segments.first().unwrap();
+                if segment.ident == "Option" {
+                    return true;
+                }
+            } else if segments.len() == 3 {
+                let segment_idents = segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>();
+                if segment_idents == ["std", "option", "Option"] {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn option_generic_arg_unchecked(ty: &Type) -> Type {
+        if let Type::Path(typepath) = ty {
+            let segment = &typepath
+                .path
+                .segments
+                .last()
+                .expect("option_generic_arg_unchecked: empty path");
+            if let PathArguments::AngleBracketed(brackets) = &segment.arguments {
+                if let Some(syn::GenericArgument::Type(inner_ty)) = brackets.args.first() {
+                    return inner_ty.clone();
+                }
+            }
+        }
+        panic!("option_generic_arg_unchecked: could not extract inner type");
+    }
+
+    pub(super) fn is_option_of_ref(ty: &Type) -> bool {
+        if is_option(ty) {
+            let inner_ty = option_generic_arg_unchecked(ty);
+            if let Type::Reference(_) = inner_ty {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub(super) fn convert_ref_to_owned_type(ty: Type) -> Type {
+        match ty {
+            Type::Reference(reftype) => *reftype.elem,
+            _ => ty,
+        }
+    }
+
+    pub(super) fn convert_option_of_ref_to_option_of_owned_type(ty: Type) -> Type {
+        if is_option_of_ref(&ty) {
+            let inner_ty = option_generic_arg_unchecked(&ty);
+            if let Type::Reference(reftype) = inner_ty {
+                let elem = *reftype.elem;
+                return parse_quote! { Option< #elem > };
+            }
+        }
+        ty
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use googletest::{assert_that, matchers::eq};
+    use syn::parse_quote;
+
+    macro_rules! type_test {
+        ($test_name:ident, $target_fn:ident syn_ref, $input_type:ty, $expected:expr) => {
+            #[googletest::test]
+            fn $test_name() {
+                let ty = &parse_quote! { $input_type };
+                assert_that!($target_fn(ty), eq($expected));
+            }
+        };
+        ($test_name:ident, $target_fn:ident syn_owned, $input_type:ty, $expected:expr) => {
+            #[googletest::test]
+            fn $test_name() {
+                let ty = parse_quote! { $input_type };
+                assert_that!($target_fn(ty), eq($expected));
+            }
+        };
+    }
+
+    mod convert_ref_to_owned_type {
+        use super::*;
+
+        type_test! {
+            returns_the_owned_type_when_given_a_ref_type,
+            convert_ref_to_owned_type syn_owned,
+            &T,
+            parse_quote!{ T }
+        }
+
+        type_test! {
+            returns_the_same_type_when_given_a_non_ref_type,
+            convert_ref_to_owned_type syn_owned,
+            T,
+            parse_quote!{ T }
+        }
+    }
+
+    mod convert_option_of_ref_to_option_of_owned_type {
+        use super::*;
+
+        type_test! {
+            returns_the_owned_option_type_when_given_option_of_ref,
+            convert_option_of_ref_to_option_of_owned_type syn_owned,
+            Option<&T>,
+            parse_quote!{ Option<T> }
+        }
+
+        type_test! {
+            returns_the_same_type_when_given_a_non_option_type,
+            convert_option_of_ref_to_option_of_owned_type syn_owned,
+            T,
+            parse_quote!{ T }
+        }
+
+        type_test! {
+            returns_the_same_type_when_given_an_option_of_non_ref_type,
+            convert_option_of_ref_to_option_of_owned_type syn_owned,
+            Option<T>,
+            parse_quote!{ Option<T> }
+        }
+    }
+
+    mod is_option {
+
+        mod when_arg_is_ref {
+            use super::super::*;
+            type_test!(returns_true_for_option, is_option syn_ref, Option<&T>, true);
+            type_test!(
+                returns_true_for_option_with_fully_qualified_core_path,
+                is_option syn_ref,
+                std::option::Option<&T>,
+                true
+            );
+            type_test!(
+                returns_false_for_custom_type_named_option,
+                is_option syn_ref,
+                my_module::Option<&T>,
+                false
+            );
+        }
+
+        mod when_arg_is_not_ref {
+            use super::super::*;
+            type_test!(returns_true_for_option, is_option syn_ref, Option<T>, true);
+            type_test!(
+                returns_true_for_option_with_fully_qualified_core_path,
+                is_option syn_ref,
+                std::option::Option<T>,
+                true
+            );
+            type_test!(
+                returns_false_for_custom_type_named_option,
+                is_option syn_ref,
+                my_module::Option<T>,
+                false
+            );
+            type_test!(returns_false_for_simple_type, is_option syn_ref, T, false);
+            type_test!(returns_false_for_a_generic_type, is_option syn_ref, Vec<T>, false);
+        }
+    }
+
+    mod is_option_of_ref {
+        use super::*;
+        type_test!(
+            returns_true_for_option_of_ref,
+            is_option_of_ref syn_ref,
+            Option<&T>,
+            true
+        );
+        type_test!(
+            returns_true_for_option_of_ref_with_fully_qualified_core_path,
+            is_option_of_ref syn_ref,
+            std::option::Option<&T>,
+            true
+        );
+        type_test!(
+            returns_false_for_custom_type_named_option_with_ref_generic_arg,
+            is_option_of_ref syn_ref,
+            my_module::Option<&T>,
+            false
+        );
+        type_test!(
+            returns_false_for_option_of_non_ref,
+            is_option_of_ref syn_ref,
+            Option<T>,
+            false
+        );
+        type_test!(
+            returns_false_for_option_of_non_ref_with_fully_qualified_core_path,
+            is_option_of_ref syn_ref,
+            std::option::Option<T>,
+            false
+        );
+    }
 }

@@ -1270,6 +1270,44 @@ fn test_mutable_args_once() {
     assert_eq!((2, 2), mutable_args_once(5, 6));
 }
 
+#[allow(unused_variables)]
+#[allow(clippy::ptr_arg)]
+mod static_only_checks {
+    use super::*;
+
+    #[derive(Clone, Hash, PartialEq, Eq)]
+    struct TestStruct {
+        a: i32,
+    }
+
+    #[cached]
+    fn args_which_are_sized_refs_1(a: &String, b: &String) -> String {
+        unimplemented!("Just testing signature")
+    }
+    #[cached]
+    fn args_which_are_sized_refs_2(a: &TestStruct, b: &TestStruct) -> String {
+        unimplemented!("Just testing signature")
+    }
+
+    #[cached]
+    fn args_which_are_sized_options_of_refs_1(a: Option<&String>, b: Option<&String>) -> String {
+        unimplemented!("Just testing signature")
+    }
+
+    #[cached]
+    fn args_which_are_sized_options_of_refs_2(
+        a: Option<&TestStruct>,
+        b: Option<&TestStruct>,
+    ) -> String {
+        unimplemented!("Just testing signature")
+    }
+
+    #[cached]
+    fn args_which_are_sized_refs_and_options_of_refs(a: &String, b: Option<&String>) -> String {
+        unimplemented!("Just testing signature")
+    }
+}
+
 #[cfg(feature = "disk_store")]
 mod disk_tests {
     use super::*;
