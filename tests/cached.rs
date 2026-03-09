@@ -1226,7 +1226,7 @@ fn once_for_priming() -> bool {
 fn test_once_for_priming() {
     assert!(once_for_priming_prime_cache());
     {
-        let cache = ONCE_FOR_PRIMING.read().unwrap();
+        let cache = ONCE_FOR_PRIMING.read();
         assert!(cache.is_some());
     }
 }
