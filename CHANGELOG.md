@@ -5,6 +5,13 @@
 ## Changed
 ## Removed
 
+## [0.58.0]
+## Added
+- Add `redis_async_cache` feature for Redis client-side caching support via the RESP3 protocol
+## Changed
+- Update `redis` to 1.0
+## Removed
+
 ## [0.57.0 / [cached_proc_macro[0.26.0]]]
 ## Added
 - Add `parking_lot` dependency
