@@ -12,7 +12,9 @@ use cached::{
 use cached::{TimedCache, TimedSizedCache};
 use serial_test::serial;
 use std::thread::{self, sleep};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "time_stores")]
+use cached::web_time::Instant;
 
 cached! {
     UNBOUND_FIB;
