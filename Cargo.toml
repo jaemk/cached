@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "0.56.0"
+version = "0.57.0"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -41,7 +41,7 @@ disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = []
 
 [dependencies.cached_proc_macro]
-version = "0.25.0"
+version = "0.26.0"
 path = "cached_proc_macro"
 optional = true
 
@@ -54,6 +54,9 @@ optional = true
 version = "0.16"
 default-features = false
 features = ["inline-more"]
+
+[dependencies.parking_lot]
+version = "0.12.5"
 
 [dependencies.once_cell]
 version = "1"

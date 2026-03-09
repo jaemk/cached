@@ -3,7 +3,14 @@
 ## [Unreleased]
 ## Added
 ## Changed
-- Using proc macros no longer require importing `std::time::Duration`
+## Removed
+
+## [0.57.0 / [cached_proc_macro[0.26.0]]]
+## Added
+- Add `parking_lot` dependency
+## Changed
+- Switch to `parking_lot`'s `Mutex` and `RwLock` in all macros.
+- Remove `unwrap()` calls from lock operations.
 ## Removed
 
 ## [0.56.0 / [cached_proc_macro[0.25.0]]]

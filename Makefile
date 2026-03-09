@@ -128,7 +128,9 @@ check/fmt:
 # Checks if the README.md file is up-to-date
 check/readme:
 	@echo [$@]: Checking README.md...
-	$(README_CC) $(README_CCFLAGS) | cmp README.md
+	$(README_CC) $(README_CCFLAGS) > _tmp_readme.md
+	cmp README.md _tmp_readme.md
+	rm -f _tmp_readme.md
 
 # Runs clippy linter on `cached` crate
 check/clippy:
