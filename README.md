@@ -36,9 +36,8 @@ of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(s
 - `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
    runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_tokio`, `redis_ahash`)
-- `time_stores`: Include time-based cache stores (`TimedCache`, `TimedSizedCache`, and `ExpiringSizedCache`).
+- `time_stores`: Include time-based cache stores ([`TimedCache`], [`TimedSizedCache`], and [`stores::ExpiringSizedCache`]).
    Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
-   Disabling this feature also removes the `web-time` dependency.
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the
@@ -68,7 +67,7 @@ fn fib(n: u64) -> u64 {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 use cached::SizedCache;
 
@@ -127,7 +126,7 @@ fn doesnt_compile() -> Result<String, ()> {
 ```rust,no_run,ignore
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
-use std::time::Duration;
+use web_time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -153,7 +152,7 @@ enum ExampleError {
     } "##
 )]
 async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
-    std::thread::sleep(std::time::Duration::from_secs(secs));
+    std::thread::sleep(web_time::Duration::from_secs(secs));
     Ok(secs.to_string())
 }
 ```
@@ -182,7 +181,7 @@ enum ExampleError {
     disk = true
 )]
 fn cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
-    std::thread::sleep(std::time::Duration::from_secs(secs));
+    std::thread::sleep(web_time::Duration::from_secs(secs));
     Ok(secs.to_string())
 }
 ```
