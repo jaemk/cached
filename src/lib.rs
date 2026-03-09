@@ -224,7 +224,6 @@ Due to the requirements of storing arguments and return values in a global cache
 #[doc(hidden)]
 pub extern crate once_cell;
 
-use web_time::Duration;
 #[cfg(feature = "proc_macro")]
 #[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
 pub use proc_macro::Return;
@@ -232,15 +231,16 @@ pub use proc_macro::Return;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "redis_smol", feature = "redis_tokio"))))]
 pub use stores::AsyncRedisCache;
 pub use stores::{CanExpire, ExpiringValueCache, SizedCache, UnboundCache};
-#[cfg(feature = "time_stores")]
-#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub use stores::{TimedCache, TimedSizedCache};
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
 pub use stores::{DiskCache, DiskCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use stores::{RedisCache, RedisCacheError};
+#[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+pub use stores::{TimedCache, TimedSizedCache};
+use web_time::Duration;
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 use {async_trait::async_trait, futures::Future};

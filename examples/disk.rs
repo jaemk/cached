@@ -6,8 +6,8 @@ run with required features:
 use cached::proc_macro::io_cached;
 use std::io;
 use std::io::Write;
-use web_time::Duration;
 use thiserror::Error;
+use web_time::Duration;
 
 #[derive(Error, Debug, PartialEq, Clone)]
 enum ExampleError {

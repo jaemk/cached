@@ -4,6 +4,9 @@ Full tests of macro-defined functions
 #[macro_use]
 extern crate cached;
 
+use cached::web_time::Duration;
+#[cfg(feature = "time_stores")]
+use cached::web_time::Instant;
 use cached::{
     proc_macro::cached, proc_macro::once, Cached, CanExpire, ExpiringValueCache, SizedCache,
     UnboundCache,
@@ -12,9 +15,6 @@ use cached::{
 use cached::{TimedCache, TimedSizedCache};
 use serial_test::serial;
 use std::thread::{self, sleep};
-use cached::web_time::Duration;
-#[cfg(feature = "time_stores")]
-use cached::web_time::Instant;
 
 cached! {
     UNBOUND_FIB;

@@ -1,7 +1,7 @@
 use cached::stores::ExpiringSizedCache;
 use std::sync::Arc;
-use web_time::{Duration, Instant};
 use tokio::sync::RwLock;
+use web_time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() {

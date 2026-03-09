@@ -6,8 +6,8 @@ use sled::Db;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
-use web_time::SystemTime;
 use web_time::Duration;
+use web_time::SystemTime;
 
 pub struct DiskCacheBuilder<K, V> {
     ttl: Option<Duration>,
@@ -380,8 +380,8 @@ mod test_DiskCache {
         GoogleTestSupport as _,
     };
     use std::thread::sleep;
-    use web_time::Duration;
     use tempfile::TempDir;
+    use web_time::Duration;
 
     use super::*;
 

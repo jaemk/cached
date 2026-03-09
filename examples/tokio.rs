@@ -1,6 +1,6 @@
 use cached::proc_macro::cached;
-use web_time::Duration;
 use tokio::time::sleep;
+use web_time::Duration;
 
 async fn sleep_secs(secs: u64) {
     sleep(Duration::from_secs(secs)).await;

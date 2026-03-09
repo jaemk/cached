@@ -1,5 +1,5 @@
-use std::hash::Hash;
 use std::cmp::Eq;
+use std::hash::Hash;
 use web_time::Duration;
 
 use web_time::Instant;
