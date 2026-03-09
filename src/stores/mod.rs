@@ -35,14 +35,14 @@ pub use unbound::UnboundCache;
 #[cfg(all(
     feature = "async",
     feature = "redis_store",
-    any(feature = "redis_async_std", feature = "redis_tokio")
+    any(feature = "redis_smol", feature = "redis_tokio")
 ))]
 #[cfg_attr(
     docsrs,
     doc(cfg(all(
         feature = "async",
         feature = "redis_store",
-        any(feature = "redis_async_std", feature = "redis_tokio")
+        any(feature = "redis_smol", feature = "redis_tokio")
     )))
 )]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
