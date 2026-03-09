@@ -3,3 +3,4 @@ Cargo.lock
 _tmp_readme.md
 
 .idea/
+.DS_Store
