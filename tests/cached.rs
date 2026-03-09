@@ -6,8 +6,10 @@ extern crate cached;
 
 use cached::{
     proc_macro::cached, proc_macro::once, Cached, CanExpire, ExpiringValueCache, SizedCache,
-    TimedCache, TimedSizedCache, UnboundCache,
+    UnboundCache,
 };
+#[cfg(feature = "time_stores")]
+use cached::{TimedCache, TimedSizedCache};
 use serial_test::serial;
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
@@ -50,6 +52,7 @@ fn test_sized_cache() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 cached! {
     TIMED: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(Duration::from_secs(2), 5);
     fn timed(n: u32) -> u32 = {
@@ -58,6 +61,7 @@ cached! {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_timed_cache() {
     timed(1);
@@ -94,6 +98,7 @@ fn test_timed_cache() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 cached! {
     TIMED_SIZED: TimedSizedCache<u32, u32> = TimedSizedCache::with_size_and_lifespan(3, Duration::from_secs(2));
     fn timefac(n: u32) -> u32 = {
@@ -106,6 +111,7 @@ cached! {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_timed_sized_cache() {
     timefac(1);
@@ -207,6 +213,7 @@ fn test_string_cache() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 cached_key! {
     TIMED_CACHE: TimedCache<u32, u32> = TimedCache::with_lifespan_and_capacity(Duration::from_secs(2), 5);
     Key = { n };
@@ -216,6 +223,7 @@ cached_key! {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_timed_cache_key() {
     timed_2(1);
@@ -479,12 +487,14 @@ cached_key_result! {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(size = 1, time = 1)]
 fn proc_timed_sized_sleeper(n: u64) -> u64 {
     sleep(Duration::new(1, 0));
     n
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_proc_timed_sized_cache() {
     proc_timed_sized_sleeper(1);
@@ -608,11 +618,13 @@ fn test_cached_return_flag_option() {
 /// should only cache the _first_ value returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
+#[cfg(feature = "time_stores")]
 #[once(time = 1)]
 fn only_cached_once_per_second(s: String) -> Vec<String> {
     vec![s]
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_only_cached_once_per_second() {
     let a = only_cached_once_per_second("a".to_string());
@@ -623,13 +635,13 @@ fn test_only_cached_once_per_second() {
     assert_eq!(vec!["b".to_string()], b);
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[once(time = 1)]
 async fn only_cached_once_per_second_a(s: String) -> Vec<String> {
     vec![s]
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_only_cached_once_per_second_a() {
     let a = only_cached_once_per_second_a("a".to_string()).await;
@@ -698,6 +710,7 @@ async fn test_only_cached_result_once_a() {
 /// should only cache the _first_ `Ok` returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
+#[cfg(feature = "time_stores")]
 #[once(result = true, time = 1)]
 fn only_cached_result_once_per_second(
     s: String,
@@ -710,6 +723,7 @@ fn only_cached_result_once_per_second(
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_only_cached_result_once_per_second() {
     assert!(only_cached_result_once_per_second("z".to_string(), true).is_err());
@@ -721,7 +735,7 @@ fn test_only_cached_result_once_per_second() {
     assert_eq!(vec!["b".to_string()], b);
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[once(result = true, time = 1)]
 async fn only_cached_result_once_per_second_a(
     s: String,
@@ -734,7 +748,7 @@ async fn only_cached_result_once_per_second_a(
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_only_cached_result_once_per_second_a() {
     assert!(only_cached_result_once_per_second_a("z".to_string(), true)
@@ -809,6 +823,7 @@ async fn test_only_cached_option_once_a() {
 /// should only cache the _first_ `Some` returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
+#[cfg(feature = "time_stores")]
 #[once(option = true, time = 1)]
 fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
     if none {
@@ -818,6 +833,7 @@ fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<Strin
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_only_cached_option_once_per_second() {
     assert!(only_cached_option_once_per_second("z".to_string(), true).is_none());
@@ -829,7 +845,7 @@ fn test_only_cached_option_once_per_second() {
     assert_eq!(vec!["b".to_string()], b);
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[once(option = true, time = 1)]
 async fn only_cached_option_once_per_second_a(s: String, none: bool) -> Option<Vec<String>> {
     if none {
@@ -839,7 +855,7 @@ async fn only_cached_option_once_per_second_a(s: String, none: bool) -> Option<V
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_only_cached_option_once_per_second_a() {
     assert!(only_cached_option_once_per_second_a("z".to_string(), true)
@@ -866,13 +882,13 @@ async fn test_only_cached_option_once_per_second_a() {
 /// _one_ call will be "executed" and all others will be synchronized
 /// to return the cached result of the one call instead of all
 /// concurrently un-cached tasks executing and writing concurrently.
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[once(time = 2, sync_writes)]
 async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_only_cached_once_per_second_sync_writes() {
     let a = tokio::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
@@ -881,11 +897,13 @@ async fn test_only_cached_once_per_second_sync_writes() {
     assert_eq!(a.await.unwrap(), b.await.unwrap());
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(time = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
 fn cached_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_cached_sync_writes() {
     let a = std::thread::spawn(|| cached_sync_writes("a".to_string()));
@@ -899,13 +917,13 @@ fn test_cached_sync_writes() {
     assert_eq!(a, c);
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[cached(time = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
 async fn cached_sync_writes_a(s: String) -> Vec<String> {
     vec![s]
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_cached_sync_writes_a() {
     let a = tokio::spawn(cached_sync_writes_a("a".to_string()));
@@ -917,12 +935,14 @@ async fn test_cached_sync_writes_a() {
     assert_eq!(a, c.await.unwrap());
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(time = 2, sync_writes = "by_key", key = "u32", convert = "{ 1 }")]
 fn cached_sync_writes_by_key(s: String) -> Vec<String> {
     sleep(Duration::new(1, 0));
     vec![s]
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_cached_sync_writes_by_key() {
     let a = std::thread::spawn(|| cached_sync_writes_by_key("a".to_string()));
@@ -935,7 +955,7 @@ fn test_cached_sync_writes_by_key() {
     assert!(start.elapsed() < Duration::from_secs(2));
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[cached(
     time = 5,
     sync_writes = "by_key",
@@ -947,7 +967,7 @@ async fn cached_sync_writes_by_key_a(s: String) -> Vec<String> {
     vec![s]
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_cached_sync_writes_by_key_a() {
     let a = tokio::spawn(cached_sync_writes_by_key_a("a".to_string()));
@@ -1056,6 +1076,7 @@ fn test_cached_smartstring_from_str() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(
     time = 1,
     time_refresh = true,
@@ -1066,6 +1087,7 @@ fn cached_timed_refresh(s: &str) -> bool {
     s == "true"
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_cached_timed_refresh() {
     assert!(cached_timed_refresh("true"));
@@ -1095,6 +1117,7 @@ fn test_cached_timed_refresh() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(
     size = 2,
     time = 1,
@@ -1106,6 +1129,7 @@ fn cached_timed_sized_refresh(s: &str) -> bool {
     s == "true"
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_cached_timed_sized_refresh() {
     assert!(cached_timed_sized_refresh("true"));
@@ -1135,6 +1159,7 @@ fn test_cached_timed_sized_refresh() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(
     size = 2,
     time = 1,
@@ -1146,6 +1171,7 @@ fn cached_timed_sized_refresh_prime(s: &str) -> bool {
     s == "true"
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_cached_timed_sized_refresh_prime() {
     assert!(cached_timed_sized_refresh_prime("true"));
@@ -1177,11 +1203,13 @@ fn test_cached_timed_sized_refresh_prime() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[cached(size = 2, time = 1, key = "String", convert = r#"{ String::from(s) }"#)]
 fn cached_timed_sized_prime(s: &str) -> bool {
     s == "true"
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_cached_timed_sized_prime() {
     assert!(cached_timed_sized_prime("true"));
@@ -1664,11 +1692,13 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
     }
 }
 
+#[cfg(feature = "time_stores")]
 #[cached::proc_macro::cached(result = true, time = 1, result_fallback = true)]
 fn always_failing() -> Result<String, ()> {
     Err(())
 }
 
+#[cfg(feature = "time_stores")]
 #[test]
 fn test_result_fallback() {
     assert!(always_failing().is_err());

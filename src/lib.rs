@@ -21,7 +21,7 @@ of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(s
 
 **Features**
 
-- `default`: Include `proc_macro` and `ahash` features
+- `default`: Include `proc_macro`, `ahash`, and `time_stores` features
 - `proc_macro`: Include proc macros
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async`: Include support for async functions and async cache stores
@@ -35,6 +35,9 @@ of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(s
 - `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
    runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_tokio`, `redis_ahash`)
+- `time_stores`: Include time-based cache stores ([`TimedCache`], [`TimedSizedCache`], and [`stores::ExpiringSizedCache`]).
+   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
+   Disabling this feature also removes the `web-time` dependency.
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the
@@ -94,6 +97,7 @@ use cached::proc_macro::once;
 /// When no (or expired) cache, concurrent calls
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
+# #[cfg(feature = "time_stores")]
 #[once(time=10, option = true, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
@@ -229,9 +233,10 @@ pub use proc_macro::Return;
 #[cfg(any(feature = "redis_smol", feature = "redis_tokio"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "redis_smol", feature = "redis_tokio"))))]
 pub use stores::AsyncRedisCache;
-pub use stores::{
-    CanExpire, ExpiringValueCache, SizedCache, TimedCache, TimedSizedCache, UnboundCache,
-};
+pub use stores::{CanExpire, ExpiringValueCache, SizedCache, UnboundCache};
+#[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+pub use stores::{TimedCache, TimedSizedCache};
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
 pub use stores::{DiskCache, DiskCacheError};
@@ -247,6 +252,7 @@ pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
 pub mod stores;
+#[cfg(feature = "time_stores")]
 #[doc(hidden)]
 pub use web_time;
 

@@ -255,6 +255,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
     // put it all together
+    let now_block = if args.time.is_some() {
+        quote! { let now = ::cached::web_time::Instant::now(); }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         // Cached static
         #[doc = #cache_ident_doc]
@@ -262,14 +268,14 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {
-            let now = ::cached::web_time::Instant::now();
+            #now_block
             #do_set_return_block
         }
         // Prime cached function
         #[doc = #prime_fn_indent_doc]
         #[allow(dead_code)]
         #visibility #prime_sig {
-            let now = ::cached::web_time::Instant::now();
+            #now_block
             #prime_do_set_return_block
         }
     };

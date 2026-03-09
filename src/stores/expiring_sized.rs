@@ -4,7 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Wrap keys so they don't need to implement Clone
 #[derive(Eq)]

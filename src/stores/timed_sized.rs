@@ -6,7 +6,9 @@ use web_time::Instant;
 #[cfg(feature = "async")]
 use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
-use crate::{stores::timed::Status, CloneCached};
+use crate::CloneCached;
+
+use super::Status;
 
 use super::{Cached, SizedCache};
 

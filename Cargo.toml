@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["proc_macro", "ahash"]
+default = ["proc_macro", "ahash", "time_stores"]
 proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async = ["futures", "tokio", "async-trait"]
@@ -39,6 +39,7 @@ redis_async_cache = [
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = []
+time_stores = ["dep:web-time"]
 
 [dependencies.cached_proc_macro]
 version = "0.26.0"
@@ -115,6 +116,7 @@ optional = true
 
 [dependencies.web-time]
 version = "^1.1.0"
+optional = true
 
 [dev-dependencies]
 copy_dir = "0.1.3"
@@ -152,7 +154,15 @@ required-features = ["async", "proc_macro"]
 
 [[example]]
 name = "expiring_sized_cache"
-required-features = ["async_tokio_rt_multi_thread"]
+required-features = ["async_tokio_rt_multi_thread", "time_stores"]
+
+[[example]]
+name = "basic_proc_macro"
+required-features = ["time_stores", "proc_macro"]
+
+[[example]]
+name = "kitchen_sink_proc_macro"
+required-features = ["time_stores", "proc_macro"]
 
 [[example]]
 name = "disk"

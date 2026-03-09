@@ -22,7 +22,7 @@ of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(s
 
 **Features**
 
-- `default`: Include `proc_macro` and `ahash` features
+- `default`: Include `proc_macro`, `ahash`, and `time_stores` features
 - `proc_macro`: Include proc macros
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async`: Include support for async functions and async cache stores
@@ -36,6 +36,9 @@ of un-cached arguments, specify `#[cached(sync_writes = "default")]` / `#[once(s
 - `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
    runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_tokio`, `redis_ahash`)
+- `time_stores`: Include time-based cache stores (`TimedCache`, `TimedSizedCache`, and `ExpiringSizedCache`).
+   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
+   Disabling this feature also removes the `web-time` dependency.
 
 The procedural macros (`#[cached]`, `#[once]`, `#[io_cached]`) offer more features, including async support.
 See the [`proc_macro`](crate::proc_macro) and [`macros`](crate::macros) modules for more samples, and the

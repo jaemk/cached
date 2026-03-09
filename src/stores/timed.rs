@@ -13,15 +13,7 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
 use crate::CloneCached;
 
-use super::Cached;
-
-/// Enum used for defining the status of time-cached values
-#[derive(Debug)]
-pub(super) enum Status {
-    NotFound,
-    Found,
-    Expired,
-}
+use super::{Cached, Status};
 
 /// Cache store bound by time
 ///
