@@ -12,7 +12,7 @@ use cached::{
 use cached::{TimedCache, TimedSizedCache};
 use serial_test::serial;
 use std::thread::{self, sleep};
-use std::time::Duration;
+use cached::web_time::Duration;
 #[cfg(feature = "time_stores")]
 use cached::web_time::Instant;
 
@@ -1106,11 +1106,11 @@ fn test_cached_timed_refresh() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_refresh("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_refresh("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_refresh("true"));
     {
         let cache = CACHED_TIMED_REFRESH.lock();
@@ -1148,11 +1148,11 @@ fn test_cached_timed_sized_refresh() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_refresh("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_refresh("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_refresh("true"));
     {
         let cache = CACHED_TIMED_SIZED_REFRESH.lock();
@@ -1189,11 +1189,11 @@ fn test_cached_timed_sized_refresh_prime() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_refresh_prime_prime_cache("true"));
 
     // stats unchanged (other than this new hit) since we kept priming
@@ -1227,11 +1227,11 @@ fn test_cached_timed_sized_prime() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_prime_prime_cache("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_prime_prime_cache("true"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(cached_timed_sized_prime_prime_cache("true"));
 
     // stats unchanged (other than this new hit) since we kept priming
@@ -1241,7 +1241,7 @@ fn test_cached_timed_sized_prime() {
         assert_eq!(cache.cache_hits(), Some(2));
         assert_eq!(cache.cache_misses(), Some(1));
         assert!(cache.cache_size() > 0);
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(1000));
         cache.flush();
         assert_eq!(cache.cache_size(), 0);
     }
@@ -1719,7 +1719,7 @@ fn test_result_fallback() {
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(2000));
+    std::thread::sleep(Duration::from_millis(2000));
 
     // Even though the cache should've expired, the `result_fallback` flag means it refreshes the cache with the last valid result
     assert_eq!(always_failing(), Ok("abc".to_string()));

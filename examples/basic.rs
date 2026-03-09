@@ -2,7 +2,7 @@
 extern crate cached;
 
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use cached::SizedCache;
 

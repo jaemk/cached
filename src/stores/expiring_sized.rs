@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
-use std::time::Duration;
+use web_time::Duration;
 use web_time::Instant;
 
 /// Wrap keys so they don't need to implement Clone
@@ -363,7 +363,7 @@ impl<V> ExpiringSizedCache<String, V> {
     /// Retrieve unexpired entry, accepting `&str` to check against `String` keys
     /// ```rust
     /// # use cached::stores::ExpiringSizedCache;
-    /// # use std::time::Duration;
+    /// # use web_time::Duration;
     /// let mut cache = ExpiringSizedCache::<String, &str>::new(Duration::from_millis(2_000));
     /// cache.insert(String::from("a"), "a").unwrap();
     /// assert_eq!(cache.get_borrowed("a").unwrap(), &"a");
@@ -377,7 +377,7 @@ impl<T: Hash + Eq + PartialEq, V> ExpiringSizedCache<Vec<T>, V> {
     /// Retrieve unexpired entry, accepting `&[T]` to check against `Vec<T>` keys
     /// ```rust
     /// # use cached::stores::ExpiringSizedCache;
-    /// # use std::time::Duration;
+    /// # use web_time::Duration;
     /// let mut cache = ExpiringSizedCache::<Vec<usize>, &str>::new(Duration::from_millis(2_000));
     /// cache.insert(vec![0], "a").unwrap();
     /// assert_eq!(cache.get_borrowed(&[0]).unwrap(), &"a");
@@ -390,7 +390,7 @@ impl<T: Hash + Eq + PartialEq, V> ExpiringSizedCache<Vec<T>, V> {
 #[cfg(test)]
 mod test {
     use crate::stores::ExpiringSizedCache;
-    use std::time::Duration;
+    use web_time::Duration;
 
     #[test]
     fn borrow_keys() {

@@ -5,7 +5,7 @@ use std::cmp::Eq;
 use std::collections::{hash_map::Entry, HashMap};
 use std::hash::Hash;
 use std::thread::{sleep, spawn};
-use std::time::Duration;
+use web_time::Duration;
 
 // cached shorthand, uses the default unbounded cache.
 // Equivalent to specifying `ty = "UnboundCache<(u32), u32>", create= "{ UnboundCache::new() }"`

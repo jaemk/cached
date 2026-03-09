@@ -1,5 +1,6 @@
 use std::hash::Hash;
-use std::{cmp::Eq, time::Duration};
+use std::cmp::Eq;
+use web_time::Duration;
 use web_time::Instant;
 
 #[cfg(feature = "ahash")]
@@ -467,7 +468,7 @@ mod tests {
         assert_eq!(c.cache_set(1, 200), Some(100));
         assert_eq!(c.cache_size(), 1);
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
         assert_eq!(None, c.cache_remove(&1));
         assert_eq!(0, c.cache_size());
     }
@@ -480,7 +481,7 @@ mod tests {
         assert_eq!(c.cache_set(1, 200), Some(100));
         assert_eq!(c.cache_size(), 1);
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
         assert_eq!(1, c.cache_size());
         assert_eq!(None, c.cache_set(1, 300));
         assert_eq!(1, c.cache_size());
@@ -494,7 +495,7 @@ mod tests {
         assert_eq!(c.cache_set(1, 200), Some(100));
         assert_eq!(c.cache_size(), 1);
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
         // still around until we try to get
         assert_eq!(1, c.cache_size());
         assert_eq!(None, c.cache_get(&1));
@@ -509,7 +510,7 @@ mod tests {
         assert_eq!(c.cache_set(1, 200), Some(100));
         assert_eq!(c.cache_size(), 1);
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
         // still around until we try to get
         assert_eq!(1, c.cache_size());
         assert_eq!(None, c.cache_get_mut(&1));
@@ -524,7 +525,7 @@ mod tests {
         assert_eq!(c.cache_set(1, 200), Some(100));
         assert_eq!(c.cache_size(), 1);
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
         // still around until we flush
         assert_eq!(1, c.cache_size());
         c.flush();

@@ -39,7 +39,7 @@ redis_async_cache = [
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["sled", "serde", "rmp-serde", "directories"]
 wasm = []
-time_stores = ["dep:web-time"]
+time_stores = []
 
 [dependencies.cached_proc_macro]
 version = "0.26.0"
@@ -116,7 +116,6 @@ optional = true
 
 [dependencies.web-time]
 version = "^1.1.0"
-optional = true
 
 [dev-dependencies]
 copy_dir = "0.1.3"

@@ -5,7 +5,7 @@ Procedural macros for defining functions that wrap a static-ref cache object.
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use an lru cache with size 100 and a `(String, String)` cache key
@@ -22,7 +22,7 @@ fn keyed(a: String, b: String) -> usize {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed-lru cache with size 1, a TTL of 60s,
@@ -63,7 +63,7 @@ pub fn main() {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed cache with a TTL of 60s
@@ -212,7 +212,7 @@ pub fn main() {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 use cached::SizedCache;
 
@@ -234,7 +234,7 @@ fn keyed(a: &str, b: &str) -> usize {
 
 ```rust,no_run
 use cached::proc_macro::once;
-use std::time::Duration;
+use web_time::Duration;
 
 /// Only cache the initial function call.
 /// Function will be re-executed after the cache
@@ -258,7 +258,7 @@ fn keyed(a: String) -> Option<usize> {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed cache with a TTL of 60s.
@@ -285,7 +285,7 @@ pub fn main() {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::once;
 
 /// Run a background thread to continuously refresh a singleton.
@@ -310,7 +310,7 @@ pub fn main() {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Run a background thread to continuously refresh every key of a cache

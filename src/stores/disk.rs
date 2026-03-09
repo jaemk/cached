@@ -5,7 +5,8 @@ use serde::Serialize;
 use sled::Db;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::{path::PathBuf, time::SystemTime};
+use std::path::PathBuf;
+use web_time::SystemTime;
 use web_time::Duration;
 
 pub struct DiskCacheBuilder<K, V> {
@@ -379,7 +380,7 @@ mod test_DiskCache {
         GoogleTestSupport as _,
     };
     use std::thread::sleep;
-    use std::time::Duration;
+    use web_time::Duration;
     use tempfile::TempDir;
 
     use super::*;
@@ -400,8 +401,8 @@ mod test_DiskCache {
     }
 
     fn now_millis() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_millis()
     }

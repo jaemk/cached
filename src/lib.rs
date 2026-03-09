@@ -68,7 +68,7 @@ fn fib(n: u64) -> u64 {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 use cached::SizedCache;
 
@@ -130,7 +130,7 @@ fn doesnt_compile() -> Result<String, ()> {
 ```rust,no_run,ignore
 use cached::proc_macro::io_cached;
 use cached::AsyncRedisCache;
-use std::time::Duration;
+use web_time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -156,7 +156,7 @@ enum ExampleError {
     } "##
 )]
 async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
-    std::thread::sleep(std::time::Duration::from_secs(secs));
+    std::thread::sleep(web_time::Duration::from_secs(secs));
     Ok(secs.to_string())
 }
 ```
@@ -185,7 +185,7 @@ enum ExampleError {
     disk = true
 )]
 fn cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
-    std::thread::sleep(std::time::Duration::from_secs(secs));
+    std::thread::sleep(web_time::Duration::from_secs(secs));
     Ok(secs.to_string())
 }
 ```
@@ -225,8 +225,7 @@ Due to the requirements of storing arguments and return values in a global cache
 #[doc(hidden)]
 pub extern crate once_cell;
 
-use std::time::Duration;
-
+use web_time::Duration;
 #[cfg(feature = "proc_macro")]
 #[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
 pub use proc_macro::Return;
@@ -252,7 +251,6 @@ pub mod macros;
 #[cfg(feature = "proc_macro")]
 pub mod proc_macro;
 pub mod stores;
-#[cfg(feature = "time_stores")]
 #[doc(hidden)]
 pub use web_time;
 

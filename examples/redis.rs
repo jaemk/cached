@@ -12,7 +12,7 @@ use cached::RedisCache;
 use once_cell::sync::Lazy;
 use std::io;
 use std::io::Write;
-use std::time::Duration;
+use web_time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
