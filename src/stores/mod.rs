@@ -9,14 +9,25 @@ use {super::CachedAsync, async_trait::async_trait, futures::Future};
 
 #[cfg(feature = "disk_store")]
 mod disk;
+#[cfg(feature = "time_stores")]
 mod expiring_sized;
 mod expiring_value_cache;
 #[cfg(feature = "redis_store")]
 mod redis;
 mod sized;
+#[cfg(feature = "time_stores")]
 mod timed;
+#[cfg(feature = "time_stores")]
 mod timed_sized;
 mod unbound;
+
+/// Enum used for defining the status of time-cached values
+#[derive(Debug)]
+pub(super) enum Status {
+    NotFound,
+    Found,
+    Expired,
+}
 
 #[cfg(feature = "disk_store")]
 pub use crate::stores::disk::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError};
@@ -25,10 +36,16 @@ pub use crate::stores::disk::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, 
 pub use crate::stores::redis::{
     RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
+#[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use expiring_sized::ExpiringSizedCache;
 pub use expiring_value_cache::{CanExpire, ExpiringValueCache};
 pub use sized::SizedCache;
+#[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use timed::TimedCache;
+#[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use timed_sized::TimedSizedCache;
 pub use unbound::UnboundCache;
 

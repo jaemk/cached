@@ -5,7 +5,7 @@ Procedural macros for defining functions that wrap a static-ref cache object.
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use an lru cache with size 100 and a `(String, String)` cache key
@@ -22,11 +22,12 @@ fn keyed(a: String, b: String) -> usize {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed-lru cache with size 1, a TTL of 60s,
 /// and a `(usize, usize)` cache key
+# #[cfg(feature = "time_stores")]
 #[cached(size=1, time=60)]
 fn keyed(a: usize, b: usize) -> usize {
     let total = a + b;
@@ -34,19 +35,25 @@ fn keyed(a: usize, b: usize) -> usize {
     total
 }
 pub fn main() {
+    # #[cfg(feature = "time_stores")]
     keyed(1, 2);  // Not cached, will sleep (1+2)s
 
+    # #[cfg(feature = "time_stores")]
     keyed(1, 2);  // Cached, no sleep
 
     sleep(Duration::new(60, 0));  // Sleep for the TTL
 
+    # #[cfg(feature = "time_stores")]
     keyed(1, 2);  // 60s TTL has passed so the cached
                   // value has expired, will sleep (1+2)s
 
+    # #[cfg(feature = "time_stores")]
     keyed(1, 2);  // Cached, no sleep
 
+    # #[cfg(feature = "time_stores")]
     keyed(2, 1);  // New args, not cached, will sleep (2+1)s
 
+    # #[cfg(feature = "time_stores")]
     keyed(1, 2);  // Was evicted because of lru size of 1,
                   // will sleep (1+2)s
 }
@@ -56,12 +63,13 @@ pub fn main() {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed cache with a TTL of 60s
 /// that refreshes the entry TTL on cache hit,
 /// and a `(String, String)` cache key
+# #[cfg(feature = "time_stores")]
 #[cached(time=60, time_refresh=true)]
 fn keyed(a: String, b: String) -> usize {
     let size = a.len() + b.len();
@@ -204,7 +212,7 @@ pub fn main() {
 
 ```rust,no_run
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 use cached::SizedCache;
 
@@ -226,7 +234,7 @@ fn keyed(a: &str, b: &str) -> usize {
 
 ```rust,no_run
 use cached::proc_macro::once;
-use std::time::Duration;
+use web_time::Duration;
 
 /// Only cache the initial function call.
 /// Function will be re-executed after the cache
@@ -234,6 +242,7 @@ use std::time::Duration;
 /// When no (or expired) cache, concurrent calls
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
+# #[cfg(feature = "time_stores")]
 #[once(time=10, option = true, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
@@ -249,16 +258,18 @@ fn keyed(a: String) -> Option<usize> {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Use a timed cache with a TTL of 60s.
 /// Run a background thread to continuously refresh a specific key.
+# #[cfg(feature = "time_stores")]
 #[cached(time = 60, key = "String", convert = r#"{ String::from(a) }"#)]
 fn keyed(a: &str) -> usize {
     a.len()
 }
 pub fn main() {
+    # #[cfg(feature = "time_stores")]
     let _handler = std::thread::spawn(|| {
         loop {
             sleep(Duration::from_secs(50));
@@ -274,7 +285,7 @@ pub fn main() {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::once;
 
 /// Run a background thread to continuously refresh a singleton.
@@ -299,7 +310,7 @@ pub fn main() {
 
 ```rust
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::proc_macro::cached;
 
 /// Run a background thread to continuously refresh every key of a cache

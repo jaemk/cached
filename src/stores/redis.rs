@@ -1,8 +1,9 @@
 use crate::IOCached;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::fmt::Display;
 use std::marker::PhantomData;
-use std::{fmt::Display, time::Duration};
+use web_time::Duration;
 
 pub struct RedisCacheBuilder<K, V> {
     ttl: Duration,
@@ -12,8 +13,8 @@ pub struct RedisCacheBuilder<K, V> {
     connection_string: Option<String>,
     pool_max_size: Option<u32>,
     pool_min_idle: Option<u32>,
-    pool_max_lifetime: Option<std::time::Duration>,
-    pool_idle_timeout: Option<std::time::Duration>,
+    pool_max_lifetime: Option<Duration>,
+    pool_idle_timeout: Option<Duration>,
     _phantom: PhantomData<(K, V)>,
 }
 
@@ -114,14 +115,14 @@ where
 
     /// Set the max lifetime of connections used by the underlying redis connection pool
     #[must_use]
-    pub fn set_connection_pool_max_lifetime(mut self, max_lifetime: std::time::Duration) -> Self {
+    pub fn set_connection_pool_max_lifetime(mut self, max_lifetime: Duration) -> Self {
         self.pool_max_lifetime = Some(max_lifetime);
         self
     }
 
     /// Set the max lifetime of idle connections maintained by the underlying redis connection pool
     #[must_use]
-    pub fn set_connection_pool_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
+    pub fn set_connection_pool_idle_timeout(mut self, idle_timeout: Duration) -> Self {
         self.pool_idle_timeout = Some(idle_timeout);
         self
     }
@@ -363,7 +364,7 @@ where
     any(feature = "redis_smol", feature = "redis_tokio")
 ))]
 mod async_redis {
-    use std::time::Duration;
+    use web_time::Duration;
 
     use super::{
         CachedRedisValue, DeserializeOwned, Display, PhantomData, RedisCacheBuildError,
@@ -703,11 +704,11 @@ mod async_redis {
     mod tests {
         use super::*;
         use std::thread::sleep;
-        use std::time::Duration;
+        use web_time::Duration;
 
         fn now_millis() -> u128 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis()
         }
@@ -764,13 +765,13 @@ pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 /// Cache store tests
 mod tests {
     use std::thread::sleep;
-    use std::time::Duration;
+    use web_time::Duration;
 
     use super::*;
 
     fn now_millis() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_millis()
     }

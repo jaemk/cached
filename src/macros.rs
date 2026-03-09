@@ -34,7 +34,7 @@ cached!{
 #[macro_use] extern crate cached;
 
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::SizedCache;
 
 /// Defines a function `compute` that uses an LRU cache named `COMPUTE` which has a
@@ -58,7 +58,7 @@ cached!{
 #[macro_use] extern crate cached;
 
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::SizedCache;
 
 /// Defines a function named `length` that uses an LRU cache named `LENGTH`.
@@ -109,7 +109,7 @@ cached_result!{
 ```rust,ignore
 #[macro_use] extern crate cached;
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 use cached::RedisCache;
 
 cached! {

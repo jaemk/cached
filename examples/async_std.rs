@@ -1,7 +1,7 @@
 use async_std::task::sleep;
 use cached::proc_macro::cached;
 use cached::proc_macro::once;
-use std::time::Duration;
+use web_time::Duration;
 
 async fn sleep_secs(secs: u64) {
     sleep(Duration::from_secs(secs)).await;

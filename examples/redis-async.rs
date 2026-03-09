@@ -12,8 +12,8 @@ use cached::AsyncRedisCache;
 use once_cell::sync::Lazy;
 use std::io;
 use std::io::Write;
-use std::time::Duration;
 use thiserror::Error;
+use web_time::Duration;
 
 #[derive(Error, Debug, PartialEq, Clone)]
 enum ExampleError {

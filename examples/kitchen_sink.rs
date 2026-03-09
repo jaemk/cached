@@ -6,7 +6,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::hash::Hash;
 
 use std::thread::sleep;
-use std::time::Duration;
+use web_time::Duration;
 
 use cached::{Cached, SizedCache, UnboundCache};
 
