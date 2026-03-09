@@ -199,7 +199,7 @@ pub fn main() {
     fib(3);
     fib(3);
     {
-        let cache = FIB.lock().unwrap();
+        let cache = FIB.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 2);
         println!("misses: {:?}", cache.cache_misses());
@@ -213,7 +213,7 @@ pub fn main() {
     fib_2(3);
     fib_2(3);
     {
-        let cache = FLIB.lock().unwrap();
+        let cache = FLIB.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
@@ -225,7 +225,7 @@ pub fn main() {
     fib_specific(20);
     fib_specific(20);
     {
-        let cache = FIB_SPECIFIC.lock().unwrap();
+        let cache = FIB_SPECIFIC.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 19);
         println!("misses: {:?}", cache.cache_misses());
@@ -238,7 +238,7 @@ pub fn main() {
     println!("\n ** custom cache **");
     custom(25);
     {
-        let cache = CUSTOM.lock().unwrap();
+        let cache = CUSTOM.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits(), None);
         println!("misses: {:?}", cache.cache_misses());
@@ -253,7 +253,7 @@ pub fn main() {
     println!(" - second run `slow(10)`");
     slow(10, 10);
     {
-        let cache = SLOW.lock().unwrap();
+        let cache = SLOW.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
@@ -267,7 +267,7 @@ pub fn main() {
     println!(" - second run `slow_result(10)`");
     let _ = slow_result(10, 10);
     {
-        let cache = SLOW_RESULT.lock().unwrap();
+        let cache = SLOW_RESULT.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
@@ -288,7 +288,7 @@ pub fn main() {
         r.as_str() == "a"
     );
     {
-        let cache = WITH_CACHED_FLAG.lock().unwrap();
+        let cache = WITH_CACHED_FLAG.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
@@ -310,7 +310,7 @@ pub fn main() {
         r.as_str() == "a"
     );
     {
-        let cache = WITH_CACHED_FLAG_RESULT.lock().unwrap();
+        let cache = WITH_CACHED_FLAG_RESULT.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
@@ -332,7 +332,7 @@ pub fn main() {
         r.as_str() == "a"
     );
     {
-        let cache = WITH_CACHED_FLAG_OPTION.lock().unwrap();
+        let cache = WITH_CACHED_FLAG_OPTION.lock();
         println!("hits: {:?}", cache.cache_hits());
         assert_eq!(cache.cache_hits().unwrap(), 1);
         println!("misses: {:?}", cache.cache_misses());
@@ -351,7 +351,7 @@ pub fn main() {
     for n in 1..6 {
         assert_eq!(1, expires_for_priming(1));
         {
-            let c = EXPIRES_FOR_PRIMING.lock().unwrap();
+            let c = EXPIRES_FOR_PRIMING.lock();
             assert_eq!(n, c.cache_hits().unwrap());
             assert_eq!(0, c.cache_misses().unwrap());
             println!(
@@ -367,7 +367,7 @@ pub fn main() {
     sleep(Duration::from_millis(1000));
     assert_eq!(1, expires_for_priming(1));
     {
-        let c = EXPIRES_FOR_PRIMING.lock().unwrap();
+        let c = EXPIRES_FOR_PRIMING.lock();
         assert_eq!(5, c.cache_hits().unwrap());
         assert_eq!(1, c.cache_misses().unwrap());
         println!(

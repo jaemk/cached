@@ -186,12 +186,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         w_lock = quote! {
             // try to get a lock first
-            let mut cached = #cache_ident.write().unwrap();
+            let mut cached = #cache_ident.write();
         };
 
         r_lock = quote! {
             // try to get a read lock
-            let mut cached = #cache_ident.read().unwrap();
+            let mut cached = #cache_ident.read();
         };
 
         function_call = quote! {
@@ -201,7 +201,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
         ty = quote! {
-            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<std::sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| std::sync::RwLock::new(#cache_create));
+            #visibility static #cache_ident: ::cached::once_cell::sync::Lazy<::cached::sync_sync::RwLock<#cache_ty>> = ::cached::once_cell::sync::Lazy::new(|| ::cached::sync_sync::RwLock::new(#cache_create));
         };
     }
 
