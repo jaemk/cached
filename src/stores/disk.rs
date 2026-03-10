@@ -353,6 +353,13 @@ where
         self.ttl
     }
 
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        for (key, _value) in self.connection.iter().flatten() {
+            self.connection.remove(key)?;
+        }
+        Ok(())
+    }
+
     fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = Some(ttl);
