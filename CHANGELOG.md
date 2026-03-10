@@ -3,6 +3,7 @@
 ## [Unreleased]
 ## Added
 ## Changed
+- Refactor how attributes are parsed
 ## Removed
 
 ## [0.58.0]
