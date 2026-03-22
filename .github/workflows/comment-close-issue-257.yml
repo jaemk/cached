@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - copilot/comment-close-issue-257
+  workflow_dispatch:
 
 jobs:
   comment-and-close:
