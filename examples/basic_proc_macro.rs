@@ -1,7 +1,7 @@
 use cached::proc_macro::cached;
 use cached::proc_macro::once;
+use cached::time::{Duration, Instant};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
 
 #[cached(size = 50)]
 fn slow_fn(n: u32) -> String {

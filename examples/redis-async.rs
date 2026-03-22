@@ -8,11 +8,11 @@ Cleanup the redis docker container:
  */
 
 use cached::proc_macro::io_cached;
+use cached::time::Duration;
 use cached::AsyncRedisCache;
 use once_cell::sync::Lazy;
 use std::io;
 use std::io::Write;
-use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]

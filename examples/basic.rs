@@ -1,8 +1,8 @@
 #[macro_use]
 extern crate cached;
 
+use cached::time::{Duration, Instant};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
 
 use cached::SizedCache;
 
