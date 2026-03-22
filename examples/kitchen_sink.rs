@@ -5,8 +5,8 @@ use std::cmp::Eq;
 use std::collections::{hash_map::Entry, HashMap};
 use std::hash::Hash;
 
+use cached::time::Duration;
 use std::thread::sleep;
-use std::time::Duration;
 
 use cached::{Cached, SizedCache, UnboundCache};
 

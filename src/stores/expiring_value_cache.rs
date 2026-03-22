@@ -1,5 +1,5 @@
-use super::{Cached, SizedCache};
-use crate::{stores::timed::Status, CloneCached};
+use super::{Cached, SizedCache, Status};
+use crate::CloneCached;
 use std::hash::Hash;
 
 /// The `CanExpire` trait defines a function for implementations to determine if

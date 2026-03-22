@@ -1,5 +1,5 @@
 use cached::proc_macro::cached;
-use std::time::Duration;
+use cached::time::Duration;
 use tokio::time::sleep;
 
 async fn sleep_secs(secs: u64) {

@@ -4,9 +4,9 @@ run with required features:
  */
 
 use cached::proc_macro::io_cached;
+use cached::time::Duration;
 use std::io;
 use std::io::Write;
-use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]

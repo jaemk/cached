@@ -5,6 +5,12 @@
 ## Changed
 ## Removed
 
+## [0.59.0 / [cached_proc_macro[0.27.0]]]
+## Added
+## Changed
+- Fix `examples/wasm` build: add `time_stores` feature to the `cached` dependency (required when using `default-features = false` with `TimedCache`)
+## Removed
+
 ## [0.58.0]
 ## Added
 - Add `redis_async_cache` feature for Redis client-side caching support via the RESP3 protocol

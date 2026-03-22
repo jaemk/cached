@@ -1,11 +1,11 @@
 use cached::proc_macro::cached;
+use cached::time::Duration;
 use cached::Return;
 use cached::{Cached, SizedCache, UnboundCache};
 use std::cmp::Eq;
 use std::collections::{hash_map::Entry, HashMap};
 use std::hash::Hash;
 use std::thread::{sleep, spawn};
-use std::time::Duration;
 
 // cached shorthand, uses the default unbounded cache.
 // Equivalent to specifying `ty = "UnboundCache<(u32), u32>", create= "{ UnboundCache::new() }"`
