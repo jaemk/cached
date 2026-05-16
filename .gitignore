@@ -4,3 +4,6 @@ _tmp_readme.md
 
 .idea/
 .DS_Store
+.antigravitycli/
+local/
+!local/.gitkeep

@@ -1,0 +1,5 @@
+error: `result_fallback` and `sync_writes` are mutually exclusive
+ --> tests/ui/cached_result_fallback_sync_writes.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> Result<i32, ()> {
+  |    ^^^^^

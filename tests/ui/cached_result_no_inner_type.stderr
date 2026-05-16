@@ -1,0 +1,5 @@
+error: function return type has no inner type
+ --> tests/ui/cached_result_no_inner_type.rs:4:21
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |                     ^^^

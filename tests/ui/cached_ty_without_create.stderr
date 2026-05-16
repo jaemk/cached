@@ -1,0 +1,5 @@
+error: `ty` requires `create` to also be set
+ --> tests/ui/cached_ty_without_create.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

@@ -1,0 +1,5 @@
+error: #[cached] cannot be applied to methods that take `self`
+ --> tests/ui/cached_self_method.rs:4:4
+  |
+4 | fn my_fn(&self, k: i32) -> i32 {
+  |    ^^^^^

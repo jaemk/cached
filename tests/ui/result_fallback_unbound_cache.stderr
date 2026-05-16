@@ -1,0 +1,5 @@
+error: `result_fallback` requires a store that implements `CloneCached`. The default `UnboundCache` and `LruCache` (size without ttl) do not implement it. Use `ttl` (for `TtlCache`), `size` + `ttl` (for `LruTtlCache`), or a custom `ty`.
+ --> tests/ui/result_fallback_unbound_cache.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> Result<i32, ()> {
+  |    ^^^^^

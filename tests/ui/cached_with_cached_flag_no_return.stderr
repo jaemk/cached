@@ -1,0 +1,13 @@
+error:
+       When specifying `with_cached_flag = true`, the return type must be wrapped in `cached::Return<T>`.
+       The following return types are supported:
+       |    `cached::Return<T>`
+       |    `std::result::Result<cached::Return<T>, E>`
+       |    `std::option::Option<cached::Return<T>>`
+       Found type: ().
+ --> tests/ui/cached_with_cached_flag_no_return.rs:3:1
+  |
+3 | #[cached(with_cached_flag = true)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

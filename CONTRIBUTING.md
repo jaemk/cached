@@ -19,36 +19,39 @@ Thanks for contributing!
 
 ## Making Changes
 
-- Before committing changes, make sure to run `make fmt` to format the changes
-- Add an entry to the `CHANGELOG.md` file
-- The `README.md` is generated using `cargo-readme` from the crate level
-  documentation in `src/lib.rs`. This means the `README.md` should never be
-  modified by hand. To sync changes made to `src/lib.rs`, run `make docs`
-- The CI system will run all tests using `make ci`. Make sure to run all tests
-  before submitting your pull request
+- Before committing changes, run `make fmt` to format the code
+- Add an entry to `CHANGELOG.md` describing what changed and why
+- The `README.md` is generated from `src/lib.rs` using `cargo-readme` and must
+  never be edited by hand. After changing `src/lib.rs`, run `make docs` to sync
+  it, then verify with `make check/readme`
+- Keep `make help` output up to date with any Makefile target changes, and
+  verify it with `make check/help`
+- Run the full CI check before submitting: `make ci`
 
 ## Make goals overview
 
 ```bash
-# The goal used by the CI system
+# Run the full CI pipeline (fmt + clippy + readme check + tests + examples)
 make ci
-# Runs all examples
-make examples
-# Runs all tests
+# List all supported Make targets
+make help
+# Run all tests across all feature combinations
 make tests
-# Syncs all docs
-make sync
-# Formats the source code
+# Run all examples
+make examples
+# Sync README.md from src/lib.rs
+make docs
+# Format the source code
 make fmt
-# Performs multiple checks (formatting, clippy and documentation sync)
+# Run all checks (formatting, clippy, README sync)
 make check
-# Removes all generated artifacts, including docker containers
+# Verify `make help` covers every supported target
+make check/help
+# Remove all generated artifacts and Docker containers
 make clean
 ```
 
 ## Submitting Changes
 
-Pull Requests should be made against master.
-Travis CI will run the test suite on all PRs.
-Remember to update the changelog!
-
+Pull requests should be made against `master`. GitHub Actions will run the full
+test suite on all PRs. Remember to update the changelog!

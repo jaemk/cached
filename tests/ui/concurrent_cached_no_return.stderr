@@ -1,0 +1,7 @@
+error: #[concurrent_cached] functions must return `Result`s, found "()"
+ --> tests/ui/concurrent_cached_no_return.rs:3:1
+  |
+3 | #[concurrent_cached(map_error = "|e| e", disk = true)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `concurrent_cached` (in Nightly builds, run with -Z macro-backtrace for more info)

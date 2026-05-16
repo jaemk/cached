@@ -1,0 +1,5 @@
+error: `unsync_reads` requires an RwLock; remove `sync_lock = "mutex"`
+ --> tests/ui/unsync_reads_mutex_lock.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

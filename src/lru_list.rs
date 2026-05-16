@@ -34,6 +34,35 @@ impl<T> LRUList<T> {
         LRUList { values }
     }
 
+    pub(crate) fn try_with_capacity(
+        capacity: usize,
+    ) -> Result<LRUList<T>, crate::stores::BuildError> {
+        let capacity = capacity
+            .checked_add(2)
+            .ok_or(crate::stores::BuildError::InvalidValue {
+                field: "size",
+                reason: "capacity overflow",
+            })?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(capacity).map_err(|_| {
+            crate::stores::BuildError::InvalidValue {
+                field: "size",
+                reason: "allocation failed",
+            }
+        })?;
+        values.push(ListEntry::<T> {
+            value: None,
+            next: 0,
+            prev: 0,
+        });
+        values.push(ListEntry::<T> {
+            value: None,
+            next: 1,
+            prev: 1,
+        });
+        Ok(LRUList { values })
+    }
+
     pub(crate) fn unlink(&mut self, index: usize) {
         let prev = self.values[index].prev;
         let next = self.values[index].next;
@@ -132,5 +161,80 @@ impl<'a, T> Iterator for LRUListIterator<'a, T> {
             self.index = next;
             value
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Direct coverage of the slab/free-list invariants that `LruCache`,
+    // `LruTtlCache`, and `ExpiringLruCache` rely on (index stability across
+    // unrelated removals; freed-slot reuse; MRU/LRU ordering). Previously only
+    // exercised indirectly via the store tests.
+    use super::LRUList;
+
+    fn order(l: &LRUList<i32>) -> Vec<i32> {
+        l.iter().copied().collect()
+    }
+
+    #[test]
+    fn push_order_and_back() {
+        let mut l = LRUList::with_capacity(4);
+        assert!(order(&l).is_empty());
+        let a = l.push_front(1);
+        let b = l.push_front(2);
+        let c = l.push_front(3);
+        assert_eq!(order(&l), vec![3, 2, 1]); // MRU -> LRU
+        assert_eq!(*l.get(a), 1);
+        assert_eq!(*l.get(b), 2);
+        assert_eq!(*l.get(c), 3);
+        assert_eq!(l.back(), a); // oldest
+    }
+
+    #[test]
+    fn index_stable_across_other_removal() {
+        let mut l = LRUList::with_capacity(4);
+        let a = l.push_front(10);
+        let b = l.push_front(20);
+        let c = l.push_front(30);
+        assert_eq!(l.remove(b), 20);
+        // a and c indices must remain valid after removing an unrelated node.
+        assert_eq!(*l.get(a), 10);
+        assert_eq!(*l.get(c), 30);
+        assert_eq!(order(&l), vec![30, 10]);
+    }
+
+    #[test]
+    fn freed_slots_are_reused() {
+        let mut l = LRUList::with_capacity(2);
+        let a = l.push_front(1);
+        assert_eq!(l.remove(a), 1);
+        let b = l.push_front(2);
+        assert_eq!(a, b, "a freed slot must be reused, not grown");
+        assert_eq!(*l.get(b), 2);
+        assert_eq!(order(&l), vec![2]);
+    }
+
+    #[test]
+    fn move_to_front_reorders() {
+        let mut l = LRUList::with_capacity(4);
+        let a = l.push_front(1);
+        let b = l.push_front(2);
+        let _c = l.push_front(3);
+        assert_eq!(order(&l), vec![3, 2, 1]);
+        l.move_to_front(a);
+        assert_eq!(order(&l), vec![1, 3, 2]);
+        assert_eq!(l.back(), b); // 2 is now LRU
+    }
+
+    #[test]
+    fn set_replaces_and_clear_resets() {
+        let mut l = LRUList::with_capacity(2);
+        let a = l.push_front(7);
+        assert_eq!(l.set(a, 8), Some(7));
+        assert_eq!(*l.get(a), 8);
+        l.clear();
+        assert!(order(&l).is_empty());
+        let b = l.push_front(9); // still usable after clear
+        assert_eq!(*l.get(b), 9);
     }
 }

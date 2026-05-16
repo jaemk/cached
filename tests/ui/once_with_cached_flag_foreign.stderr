@@ -1,0 +1,11 @@
+error:
+       When specifying `with_cached_flag = true`, the return type must be wrapped in `cached::Return<T>`.
+       The following return types are supported:
+       |    `cached::Return<T>`
+       |    `std::result::Result<cached::Return<T>, E>`
+       |    `std::option::Option<cached::Return<T>>`
+       Found type: other::Return<i32>.
+  --> tests/ui/once_with_cached_flag_foreign.rs:10:21
+   |
+10 | fn my_fn(k: i32) -> other::Return<i32> {
+   |                     ^^^^^
