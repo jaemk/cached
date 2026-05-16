@@ -1,11 +1,20 @@
-use cached::stores::ExpiringSizedCache;
+/*
+`TtlSortedCache` used directly (no macro): a TTL cache with an optional size
+limit, exercised by concurrent readers/writers on the tokio runtime.
+
+Run:
+    cargo run --example expiring_sized_cache --features "async_tokio_rt_multi_thread,time_stores"
+*/
+
+use cached::stores::TtlSortedCache;
 use cached::time::{Duration, Instant};
+use cached::CachedRead; // shared-borrow reads via `cache_get_read` (RwLockReadGuard)
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
-    let mut cache = ExpiringSizedCache::new(Duration::from_millis(20_000));
+    let mut cache = TtlSortedCache::new(Duration::from_millis(20_000));
     cache.size_limit(100);
 
     let cache = Arc::new(RwLock::new(cache));
@@ -34,7 +43,7 @@ async fn main() {
             let mut count = 0;
             while Instant::now().duration_since(start) < Duration::from_millis(5_000) {
                 let cache = read_cache.read().await;
-                assert_eq!(cache.get_borrowed("A"), Some(&"A".to_string()));
+                assert_eq!(cache.cache_get_read("A"), Some(&"A".to_string()));
                 count += 1;
                 if count % 1_000_000 == 0 {
                     println!("[expiring_sized] read 1M times in reader {}", reader);

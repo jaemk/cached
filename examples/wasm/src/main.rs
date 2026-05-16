@@ -1,9 +1,19 @@
+/*
+`cached` on `wasm32-unknown-unknown`: with the `wasm` feature, `cached::time`
+is backed by `web_time`, so `#[cached]` / `TtlCache` work in the browser. This
+is a standalone workspace crate (its Cargo.toml enables `cached` with
+`wasm,time_stores,proc_macro`), not a `cargo run --example` target.
+
+Build:
+    cd examples/wasm && cargo build --target=wasm32-unknown-unknown
+*/
+
 use chrono::{DateTime, Utc};
 use reqwasm::http::Request;
 use yew::prelude::*;
 
-use cached::proc_macro::cached;
-use cached::TimedCache;
+use cached::macros::cached;
+use cached::TtlCache;
 
 const URL: &'static str = "https://echo.zuplo.io/";
 
@@ -46,8 +56,8 @@ fn app() -> Html {
 }
 
 #[cached(
-    ty = "TimedCache<String, Option<String>>",
-    create = "{ TimedCache::with_lifespan(cached::time::Duration::from_secs(5)) }"
+    ty = "TtlCache<String, Option<String>>",
+    create = "{ TtlCache::with_ttl(cached::time::Duration::from_secs(5)) }"
 )]
 async fn fetch(body: String) -> Option<String> {
     Request::post(URL)

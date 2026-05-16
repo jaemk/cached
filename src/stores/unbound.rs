@@ -1,28 +1,59 @@
 use super::Cached;
+use crate::{CachedIter, CachedPeek, CachedRead};
 
 use std::cmp::Eq;
 use std::hash::Hash;
 
 #[cfg(feature = "ahash")]
-use hashbrown::{hash_map::Entry, HashMap};
+use ahash::RandomState;
 
 #[cfg(not(feature = "ahash"))]
+use std::collections::hash_map::RandomState;
+
 use std::collections::{hash_map::Entry, HashMap};
 
-#[cfg(feature = "async")]
-use {super::CachedAsync, async_trait::async_trait, futures::Future};
+#[cfg(feature = "async_core")]
+use {super::CachedAsync, std::future::Future};
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Default unbounded cache
 ///
 /// This cache has no size limit or eviction policy.
 ///
 /// Note: This cache is in-memory only
-#[derive(Clone, Debug)]
 pub struct UnboundCache<K, V> {
-    pub(super) store: HashMap<K, V>,
-    pub(super) hits: u64,
-    pub(super) misses: u64,
+    pub(super) store: HashMap<K, V, RandomState>,
+    pub(super) hits: AtomicU64,
+    pub(super) misses: AtomicU64,
     pub(super) initial_capacity: Option<usize>,
+    pub(super) on_evict: Option<super::OnEvict<K, V>>,
+}
+
+impl<K, V> std::fmt::Debug for UnboundCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnboundCache")
+            .field("hits", &self.hits.load(Ordering::Relaxed))
+            .field("misses", &self.misses.load(Ordering::Relaxed))
+            .field("on_evict", &self.on_evict.as_ref().map(|_| "on_evict"))
+            .finish()
+    }
+}
+
+impl<K, V> Clone for UnboundCache<K, V>
+where
+    K: Clone + Hash + Eq,
+    V: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            hits: AtomicU64::new(self.hits.load(Ordering::Relaxed)),
+            misses: AtomicU64::new(self.misses.load(Ordering::Relaxed)),
+            initial_capacity: self.initial_capacity,
+            on_evict: self.on_evict.clone(),
+        }
+    }
 }
 
 impl<K, V> PartialEq for UnboundCache<K, V>
@@ -42,16 +73,87 @@ where
 {
 }
 
+/// Builder for [`UnboundCache`].
+pub struct UnboundCacheBuilder<K, V> {
+    capacity: Option<usize>,
+    on_evict: Option<super::OnEvict<K, V>>,
+}
+
+impl<K, V> Default for UnboundCacheBuilder<K, V> {
+    fn default() -> Self {
+        Self {
+            capacity: None,
+            on_evict: None,
+        }
+    }
+}
+
+impl<K, V> UnboundCacheBuilder<K, V> {
+    /// Set the initial allocation capacity (optional, purely a hint).
+    #[must_use]
+    pub fn capacity(mut self, capacity: usize) -> Self {
+        self.capacity = Some(capacity);
+        self
+    }
+
+    /// Set a callback invoked when an entry is explicitly removed via
+    /// [`cache_remove`](crate::Cached::cache_remove).
+    ///
+    /// Note: because `UnboundCache` has no eviction policy, `on_evict` will
+    /// not fire during normal cache operations — only on explicit removal.
+    #[must_use]
+    pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
+        self.on_evict = Some(std::sync::Arc::new(on_evict));
+        self
+    }
+
+    /// Build the cache.
+    #[must_use]
+    pub fn build(self) -> UnboundCache<K, V>
+    where
+        K: Hash + Eq,
+    {
+        let mut cache = match self.capacity {
+            Some(cap) => UnboundCache::with_capacity(cap),
+            None => UnboundCache::new(),
+        };
+        cache.on_evict = self.on_evict;
+        cache
+    }
+
+    /// Build the cache, returning an error instead of panicking.
+    ///
+    /// `UnboundCache` has no required fields, so this always succeeds.
+    /// Provided for API consistency with other builders.
+    ///
+    /// # Errors
+    ///
+    /// This method currently never returns an error.
+    pub fn try_build(self) -> Result<UnboundCache<K, V>, super::BuildError>
+    where
+        K: Hash + Eq,
+    {
+        Ok(self.build())
+    }
+}
+
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
+    /// Return a builder for constructing an [`UnboundCache`].
+    #[must_use]
+    pub fn builder() -> UnboundCacheBuilder<K, V> {
+        UnboundCacheBuilder::default()
+    }
+
     /// Creates an empty `UnboundCache`
     #[allow(clippy::new_without_default)]
     #[must_use]
     pub fn new() -> UnboundCache<K, V> {
         UnboundCache {
             store: Self::new_store(None),
-            hits: 0,
-            misses: 0,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
             initial_capacity: None,
+            on_evict: None,
         }
     }
 
@@ -60,19 +162,23 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     pub fn with_capacity(size: usize) -> UnboundCache<K, V> {
         UnboundCache {
             store: Self::new_store(Some(size)),
-            hits: 0,
-            misses: 0,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
             initial_capacity: Some(size),
+            on_evict: None,
         }
     }
 
-    fn new_store(capacity: Option<usize>) -> HashMap<K, V> {
-        capacity.map_or_else(HashMap::new, HashMap::with_capacity)
+    fn new_store(capacity: Option<usize>) -> HashMap<K, V, RandomState> {
+        capacity.map_or_else(
+            || HashMap::with_hasher(RandomState::new()),
+            |cap| HashMap::with_capacity_and_hasher(cap, RandomState::new()),
+        )
     }
 
     /// Returns a reference to the cache's `store`
     #[must_use]
-    pub fn get_store(&self) -> &HashMap<K, V> {
+    pub fn store(&self) -> &HashMap<K, V, RandomState> {
         &self.store
     }
 }
@@ -84,10 +190,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(v) = self.store.get(key) {
-            self.hits += 1;
+            self.hits.fetch_add(1, Ordering::Relaxed);
             Some(v)
         } else {
-            self.misses += 1;
+            self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
@@ -97,10 +203,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(v) = self.store.get_mut(key) {
-            self.hits += 1;
+            self.hits.fetch_add(1, Ordering::Relaxed);
             Some(v)
         } else {
-            self.misses += 1;
+            self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
@@ -110,29 +216,29 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
-                self.hits += 1;
+                self.hits.fetch_add(1, Ordering::Relaxed);
                 occupied.into_mut()
             }
 
             Entry::Vacant(vacant) => {
-                self.misses += 1;
+                self.misses.fetch_add(1, Ordering::Relaxed);
                 vacant.insert(f())
             }
         }
     }
     fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
-        k: K,
+        key: K,
         f: F,
     ) -> Result<&mut V, E> {
-        match self.store.entry(k) {
+        match self.store.entry(key) {
             Entry::Occupied(occupied) => {
-                self.hits += 1;
+                self.hits.fetch_add(1, Ordering::Relaxed);
                 Ok(occupied.into_mut())
             }
 
             Entry::Vacant(vacant) => {
-                self.misses += 1;
+                self.misses.fetch_add(1, Ordering::Relaxed);
                 Ok(vacant.insert(f()?))
             }
         }
@@ -142,72 +248,128 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.store.remove(k)
+        let removed = self.store.remove_entry(k);
+        if let Some((ref k, ref v)) = removed {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(k, v);
+            }
+        }
+        removed.map(|(_, v)| v)
     }
     fn cache_clear(&mut self) {
         self.store.clear();
     }
     fn cache_reset(&mut self) {
+        // Entries are dropped in-place. UnboundCache has no `on_evict` callback.
         self.store = Self::new_store(self.initial_capacity);
+        self.cache_reset_metrics();
     }
     fn cache_reset_metrics(&mut self) {
-        self.misses = 0;
-        self.hits = 0;
+        self.misses.store(0, Ordering::Relaxed);
+        self.hits.store(0, Ordering::Relaxed);
     }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
     fn cache_hits(&self) -> Option<u64> {
-        Some(self.hits)
+        Some(self.hits.load(Ordering::Relaxed))
     }
     fn cache_misses(&self) -> Option<u64> {
-        Some(self.misses)
+        Some(self.misses.load(Ordering::Relaxed))
     }
 }
 
-#[cfg(feature = "async")]
-#[async_trait]
+impl<K: Hash + Eq, V> CachedIter<K, V> for UnboundCache<K, V> {
+    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
+    where
+        K: 'a,
+        V: 'a,
+    {
+        self.store.iter()
+    }
+}
+
+impl<K: Hash + Eq, V> CachedPeek<K, V> for UnboundCache<K, V> {
+    fn cache_peek<Q>(&self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.store.get(k)
+    }
+}
+
+impl<K: Hash + Eq, V> CachedRead<K, V> for UnboundCache<K, V> {
+    fn cache_get_read<Q>(&self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        if let Some(value) = self.cache_peek(k) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            Some(value)
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+#[cfg(feature = "async_core")]
 impl<K, V> CachedAsync<K, V> for UnboundCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    async fn get_or_set_with<F, Fut>(&mut self, key: K, f: F) -> &mut V
+    fn async_get_or_set_with<'a, F, Fut>(
+        &'a mut self,
+        key: K,
+        f: F,
+    ) -> impl Future<Output = &'a mut V> + Send + 'a
     where
-        V: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = V> + Send,
+        K: 'a,
+        V: Send + 'a,
+        F: FnOnce() -> Fut + Send + 'a,
+        Fut: Future<Output = V> + Send + 'a,
     {
-        match self.store.entry(key) {
-            Entry::Occupied(occupied) => {
-                self.hits += 1;
-                occupied.into_mut()
-            }
-
-            Entry::Vacant(vacant) => {
-                self.misses += 1;
-                vacant.insert(f().await)
+        async move {
+            match self.store.entry(key) {
+                Entry::Occupied(occupied) => {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    occupied.into_mut()
+                }
+                Entry::Vacant(vacant) => {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    vacant.insert(f().await)
+                }
             }
         }
     }
 
-    async fn try_get_or_set_with<F, Fut, E>(&mut self, key: K, f: F) -> Result<&mut V, E>
+    fn async_try_get_or_set_with<'a, F, Fut, E>(
+        &'a mut self,
+        key: K,
+        f: F,
+    ) -> impl Future<Output = Result<&'a mut V, E>> + Send + 'a
     where
-        V: Send,
-        F: FnOnce() -> Fut + Send,
-        Fut: Future<Output = Result<V, E>> + Send,
+        K: 'a,
+        V: Send + 'a,
+        E: 'a,
+        F: FnOnce() -> Fut + Send + 'a,
+        Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
-        let v = match self.store.entry(key) {
-            Entry::Occupied(occupied) => {
-                self.hits += 1;
-                occupied.into_mut()
-            }
-
-            Entry::Vacant(vacant) => {
-                self.misses += 1;
-                vacant.insert(f().await?)
-            }
-        };
-        Ok(v)
+        async move {
+            let v = match self.store.entry(key) {
+                Entry::Occupied(occupied) => {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    occupied.into_mut()
+                }
+                Entry::Vacant(vacant) => {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    vacant.insert(f().await?)
+                }
+            };
+            Ok(v)
+        }
     }
 }
 
@@ -229,6 +391,16 @@ mod tests {
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, hits);
         assert_eq!(1, misses);
+    }
+
+    #[test]
+    fn metrics_preserve_untracked_state_in_helpers() {
+        let c = std::collections::HashMap::<u8, u8>::new();
+        let metrics = c.metrics();
+        assert_eq!(metrics.hits, None);
+        assert_eq!(metrics.misses, None);
+        assert_eq!(metrics.evictions, None);
+        assert_eq!(metrics.hit_ratio(), None);
     }
 
     #[test]

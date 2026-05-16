@@ -1,0 +1,287 @@
+# cached 0.x → 1.0 Migration (Agent Instructions)
+
+Machine-oriented migration spec for an AI/automation agent. Apply the rules
+below to a codebase that depends on `cached < 1.0` to make it compile against
+`cached 1.0`. The human-readable companion is
+[`MIGRATION-1.0.md`](./MIGRATION-1.0.md).
+
+## Execution model
+
+1. Apply all MECHANICAL rules (token-for-token rename, no semantic judgment).
+2. Apply CONDITIONAL rules (depend on context; instructions inline).
+3. Handle the REDIS DATA rule (no code change; flag for human decision).
+4. Run `cargo build`. The macros emit explicit compile errors for renamed
+   `time` / `time_refresh` attributes — use them to find missed sites.
+5. Do NOT introduce abstractions, fallbacks, or compat shims. Rename in place.
+
+Ordering note: identifier renames can collide (e.g. `set_refresh` appears for
+both Redis builders → `refresh` and timed-store accessors → `set_refresh_on_hit`).
+Resolve by receiver type / context, not blind global replace. Rules below are
+scoped by where they apply.
+
+---
+
+## MECHANICAL — type renames (global, identifier-exact)
+
+Match whole identifiers only (word boundaries). `UnboundCache` is unchanged.
+
+| Find | Replace |
+|---|---|
+| `SizedCache` | `LruCache` |
+| `TimedCache` | `TtlCache` |
+| `TimedSizedCache` | `LruTtlCache` |
+| `ExpiringSizedCache` | `TtlSortedCache` |
+| `ExpiringValueCache` | `ExpiringLruCache` |
+| `CanExpire` | `Expires` |
+| `IOCachedAsync` | `ConcurrentCachedAsync` |
+| `IOCached` | `ConcurrentCached` |
+
+Apply `IOCachedAsync` before `IOCached` (longest-match-first) so the shared
+substring is not double-rewritten.
+
+Includes trait bounds and impls: `V: CanExpire` → `V: Expires`,
+`where T: CanExpire` → `where T: Expires`, `impl CanExpire for` →
+`impl Expires for`, `impl IOCached for` → `impl ConcurrentCached for`,
+`use cached::IOCached` → `use cached::ConcurrentCached`.
+
+REMOVED: `InMemoryAdapter<K, V, C>` no longer exists (it was 1.0-pre-release
+only; 0.x code never referenced it — no rule needed unless a `1.0.0-rc` is
+involved, in which case replace with `#[cached]`/`#[once]` or a hand-written
+`ConcurrentCached` impl).
+
+## MECHANICAL — module path renames
+
+| Find | Replace |
+|---|---|
+| `cached::stores::sized` | `cached::stores::lru` |
+| `cached::stores::timed_sized` | `cached::stores::lru_ttl` |
+| `cached::stores::timed` | `cached::stores::ttl` |
+| `cached::stores::expiring_sized` | `cached::stores::ttl_sorted` |
+| `cached::stores::expiring_value_cache` | `cached::stores::expiring_lru` |
+
+Apply `timed_sized` before `timed` (longest-match-first) to avoid partial rewrite.
+
+## MECHANICAL — proc-macro module path
+
+| Find | Replace |
+|---|---|
+| `cached::proc_macro::cached` | `cached::macros::cached` |
+| `cached::proc_macro::once` | `cached::macros::once` |
+| `cached::proc_macro::io_cached` | `cached::macros::concurrent_cached` |
+| `cached::macros::io_cached` | `cached::macros::concurrent_cached` |
+| `use cached::proc_macro::` | `use cached::macros::` |
+
+The Cargo feature flag stays `proc_macro` — do NOT edit `Cargo.toml` feature
+names for this rule.
+
+## MECHANICAL — proc-macro attribute rename
+
+The `#[io_cached]` attribute was renamed to `#[concurrent_cached]` (the trait
+rename above; the macro that targets it follows the same name). Match the
+attribute path token only.
+
+| Find | Replace |
+|---|---|
+| `#[io_cached` | `#[concurrent_cached` |
+| `io_cached(` *(inside `cached::macros::` use lists)* | `concurrent_cached(` |
+
+## MECHANICAL — constructor methods
+
+| Find | Replace |
+|---|---|
+| `::with_capacity(` *(on the old `SizedCache` only)* | `::with_size(` |
+| `::with_lifespan_and_refresh(` | `::with_ttl_and_refresh(` |
+| `::with_lifespan_and_capacity(` | `::with_ttl_and_capacity(` |
+| `::with_lifespan(` | `::with_ttl(` |
+| `::with_size_and_lifespan_and_refresh(` | `::with_size_and_ttl_and_refresh(` |
+| `::with_size_and_lifespan(` | `::with_size_and_ttl(` |
+
+Apply longer method names before shorter (e.g. `with_lifespan_and_refresh`
+before `with_lifespan`).
+
+COLLISION GUARD: `::with_capacity(` is renamed to `::with_size(` **only** on the
+old `SizedCache`. `UnboundCache::with_capacity(` is unchanged in 1.0 — do NOT
+rewrite it. `TtlCache::with_ttl_and_capacity` is the renamed
+`with_lifespan_and_capacity` and is covered by that rule, not this one.
+Disambiguate by receiver type before applying the `with_capacity` row.
+
+## MECHANICAL — timed-store accessors (receiver is a TtlCache/LruTtlCache value)
+
+| Find | Replace |
+|---|---|
+| `.set_refresh(` | `.set_refresh_on_hit(` |
+| `.refresh()` | `.refresh_on_hit()` |
+
+## MECHANICAL — store accessor (unambiguous, global)
+
+`get_store` has no collisions. Applies to `TtlCache`, `LruTtlCache`, **and
+`UnboundCache`**.
+
+| Find | Replace |
+|---|---|
+| `.get_store()` | `.store()` |
+
+## MECHANICAL — IO/CacheTtl trait methods (receiver is Disk/Redis cache)
+
+| Find | Replace |
+|---|---|
+| `.cache_set_ttl(` | `.set_ttl(` |
+| `.cache_unset_ttl(` | `.unset_ttl(` |
+| `.cache_ttl(` | `.ttl(` |
+| `.cache_set_refresh(` | `.set_refresh_on_hit(` |
+
+TRAIT IMPORT: these are trait methods now. After renaming, if `cargo build`
+reports `E0599` for `set_ttl`/`ttl`/`unset_ttl`, add the trait import at the
+call site — `use cached::CacheTtl;` for a timed in-memory store
+(`TtlCache`/`LruTtlCache`/`TtlSortedCache`), or
+`use cached::ConcurrentCached;` / `use cached::ConcurrentCachedAsync;` for
+`DiskCache`/`RedisCache`/`AsyncRedisCache`. This is a missing-import fix, not a
+rename.
+
+## COMPILE-ASSISTED — `CachedAsync` get-or-set rename
+
+The two `CachedAsync` get-or-set methods were `async_`-prefixed:
+
+| Find | Replace |
+|---|---|
+| `CachedAsync::get_or_set_with` | `CachedAsync::async_get_or_set_with` |
+| `CachedAsync::try_get_or_set_with` | `CachedAsync::async_try_get_or_set_with` |
+| `.get_or_set_with(` (async receiver, call is `.await`-ed) | `.async_get_or_set_with(` |
+| `.try_get_or_set_with(` (async receiver, call is `.await`-ed) | `.async_try_get_or_set_with(` |
+
+COLLISION GUARD: `Cached` has same-named **synchronous** convenience aliases
+`.get_or_set_with(` / `.try_get_or_set_with(` that are **not** renamed. Do not
+rewrite a call unless it is the async one — identifiable by being immediately
+`.await`-ed and/or taking an `async`/future-returning closure. Never touch
+`.cache_get_or_set_with(` / `.cache_try_get_or_set_with(` (canonical, unchanged).
+The UFCS `CachedAsync::…` forms in the first two rows are unambiguous and always
+safe to rename. After editing, `cargo build`: a stale async call reports
+`E0599` (unknown method) or `E0034` (now-resolved ambiguity), and a
+wrongly-renamed sync call reports `E0599` on the sync receiver — use these to
+correct mistakes. Macro (`#[cached]`/`#[once]`) users are unaffected.
+
+## MECHANICAL — macro attributes (`#[cached]`, `#[once]`, `#[concurrent_cached]`)
+
+Within macro attribute lists only (apply the `#[io_cached]` → `#[concurrent_cached]`
+attribute rename first):
+
+| Find | Replace | Applies to |
+|---|---|---|
+| `time =` | `ttl =` | `#[cached]`, `#[once]`, `#[concurrent_cached]` |
+| `time_refresh =` | `refresh =` | `#[cached]`, `#[concurrent_cached]` only — `#[once]` never had this attribute |
+
+Example: `#[cached(time = 60, time_refresh = true)]` →
+`#[cached(ttl = 60, refresh = true)]`.
+
+## MECHANICAL — builder methods (drop `set_` prefix)
+
+Receiver is `DiskCacheBuilder`, `RedisCacheBuilder`, or `AsyncRedisCacheBuilder`.
+
+| Find | Replace |
+|---|---|
+| `.set_lifespan(` | `.ttl(` |
+| `.set_ttl(` | `.ttl(` |
+| `.set_refresh(` | `.refresh(` |
+| `.set_namespace(` | `.namespace(` |
+| `.set_prefix(` | `.prefix(` |
+| `.set_disk_directory(` | `.disk_directory(` |
+| `.set_sync_to_disk_on_cache_change(` | `.sync_to_disk_on_cache_change(` |
+| `.set_connection_config(` | `.connection_config(` |
+| `.set_connection_string(` | `.connection_string(` |
+| `.set_connection_pool_max_size(` | `.connection_pool_max_size(` |
+| `.set_connection_pool_min_idle(` | `.connection_pool_min_idle(` |
+| `.set_connection_pool_max_lifetime(` | `.connection_pool_max_lifetime(` |
+| `.set_connection_pool_idle_timeout(` | `.connection_pool_idle_timeout(` |
+| `.set_client_side_caching(` | `.client_side_caching(` |
+
+COLLISION GUARD: `.set_refresh(` and `.set_ttl(` also exist as timed-store
+accessor rules above with *different* targets. Disambiguate by receiver:
+- Builder receiver → `.refresh(` / `.ttl(`
+- `TtlCache`/`LruTtlCache` value receiver → `.set_refresh_on_hit(` (and
+  `.set_ttl(` on a non-builder timed store stays `.set_ttl(`).
+
+## REMOVED — `TtlSortedCache::ttl_millis` / `DiskCacheBuilder::set_lifespan`
+
+`ttl_millis(ms)` deprecated shim removed → construct with
+`TtlSortedCache::new(Duration::from_millis(ms))`. `DiskCacheBuilder::set_lifespan`
+removed → `.ttl(Duration)` (covered by builder rule).
+
+## REMOVED — `get_borrowed`
+
+`TtlSortedCache::get_borrowed(k)` removed. Replace with `.get(k)` — `get` is now
+generic `get<Q>(&self, key: &Q) where K: Borrow<Q>`.
+
+| Find | Replace |
+|---|---|
+| `.get_borrowed(` | `.get(` |
+
+## CONDITIONAL — declarative macros removed
+
+The macros `cached!`, `cached_key!`, `cached_result!`, `cached_key_result!`,
+`cached_control!` no longer exist. These require a structural rewrite, not a
+rename. Convert each invocation to the equivalent procedural macro:
+
+- `cached! { NAME; fn f(a: A) -> R = { body } }`
+  → `#[cached] fn f(a: A) -> R { body }`
+- `cached_key! { NAME; Key = expr; fn f(...) -> R = { body } }`
+  → `#[cached(key = "KeyType", convert = r#"{ expr }"#)] fn f(...) -> R { body }`
+- `cached_result!` → `#[cached(result = true)]`
+- `cached_key_result!` → `#[cached(result = true, key = ..., convert = ...)]`
+- `cached_control!` → `#[cached]` with `result`/`option` or a custom store impl;
+  inspect the original control flow and map it explicitly.
+
+Add `use cached::macros::{cached, once, concurrent_cached};` as needed. Flag any
+`cached_control!` site for human review if the control flow does not map cleanly.
+
+## REDIS DATA — no code change, flag for human
+
+`cached 1.0` changes the Redis key format:
+`{namespace}{prefix}{key}` → `{namespace}:{prefix}:{key}` (colon-joined, empty
+segments skipped; default namespace's trailing `:` is trimmed then re-joined).
+
+There is NO code edit for this. Effect: 100% cache miss on first run after
+upgrade; old keys orphaned until their TTL expires. Emit a notice to the human:
+"Redis key format changed in cached 1.0 — existing entries will cold-start.
+Decide: accept cold start (default, no action), flush old `{namespace}*` keys,
+or pick a namespace/prefix that reproduces the old layout." Do not attempt to
+auto-resolve.
+
+## BEHAVIORAL — review only (no mechanical edit)
+
+Flag these for human review only if the surrounding code branches on the old
+behavior:
+- `DiskCache::cache_get` returns deserialization errors instead of a silent miss.
+- `DiskCache::cache_set` returns the raw previous value (ConcurrentCached contract).
+- `DiskCache::remove_expired_entries` now surfaces errors.
+- `LruCache`/`LruTtlCache`/`ExpiringLruCache` `cache_reset` rebuilds the store.
+- Timed `#[once]` starts its TTL after the body completes.
+- `LruTtlCache`/`TtlSortedCache` validation errors use `ErrorKind::InvalidInput`.
+- Redis TTL: only zero is rejected; sub-second rounds up to 1s.
+- `ExpiringLruCache::cache_get` evicts expired entries instead of promoting them.
+- Async `DiskCache` (`#[concurrent_cached(disk = true)]` on `async fn`, or
+  `DiskCache` via `ConcurrentCachedAsync`) now runs `sled` I/O on `tokio`'s
+  blocking pool via `spawn_blocking`; requires a Tokio runtime context (already
+  true for `#[concurrent_cached]` async fns). No code edit.
+- `DiskCacheError` gained a `BackgroundTaskFailed` variant. MECHANICAL where an
+  exhaustive `match` on `DiskCacheError` exists: add a `BackgroundTaskFailed`
+  arm or a `_ =>` catch-all, else `E0004`.
+
+## FEATURE FLAGS — Cargo.toml
+
+- New feature `async_core` (runtime-agnostic async traits). `async` =
+  `async_core` + `tokio`; it no longer pulls `futures` / `async-trait`.
+- If the downstream crate used `futures` or `async-trait` transitively via
+  `cached`'s `async` feature, add them as explicit dependencies.
+- The timed in-memory stores (`TtlCache`/`LruTtlCache`/`TtlSortedCache`) and the
+  `CacheTtl` trait are gated behind the `time_stores` feature (in the default
+  set). CONDITIONAL: if the manifest sets `default-features = false` and the
+  code uses any of these (incl. the renamed `TimedCache`/`TimedSizedCache`/
+  `ExpiringSizedCache`), add `time_stores` to the `cached` features.
+- Do not rename the `proc_macro` feature flag.
+
+## VERIFY
+
+Run `cargo build` then `cargo test`. Macro attribute mistakes (`time` /
+`time_refresh`) produce explicit spanned compile errors naming the new
+attribute. Resolve remaining `E0599`/`E0432`/`E0412` errors by re-checking the
+rename tables above scoped to the erroring receiver/type.

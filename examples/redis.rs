@@ -1,18 +1,24 @@
 /*
-Start a redis docker image if you don't already have it running locally:
-    docker run --rm --name cached-redis-example -p 6379:6379 -d redis
-Set the required env variable and run this example and run with required features:
-    CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 cargo run --example redis --features "redis_store"
-Cleanup the redis docker container:
-    docker rm -f cached-redis-example
- */
+Synchronous Redis cache: `#[concurrent_cached(redis = true)]` and an explicit
+`ty = "RedisCache<..>"` + `create` store. The connection string is read from
+`CACHED_REDIS_CONNECTION_STRING`. (`main` is `#[tokio::main]`, hence the
+`async_tokio_rt_multi_thread` feature even though the cache itself is sync.)
 
-use cached::proc_macro::io_cached;
+Start redis if you don't already have one:
+    docker run --rm --name cached-redis-example -p 6379:6379 -d redis
+Run:
+    CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
+        cargo run --example redis --features "redis_store,async_tokio_rt_multi_thread,proc_macro"
+Cleanup:
+    docker rm -f cached-redis-example
+*/
+
+use cached::macros::concurrent_cached;
 use cached::time::Duration;
 use cached::RedisCache;
-use once_cell::sync::Lazy;
 use std::io;
 use std::io::Write;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -23,9 +29,9 @@ enum ExampleError {
 
 // When the macro constructs your RedisCache instance, the connection string
 // will be pulled from the env var: `CACHED_REDIS_CONNECTION_STRING`;
-#[io_cached(
+#[concurrent_cached(
     redis = true,
-    time = 30,
+    ttl = 30,
     cache_prefix_block = r##"{ "cache-redis-example-1" }"##,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
@@ -36,9 +42,9 @@ fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
 
 // If not `cache_prefix_block` is specified, then the function name
 // is used to create a prefix for cache keys used by this function
-#[io_cached(
+#[concurrent_cached(
     redis = true,
-    time = 30,
+    ttl = 30,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
 fn cached_sleep_secs_example_2(secs: u64) -> Result<(), ExampleError> {
@@ -57,15 +63,15 @@ impl Config {
     }
 }
 
-static CONFIG: Lazy<Config> = Lazy::new(Config::load);
+static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 
-#[io_cached(
+#[concurrent_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::RedisCache<u64, String>",
     create = r##" {
         RedisCache::new("cache_redis_example_cached_sleep_secs_config", Duration::from_secs(1))
-            .set_refresh(true)
-            .set_connection_string(&CONFIG.conn_str)
+            .refresh(true)
+            .connection_string(&CONFIG.conn_str)
             .build()
             .expect("error building example redis cache")
     } "##
@@ -86,7 +92,7 @@ async fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
-    use cached::IOCached;
+    use cached::ConcurrentCached;
     CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();

@@ -1,0 +1,5 @@
+error: `sync_writes = "by_key"` is not supported by `#[once]` because `#[once]` stores a single value for all arguments
+ --> tests/ui/once_by_key_rejected.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

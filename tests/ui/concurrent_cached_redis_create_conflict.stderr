@@ -1,0 +1,5 @@
+error: cannot specify `ttl` when passing a `create` block — `create` fully constructs the store, so these store-builder attributes would be silently ignored
+ --> tests/ui/concurrent_cached_redis_create_conflict.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> Result<i32, String> {
+  |    ^^^^^

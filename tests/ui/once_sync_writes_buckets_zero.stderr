@@ -1,0 +1,5 @@
+error: `sync_writes_buckets` must be greater than 0
+ --> tests/ui/once_sync_writes_buckets_zero.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

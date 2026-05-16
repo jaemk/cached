@@ -1,5 +1,5 @@
 /// Used to wrap a function result so callers can see whether the result was cached.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Return<T> {
     pub was_cached: bool,
     pub value: T,

@@ -1,0 +1,7 @@
+error[E0609]: no field `was_cached` on type `Return<i32>`
+  --> tests/ui/cached_with_cached_flag_unqualified_return.rs:13:1
+   |
+13 | #[cached(with_cached_flag = true)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

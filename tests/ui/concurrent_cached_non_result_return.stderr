@@ -1,0 +1,5 @@
+error: #[concurrent_cached] functions must return `Result`s, found "i32"
+ --> tests/ui/concurrent_cached_non_result_return.rs:4:21
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |                     ^^^
