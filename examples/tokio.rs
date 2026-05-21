@@ -1,4 +1,12 @@
-use cached::proc_macro::cached;
+/*
+Async memoization on the tokio runtime: `#[cached]` on `async fn`s, including
+`result = true, with_cached_flag = true` returning `cached::Return`.
+
+Run:
+    cargo run --example tokio --features "async_tokio_rt_multi_thread,proc_macro"
+*/
+
+use cached::macros::cached;
 use cached::time::Duration;
 use tokio::time::sleep;
 

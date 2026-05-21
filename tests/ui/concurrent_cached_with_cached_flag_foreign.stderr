@@ -1,0 +1,9 @@
+error:
+       When specifying `with_cached_flag = true`, the return type must be wrapped in `cached::Return<T>`.
+       The following return types are supported:
+       |    `Result<cached::Return<T>, E>`
+       Found type: Result<other::Return<i32>,String>.
+  --> tests/ui/concurrent_cached_with_cached_flag_foreign.rs:10:21
+   |
+10 | fn my_fn(k: i32) -> Result<other::Return<i32>, String> {
+   |                     ^^^^^^

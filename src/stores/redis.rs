@@ -1,5 +1,7 @@
 use crate::time::Duration;
-use crate::IOCached;
+#[cfg(feature = "time_stores")]
+use crate::CacheTtl;
+use crate::ConcurrentCached;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Display;
@@ -15,11 +17,179 @@ pub struct RedisCacheBuilder<K, V> {
     pool_min_idle: Option<u32>,
     pool_max_lifetime: Option<Duration>,
     pool_idle_timeout: Option<Duration>,
-    _phantom: PhantomData<(K, V)>,
+    // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
+    _phantom: PhantomData<fn() -> (K, V)>,
 }
 
 const ENV_KEY: &str = "CACHED_REDIS_CONNECTION_STRING";
 const DEFAULT_NAMESPACE: &str = "cached-redis-store:";
+
+fn ttl_seconds(ttl: Duration) -> Result<u64, RedisCacheError> {
+    if ttl.is_zero() {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "TTL must be greater than zero for Redis",
+            format!("got {ttl:?}"),
+        ))
+        .into());
+    }
+    // Redis only supports whole-second granularity. Round up so keys never
+    // expire earlier than the caller requested (any non-zero duration yields >= 1).
+    // Saturate rather than overflow on pathologically large durations, then clamp
+    // to Redis' supported TTL range (`i64::MAX` seconds). Clamping here means the
+    // same bounded value is used by both `SETEX` (cache_set) and `EXPIRE`
+    // (refresh); an out-of-range value would otherwise be rejected by Redis.
+    let secs = ttl
+        .as_secs()
+        .saturating_add(u64::from(ttl.subsec_nanos() > 0));
+    Ok(secs.min(i64::MAX as u64))
+}
+
+fn ttl_seconds_i64(ttl: Duration) -> Result<i64, RedisCacheError> {
+    // `ttl_seconds` is already clamped to `i64::MAX`, so this cast is lossless.
+    Ok(ttl_seconds(ttl)? as i64)
+}
+
+/// Build the Redis key: `{namespace}:{prefix}:{key}`, colon-joined with empty
+/// segments skipped and the namespace's trailing `:` trimmed.
+///
+/// **Data-impacting in 1.0** (see migration §8): pre-1.0 used raw
+/// concatenation. Single source of truth shared by the sync and async stores
+/// so the two formats cannot drift.
+fn generate_redis_key(namespace: &str, prefix: &str, key: &str) -> String {
+    let namespace = namespace.trim_end_matches(':');
+    let cap = namespace.len()
+        + if !namespace.is_empty() { 1 } else { 0 }
+        + prefix.len()
+        + if !prefix.is_empty() { 1 } else { 0 }
+        + key.len();
+    let mut out = String::with_capacity(cap);
+    if !namespace.is_empty() {
+        out.push_str(namespace);
+        out.push(':');
+    }
+    if !prefix.is_empty() {
+        out.push_str(prefix);
+        out.push(':');
+    }
+    out.push_str(key);
+    out
+}
+
+#[cfg(test)]
+mod generate_key_tests {
+    // No Redis server needed — pins the data-impacting 1.0 key format (§8).
+    use super::{generate_redis_key, DEFAULT_NAMESPACE};
+
+    #[test]
+    fn default_namespace_trailing_colon_trimmed_and_rejoined() {
+        // The canonical §8 example.
+        assert_eq!(
+            generate_redis_key(DEFAULT_NAMESPACE, "my_prefix", "my_key"),
+            "cached-redis-store:my_prefix:my_key"
+        );
+        // DEFAULT_NAMESPACE itself ends in ':' — only trailing colons are trimmed.
+        assert!(DEFAULT_NAMESPACE.ends_with(':'));
+    }
+
+    #[test]
+    fn empty_segments_are_skipped() {
+        assert_eq!(generate_redis_key("", "p", "k"), "p:k");
+        assert_eq!(generate_redis_key("ns", "", "k"), "ns:k");
+        assert_eq!(generate_redis_key("", "", "k"), "k");
+        assert_eq!(generate_redis_key(":", "", "k"), "k"); // ":" trims to empty
+    }
+
+    #[test]
+    fn full_form_and_multiple_trailing_colons() {
+        assert_eq!(generate_redis_key("ns", "p", "k"), "ns:p:k");
+        // `trim_end_matches(':')` strips *all* trailing colons.
+        assert_eq!(generate_redis_key("ns:::", "p", "k"), "ns:p:k");
+        // Interior colons in segments are preserved.
+        assert_eq!(generate_redis_key("a:b", "p", "k"), "a:b:p:k");
+    }
+
+    #[test]
+    fn interior_colon_collision() {
+        // Documents the known limitation: a namespace containing an interior colon
+        // produces the same key as a shorter namespace with the remainder as a prefix.
+        // See `namespace()` / `prefix()` doc notes on the builders.
+        let with_interior = generate_redis_key("ns:evil", "", "k");
+        let split_across = generate_redis_key("ns", "evil", "k");
+        assert_eq!(
+            with_interior, split_across,
+            "interior colons can cause key collisions"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ttl_seconds_tests {
+    // Pure-function coverage for the subtle Redis TTL normalization (reject
+    // zero, round any sub-second remainder up, clamp to `i64::MAX`). These need
+    // no Redis server and guard both the `SETEX` and `EXPIRE` paths, which
+    // share `ttl_seconds`/`ttl_seconds_i64`.
+    use super::{ttl_seconds, ttl_seconds_i64};
+    use crate::time::Duration;
+
+    #[test]
+    fn zero_is_rejected() {
+        assert!(ttl_seconds(Duration::ZERO).is_err());
+        assert!(ttl_seconds_i64(Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn whole_seconds_pass_through() {
+        assert_eq!(ttl_seconds(Duration::from_secs(1)).unwrap(), 1);
+        assert_eq!(ttl_seconds(Duration::from_secs(60)).unwrap(), 60);
+        assert_eq!(ttl_seconds_i64(Duration::from_secs(60)).unwrap(), 60);
+    }
+
+    #[test]
+    fn subsecond_rounds_up_to_one() {
+        assert_eq!(ttl_seconds(Duration::from_nanos(1)).unwrap(), 1);
+        assert_eq!(ttl_seconds(Duration::from_millis(1)).unwrap(), 1);
+        assert_eq!(ttl_seconds(Duration::from_millis(999)).unwrap(), 1);
+    }
+
+    #[test]
+    fn fractional_rounds_up() {
+        assert_eq!(ttl_seconds(Duration::from_millis(1_500)).unwrap(), 2);
+        assert_eq!(ttl_seconds(Duration::new(5, 1)).unwrap(), 6);
+    }
+
+    #[test]
+    fn very_large_clamps_to_i64_max() {
+        let huge = Duration::from_secs(u64::MAX);
+        assert_eq!(ttl_seconds(huge).unwrap(), i64::MAX as u64);
+        assert_eq!(ttl_seconds_i64(huge).unwrap(), i64::MAX);
+    }
+}
+
+/// A Redis connection URL stored in memory with credentials redacted in `Debug`/`Display`.
+///
+/// The inner string (accessible via `.as_str()`) is the full URL including any password
+/// and should not be logged or exposed in error messages.
+#[derive(Clone)]
+struct ConnectionString(String);
+
+impl ConnectionString {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ConnectionString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED connection string]")
+    }
+}
+
+impl std::fmt::Display for ConnectionString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED connection string]")
+    }
+}
 
 use thiserror::Error;
 
@@ -57,50 +227,56 @@ where
         }
     }
 
-    /// Specify the cache TTL/lifespan in seconds
+    /// Specify the cache TTL as a `Duration`.
+    /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
     #[must_use]
-    pub fn set_lifespan(mut self, ttl: Duration) -> Self {
+    pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
     }
 
     /// Specify whether cache hits refresh the TTL
     #[must_use]
-    pub fn set_refresh(mut self, refresh: bool) -> Self {
+    pub fn refresh(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
     }
 
     /// Set the namespace for cache keys. Defaults to `cached-redis-store:`.
-    /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
-    /// Note that no delimiters are implicitly added so you may pass
-    /// an empty string if you want there to be no namespace on keys.
+    /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
+    /// Empty namespace values are omitted from the generated key.
+    ///
+    /// **Note:** colons in the namespace are not escaped. A namespace containing
+    /// an interior colon (e.g. `"a:b"`) can produce keys that collide with a
+    /// shorter namespace combined with a prefix (e.g. namespace `"a"`, prefix `"b"`).
     #[must_use]
-    pub fn set_namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
+    pub fn namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
         self.namespace = namespace.as_ref().to_string();
         self
     }
 
     /// Set the prefix for cache keys.
-    /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
-    /// Note that no delimiters are implicitly added so you may pass
-    /// an empty string if you want there to be no prefix on keys.
+    /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
+    /// Empty prefix values are omitted from the generated key.
+    ///
+    /// **Note:** colons in the prefix are not escaped and can cause key collisions
+    /// with differently-split namespace/prefix combinations sharing the same segments.
     #[must_use]
-    pub fn set_prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
+    pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
         self.prefix = prefix.as_ref().to_string();
         self
     }
 
     /// Set the connection string for redis
     #[must_use]
-    pub fn set_connection_string(mut self, cs: &str) -> Self {
+    pub fn connection_string(mut self, cs: &str) -> Self {
         self.connection_string = Some(cs.to_string());
         self
     }
 
     /// Set the max size of the underlying redis connection pool
     #[must_use]
-    pub fn set_connection_pool_max_size(mut self, max_size: u32) -> Self {
+    pub fn connection_pool_max_size(mut self, max_size: u32) -> Self {
         self.pool_max_size = Some(max_size);
         self
     }
@@ -108,21 +284,21 @@ where
     /// Set the minimum number of idle redis connections that should be maintained by the
     /// underlying redis connection pool
     #[must_use]
-    pub fn set_connection_pool_min_idle(mut self, min_idle: u32) -> Self {
+    pub fn connection_pool_min_idle(mut self, min_idle: u32) -> Self {
         self.pool_min_idle = Some(min_idle);
         self
     }
 
     /// Set the max lifetime of connections used by the underlying redis connection pool
     #[must_use]
-    pub fn set_connection_pool_max_lifetime(mut self, max_lifetime: Duration) -> Self {
+    pub fn connection_pool_max_lifetime(mut self, max_lifetime: Duration) -> Self {
         self.pool_max_lifetime = Some(max_lifetime);
         self
     }
 
     /// Set the max lifetime of idle connections maintained by the underlying redis connection pool
     #[must_use]
-    pub fn set_connection_pool_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+    pub fn connection_pool_idle_timeout(mut self, idle_timeout: Duration) -> Self {
         self.pool_idle_timeout = Some(idle_timeout);
         self
     }
@@ -132,7 +308,7 @@ where
     /// # Errors
     ///
     /// Will return `RedisCacheBuildError::MissingConnectionString` if connection string is not set
-    pub fn connection_string(&self) -> Result<String, RedisCacheBuildError> {
+    pub fn resolve_connection_string(&self) -> Result<String, RedisCacheBuildError> {
         match self.connection_string {
             Some(ref s) => Ok(s.to_string()),
             None => {
@@ -145,7 +321,7 @@ where
     }
 
     fn create_pool(&self) -> Result<r2d2::Pool<redis::Client>, RedisCacheBuildError> {
-        let s = self.connection_string()?;
+        let s = self.resolve_connection_string()?;
         let client: redis::Client = redis::Client::open(s)?;
         // some pool-builder defaults are set when the builder is initialized
         // so we can't overwrite any values with Nones...
@@ -184,7 +360,7 @@ where
         Ok(RedisCache {
             ttl: self.ttl,
             refresh: self.refresh,
-            connection_string: self.connection_string()?,
+            connection_string: ConnectionString(self.resolve_connection_string()?),
             pool: self.create_pool()?,
             namespace: self.namespace,
             prefix: self.prefix,
@@ -202,9 +378,17 @@ pub struct RedisCache<K, V> {
     pub(super) refresh: bool,
     pub(super) namespace: String,
     pub(super) prefix: String,
-    connection_string: String,
+    connection_string: ConnectionString,
     pool: r2d2::Pool<redis::Client>,
-    _phantom: PhantomData<(K, V)>,
+    // `RedisCache` owns no live `K`/`V` — values are serialized to Redis and
+    // `K`/`V` appear only in method signatures. Use a fn-pointer phantom so the
+    // type is unconditionally `Send + Sync` regardless of whether `K`/`V` are
+    // (e.g. a `V` containing a `Cell` is `Send` but `!Sync`). `#[concurrent_cached]`
+    // emits a `LazyLock<RedisCache<_, _>>` static directly (no inner lock — the
+    // `&self`-API of `ConcurrentCached` is self-synchronizing), so the cache
+    // type must itself be `Sync` for the static to be `Sync`.
+    // Variance is unchanged: covariant in `K` and `V`, same as `PhantomData<(K, V)>`.
+    _phantom: PhantomData<fn() -> (K, V)>,
 }
 
 impl<K, V> RedisCache<K, V>
@@ -219,13 +403,19 @@ where
     }
 
     fn generate_key(&self, key: &K) -> String {
-        format!("{}{}{}", self.namespace, self.prefix, key)
+        // Format `{namespace}:{prefix}:{key}` — see `generate_redis_key`.
+        // Changed from raw concatenation in 1.0 (migration §8): existing
+        // pre-1.0 keys will not be hit after upgrading.
+        generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
     }
 
-    /// Return the redis connection string used
+    /// Return the redis connection string used.
+    ///
+    /// **Note:** the returned string may contain credentials (e.g. `redis://:password@host`).
+    /// Do not log or expose it in error messages.
     #[must_use]
     pub fn connection_string(&self) -> String {
-        self.connection_string.clone()
+        self.connection_string.as_str().to_string()
     }
 }
 
@@ -258,7 +448,7 @@ impl<V> CachedRedisValue<V> {
     }
 }
 
-impl<K, V> IOCached<K, V> for RedisCache<K, V>
+impl<K, V> ConcurrentCached<K, V> for RedisCache<K, V>
 where
     K: Display,
     V: Serialize + DeserializeOwned,
@@ -272,7 +462,7 @@ where
 
         pipe.get(&key);
         if self.refresh {
-            pipe.expire(key, self.ttl.as_secs() as i64).ignore();
+            pipe.expire(key, ttl_seconds_i64(self.ttl)?).ignore();
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
@@ -295,13 +485,15 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(&key);
 
+        let ttl_secs = ttl_seconds(self.ttl)?;
+
         let val = CachedRedisValue::new(val);
         pipe.get(&key);
         pipe.set_ex::<String, String>(
             key,
             serde_json::to_string(&val)
                 .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-            self.ttl.as_secs(),
+            ttl_secs,
         )
         .ignore();
 
@@ -342,17 +534,57 @@ where
         }
     }
 
-    fn cache_lifespan(&self) -> Option<Duration> {
+    fn cache_delete(&self, key: &K) -> Result<bool, RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let key = self.generate_key(key);
+        let removed: usize = redis::cmd("DEL").arg(key).query(&mut *conn)?;
+        Ok(removed > 0)
+    }
+
+    fn ttl(&self) -> Option<Duration> {
         Some(self.ttl)
     }
 
-    fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
+    /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
+    /// they retain whatever TTL was applied when they were originally inserted.
+    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = ttl;
         Some(old)
     }
 
-    fn cache_set_refresh(&mut self, refresh: bool) -> bool {
+    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
+        let old = self.refresh;
+        self.refresh = refresh;
+        old
+    }
+
+    /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
+    fn unset_ttl(&mut self) -> Option<Duration> {
+        None
+    }
+}
+
+#[cfg(feature = "time_stores")]
+impl<K, V> CacheTtl for RedisCache<K, V> {
+    fn ttl(&self) -> Option<Duration> {
+        Some(self.ttl)
+    }
+    /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
+    /// they retain whatever TTL was applied when they were originally inserted.
+    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+        let old = self.ttl;
+        self.ttl = ttl;
+        Some(old)
+    }
+    /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
+    fn unset_ttl(&mut self) -> Option<Duration> {
+        None
+    }
+    fn refresh_on_hit(&self) -> bool {
+        self.refresh
+    }
+    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
         let old = self.refresh;
         self.refresh = refresh;
         old
@@ -361,18 +593,24 @@ where
 
 #[cfg(all(
     feature = "async",
-    any(feature = "redis_smol", feature = "redis_tokio")
+    any(
+        feature = "redis_smol",
+        feature = "redis_tokio",
+        feature = "redis_connection_manager"
+    )
 ))]
 mod async_redis {
     use crate::time::Duration;
 
     use super::{
-        CachedRedisValue, DeserializeOwned, Display, PhantomData, RedisCacheBuildError,
-        RedisCacheError, Serialize, DEFAULT_NAMESPACE, ENV_KEY,
+        CachedRedisValue, ConnectionString, DeserializeOwned, Display, PhantomData,
+        RedisCacheBuildError, RedisCacheError, Serialize, DEFAULT_NAMESPACE, ENV_KEY,
     };
+    #[cfg(feature = "time_stores")]
+    use crate::CacheTtl;
+    use crate::ConcurrentCachedAsync;
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
-    use {crate::IOCachedAsync, async_trait::async_trait};
 
     pub struct AsyncRedisCacheBuilder<K, V> {
         ttl: Duration,
@@ -382,7 +620,8 @@ mod async_redis {
         connection_string: Option<String>,
         #[cfg(feature = "redis_async_cache")]
         client_side_caching: bool,
-        _phantom: PhantomData<(K, V)>,
+        // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
+        _phantom: PhantomData<fn() -> (K, V)>,
     }
 
     impl<K, V> AsyncRedisCacheBuilder<K, V>
@@ -404,43 +643,49 @@ mod async_redis {
             }
         }
 
-        /// Specify the cache TTL/lifespan in seconds
+        /// Specify the cache TTL as a `Duration`.
+        /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
         #[must_use]
-        pub fn set_lifespan(mut self, ttl: Duration) -> Self {
+        pub fn ttl(mut self, ttl: Duration) -> Self {
             self.ttl = ttl;
             self
         }
 
         /// Specify whether cache hits refresh the TTL
         #[must_use]
-        pub fn set_refresh(mut self, refresh: bool) -> Self {
+        pub fn refresh(mut self, refresh: bool) -> Self {
             self.refresh = refresh;
             self
         }
 
         /// Set the namespace for cache keys. Defaults to `cached-redis-store:`.
-        /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
-        /// Note that no delimiters are implicitly added so you may pass
-        /// an empty string if you want there to be no namespace on keys.
+        /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
+        /// Empty namespace values are omitted from the generated key.
+        ///
+        /// **Note:** colons in the namespace are not escaped. A namespace containing
+        /// an interior colon (e.g. `"a:b"`) can produce keys that collide with a
+        /// shorter namespace combined with a prefix (e.g. namespace `"a"`, prefix `"b"`).
         #[must_use]
-        pub fn set_namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
+        pub fn namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
             self.namespace = namespace.as_ref().to_string();
             self
         }
 
-        /// Set the prefix for cache keys
-        /// Used to generate keys formatted as: `{namespace}{prefix}{key}`
-        /// Note that no delimiters are implicitly added so you may pass
-        /// an empty string if you want there to be no prefix on keys.
+        /// Set the prefix for cache keys.
+        /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
+        /// Empty prefix values are omitted from the generated key.
+        ///
+        /// **Note:** colons in the prefix are not escaped and can cause key collisions
+        /// with differently-split namespace/prefix combinations sharing the same segments.
         #[must_use]
-        pub fn set_prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
+        pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
             self.prefix = prefix.as_ref().to_string();
             self
         }
 
         /// Set the connection string for redis
         #[must_use]
-        pub fn set_connection_string(mut self, cs: &str) -> Self {
+        pub fn connection_string(mut self, cs: &str) -> Self {
             self.connection_string = Some(cs.to_string());
             self
         }
@@ -448,7 +693,7 @@ mod async_redis {
         /// Enable client-side caching using RESP3 protocol
         #[cfg(feature = "redis_async_cache")]
         #[must_use]
-        pub fn set_client_side_caching(mut self, enable: bool) -> Self {
+        pub fn client_side_caching(mut self, enable: bool) -> Self {
             self.client_side_caching = enable;
             self
         }
@@ -458,7 +703,7 @@ mod async_redis {
         /// # Errors
         ///
         /// Will return `RedisCacheBuildError::MissingConnectionString` if connection string is not set
-        pub fn connection_string(&self) -> Result<String, RedisCacheBuildError> {
+        pub fn resolve_connection_string(&self) -> Result<String, RedisCacheBuildError> {
             match self.connection_string {
                 Some(ref s) => Ok(s.to_string()),
                 None => std::env::var(ENV_KEY).map_err(|e| {
@@ -476,7 +721,7 @@ mod async_redis {
         async fn create_multiplexed_connection(
             &self,
         ) -> Result<redis::aio::MultiplexedConnection, RedisCacheBuildError> {
-            let s = self.connection_string()?;
+            let s = self.resolve_connection_string()?;
 
             #[cfg(feature = "redis_async_cache")]
             if self.client_side_caching {
@@ -508,20 +753,17 @@ mod async_redis {
         async fn create_connection_manager(
             &self,
         ) -> Result<redis::aio::ConnectionManager, RedisCacheBuildError> {
-            let s = self.connection_string()?;
+            let s = self.resolve_connection_string()?;
             #[cfg(feature = "redis_async_cache")]
             if self.client_side_caching {
                 let mut connection_info = s.into_connection_info()?;
-
-                let mut config = redis::aio::ConnectionManagerConfig::default();
-                if self.client_side_caching {
-                    let redis_settings = connection_info
-                        .redis_settings()
-                        .clone()
-                        .set_protocol(redis::ProtocolVersion::RESP3);
-                    connection_info = connection_info.set_redis_settings(redis_settings);
-                    config = config.set_cache_config(redis::caching::CacheConfig::new());
-                }
+                let redis_settings = connection_info
+                    .redis_settings()
+                    .clone()
+                    .set_protocol(redis::ProtocolVersion::RESP3);
+                connection_info = connection_info.set_redis_settings(redis_settings);
+                let config = redis::aio::ConnectionManagerConfig::default()
+                    .set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info)?;
                 let conn = redis::aio::ConnectionManager::new_with_config(client, config).await?;
                 return Ok(conn);
@@ -541,7 +783,7 @@ mod async_redis {
             Ok(AsyncRedisCache {
                 ttl: self.ttl,
                 refresh: self.refresh,
-                connection_string: self.connection_string()?,
+                connection_string: ConnectionString(self.resolve_connection_string()?),
                 #[cfg(not(feature = "redis_connection_manager"))]
                 connection: self.create_multiplexed_connection().await?,
                 #[cfg(feature = "redis_connection_manager")]
@@ -563,18 +805,26 @@ mod async_redis {
         pub(super) refresh: bool,
         pub(super) namespace: String,
         pub(super) prefix: String,
-        connection_string: String,
+        connection_string: ConnectionString,
         #[cfg(not(feature = "redis_connection_manager"))]
         connection: redis::aio::MultiplexedConnection,
         #[cfg(feature = "redis_connection_manager")]
         connection: redis::aio::ConnectionManager,
-        _phantom: PhantomData<(K, V)>,
+        // `AsyncRedisCache` owns no live `K`/`V` — see the rationale on
+        // `RedisCache::_phantom`. Same fn-pointer phantom so a `Send`-but-`!Sync`
+        // `V` (e.g. one containing a `Cell`) is usable, and the macro-emitted
+        // `OnceCell<AsyncRedisCache<_, _>>` static stays `Sync` for the runtime
+        // (the async path uses tokio's `OnceCell` rather than `LazyLock`).
+        _phantom: PhantomData<fn() -> (K, V)>,
     }
 
     impl<K, V> AsyncRedisCache<K, V>
     where
+        // `V: Sync` is intentionally absent: `V` is sent across the async
+        // boundary by value (insert/get-set return owned values; references
+        // never escape the cache), so `Send` is sufficient.
         K: Display + Send + Sync,
-        V: Serialize + DeserializeOwned + Send + Sync,
+        V: Serialize + DeserializeOwned + Send,
     {
         #[allow(clippy::new_ret_no_self)]
         /// Initialize an `AsyncRedisCacheBuilder`
@@ -583,21 +833,26 @@ mod async_redis {
         }
 
         fn generate_key(&self, key: &K) -> String {
-            format!("{}{}{}", self.namespace, self.prefix, key)
+            // Same format as the sync store — see `super::generate_redis_key`.
+            super::generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
         }
 
-        /// Return the redis connection string used
+        /// Return the redis connection string used.
+        ///
+        /// **Note:** the returned string may contain credentials (e.g. `redis://:password@host`).
+        /// Do not log or expose it in error messages.
         #[must_use]
         pub fn connection_string(&self) -> String {
-            self.connection_string.clone()
+            self.connection_string.as_str().to_string()
         }
     }
 
-    #[async_trait]
-    impl<K, V> IOCachedAsync<K, V> for AsyncRedisCache<K, V>
+    impl<K, V> ConcurrentCachedAsync<K, V> for AsyncRedisCache<K, V>
     where
+        // `V: Sync` not needed — values cross the async boundary by value, never
+        // by shared reference. Matches the async `DiskCache` impl.
         K: Display + Send + Sync,
-        V: Serialize + DeserializeOwned + Send + Sync,
+        V: Serialize + DeserializeOwned + Send,
     {
         type Error = RedisCacheError;
 
@@ -609,7 +864,7 @@ mod async_redis {
 
             pipe.get(&key);
             if self.refresh {
-                pipe.expire(key, self.ttl.as_secs() as i64).ignore();
+                pipe.expire(key, super::ttl_seconds_i64(self.ttl)?).ignore();
             }
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
@@ -632,13 +887,15 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
 
+            let ttl_secs = super::ttl_seconds(self.ttl)?;
+
             let val = CachedRedisValue::new(val);
             pipe.get(&key);
             pipe.set_ex::<String, String>(
                 key,
                 serde_json::to_string(&val)
                     .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
-                self.ttl.as_secs(),
+                ttl_secs,
             )
             .ignore();
 
@@ -680,23 +937,62 @@ mod async_redis {
             }
         }
 
-        /// Set the flag to control whether cache hits refresh the ttl of cached values, returns the old flag value
-        fn cache_set_refresh(&mut self, refresh: bool) -> bool {
+        async fn cache_delete(&self, key: &K) -> Result<bool, Self::Error> {
+            let mut conn = self.connection.clone();
+            let key = self.generate_key(key);
+            let removed: usize = redis::cmd("DEL").arg(key).query_async(&mut conn).await?;
+            Ok(removed > 0)
+        }
+
+        /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
+        fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
             let old = self.refresh;
             self.refresh = refresh;
             old
         }
 
-        /// Return the lifespan of cached values (time to eviction)
-        fn cache_lifespan(&self) -> Option<Duration> {
+        /// Return the ttl of cached values (time to eviction).
+        fn ttl(&self) -> Option<Duration> {
             Some(self.ttl)
         }
 
-        /// Set the lifespan of cached values, returns the old value
-        fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
+        /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
+        /// they retain whatever TTL was applied when they were originally inserted.
+        fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
             let old = self.ttl;
             self.ttl = ttl;
             Some(old)
+        }
+
+        /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
+        fn unset_ttl(&mut self) -> Option<Duration> {
+            None
+        }
+    }
+
+    #[cfg(feature = "time_stores")]
+    impl<K, V> CacheTtl for AsyncRedisCache<K, V> {
+        fn ttl(&self) -> Option<Duration> {
+            Some(self.ttl)
+        }
+        /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
+        /// they retain whatever TTL was applied when they were originally inserted.
+        fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+            let old = self.ttl;
+            self.ttl = ttl;
+            Some(old)
+        }
+        /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
+        fn unset_ttl(&mut self) -> Option<Duration> {
+            None
+        }
+        fn refresh_on_hit(&self) -> bool {
+            self.refresh
+        }
+        fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
+            let old = self.refresh;
+            self.refresh = refresh;
+            old
         }
     }
 
@@ -731,7 +1027,7 @@ mod async_redis {
             sleep(Duration::new(2, 500_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            let old = c.cache_set_lifespan(Duration::from_secs(1)).unwrap();
+            let old = ConcurrentCachedAsync::set_ttl(&mut c, Duration::from_secs(1)).unwrap();
             assert_eq!(2, old.as_secs());
             assert!(c.cache_set(1, 100).await.unwrap().is_none());
             assert!(c.cache_get(&1).await.unwrap().is_some());
@@ -739,7 +1035,7 @@ mod async_redis {
             sleep(Duration::new(1, 600_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            c.cache_set_lifespan(Duration::from_secs(10)).unwrap();
+            ConcurrentCachedAsync::set_ttl(&mut c, Duration::from_secs(10)).unwrap();
             assert!(c.cache_set(1, 100).await.unwrap().is_none());
             assert!(c.cache_set(2, 100).await.unwrap().is_none());
             assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
@@ -750,13 +1046,21 @@ mod async_redis {
 
 #[cfg(all(
     feature = "async",
-    any(feature = "redis_smol", feature = "redis_tokio")
+    any(
+        feature = "redis_smol",
+        feature = "redis_tokio",
+        feature = "redis_connection_manager"
+    )
 ))]
 #[cfg_attr(
     docsrs,
     doc(cfg(all(
         feature = "async",
-        any(feature = "redis_smol", feature = "redis_tokio")
+        any(
+            feature = "redis_smol",
+            feature = "redis_tokio",
+            feature = "redis_connection_manager"
+        )
     )))
 )]
 pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
@@ -782,7 +1086,7 @@ mod tests {
             format!("{}:redis-cache-test", now_millis()),
             Duration::from_secs(2),
         )
-        .set_namespace("in-tests:")
+        .namespace("in-tests:")
         .build()
         .unwrap();
 
@@ -794,7 +1098,7 @@ mod tests {
         sleep(Duration::new(2, 500_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        let old = c.cache_set_lifespan(Duration::from_secs(1)).unwrap();
+        let old = ConcurrentCached::set_ttl(&mut c, Duration::from_secs(1)).unwrap();
         assert_eq!(2, old.as_secs());
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
@@ -802,7 +1106,7 @@ mod tests {
         sleep(Duration::new(1, 600_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        c.cache_set_lifespan(Duration::from_secs(10)).unwrap();
+        ConcurrentCached::set_ttl(&mut c, Duration::from_secs(10)).unwrap();
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);

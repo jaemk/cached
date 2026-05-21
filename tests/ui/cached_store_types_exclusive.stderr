@@ -1,0 +1,5 @@
+error: cache types (`unbound`, `size` and/or `ttl`, or `ty` and `create`) are mutually exclusive
+ --> tests/ui/cached_store_types_exclusive.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

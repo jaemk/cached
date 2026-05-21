@@ -1,0 +1,5 @@
+error: `result_fallback` requires `result = true` because it falls back from `Err` to a cached `Ok` value
+ --> tests/ui/result_fallback_without_result.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

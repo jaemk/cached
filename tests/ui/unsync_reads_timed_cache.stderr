@@ -1,0 +1,5 @@
+error: `unsync_reads` requires a store that implements `CachedRead` (no mutation on reads). `LruCache` and `LruTtlCache` update LRU recency on reads; `TtlCache` may refresh TTL. Use the default store (UnboundCache), `TtlSortedCache`, or a custom `ty` that implements `CachedRead`.
+ --> tests/ui/unsync_reads_timed_cache.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

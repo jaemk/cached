@@ -1,10 +1,13 @@
 use crate::time::Duration;
 use crate::time::SystemTime;
-use crate::IOCached;
+#[cfg(feature = "time_stores")]
+use crate::CacheTtl;
+use crate::ConcurrentCached;
 use directories::BaseDirs;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sled::Db;
+use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
@@ -16,7 +19,9 @@ pub struct DiskCacheBuilder<K, V> {
     disk_dir: Option<PathBuf>,
     cache_name: String,
     connection_config: Option<sled::Config>,
-    _phantom: PhantomData<(K, V)>,
+    // fn-pointer phantom — see the rationale on `DiskCache::_phantom`; keeps the
+    // type unconditionally `Send + Sync` regardless of `K`/`V`.
+    _phantom: PhantomData<fn() -> (K, V)>,
 }
 
 use thiserror::Error;
@@ -53,20 +58,20 @@ where
         }
     }
 
-    /// Specify the cache TTL/lifespan in seconds
-    pub fn set_lifespan(mut self, ttl: Duration) -> Self {
+    /// Specify the cache TTL as a `Duration`.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
     }
 
     /// Specify whether cache hits refresh the TTL
-    pub fn set_refresh(mut self, refresh: bool) -> Self {
+    pub fn refresh(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
     }
 
     /// Set the disk path for where the data will be stored
-    pub fn set_disk_directory<P: AsRef<Path>>(mut self, dir: P) -> Self {
+    pub fn disk_directory<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.disk_dir = Some(dir.as_ref().into());
         self
     }
@@ -75,8 +80,8 @@ where
     /// [sled] flushes every [sled::Config::flush_every_ms] which has a default value.
     /// In some use cases, the default value may not be quick enough,
     /// or a user may want to reduce the flush rate / turn off auto-flushing to reduce IO (and only flush on cache changes).
-    /// (see [DiskCacheBuilder::set_connection_config] for more control over the sled connection)
-    pub fn set_sync_to_disk_on_cache_change(mut self, sync_to_disk_on_cache_change: bool) -> Self {
+    /// (see [DiskCacheBuilder::connection_config] for more control over the sled connection)
+    pub fn sync_to_disk_on_cache_change(mut self, sync_to_disk_on_cache_change: bool) -> Self {
         self.sync_to_disk_on_cache_change = sync_to_disk_on_cache_change;
         self
     }
@@ -85,51 +90,86 @@ where
     ///
     /// ### Note
     /// Don't use [sled::Config::path] as any value set here will be overwritten by either
-    /// the path specified in [DiskCacheBuilder::set_disk_directory], or the default value calculated by [DiskCacheBuilder].
+    /// the path specified in [DiskCacheBuilder::disk_directory], or the default value calculated by [DiskCacheBuilder].
     ///
     /// ### Example Use Case
     /// By default [sled] automatically syncs to disk at a frequency specified in [sled::Config::flush_every_ms].
     /// A user may want to reduce IO by setting a lower flush frequency, or by setting [sled::Config::flush_every_ms] to [None].
-    /// Also see [DiskCacheBuilder::set_sync_to_disk_on_cache_change] which allows for syncing to disk on each cache change.
-    /// ```rust
+    /// Also see [DiskCacheBuilder::sync_to_disk_on_cache_change] which allows for syncing to disk on each cache change.
+    /// ```rust,no_run
     /// use cached::stores::{DiskCacheBuilder, DiskCache};
     ///
     /// let config = sled::Config::new().flush_every_ms(None);
     /// let cache: DiskCache<String, String> = DiskCacheBuilder::new("my-cache")
-    ///     .set_connection_config(config)
-    ///     .set_sync_to_disk_on_cache_change(true)
+    ///     .connection_config(config)
+    ///     .sync_to_disk_on_cache_change(true)
     ///     .build()
     ///     .unwrap();
     /// ```
-    pub fn set_connection_config(mut self, config: sled::Config) -> Self {
+    pub fn connection_config(mut self, config: sled::Config) -> Self {
         self.connection_config = Some(config);
         self
     }
 
-    fn default_disk_dir() -> PathBuf {
-        BaseDirs::new()
-            .map(|base_dirs| {
-                let exe_name = std::env::current_exe()
-                    .ok()
-                    .and_then(|path| {
-                        path.file_name()
-                            .and_then(|os_str| os_str.to_str().map(|s| format!("{}_", s)))
-                    })
-                    .unwrap_or_default();
-                let dir_prefix = format!("{}{}", exe_name, DISK_FILE_PREFIX);
-                base_dirs.cache_dir().join(dir_prefix)
+    fn default_disk_dir_candidates() -> Vec<PathBuf> {
+        let exe_name = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|os_str| os_str.to_str().map(|s| format!("{}_", s)))
             })
-            .unwrap_or_else(|| {
-                std::env::current_dir().expect("disk cache unable to determine current directory")
-            })
+            .unwrap_or_default();
+        let dir_prefix = format!("{}{}", exe_name, DISK_FILE_PREFIX);
+        let mut candidates = Vec::new();
+
+        if let Some(base_dirs) = BaseDirs::new() {
+            candidates.push(base_dirs.cache_dir().join(&dir_prefix));
+        }
+
+        candidates.push(std::env::temp_dir().join(dir_prefix));
+        candidates
+    }
+
+    fn try_open(config: Option<sled::Config>, disk_path: PathBuf) -> Result<Db, sled::Error> {
+        match config {
+            Some(config) => config.path(disk_path).open(),
+            None => sled::open(disk_path),
+        }
+    }
+
+    fn default_disk_path(cache_dir_name: &str) -> Result<PathBuf, sled::Error> {
+        let mut last_error = None;
+
+        for disk_dir in Self::default_disk_dir_candidates() {
+            let disk_path = disk_dir.join(cache_dir_name);
+            match std::fs::create_dir_all(&disk_path) {
+                Ok(()) => return Ok(disk_path),
+                Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(sled::Error::Io(error)),
+            }
+        }
+
+        Err(sled::Error::Io(last_error.unwrap_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "unable to create a writable default disk cache directory",
+            )
+        })))
     }
 
     pub fn build(self) -> Result<DiskCache<K, V>, DiskCacheBuildError> {
-        let disk_dir = self.disk_dir.unwrap_or_else(|| Self::default_disk_dir());
-        let disk_path = disk_dir.join(format!("{}_v{}", self.cache_name, DISK_FILE_VERSION));
-        let connection = match self.connection_config {
-            Some(config) => config.path(disk_path.clone()).open()?,
-            None => sled::open(disk_path.clone())?,
+        let cache_dir_name = format!("{}_v{}", self.cache_name, DISK_FILE_VERSION);
+
+        let (disk_path, connection) = if let Some(disk_dir) = self.disk_dir {
+            let disk_path = disk_dir.join(&cache_dir_name);
+            let connection = Self::try_open(self.connection_config, disk_path.clone())?;
+            (disk_path, connection)
+        } else {
+            let disk_path = Self::default_disk_path(&cache_dir_name)?;
+            let connection = Self::try_open(self.connection_config, disk_path.clone())?;
+            (disk_path, connection)
         };
 
         Ok(DiskCache {
@@ -154,7 +194,12 @@ pub struct DiskCache<K, V> {
     #[allow(unused)]
     disk_path: PathBuf,
     connection: Db,
-    _phantom: PhantomData<(K, V)>,
+    // `DiskCache`/`DiskCacheBuilder` own no live `K`/`V` (values are serialized
+    // to disk; `K`/`V` only appear in method signatures). Use a fn-pointer
+    // phantom so the type is unconditionally `Send + Sync` and does not impose
+    // `K: Sync`/`V: Sync` on callers (e.g. the async impl). Variance is
+    // unchanged: covariant in `K` and `V`, same as `PhantomData<(K, V)>`.
+    _phantom: PhantomData<fn() -> (K, V)>,
 }
 
 impl<K, V> DiskCache<K, V>
@@ -171,16 +216,16 @@ where
     pub fn remove_expired_entries(&self) -> Result<(), DiskCacheError> {
         let now = SystemTime::now();
 
-        for (key, value) in self.connection.iter().flatten() {
-            if let Ok(cached) = rmp_serde::from_slice::<CachedDiskValue<V>>(&value) {
-                if let Some(ttl) = self.ttl {
-                    if now
-                        .duration_since(cached.created_at)
-                        .unwrap_or(Duration::from_secs(0))
-                        >= ttl
-                    {
-                        self.connection.remove(key)?;
-                    }
+        for item in self.connection.iter() {
+            let (key, value) = item?;
+            let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&value)?;
+            if let Some(ttl) = self.ttl {
+                if now
+                    .duration_since(cached.created_at)
+                    .unwrap_or(Duration::from_secs(0))
+                    >= ttl
+                {
+                    self.connection.remove(key)?;
                 }
             }
         }
@@ -211,6 +256,17 @@ pub enum DiskCacheError {
     CacheDeserializationError(#[from] rmp_serde::decode::Error),
     #[error("Error serializing cached value")]
     CacheSerializationError(#[from] rmp_serde::encode::Error),
+    /// The blocking task used to run `sled` I/O off the async runtime was
+    /// cancelled or panicked. Only produced by the async
+    /// (`ConcurrentCachedAsync`) path.
+    ///
+    /// Effectively unreachable in normal operation: the blocking work is itself
+    /// fallible and returns the variants above, so this surfaces only if the
+    /// Tokio runtime aborts/cancels the blocking task (e.g. runtime shutdown).
+    /// The underlying `JoinError` is intentionally not carried, to keep
+    /// `tokio` out of this (sync-shared) public error type.
+    #[error("disk cache background task failed")]
+    BackgroundTaskFailed,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -234,7 +290,132 @@ impl<V> CachedDiskValue<V> {
     }
 }
 
-impl<K, V> IOCached<K, V> for DiskCache<K, V>
+// ── Connection-level disk operations ─────────────────────────────────────────
+//
+// These free functions hold the single source of truth for the on-disk
+// behavior (TTL/refresh handling, serialization-error propagation, optional
+// flush). The synchronous `ConcurrentCached` impl calls them directly; the async
+// `ConcurrentCachedAsync` impl calls them inside `tokio::task::spawn_blocking` so the
+// blocking `sled` I/O does not stall the async runtime. Keeping one
+// implementation guarantees the sync and async paths stay behaviorally
+// identical.
+
+fn disk_cache_get<V>(
+    connection: &Db,
+    key: &str,
+    ttl: Option<Duration>,
+    refresh: bool,
+    sync_to_disk_on_cache_change: bool,
+) -> Result<Option<V>, DiskCacheError>
+where
+    V: Serialize + DeserializeOwned,
+{
+    let Some(data) = connection.get(key)? else {
+        return Ok(None);
+    };
+
+    let mut cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
+
+    if let Some(ttl) = ttl {
+        if SystemTime::now()
+            .duration_since(cached.created_at)
+            .unwrap_or(Duration::from_secs(0))
+            < ttl
+        {
+            if refresh {
+                cached.refresh_created_at();
+                connection.insert(key, rmp_serde::to_vec(&cached)?)?;
+                if sync_to_disk_on_cache_change {
+                    connection.flush()?;
+                }
+            }
+            Ok(Some(cached.value))
+        } else {
+            connection.remove(key)?;
+            if sync_to_disk_on_cache_change {
+                connection.flush()?;
+            }
+            Ok(None)
+        }
+    } else {
+        Ok(Some(cached.value))
+    }
+}
+
+fn disk_cache_set<V>(
+    connection: &Db,
+    key: &str,
+    serialized: Vec<u8>,
+    sync_to_disk_on_cache_change: bool,
+) -> Result<Option<V>, DiskCacheError>
+where
+    V: DeserializeOwned,
+{
+    let result = if let Some(data) = connection.insert(key, serialized)? {
+        let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
+        Ok(Some(cached.value))
+    } else {
+        Ok(None)
+    };
+
+    if sync_to_disk_on_cache_change {
+        connection.flush()?;
+    }
+
+    result
+}
+
+fn disk_cache_remove<V>(
+    connection: &Db,
+    key: &str,
+    ttl: Option<Duration>,
+    sync_to_disk_on_cache_change: bool,
+) -> Result<Option<V>, DiskCacheError>
+where
+    V: DeserializeOwned,
+{
+    let result = if let Some(data) = connection.remove(key)? {
+        let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
+
+        if let Some(ttl) = ttl {
+            if SystemTime::now()
+                .duration_since(cached.created_at)
+                .unwrap_or(Duration::from_secs(0))
+                < ttl
+            {
+                Ok(Some(cached.value))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(Some(cached.value))
+        }
+    } else {
+        Ok(None)
+    };
+
+    if sync_to_disk_on_cache_change {
+        connection.flush()?;
+    }
+
+    result
+}
+
+fn disk_cache_delete(
+    connection: &Db,
+    key: &str,
+    sync_to_disk_on_cache_change: bool,
+) -> Result<bool, DiskCacheError> {
+    let removed = connection.remove(key)?.is_some();
+
+    if sync_to_disk_on_cache_change {
+        connection.flush()?;
+    }
+
+    Ok(removed)
+}
+
+impl<K, V> ConcurrentCached<K, V> for DiskCache<K, V>
 where
     K: ToString,
     V: Serialize + DeserializeOwned,
@@ -242,132 +423,175 @@ where
     type Error = DiskCacheError;
 
     fn cache_get(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
-        let key = key.to_string();
-        let ttl = self.ttl;
-        let refresh = self.refresh;
-        let mut cache_updated = false;
-        let update = |old: Option<&[u8]>| -> Option<Vec<u8>> {
-            let old = old?;
-            if ttl.is_none() {
-                return Some(old.to_vec());
-            }
-            let ttl = ttl.unwrap();
-            let mut cached = match rmp_serde::from_slice::<CachedDiskValue<V>>(old) {
-                Ok(cached) => cached,
-                Err(_) => {
-                    // unable to deserialize, treat it as not existing
-                    return None;
-                }
-            };
-            if SystemTime::now()
-                .duration_since(cached.created_at)
-                .unwrap_or(Duration::from_secs(0))
-                < ttl
-            {
-                if refresh {
-                    cached.refresh_created_at();
-                    cache_updated = true;
-                }
-                let cache_val =
-                    rmp_serde::to_vec(&cached).expect("error serializing cached disk value");
-                Some(cache_val)
-            } else {
-                None
-            }
-        };
-
-        let result = if let Some(data) = self.connection.update_and_fetch(key, update)? {
-            let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
-            Ok(Some(cached.value))
-        } else {
-            Ok(None)
-        };
-
-        if cache_updated && self.sync_to_disk_on_cache_change {
-            self.connection.flush()?;
-        }
-
-        result
+        disk_cache_get(
+            &self.connection,
+            &key.to_string(),
+            self.ttl,
+            self.refresh,
+            self.sync_to_disk_on_cache_change,
+        )
     }
 
     fn cache_set(&self, key: K, value: V) -> Result<Option<V>, DiskCacheError> {
-        let key = key.to_string();
-        let value = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
-
-        let result = if let Some(data) = self.connection.insert(key, value)? {
-            let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
-
-            if let Some(ttl) = self.ttl {
-                if SystemTime::now()
-                    .duration_since(cached.created_at)
-                    .unwrap_or(Duration::from_secs(0))
-                    < ttl
-                {
-                    Ok(Some(cached.value))
-                } else {
-                    Ok(None)
-                }
-            } else {
-                Ok(Some(cached.value))
-            }
-        } else {
-            Ok(None)
-        };
-
-        if self.sync_to_disk_on_cache_change {
-            self.connection.flush()?;
-        }
-
-        result
+        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
+        disk_cache_set(
+            &self.connection,
+            &key.to_string(),
+            serialized,
+            self.sync_to_disk_on_cache_change,
+        )
     }
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
-        let key = key.to_string();
-        let result = if let Some(data) = self.connection.remove(key)? {
-            let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
-
-            if let Some(ttl) = self.ttl {
-                if SystemTime::now()
-                    .duration_since(cached.created_at)
-                    .unwrap_or(Duration::from_secs(0))
-                    < ttl
-                {
-                    Ok(Some(cached.value))
-                } else {
-                    Ok(None)
-                }
-            } else {
-                Ok(Some(cached.value))
-            }
-        } else {
-            Ok(None)
-        };
-
-        if self.sync_to_disk_on_cache_change {
-            self.connection.flush()?;
-        }
-
-        result
+        disk_cache_remove(
+            &self.connection,
+            &key.to_string(),
+            self.ttl,
+            self.sync_to_disk_on_cache_change,
+        )
     }
 
-    fn cache_lifespan(&self) -> Option<Duration> {
+    fn cache_delete(&self, key: &K) -> Result<bool, DiskCacheError> {
+        disk_cache_delete(
+            &self.connection,
+            &key.to_string(),
+            self.sync_to_disk_on_cache_change,
+        )
+    }
+
+    fn ttl(&self) -> Option<Duration> {
         self.ttl
     }
 
-    fn cache_set_lifespan(&mut self, ttl: Duration) -> Option<Duration> {
+    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = Some(ttl);
         old
     }
 
-    fn cache_set_refresh(&mut self, refresh: bool) -> bool {
+    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
         let old = self.refresh;
         self.refresh = refresh;
         old
     }
 
-    fn cache_unset_lifespan(&mut self) -> Option<Duration> {
+    fn unset_ttl(&mut self) -> Option<Duration> {
         self.ttl.take()
+    }
+}
+
+/// Async disk cache. `sled` has no async API, so every operation is run on
+/// `tokio`'s blocking thread pool via [`tokio::task::spawn_blocking`] to avoid
+/// stalling the async runtime. Behavior is identical to the synchronous
+/// [`ConcurrentCached`] impl (they share the `disk_cache_*` helpers).
+///
+/// Values need only be `Send`, **not `Sync`**: they are serialized before the
+/// work moves onto the blocking pool, so no `V` is held across the `.await`
+/// (only the owned serialized bytes / the `JoinHandle<Result<Option<V>, _>>`).
+/// Keys keep `Send + Sync` (the `&K` is borrowed across the await), consistent
+/// with the `RedisCache`/`AsyncRedisCache` async stores.
+///
+/// Cancellation: dropping the returned future does **not** cancel the in-flight
+/// `spawn_blocking` `sled` operation — it runs to completion on the blocking
+/// pool (only the result is discarded). This is safe for a cache (`sled`
+/// operations are atomic, so no corruption), but a cancelled `cache_set`/
+/// `cache_remove` may still have taken effect on disk.
+///
+/// **Concurrency note:** each call spawns a new blocking task on tokio's blocking
+/// thread pool (default limit: 512 threads). Under high concurrency this pool can
+/// saturate, causing subsequent `spawn_blocking` calls to queue. If your workload
+/// issues many concurrent disk-cache operations, tune the pool with
+/// `tokio::runtime::Builder::max_blocking_threads` or consider an explicit
+/// rate-limiting layer above the cache.
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+impl<K, V> crate::ConcurrentCachedAsync<K, V> for DiskCache<K, V>
+where
+    K: ToString + Send + Sync,
+    V: Serialize + DeserializeOwned + Send + 'static,
+{
+    type Error = DiskCacheError;
+
+    async fn cache_get(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
+        let connection = self.connection.clone();
+        let key = key.to_string();
+        let (ttl, refresh, sync) = (self.ttl, self.refresh, self.sync_to_disk_on_cache_change);
+        tokio::task::spawn_blocking(move || {
+            disk_cache_get::<V>(&connection, &key, ttl, refresh, sync)
+        })
+        .await
+        .map_err(|_| DiskCacheError::BackgroundTaskFailed)?
+    }
+
+    async fn cache_set(&self, key: K, value: V) -> Result<Option<V>, DiskCacheError> {
+        let connection = self.connection.clone();
+        let key = key.to_string();
+        let sync = self.sync_to_disk_on_cache_change;
+        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
+        tokio::task::spawn_blocking(move || {
+            disk_cache_set::<V>(&connection, &key, serialized, sync)
+        })
+        .await
+        .map_err(|_| DiskCacheError::BackgroundTaskFailed)?
+    }
+
+    async fn cache_remove(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
+        let connection = self.connection.clone();
+        let key = key.to_string();
+        let (ttl, sync) = (self.ttl, self.sync_to_disk_on_cache_change);
+        tokio::task::spawn_blocking(move || disk_cache_remove::<V>(&connection, &key, ttl, sync))
+            .await
+            .map_err(|_| DiskCacheError::BackgroundTaskFailed)?
+    }
+
+    async fn cache_delete(&self, key: &K) -> Result<bool, DiskCacheError> {
+        let connection = self.connection.clone();
+        let key = key.to_string();
+        let sync = self.sync_to_disk_on_cache_change;
+        tokio::task::spawn_blocking(move || disk_cache_delete(&connection, &key, sync))
+            .await
+            .map_err(|_| DiskCacheError::BackgroundTaskFailed)?
+    }
+
+    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
+        let old = self.refresh;
+        self.refresh = refresh;
+        old
+    }
+
+    fn ttl(&self) -> Option<Duration> {
+        self.ttl
+    }
+
+    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+        let old = self.ttl;
+        self.ttl = Some(ttl);
+        old
+    }
+
+    fn unset_ttl(&mut self) -> Option<Duration> {
+        self.ttl.take()
+    }
+}
+
+#[cfg(feature = "time_stores")]
+impl<K, V> CacheTtl for DiskCache<K, V> {
+    fn ttl(&self) -> Option<Duration> {
+        self.ttl
+    }
+    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+        self.ttl.replace(ttl)
+    }
+    fn unset_ttl(&mut self) -> Option<Duration> {
+        self.ttl.take()
+    }
+    fn refresh_on_hit(&self) -> bool {
+        self.refresh
+    }
+    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
+        let old = self.refresh;
+        self.refresh = refresh;
+        old
     }
 }
 
@@ -407,17 +631,129 @@ mod test_DiskCache {
             .as_millis()
     }
 
+    #[derive(Debug)]
+    struct SerializeFailsAfterDeserialize {
+        fail: bool,
+    }
+
+    impl serde::Serialize for SerializeFailsAfterDeserialize {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            if self.fail {
+                Err(serde::ser::Error::custom("intentional serialize failure"))
+            } else {
+                serializer.serialize_bool(false)
+            }
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for SerializeFailsAfterDeserialize {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let _ = bool::deserialize(deserializer)?;
+            Ok(Self { fail: true })
+        }
+    }
+
     const TEST_KEY: u32 = 1;
     const TEST_VAL: u32 = 100;
-    const TEST_KEY_1: u32 = 2;
     const TEST_VAL_1: u32 = 200;
+
+    #[test]
+    fn cache_get_returns_serialize_error_when_refresh_fails() {
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, SerializeFailsAfterDeserialize> =
+            DiskCache::new("serialize_error_on_refresh")
+                .disk_directory(tmp_dir.path())
+                .ttl(Duration::from_secs(10))
+                .refresh(true)
+                .build()
+                .expect("error building disk cache");
+        let cached = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
+        cache
+            .connection
+            .insert(
+                TEST_KEY.to_string(),
+                rmp_serde::to_vec(&cached).expect("error serializing fixture"),
+            )
+            .expect("error inserting fixture");
+
+        assert!(matches!(
+            cache.cache_get(&TEST_KEY),
+            Err(DiskCacheError::CacheSerializationError(_))
+        ));
+    }
+
+    #[test]
+    fn cache_get_returns_decode_error_for_corrupted_value() {
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, u32> = DiskCache::new("corrupted-cache-get")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .expect("error building disk cache");
+        cache
+            .connection
+            .insert(TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1])
+            .expect("error inserting corrupt fixture");
+
+        assert!(matches!(
+            cache.cache_get(&TEST_KEY),
+            Err(DiskCacheError::CacheDeserializationError(_))
+        ));
+        assert!(cache
+            .connection
+            .get(TEST_KEY.to_string())
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn cache_delete_removes_corrupted_value_without_decoding() {
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, u32> = DiskCache::new("corrupted-cache-delete")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .expect("error building disk cache");
+        cache
+            .connection
+            .insert(TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1])
+            .expect("error inserting corrupt fixture");
+
+        assert!(cache.cache_delete(&TEST_KEY).unwrap());
+        assert!(!cache.cache_delete(&TEST_KEY).unwrap());
+        assert_that!(cache.cache_get(&TEST_KEY), ok(none()));
+    }
+
+    #[test]
+    fn remove_expired_entries_returns_decode_error_for_corrupted_value() {
+        let tmp_dir = temp_dir!();
+        let cache: DiskCache<u32, u32> = DiskCache::new("corrupted-sweep")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(1))
+            .build()
+            .expect("error building disk cache");
+        cache
+            .connection
+            .insert(TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1])
+            .expect("error inserting corrupt fixture");
+
+        assert!(matches!(
+            cache.remove_expired_entries(),
+            Err(DiskCacheError::CacheDeserializationError(_))
+        ));
+    }
+
     const LIFE_SPAN_2_SECS: Duration = Duration::from_secs(2);
     const LIFE_SPAN_1_SEC: Duration = Duration::from_secs(1);
     #[googletest::test]
     fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
-            .set_disk_directory(tmp_dir.path())
+            .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
 
@@ -462,8 +798,8 @@ mod test_DiskCache {
     fn values_expire_when_lifespan_elapses_returning_none() {
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
-            .set_disk_directory(tmp_dir.path())
-            .set_lifespan(LIFE_SPAN_2_SECS)
+            .disk_directory(tmp_dir.path())
+            .ttl(LIFE_SPAN_2_SECS)
             .build()
             .unwrap();
 
@@ -484,7 +820,7 @@ mod test_DiskCache {
             "Getting an existing key-value before it expires should return the value"
         );
 
-        // Let the lifespan expire
+        // Let the ttl expire
         sleep(LIFE_SPAN_2_SECS);
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
@@ -495,12 +831,12 @@ mod test_DiskCache {
     }
 
     #[googletest::test]
-    fn set_lifespan_to_a_different_lifespan_is_respected() {
+    fn set_ttl_to_a_different_ttl_is_respected() {
         // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
         let tmp_dir = temp_dir!();
         let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
-            .set_disk_directory(tmp_dir.path())
-            .set_lifespan(LIFE_SPAN_2_SECS)
+            .disk_directory(tmp_dir.path())
+            .ttl(LIFE_SPAN_2_SECS)
             .build()
             .unwrap();
 
@@ -516,7 +852,7 @@ mod test_DiskCache {
             "Setting a new key-value should return None"
         );
 
-        // Let the lifespan expire
+        // Let the ttl expire
         sleep(LIFE_SPAN_2_SECS);
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
@@ -525,13 +861,12 @@ mod test_DiskCache {
             "Getting an expired key-value should return None"
         );
 
-        let old_from_setting_lifespan = cache
-            .cache_set_lifespan(LIFE_SPAN_1_SEC)
-            .expect("error setting new lifespan");
+        let old_from_setting_lifespan =
+            ConcurrentCached::set_ttl(&mut cache, LIFE_SPAN_1_SEC).expect("error setting new ttl");
         assert_that!(
             old_from_setting_lifespan,
             eq(LIFE_SPAN_2_SECS),
-            "Setting lifespan should return the old lifespan"
+            "Setting ttl should return the old ttl"
         );
         assert_that!(
             cache.cache_set(TEST_KEY, TEST_VAL),
@@ -544,7 +879,7 @@ mod test_DiskCache {
             "Getting a newly set (previously expired) key-value should return the value"
         );
 
-        // Let the new lifespan expire
+        // Let the new ttl expire
         sleep(LIFE_SPAN_1_SEC);
         sleep(Duration::from_micros(500)); // a bit extra for good measure
         assert_that!(
@@ -553,20 +888,11 @@ mod test_DiskCache {
             "Getting an expired key-value should return None"
         );
 
-        cache
-            .cache_set_lifespan(Duration::from_secs(10))
-            .expect("error setting lifespan");
+        ConcurrentCached::set_ttl(&mut cache, Duration::from_secs(10)).expect("error setting ttl");
         assert_that!(
             cache.cache_set(TEST_KEY, TEST_VAL),
             ok(none()),
             "Setting a previously expired key-value should return None"
-        );
-
-        // TODO: Why are we now setting an irrelevant key?
-        assert_that!(
-            cache.cache_set(TEST_KEY_1, TEST_VAL),
-            ok(none()),
-            "Setting a new, separate, key-value should return None"
         );
 
         assert_that!(
@@ -588,9 +914,9 @@ mod test_DiskCache {
         const HALF_LIFE_SPAN: Duration = LIFE_SPAN_1_SEC;
         let tmp_dir = temp_dir!();
         let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
-            .set_disk_directory(tmp_dir.path())
-            .set_lifespan(LIFE_SPAN)
-            .set_refresh(true) // ENABLE REFRESH - this is what we're testing
+            .disk_directory(tmp_dir.path())
+            .ttl(LIFE_SPAN)
+            .refresh(true) // ENABLE REFRESH - this is what we're testing
             .build()
             .unwrap();
 
@@ -624,9 +950,8 @@ mod test_DiskCache {
     }
 
     #[googletest::test]
-    // TODO: Consider removing this test, as it's not really testing anything.
-    // If we want to check that setting a different disk directory to the default doesn't change anything,
-    // we should design the tests to run all the same tests but paramaterized with different conditions.
+    // Smoke test for the default disk directory: a full get/set/remove
+    // round-trip succeeds when `disk_directory` is left at its default.
     fn does_not_break_when_constructed_using_default_disk_directory() {
         let cache: DiskCache<u32, u32> =
             DiskCache::new(&format!("{}:disk-cache-test-default-dir", now_millis()))
@@ -670,10 +995,10 @@ mod test_DiskCache {
                 const CACHE_NAME: &str = "test-cache";
 
                 let cache: DiskCache<u32, u32> = DiskCache::new(CACHE_NAME)
-                    .set_disk_directory(original_cache_tmp_dir.path())
-                    .set_sync_to_disk_on_cache_change(set_sync_to_disk_on_cache_change) // WHAT'S BEING TESTED
+                    .disk_directory(original_cache_tmp_dir.path())
+                    .sync_to_disk_on_cache_change(set_sync_to_disk_on_cache_change) // WHAT'S BEING TESTED
                     // NOTE: disabling automatic flushing, so that we only test the flushing of cache_set
-                    .set_connection_config(sled::Config::new().flush_every_ms(None))
+                    .connection_config(sled::Config::new().flush_every_ms(None))
                     .build()
                     .unwrap();
 
@@ -748,12 +1073,6 @@ mod test_DiskCache {
                         },
                     )
                 }
-
-                #[ignore = "Not implemented"]
-                #[googletest::test]
-                fn for_cache_get_when_refreshing() {
-                    todo!("Test not implemented.")
-                }
             }
 
             /// This is the anti-test
@@ -803,12 +1122,6 @@ mod test_DiskCache {
                         },
                     )
                 }
-
-                #[ignore = "Not implemented"]
-                #[googletest::test]
-                fn for_cache_get_when_refreshing() {
-                    todo!("Test not implemented.")
-                }
             }
 
             fn clone_cache_to_new_location_no_flushing(
@@ -820,7 +1133,7 @@ mod test_DiskCache {
                     .expect("error copying cache files to new location");
 
                 DiskCache::new(cache_name)
-                    .set_disk_directory(new_location)
+                    .disk_directory(new_location)
                     .build()
                     .expect("error building cache from copied files")
             }

@@ -1,0 +1,5 @@
+error: #[concurrent_cached] functions must return `Result`s, found "Option<i32>"
+ --> tests/ui/concurrent_cached_option_return.rs:7:21
+  |
+7 | fn my_fn(k: i32) -> Option<i32> {
+  |                     ^^^^^^

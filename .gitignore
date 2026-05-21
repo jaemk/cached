@@ -4,3 +4,5 @@ _tmp_readme.md
 
 .idea/
 .DS_Store
+local/
+!local/.gitkeep

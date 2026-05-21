@@ -1,0 +1,1143 @@
+use crate::time::Duration;
+use crate::time::Instant;
+use crate::{CacheEvict, CacheTtl, Cached, CachedIter, CachedPeek, CachedRead, CloneCached};
+
+use std::borrow::Borrow;
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
+use std::ops::Bound::{Excluded, Included};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+#[cfg(feature = "async_core")]
+use {super::CachedAsync, std::future::Future};
+
+#[cfg(feature = "ahash")]
+use ahash::RandomState;
+
+#[cfg(not(feature = "ahash"))]
+use std::collections::hash_map::RandomState;
+
+use std::collections::HashMap;
+
+/// Wrap keys in Arc for shared ownership between the HashMap values and BTreeSet index.
+#[derive(Eq)]
+struct CacheArc<T>(Arc<T>);
+
+impl<T> CacheArc<T> {
+    fn new(key: T) -> Self {
+        CacheArc(Arc::new(key))
+    }
+}
+
+impl<T> Clone for CacheArc<T> {
+    fn clone(&self) -> Self {
+        CacheArc(self.0.clone())
+    }
+}
+
+impl<T: PartialEq> PartialEq for CacheArc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for CacheArc<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+impl<T: Ord> Ord for CacheArc<T> {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl<T: Hash> Hash for CacheArc<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<T> Borrow<T> for CacheArc<T> {
+    fn borrow(&self) -> &T {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    /// Calculating expiration `Instant`s resulted in a
+    /// value outside of `Instant`s internal bounds
+    TimeBounds,
+}
+
+/// Public alias for the internal error type — use this name when matching on errors returned by
+/// [`TtlSortedCache`] operations (e.g. [`Cached::cache_try_set`](crate::Cached::cache_try_set)).
+pub type TtlSortedCacheError = Error;
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::TimeBounds => f.write_str("ttl is outside Instant bounds"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<Error> for std::io::Error {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::TimeBounds => std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ttl is outside Instant bounds",
+            ),
+        }
+    }
+}
+
+/// A timestamped key to allow identifying key ranges
+#[derive(Hash, Eq, PartialEq, Ord, PartialOrd)]
+struct Stamped<K> {
+    // note: the field order matters here since the derived ord traits
+    //       generate lexicographic ordering based on the top-to-bottom
+    //       declaration order
+    expiry: Instant,
+
+    // wrapped in an option so it's easy to generate
+    // a range bound containing None
+    key: Option<CacheArc<K>>,
+}
+
+impl<K> Clone for Stamped<K> {
+    fn clone(&self) -> Self {
+        Self {
+            expiry: self.expiry,
+            key: self.key.clone(),
+        }
+    }
+}
+
+impl<K> Stamped<K> {
+    fn bound(expiry: Instant) -> Stamped<K> {
+        Stamped { expiry, key: None }
+    }
+}
+
+/// A timestamped value to allow re-building a timestamped key
+struct Entry<K, V> {
+    expiry: Instant,
+    key: CacheArc<K>,
+    value: V,
+}
+
+impl<K, V> Entry<K, V> {
+    fn as_stamped(&self) -> Stamped<K> {
+        Stamped {
+            expiry: self.expiry,
+            key: Some(self.key.clone()),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.expiry < Instant::now()
+    }
+}
+
+/// Policy for [`TtlSortedCache::insert_inner`] when `now + ttl` overflows `Instant`.
+#[derive(Clone, Copy)]
+enum TtlOverflow {
+    /// Return [`Error::TimeBounds`] without mutating the cache.
+    Error,
+    /// Saturate the expiry to "now" (immediately stale) and still store the entry.
+    SaturateNow,
+}
+
+/// A cache enforcing time expiration and an optional maximum size.
+/// When a maximum size is specified, the values are dropped in the
+/// order of expiration date, e.g. the next value to expire is dropped.
+/// This cache is intended for high read scenarios to allow for concurrent
+/// reads while still enforcing expiration and an optional maximum cache size.
+///
+/// To accomplish this, there are a few trade-offs:
+///  - Maximum cache size logic cannot support "LRU", instead dropping the next value to expire
+///  - Cache keys must implement `Ord`
+///  - The cache's size, reported by `.len` is only guaranteed to be accurate immediately
+///    after a call to either `.evict` or `.retain_latest`
+///  - Eviction must be explicitly requested, either on its own or while inserting
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+pub struct TtlSortedCache<K, V> {
+    // a minimum instant to compare ranges against since
+    // all keys must logically expire after the creation
+    // of the cache
+    min_instant: Instant,
+
+    // k/v where entry contains corresponds to an ordered value in `keys`
+    map: HashMap<K, Entry<K, V>, RandomState>,
+
+    // ordered in ascending expiration `Instant`s
+    // to support retaining/evicting without full traversal
+    keys: BTreeSet<Stamped<K>>,
+
+    pub(crate) ttl: Duration,
+    pub(crate) size_limit: Option<usize>,
+    pub(super) hits: std::sync::atomic::AtomicU64,
+    pub(super) misses: std::sync::atomic::AtomicU64,
+    pub(super) evictions: std::sync::atomic::AtomicU64,
+    pub(super) on_evict: Option<super::OnEvict<K, V>>,
+}
+/// Builder for [`TtlSortedCache`].
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+pub struct TtlSortedCacheBuilder<K, V> {
+    size: Option<usize>,
+    ttl: Option<Duration>,
+    on_evict: Option<super::OnEvict<K, V>>,
+}
+
+impl<K, V> TtlSortedCacheBuilder<K, V> {
+    /// Set the maximum number of entries.
+    #[must_use]
+    pub fn size(mut self, size: usize) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    /// Set the TTL for cache entries. Required.
+    #[must_use]
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set a callback to be invoked when an entry is evicted.
+    #[must_use]
+    pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
+        self.on_evict = Some(Arc::new(on_evict));
+        self
+    }
+
+    /// Build the cache.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` was not set or the size limit is 0.
+    #[must_use]
+    pub fn build(self) -> TtlSortedCache<K, V>
+    where
+        K: Hash + Eq + Ord + Clone,
+    {
+        let ttl = self
+            .ttl
+            .expect("`TtlSortedCacheBuilder` requires `ttl` to be set");
+        if self.size == Some(0) {
+            panic!("size limit must be greater than zero");
+        }
+        let mut cache = match self.size {
+            Some(size) => TtlSortedCache::with_capacity(ttl, size.saturating_add(1)),
+            None => TtlSortedCache::new(ttl),
+        };
+        cache.size_limit = self.size;
+        cache.on_evict = self.on_evict;
+        cache
+    }
+
+    /// Build the cache, returning an error instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`](super::BuildError) if `ttl` is not set or `size` is `0`.
+    pub fn try_build(self) -> Result<TtlSortedCache<K, V>, super::BuildError>
+    where
+        K: Hash + Eq + Ord + Clone,
+    {
+        let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
+        if self.size == Some(0) {
+            return Err(super::BuildError::InvalidValue {
+                field: "size",
+                reason: "must be greater than zero",
+            });
+        }
+        let mut cache = match self.size {
+            Some(size) => TtlSortedCache::with_capacity(ttl, size.saturating_add(1)),
+            None => TtlSortedCache::new(ttl),
+        };
+        cache.size_limit = self.size;
+        cache.on_evict = self.on_evict;
+        Ok(cache)
+    }
+}
+
+impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
+    /// Return a builder for constructing an [`TtlSortedCache`].
+    #[must_use]
+    pub fn builder() -> TtlSortedCacheBuilder<K, V> {
+        TtlSortedCacheBuilder {
+            size: None,
+            ttl: None,
+            on_evict: None,
+        }
+    }
+
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            min_instant: Instant::now(),
+            map: HashMap::with_hasher(RandomState::new()),
+            keys: BTreeSet::new(),
+            ttl,
+            size_limit: None,
+            hits: std::sync::atomic::AtomicU64::new(0),
+            misses: std::sync::atomic::AtomicU64::new(0),
+            evictions: std::sync::atomic::AtomicU64::new(0),
+            on_evict: None,
+        }
+    }
+
+    pub fn with_capacity(ttl: Duration, size: usize) -> Self {
+        let mut new = Self::new(ttl);
+        new.map.reserve(size);
+        new
+    }
+
+    /// Set a size limit. When reached, the next entries to expire are evicted.
+    /// Returns the previous value if one was set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is 0. Use [`TtlSortedCache::try_size_limit`] to handle invalid
+    /// sizes without panicking.
+    pub fn size_limit(&mut self, size: usize) -> Option<usize> {
+        assert!(size > 0, "size limit must be greater than zero");
+        let prev = self.size_limit;
+        self.size_limit = Some(size);
+        self.map
+            .reserve(size.saturating_add(1).saturating_sub(self.map.capacity()));
+        prev
+    }
+
+    /// Set a non-zero size limit. When reached, the next entries to expire are evicted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `InvalidInput` error if `size` is 0.
+    pub fn try_size_limit(&mut self, size: usize) -> std::io::Result<Option<usize>> {
+        if size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "size limit must be greater than zero",
+            ));
+        }
+        Ok(self.size_limit(size))
+    }
+
+    /// Increase backing stores with enough capacity to store `more`
+    pub fn reserve(&mut self, more: usize) {
+        self.map.reserve(more);
+    }
+
+    /// Set the default ttl and return the previous value.
+    ///
+    /// Returns `Some(previous_ttl)` to match [`CacheTtl::set_ttl`](crate::CacheTtl::set_ttl)
+    /// and the `set_ttl` of every other timed store, so the return type is consistent
+    /// regardless of which store a generic caller is using.
+    pub fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+        let prev = self.ttl;
+        self.ttl = ttl;
+        Some(prev)
+    }
+
+    /// Evict values that have expired.
+    /// Returns number of dropped items.
+    pub fn evict(&mut self) -> usize {
+        let cutoff = Instant::now();
+        let min = Stamped::bound(self.min_instant);
+        let max = Stamped::bound(cutoff);
+        let min = Included(&min);
+        let max = Excluded(&max);
+        let remove = self.keys.range((min, max)).count();
+
+        let mut count = 0;
+        while count < remove {
+            match self.keys.pop_first() {
+                None => break,
+                Some(stamped) => {
+                    // Invariant: `None` keys are only used as artificial range sentinels
+                    // in `evict()`/`retain_latest()` and are never inserted into `self.keys`.
+                    let key = stamped
+                        .key
+                        .expect("evicting: only artificial bounds are none");
+                    if let Some(entry) = self.map.remove(key.0.as_ref()) {
+                        if let Some(on_evict) = &self.on_evict {
+                            on_evict(key.0.as_ref(), &entry.value);
+                        }
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Retain only the latest `count` values, dropping the next values to expire.
+    /// If `evict`, then also evict values that have expired.
+    /// Returns number of dropped items.
+    pub fn retain_latest(&mut self, count: usize, evict: bool) -> usize {
+        let retain_drop_count = self.map.len().saturating_sub(count);
+
+        let remove = if evict {
+            let cutoff = Instant::now();
+            let min = Stamped::bound(self.min_instant);
+            let max = Stamped::bound(cutoff);
+            let min = Included(&min);
+            let max = Excluded(&max);
+            let to_evict_count = self.keys.range((min, max)).count();
+            retain_drop_count.max(to_evict_count)
+        } else {
+            retain_drop_count
+        };
+
+        let mut count = 0;
+        while count < remove {
+            match self.keys.pop_first() {
+                None => break,
+                Some(stamped) => {
+                    // Invariant: same as evict() — None keys are sentinel-only.
+                    let key = stamped
+                        .key
+                        .expect("retaining: only artificial bounds are none");
+                    if let Some(entry) = self.map.remove(key.0.as_ref()) {
+                        if let Some(on_evict) = &self.on_evict {
+                            on_evict(key.0.as_ref(), &entry.value);
+                        }
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Insert k/v pair without running eviction logic. See `.insert_ttl_evict`
+    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, Error> {
+        self.insert_ttl_evict(key, value, None, false)
+    }
+
+    /// Insert k/v pair with explicit ttl. See `.insert_ttl_evict`
+    pub fn insert_ttl(&mut self, key: K, value: V, ttl: Duration) -> Result<Option<V>, Error> {
+        self.insert_ttl_evict(key, value, Some(ttl), false)
+    }
+
+    /// Insert k/v pair and run eviction logic. See `.insert_ttl_evict`
+    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, Error> {
+        self.insert_ttl_evict(key, value, None, evict)
+    }
+
+    /// Insert a k/v pair with an optional explicit TTL, then optionally run eviction logic.
+    /// The entry is inserted first. If a `size_limit` was specified and capacity is exceeded,
+    /// the next-to-expire entry is dropped after insertion. The eviction callback fires after
+    /// insertion, not before. Returns any existing unexpired value that was replaced.
+    pub fn insert_ttl_evict(
+        &mut self,
+        key: K,
+        value: V,
+        ttl: Option<Duration>,
+        evict: bool,
+    ) -> Result<Option<V>, Error> {
+        self.insert_inner(key, value, ttl, evict, TtlOverflow::Error, false)
+    }
+
+    /// Shared insertion routine for [`insert_ttl_evict`](Self::insert_ttl_evict) and the
+    /// infallible `cache_get_or_set_with` paths.
+    ///
+    /// `on_overflow` selects what happens in the (practically unreachable) case where
+    /// `now + ttl` exceeds `Instant`'s representable range — a TTL on the order of
+    /// hundreds of years:
+    /// - [`TtlOverflow::Error`]: return [`Error::TimeBounds`] before any mutation
+    ///   (used by the fallible public API).
+    /// - [`TtlOverflow::SaturateNow`]: store the entry with an already-elapsed expiry
+    ///   so the value is still retained (and returnable by reference) but is treated as
+    ///   immediately stale. Size-limit enforcement is skipped in this branch so the
+    ///   just-inserted entry cannot be the one evicted, which lets the infallible
+    ///   `get_or_set` paths return `&mut V` without a fallible re-lookup.
+    fn insert_inner(
+        &mut self,
+        key: K,
+        value: V,
+        ttl: Option<Duration>,
+        evict: bool,
+        on_overflow: TtlOverflow,
+        skip_size_eviction: bool,
+    ) -> Result<Option<V>, Error> {
+        let arc_key = CacheArc::new(key.clone());
+        let now = Instant::now();
+        let (expiry, overflowed) = match now.checked_add(ttl.unwrap_or(self.ttl)) {
+            Some(expiry) => (expiry, false),
+            None => match on_overflow {
+                TtlOverflow::Error => return Err(Error::TimeBounds),
+                TtlOverflow::SaturateNow => (now, true),
+            },
+        };
+
+        let new_stamped = Stamped {
+            expiry,
+            key: Some(arc_key.clone()),
+        };
+        self.keys.insert(new_stamped.clone());
+        let old = self.map.insert(
+            key,
+            Entry {
+                expiry,
+                key: arc_key,
+                value,
+            },
+        );
+        if let Some(old) = &old {
+            let old_stamped = old.as_stamped();
+            if old_stamped != new_stamped {
+                self.keys.remove(&old_stamped);
+            }
+        }
+        let old_value = old.and_then(|entry| {
+            if entry.is_expired() {
+                None
+            } else {
+                Some(entry.value)
+            }
+        });
+
+        // Skip size-limit eviction in two cases:
+        // 1. The TTL overflowed and was saturated to `now` — the new entry has the earliest
+        //    possible expiry and would be the first thing `retain_latest` drops.
+        // 2. The caller explicitly requests it (`skip_size_eviction`) — e.g. `set_and_get_mut`
+        //    must guarantee the just-inserted entry is still present to return `&mut V` safely,
+        //    regardless of the entry's TTL.
+        if !overflowed && !skip_size_eviction {
+            if let Some(size_limit) = self.size_limit {
+                if self.map.len() > size_limit {
+                    self.retain_latest(size_limit, evict);
+                }
+            } else if evict {
+                self.evict();
+            }
+        }
+
+        Ok(old_value)
+    }
+
+    /// Insert `key`/`value` and return a mutable reference to the stored value.
+    ///
+    /// Unlike [`insert`](Self::insert) this never fails and never drops the value:
+    /// an unrepresentable TTL saturates to an immediately-stale entry rather than
+    /// erroring. When a `size_limit` is configured the just-inserted entry is
+    /// protected from eviction: other entries are evicted in TTL order to restore
+    /// capacity. Used by the infallible `cache_get_or_set_with` family.
+    fn set_and_get_mut(&mut self, key: K, value: V) -> &mut V {
+        // `Ok` is guaranteed: `TtlOverflow::SaturateNow` never returns `Err`.
+        // `skip_size_eviction = true` defers size enforcement to the block below,
+        // where we can protect the just-inserted entry.
+        let _ = self.insert_inner(
+            key.clone(),
+            value,
+            None,
+            false,
+            TtlOverflow::SaturateNow,
+            true,
+        );
+
+        if let Some(size_limit) = self.size_limit {
+            if self.map.len() > size_limit {
+                // Temporarily unlink the just-inserted entry from the expiry index so
+                // `retain_latest` cannot select it for eviction. Other entries are
+                // dropped in TTL order until the map is back within `size_limit`.
+                // The stamp is restored afterward so the index stays consistent.
+                let protected = self.map[&key].as_stamped();
+                self.keys.remove(&protected);
+                self.retain_latest(size_limit, false);
+                // If the TTL overflowed (SaturateNow), protected.expiry == now —
+                // the entry is immediately stale but the caller holds a live &mut V.
+                self.keys.insert(protected);
+            }
+        }
+
+        &mut self
+            .map
+            .get_mut(&key)
+            .expect(
+                "set_and_get_mut: SaturateNow never errors and the protected eviction \
+                 path guarantees the entry is present",
+            )
+            .value
+    }
+}
+
+impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
+    fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        // Two lookups: the first (immutable) checks expiry and releases its borrow so
+        // the expired path can call map.remove(); the second (immutable) returns the live
+        // value. Collapsing to one lookup would require the borrow to extend past the
+        // mutable map.remove() call, which the borrow checker disallows in safe Rust.
+        let expired = match self.map.get(key) {
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            Some(entry) => entry.is_expired(),
+        };
+        if expired {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(entry) = self.map.remove(key) {
+                self.keys.remove(&entry.as_stamped());
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(entry.key.0.as_ref(), &entry.value);
+                }
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+            return None;
+        }
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.map.get(key).map(|entry| &entry.value)
+    }
+
+    fn cache_get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        // Two lookups: same reasoning as cache_get above; additionally the second
+        // lookup must be mutable to return &mut V.
+        let expired = match self.map.get(key) {
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            Some(entry) => entry.is_expired(),
+        };
+        if expired {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(entry) = self.map.remove(key) {
+                self.keys.remove(&entry.as_stamped());
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(entry.key.0.as_ref(), &entry.value);
+                }
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+            return None;
+        }
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.map.get_mut(key).map(|entry| &mut entry.value)
+    }
+
+    fn cache_set(&mut self, key: K, value: V) -> Option<V> {
+        // Silently treat an Instant overflow as a no-op; callers that need
+        // to distinguish this case should use cache_try_set instead.
+        self.insert(key, value).unwrap_or(None)
+    }
+
+    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Box<dyn std::error::Error>> {
+        self.insert(k, v).map_err(|e| Box::new(e) as _)
+    }
+
+    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+        if self.cache_get(&key).is_some() {
+            return self
+                .map
+                .get_mut(&key)
+                .map(|entry| &mut entry.value)
+                // Invariant: cache_get confirmed the entry exists and is not expired.
+                // No other code path removes it between the check and this get_mut.
+                .expect("cache entry vanished");
+        }
+        // `set_and_get_mut` never drops the value (it saturates an unrepresentable
+        // TTL instead of erroring), so this path is panic-free.
+        self.set_and_get_mut(key, f())
+    }
+
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        key: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        if self.cache_get(&key).is_some() {
+            return Ok(self
+                .map
+                .get_mut(&key)
+                .map(|entry| &mut entry.value)
+                // Invariant: same as cache_get_or_set_with above.
+                .expect("cache entry vanished"));
+        }
+        // `set_and_get_mut` never drops the value, so this path is panic-free.
+        Ok(self.set_and_get_mut(key, f()?))
+    }
+
+    fn cache_remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match self.map.remove(key) {
+            None => None,
+            Some(removed) => {
+                self.keys.remove(&removed.as_stamped());
+                if removed.is_expired() {
+                    None
+                } else {
+                    Some(removed.value)
+                }
+            }
+        }
+    }
+
+    fn cache_clear(&mut self) {
+        // Inline rather than delegate to a `self.clear()` shim — the `Cached`
+        // short alias `clear` defaults to `cache_clear`, so going through it
+        // would be circular.
+        self.map.clear();
+        self.keys.clear();
+    }
+
+    fn cache_reset(&mut self) {
+        // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
+        self.map = HashMap::with_hasher(RandomState::new());
+        self.keys = BTreeSet::new();
+        self.min_instant = Instant::now();
+        self.cache_reset_metrics();
+    }
+
+    fn cache_reset_metrics(&mut self) {
+        self.misses.store(0, Ordering::Relaxed);
+        self.hits.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
+    }
+
+    /// Reports raw entry count without sweeping; the count may include
+    /// expired entries. Run [`evict`](TtlSortedCache::evict) or
+    /// [`retain_latest`](TtlSortedCache::retain_latest) first for an accurate
+    /// post-sweep count.
+    fn cache_size(&self) -> usize {
+        self.map.len()
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(self.hits.load(Ordering::Relaxed))
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(self.misses.load(Ordering::Relaxed))
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        Some(self.evictions.load(Ordering::Relaxed))
+    }
+
+    fn cache_capacity(&self) -> Option<usize> {
+        self.size_limit
+    }
+}
+
+impl<K: Hash + Eq + Ord, V> CachedIter<K, V> for TtlSortedCache<K, V> {
+    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
+    where
+        K: 'a,
+        V: 'a,
+    {
+        self.map.iter().filter_map(|(k, entry)| {
+            if entry.is_expired() {
+                None
+            } else {
+                Some((k, &entry.value))
+            }
+        })
+    }
+}
+
+impl<K: Hash + Eq + Ord, V> CacheTtl for TtlSortedCache<K, V> {
+    fn ttl(&self) -> Option<Duration> {
+        Some(self.ttl)
+    }
+    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+        let prev = self.ttl;
+        self.ttl = ttl;
+        Some(prev)
+    }
+    /// `TtlSortedCache` always requires a TTL; calling `unset_ttl` is a no-op and always returns `None`.
+    fn unset_ttl(&mut self) -> Option<Duration> {
+        None
+    }
+}
+
+impl<K: Hash + Eq + Ord, V> CachedPeek<K, V> for TtlSortedCache<K, V> {
+    fn cache_peek<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.map.get(key).and_then(|entry| {
+            if entry.is_expired() {
+                None
+            } else {
+                Some(&entry.value)
+            }
+        })
+    }
+}
+
+impl<K: Hash + Eq + Ord, V> CachedRead<K, V> for TtlSortedCache<K, V> {
+    fn cache_get_read<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(value) = self.cache_peek(key) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            Some(value)
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+impl<K: Hash + Eq + Ord + Clone, V: Clone> CloneCached<K, V> for TtlSortedCache<K, V> {
+    fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match self.map.get(k) {
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                (None, false)
+            }
+            Some(entry) if entry.is_expired() => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                (Some(entry.value.clone()), true)
+            }
+            Some(entry) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                (Some(entry.value.clone()), false)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "async_core")]
+impl<K, V> CachedAsync<K, V> for TtlSortedCache<K, V>
+where
+    K: Hash + Eq + Ord + Clone + Send + Sync,
+    V: Send,
+{
+    fn async_get_or_set_with<'a, F, Fut>(
+        &'a mut self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = &'a mut V> + Send + 'a
+    where
+        K: 'a,
+        V: Send + 'a,
+        F: FnOnce() -> Fut + Send + 'a,
+        Fut: Future<Output = V> + Send + 'a,
+    {
+        async move {
+            if self.cache_get(&k).is_some() {
+                return self
+                    .map
+                    .get_mut(&k)
+                    .map(|entry| &mut entry.value)
+                    // Invariant: cache_get confirmed the entry is present and unexpired.
+                    .expect("cache entry vanished");
+            }
+            // `set_and_get_mut` never drops the value, so this path is panic-free.
+            let value = f().await;
+            self.set_and_get_mut(k, value)
+        }
+    }
+
+    fn async_try_get_or_set_with<'a, F, Fut, E>(
+        &'a mut self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<&'a mut V, E>> + Send + 'a
+    where
+        K: 'a,
+        V: Send + 'a,
+        E: 'a,
+        F: FnOnce() -> Fut + Send + 'a,
+        Fut: Future<Output = Result<V, E>> + Send + 'a,
+    {
+        async move {
+            if self.cache_get(&k).is_some() {
+                return Ok(self
+                    .map
+                    .get_mut(&k)
+                    .map(|entry| &mut entry.value)
+                    // Invariant: cache_get confirmed the entry is present and unexpired.
+                    .expect("cache entry vanished"));
+            }
+            // `set_and_get_mut` never drops the value, so this path is panic-free.
+            let value = f().await?;
+            Ok(self.set_and_get_mut(k, value))
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Ord + Clone, V> CacheEvict for TtlSortedCache<K, V> {
+    fn evict(&mut self) -> usize {
+        TtlSortedCache::evict(self)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::stores::TtlSortedCache;
+    use crate::time::Duration;
+    use crate::{Cached, CachedRead};
+
+    #[test]
+    fn borrow_keys() {
+        let mut cache = TtlSortedCache::with_capacity(Duration::from_millis(100), 100);
+        cache.insert(String::from("a"), "a").unwrap();
+        assert_eq!(cache.get("a").unwrap(), &"a");
+
+        let mut cache = TtlSortedCache::with_capacity(Duration::from_millis(100), 100);
+        cache.insert(vec![0], "a").unwrap();
+        assert_eq!(cache.get([0].as_slice()).unwrap(), &"a");
+    }
+
+    #[test]
+    fn kitchen_sink() {
+        let mut cache = TtlSortedCache::with_capacity(Duration::from_millis(100), 100);
+        assert_eq!(0, cache.evict());
+        assert_eq!(0, cache.retain_latest(100, true));
+        assert!(cache.get("a").is_none());
+
+        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        assert_eq!(cache.get("a"), Some("A".to_string()).as_ref());
+        assert_eq!(cache.len(), 1);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(1, cache.evict());
+        assert!(cache.get("a").is_none());
+        assert_eq!(cache.len(), 0);
+
+        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        assert_eq!(cache.get("a"), Some("A".to_string()).as_ref());
+        assert_eq!(cache.len(), 1);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(0, cache.retain_latest(1, false));
+        // Expired-but-not-yet-evicted: use the non-mutating read so the entry
+        // stays in the map (the next assertion verifies it's still counted).
+        assert_eq!(cache.cache_get_read("a"), None);
+        // in size until eviction
+        assert_eq!(cache.len(), 1);
+        assert_eq!(1, cache.retain_latest(1, true));
+        assert!(cache.get("a").is_none());
+        assert_eq!(cache.len(), 0);
+
+        cache.insert("a".to_string(), "a".to_string()).unwrap();
+        cache.insert("b".to_string(), "b".to_string()).unwrap();
+        cache.insert("c".to_string(), "c".to_string()).unwrap();
+        cache.insert("d".to_string(), "d".to_string()).unwrap();
+        cache.insert("e".to_string(), "e".to_string()).unwrap();
+        assert_eq!(3, cache.retain_latest(2, false));
+        assert_eq!(2, cache.len());
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("c"), None);
+        assert_eq!(cache.get("d"), Some("d".to_string()).as_ref());
+        assert_eq!(cache.get("e"), Some("e".to_string()).as_ref());
+
+        cache.insert("a".to_string(), "a".to_string()).unwrap();
+        cache.insert("a".to_string(), "a".to_string()).unwrap();
+        cache.insert("b".to_string(), "b".to_string()).unwrap();
+        cache.insert("b".to_string(), "b".to_string()).unwrap();
+        assert_eq!(4, cache.len());
+
+        assert_eq!(2, cache.retain_latest(2, false));
+        assert_eq!(cache.get("d"), None);
+        assert_eq!(cache.get("e"), None);
+        assert_eq!(cache.get("a"), Some("a".to_string()).as_ref());
+        assert_eq!(cache.get("b"), Some("b".to_string()).as_ref());
+        assert_eq!(2, cache.len());
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(cache.remove("a"), None);
+        // trying to get something expired will expire values
+        assert_eq!(1, cache.len());
+
+        cache.insert("a".to_string(), "a".to_string()).unwrap();
+        assert_eq!(cache.remove("a"), Some("a".to_string()));
+        // we haven't done anything to evict "b" so there's still one entry
+        assert_eq!(1, cache.len());
+
+        assert_eq!(1, cache.evict());
+        assert_eq!(0, cache.len());
+
+        // default ttl is 100ms
+        cache
+            .insert_ttl("a".to_string(), "a".to_string(), Duration::from_millis(300))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(cache.get("a"), Some("a".to_string()).as_ref());
+        assert_eq!(1, cache.len());
+
+        std::thread::sleep(Duration::from_millis(200));
+        cache
+            .insert_ttl_evict(
+                "b".to_string(),
+                "b".to_string(),
+                Some(Duration::from_millis(300)),
+                true,
+            )
+            .unwrap();
+        // a should now be evicted
+        assert_eq!(1, cache.len());
+        assert_eq!(cache.get("a"), None);
+    }
+
+    #[test]
+    fn size_limit() {
+        let mut cache = TtlSortedCache::with_capacity(Duration::from_millis(100), 100);
+        cache.size_limit(2);
+        assert_eq!(0, cache.evict());
+        assert_eq!(0, cache.retain_latest(100, true));
+        assert!(cache.get("a").is_none());
+
+        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        assert_eq!(cache.get("a"), Some("A".to_string()).as_ref());
+        assert_eq!(cache.len(), 1);
+        cache.insert("b".to_string(), "B".to_string()).unwrap();
+        assert_eq!(cache.get("b"), Some("B".to_string()).as_ref());
+        assert_eq!(cache.len(), 2);
+        cache.insert("c".to_string(), "C".to_string()).unwrap();
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("b"), Some("B".to_string()).as_ref());
+        assert_eq!(cache.get("c"), Some("C".to_string()).as_ref());
+        assert_eq!(cache.get("a"), None);
+    }
+
+    #[test]
+    fn updating_existing_key_at_size_limit_does_not_evict_another_key() {
+        let mut cache = TtlSortedCache::with_capacity(Duration::from_millis(1_000), 2);
+        cache.size_limit(2);
+
+        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        cache.insert("b".to_string(), "B".to_string()).unwrap();
+        assert_eq!(cache.len(), 2);
+
+        assert_eq!(
+            cache.insert("a".to_string(), "A2".to_string()).unwrap(),
+            Some("A".to_string())
+        );
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("a"), Some(&"A2".to_string()));
+        assert_eq!(cache.get("b"), Some(&"B".to_string()));
+        assert_eq!(cache.cache_evictions(), Some(0));
+    }
+
+    #[test]
+    fn builder_rejects_zero_size_limit() {
+        let cache = TtlSortedCache::<String, String>::builder()
+            .ttl(Duration::from_millis(1_000))
+            .size(0)
+            .try_build();
+        match cache {
+            Ok(_) => panic!("zero size limit should fail"),
+            Err(error) => assert!(
+                matches!(error, crate::stores::BuildError::InvalidValue { .. }),
+                "expected InvalidValue, got {error:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn get_or_set_with_size_limit_short_ttl_does_not_panic() {
+        // Regression: when the just-inserted entry expires before existing entries,
+        // `retain_latest` must evict the existing entry, not the one we're returning.
+        let mut cache = TtlSortedCache::new(Duration::from_millis(1));
+        cache.size_limit(1);
+        cache
+            .insert_ttl("long", 1u32, Duration::from_secs(60))
+            .unwrap();
+        // Must not panic; "long" should be evicted to make room for "short".
+        let v = cache.cache_get_or_set_with("short", || 2u32);
+        assert_eq!(*v, 2);
+        // Size limit must be respected after the call.
+        assert_eq!(cache.cache_size(), 1);
+        // "short" is the entry that survived; "long" was evicted.
+        assert_eq!(cache.cache_get("short"), Some(&2u32));
+    }
+
+    #[test]
+    fn try_get_or_set_with_size_limit_short_ttl_does_not_panic() {
+        // Regression: same scenario as `get_or_set_with_size_limit_short_ttl_does_not_panic`
+        // but via the fallible `cache_try_get_or_set_with` path, which also routes through
+        // `set_and_get_mut`.
+        let mut cache = TtlSortedCache::new(Duration::from_millis(1));
+        cache.size_limit(1);
+        cache
+            .insert_ttl("long", 1u32, Duration::from_secs(60))
+            .unwrap();
+        let v: &mut u32 = cache
+            .cache_try_get_or_set_with("short", || Ok::<u32, ()>(2))
+            .unwrap();
+        assert_eq!(*v, 2);
+        assert_eq!(cache.cache_size(), 1);
+        assert_eq!(cache.cache_get("short"), Some(&2u32));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_or_set_with_size_limit_short_ttl_does_not_panic() {
+        use crate::CachedAsync;
+        let mut cache = TtlSortedCache::new(Duration::from_millis(1));
+        cache.size_limit(1);
+        cache
+            .insert_ttl("long", 1u32, Duration::from_secs(60))
+            .unwrap();
+        let v = cache
+            .async_get_or_set_with("short", || async { 2u32 })
+            .await;
+        assert_eq!(*v, 2);
+        assert_eq!(cache.cache_size(), 1);
+        assert_eq!(cache.cache_get("short"), Some(&2u32));
+    }
+
+    #[test]
+    fn cache_reset_preserves_configuration() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let evicted = Arc::new(AtomicU64::new(0));
+        let evicted_clone = evicted.clone();
+
+        let mut cache = TtlSortedCache::<u8, u8>::builder()
+            .ttl(Duration::from_secs(60))
+            .size(2)
+            .on_evict(move |_k: &u8, _v: &u8| {
+                evicted_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .try_build()
+            .expect("build failed");
+
+        cache.cache_set(1, 1);
+        cache.cache_set(2, 2);
+        cache.cache_reset();
+        assert_eq!(0, cache.cache_size(), "reset should clear all entries");
+
+        // After reset, size_limit and on_evict must still be active.
+        cache.cache_set(3, 3);
+        cache.cache_set(4, 4);
+        cache.cache_set(5, 5); // capacity-2 → evicts one entry
+        assert_eq!(2, cache.cache_size(), "size limit should still be enforced");
+        assert_eq!(
+            1,
+            evicted.load(Ordering::Relaxed),
+            "on_evict should still fire after reset"
+        );
+    }
+}

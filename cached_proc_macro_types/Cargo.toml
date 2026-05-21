@@ -1,14 +1,15 @@
 [package]
 name = "cached_proc_macro_types"
-version = "0.1.1"
+version = "1.0.0"
 authors = ["James Kominick <james@kominick.com>"]
-description = "Generic cache implementations and simplified function memoization"
+description = "Types used by the cached proc-macro crate"
 repository = "https://github.com/jaemk/cached"
-documentation = "https://docs.rs/cached"
+documentation = "https://docs.rs/cached_proc_macro_types"
 readme = "README.md"
 categories = ["caching"]
-keywords = ["caching", "cache", "memoize", "lru"]
+keywords = ["caching", "cache", "memoize", "cached"]
 license = "MIT"
-edition = "2018"
+edition = "2021"
+rust-version = "1.80"
 
 [dependencies]

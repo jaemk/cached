@@ -1,0 +1,5 @@
+error: the `result` and `option` attributes are mutually exclusive
+ --> tests/ui/cached_result_option_exclusive.rs:4:21
+  |
+4 | fn my_fn(k: i32) -> Result<i32, ()> {
+  |                     ^^^^^^

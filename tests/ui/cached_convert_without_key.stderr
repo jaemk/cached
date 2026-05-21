@@ -1,0 +1,7 @@
+error: `convert` requires `key` or `ty` to be set
+ --> tests/ui/cached_convert_without_key.rs:3:1
+  |
+3 | #[cached(convert = r#"{ k }"#)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

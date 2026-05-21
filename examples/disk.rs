@@ -1,9 +1,12 @@
 /*
-run with required features:
-    cargo run --example disk --features "disk_store"
- */
+Synchronous on-disk cache: `#[concurrent_cached(disk = true)]` backed by `sled`.
+Default cache files live under $system_cache_dir/cached_disk_cache/.
 
-use cached::proc_macro::io_cached;
+Run:
+    cargo run --example disk --features "disk_store,proc_macro"
+*/
+
+use cached::macros::concurrent_cached;
 use cached::time::Duration;
 use std::io;
 use std::io::Write;
@@ -17,9 +20,9 @@ enum ExampleError {
 
 // When the macro constructs your DiskCache instance, the default
 // cache files will be stored under $system_cache_dir/cached_disk_cache/
-#[io_cached(
+#[concurrent_cached(
     disk = true,
-    time = 30,
+    ttl = 30,
     map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##
 )]
 fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
@@ -37,7 +40,7 @@ fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
-    use cached::IOCached;
+    use cached::ConcurrentCached;
     CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();
