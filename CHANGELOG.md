@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- Add standardized micro-benchmarks (`benches/cache_benches.rs`) for cache hits across all 6 core in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache`), cache misses & inserts, eviction capacity overhead, and `RwLock` lock-synchronization (with and without `CachedRead::cache_get_read` unsynchronized reads).
+- Add new `bench` target to the `Makefile` to run the benchmark suite.
+- Add GitHub Actions workflow (`.github/workflows/codspeed.yml`) for automated, low-noise continuous benchmarking on every push and pull request.
+
 ## [1.0.0 / cached_proc_macro 1.0.0 / cached_proc_macro_types 1.0.0]
 > **Upgrading from 0.x?** See the [1.0 migration guide](docs/MIGRATION-1.0.md)
 > for a complete walkthrough of every breaking change (and an

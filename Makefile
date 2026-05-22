@@ -62,7 +62,7 @@ DOCKER_TARGETS = docker/status docker/redis
 DOC_TARGETS = docs docs/readme
 CHECK_TARGETS = check check/fmt check/readme check/clippy check/help
 CLEAN_TARGETS = clean clean/docker clean/cargo clean/docker/$(DOCKER_REDIS_CONTAINER_NAME)
-HELP_TARGETS = help ci $(EXAMPLE_TARGETS) $(TEST_TARGETS) $(DOCKER_TARGETS) $(DOC_TARGETS) fmt $(CHECK_TARGETS) $(CLEAN_TARGETS)
+HELP_TARGETS = help ci bench $(EXAMPLE_TARGETS) $(TEST_TARGETS) $(DOCKER_TARGETS) $(DOC_TARGETS) fmt $(CHECK_TARGETS) $(CLEAN_TARGETS)
 
 # Cargo command used to run `run`, `build`, `test`... Useful if you keep
 # multiple cargo versions installed on your machine
@@ -97,11 +97,15 @@ export RUST_BACKTRACE                 = 1
 # pull request
 ci: check tests examples ## Run the full CI pipeline (checks, tests, examples)
 
+bench: ## Run the standardized cache benchmarks
+	$(CARGO_COMMAND) bench --bench cache_benches
+
 help: ## List all supported Make targets
 	@for target in $(HELP_TARGETS); do \
 		case "$$target" in \
 			help) desc="List all supported Make targets" ;; \
 			ci) desc="Run the full CI pipeline (checks, tests, examples)" ;; \
+			bench) desc="Run the standardized cache benchmarks" ;; \
 			examples) desc="Run all examples" ;; \
 			examples/basic) desc="Run all basic examples" ;; \
 			examples/cargo) desc="Build all cargo-project examples" ;; \
