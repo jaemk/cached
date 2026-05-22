@@ -1,9 +1,9 @@
 # cached
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/jaemk/cached?utm_source=badge)
 [![Build Status](https://github.com/jaemk/cached/actions/workflows/build.yml/badge.svg)](https://github.com/jaemk/cached/actions/workflows/build.yml)
 [![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached)
 [![docs](https://docs.rs/cached/badge.svg)](https://docs.rs/cached)
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/jaemk/cached?utm_source=badge)
 
 > Caching structures and simplified function memoization
 
