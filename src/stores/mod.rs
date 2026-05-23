@@ -9,6 +9,7 @@ use {super::CachedAsync, std::future::Future};
 
 #[cfg(feature = "disk_store")]
 mod disk;
+mod expiring;
 mod expiring_lru;
 mod lru;
 #[cfg(feature = "time_stores")]
@@ -80,6 +81,7 @@ pub use crate::stores::disk::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, 
 pub use crate::stores::redis::{
     RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
+pub use expiring::{ExpiringCache, ExpiringCacheBuilder};
 pub use expiring_lru::{Expires, ExpiringLruCache, ExpiringLruCacheBuilder};
 pub use lru::{LruCache, LruCacheBuilder};
 #[cfg(feature = "time_stores")]
@@ -278,5 +280,20 @@ mod tests {
         assert_eq!(c.cache_get(&1), Some(&100));
         assert_eq!(c.cache_hits(), None);
         assert_eq!(c.cache_misses(), None);
+    }
+
+    #[test]
+    fn build_error_display() {
+        let err1 = BuildError::MissingRequired("ttl");
+        assert_eq!(err1.to_string(), "required field `ttl` was not set");
+
+        let err2 = BuildError::InvalidValue {
+            field: "size",
+            reason: "must be greater than zero",
+        };
+        assert_eq!(
+            err2.to_string(),
+            "invalid value for field `size`: must be greater than zero"
+        );
     }
 }

@@ -52,7 +52,20 @@ use proc_macro::TokenStream;
 /// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead refresh the recently expired `Ok` value.
 ///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
 ///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
-///   *Note*, this option requires the cache type implements `CloneCached`.
+///   *Note*, this option requires the cache type to implement `CloneCached`. The compatible built-in options are:
+///   `ttl` (uses `TtlCache`), `size` + `ttl` (uses `LruTtlCache`), and `expires` (uses `ExpiringCache`/`ExpiringLruCache`).
+///   A custom `ty` that implements `CloneCached` is also accepted.
+/// - `expires`: (optional, bool) Auto-select an expiry-aware store whose entries expire based on
+///   per-value logic rather than a single global TTL.
+///   The return type (or its inner type when `result`/`option` is also set) must implement `Expires`.
+///   Without `size`, uses `ExpiringCache` (unbounded).
+///   With `size = N`, uses `ExpiringLruCache` (LRU-bounded to N entries).
+///   Unlike `ttl`, expiry logic lives in each value — useful for caching OAuth tokens,
+///   HTTP responses with `Cache-Control` headers, or any payload with its own expiration timestamp.
+///   Compatible with `result_fallback`: on `Err`, returns the last-cached `Ok` value wrapped in `Ok(...)`,
+///   even if that value's `is_expired()` returns `true`. Callers must check the value's expiry themselves
+///   if they need to distinguish a fresh result from a stale fallback.
+///   Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `unsync_reads`, `refresh`, and `unbound`.
 ///
 /// ## Note
 /// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
@@ -86,6 +99,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   to be named `Return<T>` passes the attribute check but then fails to
 ///   compile in the generated body (it calls `::cached::Return::new` /
 ///   `.was_cached`). Use a different name for any non-`cached` `Return` type.
+/// - `expires`: (optional, bool) Delegate expiry to the cached value instead of a fixed TTL.
+///   The return type (or its inner type when `result`/`option` is also set) must implement `Expires`.
+///   When a lookup finds the cached value reports `is_expired() == true`, the cached value is
+///   skipped and the function re-executes; on success the new value replaces the old one.
+///   If the function returns `Err`/`None`, the expired entry is left in place and the error/none
+///   is returned to the caller — subsequent calls will re-execute the function until it succeeds.
+///   Mutually exclusive with `ttl` and `with_cached_flag`.
 #[proc_macro_attribute]
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     once::once(args, input)

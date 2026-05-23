@@ -66,6 +66,8 @@ struct MacroArgs {
     result_fallback: bool,
     #[darling(default)]
     unsync_reads: bool,
+    #[darling(default)]
+    expires: bool,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -129,6 +131,79 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    if args.expires && args.ttl.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ttl` are mutually exclusive — \
+             `expires` delegates expiry to the value via the `Expires` trait; \
+             `ttl` applies a uniform time-based TTL to all entries",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.ty.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ty` are mutually exclusive — \
+             `expires` generates the store type automatically",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.create.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `create` are mutually exclusive — \
+             `expires` generates the store constructor automatically",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.with_cached_flag {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `with_cached_flag` are mutually exclusive — \
+             the `Return<T>` wrapper does not implement `Expires`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.unsync_reads {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `unsync_reads` are mutually exclusive — \
+             `ExpiringCache` and `ExpiringLruCache` do not implement `CachedRead`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.refresh {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `refresh` are mutually exclusive — \
+             `refresh` renews a TTL on cache hit, but `ExpiringCache` and \
+             `ExpiringLruCache` have no TTL to refresh; expiry is controlled by the value",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.unbound {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `unbound` are mutually exclusive — \
+             `ExpiringCache` (the default store for `expires`) is already unbounded; \
+             use `expires = true` alone for an unbounded expiring cache",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     let input_tys = get_input_types(&inputs);
     let input_names = get_input_names(&inputs);
 
@@ -164,83 +239,97 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         };
 
     // make the cache type and create statement
-    let (cache_ty, cache_create) = match (
-        &args.unbound,
-        &args.size,
-        &args.ttl,
-        &args.ty,
-        &args.create,
-        &args.refresh,
-    ) {
-        (true, None, None, None, None, _) => {
-            let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::UnboundCache::new()};
-            (cache_ty, cache_create)
+    let (cache_ty, cache_create) = if args.expires {
+        if let Some(size) = args.size {
+            (
+                quote! { cached::ExpiringLruCache<#cache_key_ty, #cache_value_ty> },
+                quote! { cached::ExpiringLruCache::with_size(#size) },
+            )
+        } else {
+            (
+                quote! { cached::ExpiringCache<#cache_key_ty, #cache_value_ty> },
+                quote! { cached::ExpiringCache::new() },
+            )
         }
-        (false, Some(size), None, None, None, _) => {
-            let cache_ty = quote! {cached::LruCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::LruCache::with_size(#size)};
-            (cache_ty, cache_create)
-        }
-        (false, None, Some(ttl), None, None, refresh) => {
-            let cache_ty = quote! {cached::TtlCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::TtlCache::with_ttl_and_refresh(::cached::time::Duration::from_secs(#ttl), #refresh)};
-            (cache_ty, cache_create)
-        }
-        (false, Some(size), Some(ttl), None, None, refresh) => {
-            let cache_ty = quote! {cached::LruTtlCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::LruTtlCache::with_size_and_ttl_and_refresh(#size, ::cached::time::Duration::from_secs(#ttl), #refresh)};
-            (cache_ty, cache_create)
-        }
-        (false, None, None, None, None, _) => {
-            let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
-            let cache_create = quote! {cached::UnboundCache::new()};
-            (cache_ty, cache_create)
-        }
-        (false, None, None, Some(type_str), Some(create_str), _) => {
-            let ty = match parse_str::<Type>(type_str) {
-                Ok(ty) => ty,
-                Err(error) => {
-                    return syn::Error::new(
-                        fn_ident.span(),
-                        format!("unable to parse cache type: {error}"),
-                    )
+    } else {
+        match (
+            &args.unbound,
+            &args.size,
+            &args.ttl,
+            &args.ty,
+            &args.create,
+            &args.refresh,
+        ) {
+            (true, None, None, None, None, _) => {
+                let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
+                let cache_create = quote! {cached::UnboundCache::new()};
+                (cache_ty, cache_create)
+            }
+            (false, Some(size), None, None, None, _) => {
+                let cache_ty = quote! {cached::LruCache<#cache_key_ty, #cache_value_ty>};
+                let cache_create = quote! {cached::LruCache::with_size(#size)};
+                (cache_ty, cache_create)
+            }
+            (false, None, Some(ttl), None, None, refresh) => {
+                let cache_ty = quote! {cached::TtlCache<#cache_key_ty, #cache_value_ty>};
+                let cache_create = quote! {cached::TtlCache::with_ttl_and_refresh(::cached::time::Duration::from_secs(#ttl), #refresh)};
+                (cache_ty, cache_create)
+            }
+            (false, Some(size), Some(ttl), None, None, refresh) => {
+                let cache_ty = quote! {cached::LruTtlCache<#cache_key_ty, #cache_value_ty>};
+                let cache_create = quote! {cached::LruTtlCache::with_size_and_ttl_and_refresh(#size, ::cached::time::Duration::from_secs(#ttl), #refresh)};
+                (cache_ty, cache_create)
+            }
+            (false, None, None, None, None, _) => {
+                let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
+                let cache_create = quote! {cached::UnboundCache::new()};
+                (cache_ty, cache_create)
+            }
+            (false, None, None, Some(type_str), Some(create_str), _) => {
+                let ty = match parse_str::<Type>(type_str) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        return syn::Error::new(
+                            fn_ident.span(),
+                            format!("unable to parse cache type: {error}"),
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                };
+
+                let cache_create = match parse_str::<Block>(create_str) {
+                    Ok(block) => block,
+                    Err(error) => {
+                        return syn::Error::new(
+                            fn_ident.span(),
+                            format!("unable to parse cache create block: {error}"),
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                };
+
+                (quote! { #ty }, quote! { #cache_create })
+            }
+            (false, None, None, Some(_), None, _) => {
+                return syn::Error::new(fn_ident.span(), "`ty` requires `create` to also be set")
                     .to_compile_error()
                     .into();
-                }
-            };
-
-            let cache_create = match parse_str::<Block>(create_str) {
-                Ok(block) => block,
-                Err(error) => {
-                    return syn::Error::new(
-                        fn_ident.span(),
-                        format!("unable to parse cache create block: {error}"),
-                    )
+            }
+            (false, None, None, None, Some(_), _) => {
+                return syn::Error::new(fn_ident.span(), "`create` requires `ty` to also be set")
                     .to_compile_error()
                     .into();
-                }
-            };
-
-            (quote! { #ty }, quote! { #cache_create })
-        }
-        (false, None, None, Some(_), None, _) => {
-            return syn::Error::new(fn_ident.span(), "`ty` requires `create` to also be set")
-                .to_compile_error()
-                .into();
-        }
-        (false, None, None, None, Some(_), _) => {
-            return syn::Error::new(fn_ident.span(), "`create` requires `ty` to also be set")
-                .to_compile_error()
-                .into();
-        }
-        _ => {
-            return syn::Error::new(
+            }
+            _ => {
+                return syn::Error::new(
                 fn_ident.span(),
                 "cache types (`unbound`, `size` and/or `ttl`, or `ty` and `create`) are mutually exclusive",
             )
             .to_compile_error()
             .into();
+            }
         }
     };
 
@@ -313,12 +402,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    if args.result_fallback && args.ty.is_none() && args.ttl.is_none() {
+    if args.result_fallback && args.ty.is_none() && args.ttl.is_none() && !args.expires {
         return syn::Error::new(
             fn_ident.span(),
             "`result_fallback` requires a store that implements `CloneCached`. \
              The default `UnboundCache` and `LruCache` (size without ttl) do not implement it. \
-             Use `ttl` (for `TtlCache`), `size` + `ttl` (for `LruTtlCache`), or a custom `ty`.",
+             Use `ttl` (for `TtlCache`), `size` + `ttl` (for `LruTtlCache`), \
+             `expires` (for `ExpiringCache`/`ExpiringLruCache`), or a custom `ty`.",
         )
         .to_compile_error()
         .into();

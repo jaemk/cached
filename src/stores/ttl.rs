@@ -649,4 +649,30 @@ mod tests {
         );
         assert_eq!(c.cache_size(), 0);
     }
+
+    #[test]
+    fn test_diagnostics_and_traits() {
+        let mut cache = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build();
+        cache.cache_set(1, 100);
+        cache.cache_set(2, 200);
+
+        // Debug
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("TtlCache"));
+        assert!(debug_str.contains("ttl"));
+        assert!(debug_str.contains("hits"));
+        assert!(debug_str.contains("misses"));
+
+        // Clone
+        let mut cloned = cache.clone();
+        assert_eq!(cloned.cache_get(&1), Some(&100));
+        assert_eq!(cloned.cache_get(&2), Some(&200));
+
+        // Builder try_build errors
+        let builder = TtlCache::<u32, u32>::builder();
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Missing required ttl
+    }
 }

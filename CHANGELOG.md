@@ -2,10 +2,22 @@
 
 ## [Unreleased]
 
+## [1.1.0 / cached_proc_macro 1.1.0]
+
 ### Added
-- Add standardized micro-benchmarks (`benches/cache_benches.rs`) for cache hits across all 6 core in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache`), cache misses & inserts, eviction capacity overhead, and `RwLock` lock-synchronization (with and without `CachedRead::cache_get_read` unsynchronized reads).
+- Add `ExpiringCache` (and `ExpiringCacheBuilder`) as a size-unbounded store where each value implements the `Expires` trait and determines its own expiration.
+- Add `expires = true` attribute to the `#[cached]` procedural macro: automatically selects `ExpiringCache` (unbounded) or `ExpiringLruCache` (LRU-bounded when `size` is also set), so the return type controls its own expiry via `Expires`. Compatible with `result`, `option`, `result_fallback`, `sync_writes`, `key`/`convert`, and `size`. Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `unsync_reads`, `refresh`, and `unbound`.
+- Add support for the `expires = true` attribute in the `#[once]` procedural macro to allow single-value functions to utilize value-defined expiration (`Expires` trait).
+- Add comprehensive unit tests in `src/stores/expiring_lru.rs` covering the `Expires` trait and `ExpiringLruCache`'s `CachedIter::iter` expired-filtering, `Clone`, `std::fmt::Debug`, `cache_remove`, and `cache_clear`.
+- Implement `std::fmt::Debug` and `Clone` for `TtlSortedCache` (and its internal `Entry` type) and `ExpiringCache` to ensure full `Debug`/`Clone` trait parity across all 7 core in-memory store types.
+- Add robust unit tests across all remaining core cache stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`) verifying `Debug` and `Clone` trait behaviors; `UnboundCache` and `LruCache` also verify `PartialEq` and `Eq`.
+- Add comprehensive validation unit tests for each store builder's fallible `try_build()` methods (asserting expected `BuildError` outcomes for invalid capacities, sizes, or missing required attributes like `ttl`).
+- Add unit tests validating the `std::fmt::Display` representation for all `BuildError` variants in `src/stores/mod.rs`.
+- Add standardized micro-benchmarks (`benches/cache_benches.rs`) for cache hits across all 7 core in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `ExpiringLruCache`, `ExpiringCache`, `TtlSortedCache`), cache misses & inserts, eviction capacity overhead, and `RwLock` lock-synchronization (with and without `CachedRead::cache_get_read` unsynchronized reads).
 - Add new `bench` target to the `Makefile` to run the benchmark suite.
 - Add GitHub Actions workflow (`.github/workflows/codspeed.yml`) for automated, low-noise continuous benchmarking on every push and pull request.
+- Add standard, runnable example `examples/expires_per_key.rs` demonstrating how to use the `Expires` trait with `ExpiringLruCache` and `ExpiringCache` for per-value expiration, including keyed caching via `#[cached(expires = true)]` and single-value caching via `#[once(expires = true)]`.
+- Add detailed library-level documentation and quickstart example for `Expires`, `ExpiringCache`, and `ExpiringLruCache` to `src/lib.rs` (automatically synced to `README.md`).
 
 ## [1.0.0 / cached_proc_macro 1.0.0 / cached_proc_macro_types 1.0.0]
 > **Upgrading from 0.x?** See the [1.0 migration guide](docs/MIGRATION-1.0.md)

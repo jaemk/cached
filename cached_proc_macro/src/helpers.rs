@@ -294,9 +294,16 @@ pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: Stri
 
 pub(super) fn gen_return_cache_block(
     time: Option<u64>,
+    expires: bool,
     return_cache_block: TokenStream2,
 ) -> TokenStream2 {
-    if let Some(time) = &time {
+    if expires {
+        quote! {
+            if !<_ as ::cached::Expires>::is_expired(result) {
+                #return_cache_block
+            }
+        }
+    } else if let Some(time) = &time {
         quote! {
             let (created_sec, result) = result;
             if now.saturating_duration_since(*created_sec) < ::cached::time::Duration::from_secs(#time) {

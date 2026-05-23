@@ -2,6 +2,7 @@
 [![Build Status](https://github.com/jaemk/cached/actions/workflows/build.yml/badge.svg)](https://github.com/jaemk/cached/actions/workflows/build.yml)
 [![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached)
 [![docs](https://docs.rs/cached/badge.svg)](https://docs.rs/cached)
+[![CodSpeed Badge](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/jaemk/cached?utm_source=badge)
 
 > Caching structures and simplified function memoization
 
@@ -70,6 +71,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes | Yes |
 | [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html) | TTL (expiry-ordered) | Optional | Global | No | Yes | Yes |
 | [`ExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes |
+| [`ExpiringCache`](https://docs.rs/cached/latest/cached/struct.ExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes |
 
 `TtlCache`/`LruTtlCache`/`TtlSortedCache` require the `time_stores` feature.
 
@@ -91,6 +93,56 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 - `CachedPeek` provides non-mutating lookups that do not update recency, refresh TTLs, or record
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
+
+**Per-Value Expiry via the `Expires` Trait**
+
+While standard timed stores (`TtlCache`, `LruTtlCache`, `TtlSortedCache`) enforce a single, global Time-To-Live (TTL) duration applied to all entries in the cache, [`ExpiringLruCache`] and [`ExpiringCache`] let each individual value determine its own expiration. This is accomplished by storing values that implement the [`Expires`] trait.
+
+This approach is highly useful when caching payloads like OAuth tokens, HTTP responses with varying `Cache-Control` headers, or database records that contain their own absolute expiration timestamps.
+
+When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
+
+> **Memory note:** `ExpiringCache` is unbounded and only removes expired entries when the same
+> key is accessed again. `CachedIter::iter()` filters expired entries from the iterator but does
+> not remove them from the map. For high-cardinality workloads, call `evict()` periodically or
+> prefer `ExpiringLruCache` with a `size` bound.
+
+```rust
+use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
+use cached::time::{Duration, Instant};
+
+#[derive(Clone)]
+struct Response {
+    payload: String,
+    expires_at: Instant,
+}
+
+impl Expires for Response {
+    fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+}
+
+let now = Instant::now();
+
+// ExpiringCache — unbounded, default for `#[cached(expires = true)]`
+let mut cache = ExpiringCache::new();
+cache.cache_set("key1", Response {
+    payload: "a".to_string(),
+    expires_at: now + Duration::from_secs(1),
+});
+cache.cache_set("key2", Response {
+    payload: "b".to_string(),
+    expires_at: now + Duration::from_secs(3600),
+});
+
+// ExpiringLruCache — LRU-bounded, used with `#[cached(expires = true, size = N)]`
+let mut lru = ExpiringLruCache::with_size(10);
+lru.cache_set("key1", Response {
+    payload: "a".to_string(),
+    expires_at: now + Duration::from_secs(1),
+});
+```
 
 ----
 
@@ -279,8 +331,8 @@ use std::future::Future;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "redis_smol", feature = "redis_tokio"))))]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
-    BuildError, CacheEvict, Expires, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache,
-    LruCacheBuilder, UnboundCache, UnboundCacheBuilder,
+    BuildError, CacheEvict, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
+    ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]

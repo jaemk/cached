@@ -1,7 +1,7 @@
 use cached::time::Duration;
 use cached::{
-    Cached, CachedRead, Expires, ExpiringLruCache, LruCache, LruTtlCache, TtlCache, TtlSortedCache,
-    UnboundCache,
+    Cached, CachedRead, Expires, ExpiringCache, ExpiringLruCache, LruCache, LruTtlCache, TtlCache,
+    TtlSortedCache, UnboundCache,
 };
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use parking_lot::RwLock;
@@ -101,6 +101,18 @@ fn bench_cache_hits(c: &mut Criterion) {
         })
     });
 
+    // 7. ExpiringCache
+    let mut expiring_cache = ExpiringCache::new();
+    for i in 0..limit {
+        expiring_cache.cache_set(i, ExpiringValue { val: i * 2 });
+    }
+    group.bench_function("ExpiringCache hit (O(1))", |b| {
+        b.iter(|| {
+            let res = expiring_cache.cache_get(black_box(&query_key));
+            black_box(res);
+        })
+    });
+
     group.finish();
 }
 
@@ -143,6 +155,15 @@ fn bench_cache_misses_and_inserts(c: &mut Criterion) {
         let mut key = 0;
         b.iter(|| {
             cache.cache_set(key, key * 2);
+            key += 1;
+        })
+    });
+
+    group.bench_function("ExpiringCache insert", |b| {
+        let mut cache: ExpiringCache<usize, ExpiringValue> = ExpiringCache::new();
+        let mut key = 0;
+        b.iter(|| {
+            cache.cache_set(key, ExpiringValue { val: key * 2 });
             key += 1;
         })
     });

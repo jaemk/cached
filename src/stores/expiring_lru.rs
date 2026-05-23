@@ -7,12 +7,12 @@ use std::sync::Arc;
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
 
-/// Implemented by values stored in [`ExpiringLruCache`] so the value itself
-/// decides when it is stale (renamed from `CanExpire` in 1.0). Expired values
-/// are not returned by lookups and are removed on access:
+/// Implemented by values stored in [`ExpiringLruCache`] and [`ExpiringCache`](crate::ExpiringCache)
+/// so the value itself decides when it is stale. Expired values are not returned by lookups
+/// and are removed on access:
 ///
 /// ```rust
-/// use cached::{Cached, Expires, ExpiringLruCache};
+/// use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
 ///
 /// struct Token {
 ///     #[allow(dead_code)]
@@ -25,22 +25,32 @@ use {super::CachedAsync, std::future::Future};
 ///     }
 /// }
 ///
-/// let mut cache: ExpiringLruCache<u32, Token> = ExpiringLruCache::with_size(8);
+/// // Unbounded store (default for `#[cached(expires = true)]`)
+/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::new();
 /// cache.cache_set(1, Token { value: "live".into(), expired: false });
 /// assert!(cache.cache_get(&1).is_some());
 /// cache.cache_set(2, Token { value: "stale".into(), expired: true });
 /// assert!(cache.cache_get(&2).is_none()); // expired -> not returned
+///
+/// // LRU-bounded store (`#[cached(expires = true, size = N)]`)
+/// let mut lru: ExpiringLruCache<u32, Token> = ExpiringLruCache::with_size(8);
+/// lru.cache_set(3, Token { value: "live".into(), expired: false });
+/// assert!(lru.cache_get(&3).is_some());
 /// ```
 pub trait Expires {
     /// `is_expired` returns whether the value has expired.
     fn is_expired(&self) -> bool;
 }
 
-/// Expiring Value Cache
+/// LRU-bounded cache with per-value expiry.
 ///
-/// Stores values that implement the `Expires` trait so that expiration
+/// Stores values that implement the [`Expires`] trait so that expiration
 /// is determined by the values themselves. This is useful for caching
 /// values which themselves contain an expiry timestamp.
+///
+/// For an unbounded variant (no size cap), see [`ExpiringCache`](crate::ExpiringCache).
+/// When using the `#[cached]` proc macro, `expires = true` selects this store when `size`
+/// is also specified; without `size`, it selects the unbounded `ExpiringCache`.
 ///
 /// Note: This cache is in-memory only.
 ///
@@ -715,6 +725,54 @@ mod tests {
             0,
             "cache_reset must not fire on_evict"
         );
+        assert_eq!(c.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_expiring_value_cache_iter_excludes_expired() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        c.cache_set(1, 5); // live
+        c.cache_set(2, 12); // expired (value > 10)
+        c.cache_set(3, 8); // live
+
+        let mut keys: Vec<u8> = c.iter().map(|(&k, _)| k).collect();
+        keys.sort();
+        assert_eq!(keys, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_expiring_value_cache_clone() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        c.cache_set(1, 5);
+        c.cache_set(2, 6);
+
+        let mut cloned = c.clone();
+        assert_eq!(cloned.cache_size(), 2);
+        assert_eq!(cloned.cache_get(&1), Some(&5));
+        assert_eq!(cloned.cache_get(&2), Some(&6));
+    }
+
+    #[test]
+    fn test_expiring_value_cache_debug() {
+        let c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let debug_str = format!("{:?}", c);
+        assert!(debug_str.contains("ExpiringLruCache"));
+        assert!(debug_str.contains("hits"));
+        assert!(debug_str.contains("misses"));
+        assert!(debug_str.contains("evictions"));
+    }
+
+    #[test]
+    fn test_expiring_value_cache_remove_and_clear() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        c.cache_set(1, 5);
+        c.cache_set(2, 6);
+
+        assert_eq!(c.cache_remove(&1), Some(5));
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(c.cache_get(&1), None);
+
+        c.cache_clear();
         assert_eq!(c.cache_size(), 0);
     }
 }

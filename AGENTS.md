@@ -25,7 +25,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 
 ---
 
-## Store Types (current names as of v1.0)
+## Store Types (current names as of v1.1)
 
 | Type | Module | Description |
 |---|---|---|
@@ -34,7 +34,15 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `TtlCache<K,V>` | `cached::stores` | Global TTL, no size limit; requires `time_stores` |
 | `LruTtlCache<K,V>` | `cached::stores` | LRU + global TTL, size-bounded; requires `time_stores` |
 | `TtlSortedCache<K,V>` | `cached::stores` | TTL-ordered, optional size limit; requires `time_stores` |
-| `ExpiringLruCache<K,V>` | `cached::stores` | LRU, per-value expiry via `Expires` trait |
+| `ExpiringLruCache<K,V>` | `cached::stores` | LRU, size-bounded, per-value expiry via `Expires` trait |
+| `ExpiringCache<K,V>` | `cached::stores` | Unbounded HashMap-backed, per-value expiry via `Expires` trait; default store for `#[cached(expires = true)]` |
+
+**`ExpiringCache` / `ExpiringLruCache` notes:**
+- Neither store requires the `time_stores` feature — they are always available.
+- `ExpiringLruCache::store()` is `pub` (released in v1.0.0 — cannot be changed to `pub(crate)` without a breaking change). `ExpiringCache` has no public `store()` accessor.
+- `cache_get` and `cache_get_mut` on `ExpiringCache` use two hash lookups on the hit path due to stable Rust's NLL borrow-checker limitation: the first lookup checks expiry (dropping the reference via `.map`), the second returns the value reference or calls `remove_entry`. Polonius (nightly) would allow a single lookup. This is intentional and documented in the source with a comment.
+- `cache_get_with_expiry_status` (from `CloneCached`) intentionally **leaves an expired entry in the map** so `result_fallback` can clone and return it as a stale-but-present value on `Err`. The stale entry remains visible via `cache_size()` and `CachedIter` until the next `cache_get`, `evict()`, or explicit `cache_remove`. When `result_fallback = true` and `expires = true`, callers receive `Ok(stale_value)` where `stale_value.is_expired() == true` — callers must check the value's expiry themselves if they need to distinguish a fresh result from a stale fallback.
+- `CachedIter::iter()` filters expired entries from the iterator but does **not** remove them from the map. Call `evict()` periodically for high-cardinality workloads.
 
 **Renamed from pre-1.0** (do not use old names — they no longer exist):
 - `SizedCache` → `LruCache`

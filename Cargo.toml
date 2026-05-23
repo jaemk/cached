@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -42,7 +42,7 @@ wasm = []
 time_stores = []
 
 [dependencies.cached_proc_macro]
-version = "1.0.0"
+version = "1.1.0"
 path = "cached_proc_macro"
 optional = true
 
@@ -145,6 +145,10 @@ required-features = ["async_tokio_rt_multi_thread", "proc_macro"]
 [[example]]
 name = "async_std"
 required-features = ["async", "proc_macro"]
+
+[[example]]
+name = "expires_per_key"
+required-features = ["proc_macro"]
 
 [[example]]
 name = "expiring_sized_cache"

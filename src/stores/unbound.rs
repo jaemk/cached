@@ -551,4 +551,32 @@ mod tests {
         let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
         assert_eq!(res.unwrap(), &1);
     }
+
+    #[test]
+    fn test_diagnostics_and_traits() {
+        let mut cache = UnboundCache::builder().capacity(10).build();
+        cache.cache_set(1, 100);
+        cache.cache_set(2, 200);
+
+        // Debug
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("UnboundCache"));
+        assert!(debug_str.contains("hits"));
+        assert!(debug_str.contains("misses"));
+
+        // Clone
+        let mut cloned = cache.clone();
+        assert_eq!(cloned.cache_get(&1), Some(&100));
+        assert_eq!(cloned.cache_get(&2), Some(&200));
+
+        // PartialEq/Eq
+        assert_eq!(cache, cloned);
+        cloned.cache_set(3, 300);
+        assert_ne!(cache, cloned);
+
+        // Builder try_build always succeeds for UnboundCache
+        let builder = UnboundCache::<u32, u32>::builder().on_evict(|_, _| {});
+        let try_built = builder.try_build();
+        assert!(try_built.is_ok());
+    }
 }

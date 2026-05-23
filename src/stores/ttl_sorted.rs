@@ -145,6 +145,16 @@ impl<K, V> Entry<K, V> {
     }
 }
 
+impl<K, V: Clone> Clone for Entry<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            expiry: self.expiry,
+            key: self.key.clone(),
+            value: self.value.clone(),
+        }
+    }
+}
+
 /// Policy for [`TtlSortedCache::insert_inner`] when `now + ttl` overflows `Instant`.
 #[derive(Clone, Copy)]
 enum TtlOverflow {
@@ -187,6 +197,55 @@ pub struct TtlSortedCache<K, V> {
     pub(super) evictions: std::sync::atomic::AtomicU64,
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
+
+impl<K, V> std::fmt::Debug for TtlSortedCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtlSortedCache")
+            .field("ttl", &self.ttl)
+            .field("size_limit", &self.size_limit)
+            .field(
+                "hits",
+                &self.hits.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field(
+                "misses",
+                &self.misses.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field(
+                "evictions",
+                &self.evictions.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field("on_evict", &self.on_evict.as_ref().map(|_| "on_evict"))
+            .finish()
+    }
+}
+
+impl<K, V> Clone for TtlSortedCache<K, V>
+where
+    K: Clone + Hash + Eq + Ord,
+    V: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            min_instant: self.min_instant,
+            map: self.map.clone(),
+            keys: self.keys.clone(),
+            ttl: self.ttl,
+            size_limit: self.size_limit,
+            hits: std::sync::atomic::AtomicU64::new(
+                self.hits.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            misses: std::sync::atomic::AtomicU64::new(
+                self.misses.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            evictions: std::sync::atomic::AtomicU64::new(
+                self.evictions.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            on_evict: self.on_evict.clone(),
+        }
+    }
+}
+
 /// Builder for [`TtlSortedCache`].
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub struct TtlSortedCacheBuilder<K, V> {
@@ -1139,5 +1198,39 @@ mod test {
             evicted.load(Ordering::Relaxed),
             "on_evict should still fire after reset"
         );
+    }
+
+    #[test]
+    fn test_diagnostics_and_traits() {
+        let mut cache = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .size(3)
+            .build();
+        cache.cache_set(1, 100);
+        cache.cache_set(2, 200);
+
+        // Debug
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("TtlSortedCache"));
+        assert!(debug_str.contains("ttl"));
+        assert!(debug_str.contains("size_limit"));
+        assert!(debug_str.contains("hits"));
+        assert!(debug_str.contains("misses"));
+
+        // Clone
+        let mut cloned = cache.clone();
+        assert_eq!(cloned.cache_get(&1), Some(&100));
+        assert_eq!(cloned.cache_get(&2), Some(&200));
+
+        // Builder try_build errors
+        let builder = TtlSortedCache::<u32, u32>::builder();
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Missing required ttl
+
+        let builder = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .size(0);
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Size limit 0 is invalid
     }
 }
