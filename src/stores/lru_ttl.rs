@@ -923,4 +923,46 @@ mod tests {
             &0
         );
     }
+
+    #[test]
+    fn test_diagnostics_and_traits() {
+        let mut cache = LruTtlCache::builder()
+            .size(3)
+            .ttl(Duration::from_secs(60))
+            .build();
+        cache.cache_set(1, 100);
+        cache.cache_set(2, 200);
+
+        // Debug
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("LruTtlCache"));
+        assert!(debug_str.contains("size"));
+        assert!(debug_str.contains("ttl"));
+        assert!(debug_str.contains("hits"));
+        assert!(debug_str.contains("misses"));
+
+        // Clone
+        let mut cloned = cache.clone();
+        assert_eq!(cloned.cache_get(&1), Some(&100));
+        assert_eq!(cloned.cache_get(&2), Some(&200));
+
+        // Builder try_build errors
+        let builder = LruTtlCache::<u32, u32>::builder();
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Missing both size and ttl
+
+        let builder = LruTtlCache::<u32, u32>::builder().size(3);
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Missing ttl
+
+        let builder = LruTtlCache::<u32, u32>::builder().ttl(Duration::from_secs(60));
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Missing size
+
+        let builder = LruTtlCache::<u32, u32>::builder()
+            .size(0)
+            .ttl(Duration::from_secs(60));
+        let try_built = builder.try_build();
+        assert!(try_built.is_err()); // Size 0 is invalid
+    }
 }

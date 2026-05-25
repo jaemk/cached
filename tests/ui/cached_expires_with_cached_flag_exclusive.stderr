@@ -1,0 +1,5 @@
+error: `expires` and `with_cached_flag` are mutually exclusive — the `Return<T>` wrapper does not implement `Expires`
+ --> tests/ui/cached_expires_with_cached_flag_exclusive.rs:6:4
+  |
+6 | fn my_fn(x: u32) -> Return<u32> {
+  |    ^^^^^

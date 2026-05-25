@@ -24,6 +24,8 @@ struct OnceMacroArgs {
     option: bool,
     #[darling(default)]
     with_cached_flag: bool,
+    #[darling(default)]
+    expires: bool,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -73,6 +75,27 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         return syn::Error::new(
             fn_ident.span(),
             "`time` was renamed to `ttl` in cached 1.0; use `ttl = ...`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.ttl.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ttl` are mutually exclusive — \
+             `expires` delegates expiry to the value via the `Expires` trait; \
+             `ttl` applies a uniform time-based TTL",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.with_cached_flag {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `with_cached_flag` are mutually exclusive — \
+             the `Return<T>` wrapper does not implement `Expires`",
         )
         .to_compile_error()
         .into();
@@ -146,7 +169,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             } else {
                 quote! { return result.clone() }
             };
-            let return_cache_block = gen_return_cache_block(args.ttl, return_cache_block);
+            let return_cache_block =
+                gen_return_cache_block(args.ttl, args.expires, return_cache_block);
             (set_cache_block, return_cache_block)
         }
         (true, false) => {
@@ -169,7 +193,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             } else {
                 quote! { return Ok(result.clone()) }
             };
-            let return_cache_block = gen_return_cache_block(args.ttl, return_cache_block);
+            let return_cache_block =
+                gen_return_cache_block(args.ttl, args.expires, return_cache_block);
             (set_cache_block, return_cache_block)
         }
         (false, true) => {
@@ -192,7 +217,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             } else {
                 quote! { return Some(result.clone()) }
             };
-            let return_cache_block = gen_return_cache_block(args.ttl, return_cache_block);
+            let return_cache_block =
+                gen_return_cache_block(args.ttl, args.expires, return_cache_block);
             (set_cache_block, return_cache_block)
         }
         _ => {

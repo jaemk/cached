@@ -1,0 +1,5 @@
+error: `expires` and `ttl` are mutually exclusive — `expires` delegates expiry to the value via the `Expires` trait; `ttl` applies a uniform time-based TTL to all entries
+ --> tests/ui/cached_expires_ttl_exclusive.rs:4:4
+  |
+4 | fn my_fn(x: u32) -> u32 {
+  |    ^^^^^

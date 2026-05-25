@@ -62,12 +62,23 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_sync_writes_buckets_zero.rs");
     t.compile_fail("tests/ui/cached_result_fallback_sync_writes.rs");
     t.compile_fail("tests/ui/cached_sync_lock_unknown.rs");
+    t.compile_fail("tests/ui/cached_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_type_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_create_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_with_cached_flag_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_unsync_reads_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_non_expires_type.rs");
+    t.compile_fail("tests/ui/cached_expires_refresh_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_unbound_exclusive.rs");
 
     // ---- #[once] ----
     t.compile_fail("tests/ui/once_self_method.rs");
     t.compile_fail("tests/ui/once_time_attr_renamed.rs");
     t.compile_fail("tests/ui/once_with_cached_flag_foreign.rs");
     t.compile_fail("tests/ui/once_result_option_exclusive.rs");
+    t.compile_fail("tests/ui/once_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/once_expires_non_expires_type.rs");
+    t.compile_fail("tests/ui/once_expires_with_cached_flag_exclusive.rs");
     t.compile_fail("tests/ui/once_result_no_return.rs");
     t.compile_fail("tests/ui/once_sync_writes_buckets_zero.rs");
 
@@ -433,6 +444,124 @@ fn test_mutable_args_once() {
     assert_eq!((2, 2), mutable_args_once(1, 1));
     assert_eq!((2, 2), mutable_args_once(1, 1));
     assert_eq!((2, 2), mutable_args_once(5, 6));
+}
+
+/// Smoke tests for `#[cached(expires = true)]` and `#[once(expires = true)]` that do not
+/// require `time_stores` — ensuring the macro paths are covered by the `tests/proc-macro`
+/// and `tests/ahash` CI targets as well as the full-feature builds.
+#[cfg(feature = "proc_macro")]
+mod expires_macro_tests {
+    use cached::macros::{cached, once};
+    use cached::{Cached, Expires};
+
+    #[derive(Clone, Debug)]
+    struct Val {
+        v: u32,
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    // key = "u32" so `expired` controls the returned value without affecting the cache key
+    #[cached(expires = true, key = "u32", convert = "{ k }")]
+    fn sm_cached_expires(k: u32, expired: bool) -> Val {
+        Val { v: k, expired }
+    }
+
+    #[cached(expires = true, size = 4, key = "u32", convert = "{ k }")]
+    fn sm_cached_expires_lru(k: u32, expired: bool) -> Val {
+        Val { v: k, expired }
+    }
+
+    #[once(expires = true)]
+    fn sm_once_expires(expired: bool) -> Val {
+        Val { v: 42, expired }
+    }
+
+    #[test]
+    fn test_expires_macro_hit_and_miss() {
+        {
+            let mut c = SM_CACHED_EXPIRES.write();
+            c.cache_clear();
+            c.cache_reset_metrics();
+        }
+        // miss — caches Val{v=1, expired=false} under key 1
+        let v1 = sm_cached_expires(1, false);
+        assert_eq!(v1.v, 1);
+        assert!(!v1.expired);
+        // hit — same key 1, returns the cached live value (expired=false arg is ignored)
+        let v2 = sm_cached_expires(1, false);
+        assert!(!v2.expired);
+        {
+            let c = SM_CACHED_EXPIRES.read();
+            assert_eq!(c.cache_hits(), Some(1));
+            assert_eq!(c.cache_misses(), Some(1));
+        }
+
+        // different key — prime with an expired value
+        let v3 = sm_cached_expires(2, true);
+        assert!(v3.expired);
+        // same key 2 — expired entry is evicted and function re-executes
+        let v4 = sm_cached_expires(2, false);
+        assert!(!v4.expired);
+        {
+            let c = SM_CACHED_EXPIRES.read();
+            assert_eq!(c.cache_evictions(), Some(1));
+        }
+    }
+
+    #[test]
+    fn test_expires_lru_macro_hit_and_miss() {
+        {
+            let mut c = SM_CACHED_EXPIRES_LRU.write();
+            c.cache_clear();
+            c.cache_reset_metrics();
+        }
+        let v1 = sm_cached_expires_lru(10, false);
+        assert_eq!(v1.v, 10);
+        let v2 = sm_cached_expires_lru(10, false);
+        assert!(!v2.expired);
+        {
+            let c = SM_CACHED_EXPIRES_LRU.read();
+            assert_eq!(c.cache_hits(), Some(1));
+            assert_eq!(c.cache_misses(), Some(1));
+        }
+
+        // prime key 11 with expired value, then verify re-execution
+        let v3 = sm_cached_expires_lru(11, true);
+        assert!(v3.expired);
+        let v4 = sm_cached_expires_lru(11, false);
+        assert!(!v4.expired);
+        {
+            let c = SM_CACHED_EXPIRES_LRU.read();
+            assert_eq!(c.cache_evictions(), Some(1));
+        }
+    }
+
+    #[test]
+    fn test_once_expires_macro() {
+        // prime with a live value
+        let v1 = sm_once_expires(false);
+        assert!(!v1.expired);
+        // cached — argument ignored on hit
+        let v2 = sm_once_expires(true);
+        assert!(!v2.expired);
+
+        // reset cache so we can test the expired path
+        {
+            let mut cache = SM_ONCE_EXPIRES.write();
+            *cache = None;
+        }
+        // prime with an expired value
+        let v3 = sm_once_expires(true);
+        assert!(v3.expired);
+        // expired entry — re-executes
+        let v4 = sm_once_expires(false);
+        assert!(!v4.expired);
+    }
 }
 
 #[cfg(all(feature = "time_stores", feature = "proc_macro"))]
@@ -858,6 +987,160 @@ mod time_store_tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct OnceExpiredValue {
+        val: u32,
+        expired: bool,
+    }
+    impl Expires for OnceExpiredValue {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    #[once(expires = true)]
+    fn get_once_expired(val: u32, expired: bool) -> OnceExpiredValue {
+        OnceExpiredValue { val, expired }
+    }
+
+    #[test]
+    fn test_once_expires_sync() {
+        // Initial call - not expired, gets cached
+        let r1 = get_once_expired(1, false);
+        assert_eq!(r1.val, 1);
+
+        // Subsequent call - should return cached value (1) even with different args
+        let r2 = get_once_expired(2, false);
+        assert_eq!(r2.val, 1);
+
+        // Prime with an expired value
+        assert!(get_once_expired_prime_cache(3, true).expired);
+
+        // Since it's expired, calling the function again should re-evaluate and cache a new value
+        let r3 = get_once_expired(4, false);
+        assert_eq!(r3.val, 4);
+
+        // Now it is cached and not expired, so calling again returns 4
+        let r4 = get_once_expired(5, false);
+        assert_eq!(r4.val, 4);
+    }
+
+    #[once(result = true, expires = true)]
+    fn get_once_result_expired(val: u32, expired: bool) -> Result<OnceExpiredValue, String> {
+        Ok(OnceExpiredValue { val, expired })
+    }
+
+    #[test]
+    fn test_once_expires_result() {
+        // Initial call - not expired, gets cached
+        assert_eq!(get_once_result_expired(1, false).unwrap().val, 1);
+
+        // Subsequent call - returns cached val=1
+        assert_eq!(get_once_result_expired(2, false).unwrap().val, 1);
+
+        // Prime with an expired value
+        assert!(
+            get_once_result_expired_prime_cache(3, true)
+                .unwrap()
+                .expired
+        );
+
+        // Since it's expired, calling again should re-evaluate
+        assert_eq!(get_once_result_expired(4, false).unwrap().val, 4);
+
+        // Cached again, returns 4
+        assert_eq!(get_once_result_expired(5, false).unwrap().val, 4);
+    }
+
+    #[once(option = true, expires = true)]
+    fn get_once_option_expired(val: u32, expired: bool) -> Option<OnceExpiredValue> {
+        Some(OnceExpiredValue { val, expired })
+    }
+
+    #[test]
+    fn test_once_expires_option() {
+        // Initial call - not expired, gets cached
+        assert_eq!(get_once_option_expired(1, false).unwrap().val, 1);
+
+        // Subsequent call - returns cached val=1
+        assert_eq!(get_once_option_expired(2, false).unwrap().val, 1);
+
+        // Prime with an expired value
+        assert!(
+            get_once_option_expired_prime_cache(3, true)
+                .unwrap()
+                .expired
+        );
+
+        // Since it's expired, calling again should re-evaluate
+        assert_eq!(get_once_option_expired(4, false).unwrap().val, 4);
+
+        // Cached again, returns 4
+        assert_eq!(get_once_option_expired(5, false).unwrap().val, 4);
+    }
+
+    #[once(result = true, expires = true)]
+    fn get_once_result_expired_or_err(
+        val: u32,
+        expired: bool,
+        err: bool,
+    ) -> Result<OnceExpiredValue, String> {
+        if err {
+            Err("forced error".to_string())
+        } else {
+            Ok(OnceExpiredValue { val, expired })
+        }
+    }
+
+    #[test]
+    fn test_once_expires_result_err_not_cached() {
+        // Err result must not be cached — next call re-executes the function
+        assert!(get_once_result_expired_or_err(1, false, true).is_err());
+        // Because Err wasn't cached, this call actually executes and caches Ok(val=2)
+        assert_eq!(
+            get_once_result_expired_or_err(2, false, false).unwrap().val,
+            2
+        );
+        // Cached now, returns 2
+        assert_eq!(
+            get_once_result_expired_or_err(3, false, false).unwrap().val,
+            2
+        );
+    }
+
+    #[once(option = true, expires = true)]
+    fn get_once_option_expired_or_none(
+        val: u32,
+        expired: bool,
+        none: bool,
+    ) -> Option<OnceExpiredValue> {
+        if none {
+            None
+        } else {
+            Some(OnceExpiredValue { val, expired })
+        }
+    }
+
+    #[test]
+    fn test_once_expires_option_none_not_cached() {
+        // None result must not be cached — next call re-executes the function
+        assert!(get_once_option_expired_or_none(1, false, true).is_none());
+        // Because None wasn't cached, this call actually executes and caches Some(val=2)
+        assert_eq!(
+            get_once_option_expired_or_none(2, false, false)
+                .unwrap()
+                .val,
+            2
+        );
+        // Cached now, returns 2
+        assert_eq!(
+            get_once_option_expired_or_none(3, false, false)
+                .unwrap()
+                .val,
+            2
+        );
+    }
+
     #[cfg(all(feature = "async", feature = "proc_macro"))]
     mod async_tests {
         use super::*;
@@ -997,6 +1280,543 @@ mod time_store_tests {
             c.await.unwrap();
             assert!(start.elapsed() < Duration::from_secs(2));
         }
+
+        #[derive(Clone, Debug)]
+        struct OnceExpiredValueAsync {
+            val: u32,
+            expired: bool,
+        }
+        impl Expires for OnceExpiredValueAsync {
+            fn is_expired(&self) -> bool {
+                self.expired
+            }
+        }
+
+        #[once(expires = true)]
+        async fn get_once_expired_async(val: u32, expired: bool) -> OnceExpiredValueAsync {
+            OnceExpiredValueAsync { val, expired }
+        }
+
+        #[tokio::test]
+        async fn test_once_expires_async() {
+            // Initial call - not expired, gets cached
+            let r1 = get_once_expired_async(1, false).await;
+            assert_eq!(r1.val, 1);
+
+            // Subsequent call - should return cached value (1)
+            let r2 = get_once_expired_async(2, false).await;
+            assert_eq!(r2.val, 1);
+
+            // Prime with an expired value
+            assert!(get_once_expired_async_prime_cache(3, true).await.expired);
+
+            // Since it's expired, calling again should re-evaluate
+            let r3 = get_once_expired_async(4, false).await;
+            assert_eq!(r3.val, 4);
+
+            // Now it is cached and not expired, so calling again returns 4
+            let r4 = get_once_expired_async(5, false).await;
+            assert_eq!(r4.val, 4);
+        }
+
+        #[once(result = true, expires = true)]
+        async fn get_once_result_expired_async(
+            val: u32,
+            expired: bool,
+        ) -> Result<OnceExpiredValueAsync, String> {
+            Ok(OnceExpiredValueAsync { val, expired })
+        }
+
+        #[tokio::test]
+        async fn test_once_expires_result_async() {
+            // Initial call - caches Ok(val=1, not expired)
+            assert_eq!(
+                get_once_result_expired_async(1, false).await.unwrap().val,
+                1
+            );
+
+            // Hit — returns cached val=1
+            assert_eq!(
+                get_once_result_expired_async(2, false).await.unwrap().val,
+                1
+            );
+
+            // Prime with expired value
+            assert!(
+                get_once_result_expired_async_prime_cache(3, true)
+                    .await
+                    .unwrap()
+                    .expired
+            );
+
+            // Expired — re-executes and caches val=4
+            assert_eq!(
+                get_once_result_expired_async(4, false).await.unwrap().val,
+                4
+            );
+
+            // Cached again
+            assert_eq!(
+                get_once_result_expired_async(5, false).await.unwrap().val,
+                4
+            );
+        }
+
+        #[once(option = true, expires = true)]
+        async fn get_once_option_expired_async(
+            val: u32,
+            expired: bool,
+        ) -> Option<OnceExpiredValueAsync> {
+            Some(OnceExpiredValueAsync { val, expired })
+        }
+
+        #[tokio::test]
+        async fn test_once_expires_option_async() {
+            // Initial call - caches Some(val=1, not expired)
+            assert_eq!(
+                get_once_option_expired_async(1, false).await.unwrap().val,
+                1
+            );
+
+            // Hit — returns cached val=1
+            assert_eq!(
+                get_once_option_expired_async(2, false).await.unwrap().val,
+                1
+            );
+
+            // Prime with expired value
+            assert!(
+                get_once_option_expired_async_prime_cache(3, true)
+                    .await
+                    .unwrap()
+                    .expired
+            );
+
+            // Expired — re-executes and caches val=4
+            assert_eq!(
+                get_once_option_expired_async(4, false).await.unwrap().val,
+                4
+            );
+
+            // Cached again
+            assert_eq!(
+                get_once_option_expired_async(5, false).await.unwrap().val,
+                4
+            );
+        }
+
+        #[tokio::test]
+        async fn test_expiring_cache_async() {
+            use cached::CachedAsync;
+
+            #[derive(Clone, Debug)]
+            struct AsyncValue {
+                val: String,
+                expired: bool,
+            }
+            impl Expires for AsyncValue {
+                fn is_expired(&self) -> bool {
+                    self.expired
+                }
+            }
+
+            let mut cache = ExpiringCache::new();
+
+            // async_get_or_set_with: vacant
+            let r1 = cache
+                .async_get_or_set_with("key".to_string(), || async {
+                    AsyncValue {
+                        val: "hello".to_string(),
+                        expired: false,
+                    }
+                })
+                .await;
+            assert_eq!(r1.val, "hello");
+
+            // async_get_or_set_with: occupied and fresh
+            let r2 = cache
+                .async_get_or_set_with("key".to_string(), || async {
+                    AsyncValue {
+                        val: "ignored".to_string(),
+                        expired: false,
+                    }
+                })
+                .await;
+            assert_eq!(r2.val, "hello");
+
+            // Manually set to expired
+            cache.cache_set(
+                "key".to_string(),
+                AsyncValue {
+                    val: "expired_val".to_string(),
+                    expired: true,
+                },
+            );
+
+            // async_get_or_set_with: occupied but expired
+            let r3 = cache
+                .async_get_or_set_with("key".to_string(), || async {
+                    AsyncValue {
+                        val: "new_fresh".to_string(),
+                        expired: false,
+                    }
+                })
+                .await;
+            assert_eq!(r3.val, "new_fresh");
+        }
+
+        #[derive(Clone, Debug)]
+        struct AsyncCachedExpiresVal {
+            val: u32,
+            expired: bool,
+        }
+        impl Expires for AsyncCachedExpiresVal {
+            fn is_expired(&self) -> bool {
+                self.expired
+            }
+        }
+
+        #[cached(expires = true, key = "u32", convert = "{ k }")]
+        async fn async_cached_expires_basic(k: u32, expired: bool) -> AsyncCachedExpiresVal {
+            AsyncCachedExpiresVal { val: k, expired }
+        }
+
+        #[tokio::test]
+        async fn test_async_cached_expires_basic() {
+            assert_eq!(async_cached_expires_basic(1, false).await.val, 1);
+            assert_eq!(async_cached_expires_basic(1, false).await.val, 1);
+            async_cached_expires_basic_prime_cache(1, true).await;
+            let r = async_cached_expires_basic(1, false).await;
+            assert_eq!(r.val, 1);
+            assert!(!r.expired);
+            assert_eq!(async_cached_expires_basic(1, false).await.val, 1);
+        }
+
+        #[cached(expires = true, result = true, key = "u32", convert = "{ k }")]
+        async fn async_cached_expires_result(
+            k: u32,
+            expired: bool,
+            err: bool,
+        ) -> Result<AsyncCachedExpiresVal, String> {
+            if err {
+                Err("forced error".to_string())
+            } else {
+                Ok(AsyncCachedExpiresVal { val: k, expired })
+            }
+        }
+
+        #[tokio::test]
+        async fn test_async_cached_expires_result() {
+            assert!(async_cached_expires_result(1, false, true).await.is_err());
+            assert!(async_cached_expires_result(1, false, true).await.is_err());
+            assert_eq!(
+                async_cached_expires_result(1, false, false)
+                    .await
+                    .unwrap()
+                    .val,
+                1
+            );
+            assert_eq!(
+                async_cached_expires_result(1, false, false)
+                    .await
+                    .unwrap()
+                    .val,
+                1
+            );
+            async_cached_expires_result_prime_cache(1, true, false)
+                .await
+                .unwrap();
+            let r = async_cached_expires_result(1, false, false).await.unwrap();
+            assert_eq!(r.val, 1);
+            assert!(!r.expired);
+        }
+
+        #[cached(expires = true, option = true, key = "u32", convert = "{ k }")]
+        async fn async_cached_expires_option(
+            k: u32,
+            expired: bool,
+            none: bool,
+        ) -> Option<AsyncCachedExpiresVal> {
+            if none {
+                None
+            } else {
+                Some(AsyncCachedExpiresVal { val: k, expired })
+            }
+        }
+
+        #[tokio::test]
+        async fn test_async_cached_expires_option() {
+            assert!(async_cached_expires_option(1, false, true).await.is_none());
+            assert!(async_cached_expires_option(1, false, true).await.is_none());
+            assert_eq!(
+                async_cached_expires_option(1, false, false)
+                    .await
+                    .unwrap()
+                    .val,
+                1
+            );
+            assert_eq!(
+                async_cached_expires_option(1, false, false)
+                    .await
+                    .unwrap()
+                    .val,
+                1
+            );
+            async_cached_expires_option_prime_cache(1, true, false)
+                .await
+                .unwrap();
+            let r = async_cached_expires_option(1, false, false).await.unwrap();
+            assert_eq!(r.val, 1);
+            assert!(!r.expired);
+        }
+
+        #[cached(
+            expires = true,
+            result = true,
+            result_fallback = true,
+            key = "u32",
+            convert = "{ k }"
+        )]
+        async fn async_cached_expires_result_fallback(
+            k: u32,
+            expired: bool,
+            err: bool,
+        ) -> Result<AsyncCachedExpiresVal, String> {
+            if err {
+                Err("forced error".to_string())
+            } else {
+                Ok(AsyncCachedExpiresVal { val: k, expired })
+            }
+        }
+
+        #[tokio::test]
+        async fn test_async_cached_expires_result_fallback() {
+            async_cached_expires_result_fallback_prime_cache(1, false, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                async_cached_expires_result_fallback(1, false, false)
+                    .await
+                    .unwrap()
+                    .val,
+                1
+            );
+            async_cached_expires_result_fallback_prime_cache(1, true, false)
+                .await
+                .unwrap();
+            let r = async_cached_expires_result_fallback(1, false, true)
+                .await
+                .unwrap();
+            assert_eq!(r.val, 1);
+            assert!(r.expired);
+        }
+    }
+
+    use cached::stores::ExpiringCache;
+
+    #[derive(Clone, Debug)]
+    struct CachedExpiresVal {
+        val: u32,
+        expired: bool,
+    }
+    impl Expires for CachedExpiresVal {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    #[cached(expires = true, key = "u32", convert = "{ k }")]
+    fn cached_expires_basic(k: u32, expired: bool) -> CachedExpiresVal {
+        CachedExpiresVal { val: k, expired }
+    }
+
+    #[test]
+    fn test_cached_expires_basic() {
+        // miss — executes, caches {val=1, expired=false} under key=1
+        assert_eq!(cached_expires_basic(1, false).val, 1);
+        // hit — same key, returns cached value
+        assert_eq!(cached_expires_basic(1, false).val, 1);
+        {
+            let c = CACHED_EXPIRES_BASIC.read();
+            assert_eq!(c.cache_hits(), Some(1));
+            assert_eq!(c.cache_misses(), Some(1));
+        }
+        // prime key=1 with expired value
+        cached_expires_basic_prime_cache(1, true);
+        // expired miss — re-executes with (1, false), caches fresh entry
+        let r = cached_expires_basic(1, false);
+        assert_eq!(r.val, 1);
+        assert!(!r.expired);
+        {
+            let c = CACHED_EXPIRES_BASIC.read();
+            assert_eq!(c.cache_hits(), Some(1));
+            assert_eq!(c.cache_misses(), Some(2));
+            assert_eq!(c.cache_evictions(), Some(1));
+        }
+        // hit again — fresh entry
+        assert_eq!(cached_expires_basic(1, false).val, 1);
+    }
+
+    #[cached(expires = true, size = 4, key = "u32", convert = "{ k }")]
+    fn cached_expires_lru(k: u32, expired: bool) -> CachedExpiresVal {
+        CachedExpiresVal { val: k, expired }
+    }
+
+    #[test]
+    fn test_cached_expires_lru() {
+        // miss — caches {val=10, expired=false}
+        assert_eq!(cached_expires_lru(10, false).val, 10);
+        // hit
+        assert_eq!(cached_expires_lru(10, false).val, 10);
+        {
+            let c = CACHED_EXPIRES_LRU.read();
+            assert_eq!(c.cache_hits(), Some(1));
+            assert_eq!(c.cache_misses(), Some(1));
+        }
+        // prime key=10 with expired value
+        cached_expires_lru_prime_cache(10, true);
+        // expired miss — re-executes, caches fresh entry
+        let r = cached_expires_lru(10, false);
+        assert_eq!(r.val, 10);
+        assert!(!r.expired);
+        {
+            let c = CACHED_EXPIRES_LRU.read();
+            assert_eq!(c.cache_evictions(), Some(1));
+        }
+    }
+
+    #[cached(expires = true, result = true, key = "u32", convert = "{ k }")]
+    fn cached_expires_result(k: u32, expired: bool, err: bool) -> Result<CachedExpiresVal, String> {
+        if err {
+            Err("forced error".to_string())
+        } else {
+            Ok(CachedExpiresVal { val: k, expired })
+        }
+    }
+
+    #[test]
+    fn test_cached_expires_result() {
+        // Err is not cached — next call re-executes
+        assert!(cached_expires_result(1, false, true).is_err());
+        assert!(cached_expires_result(1, false, true).is_err());
+        // Ok is cached
+        assert_eq!(cached_expires_result(1, false, false).unwrap().val, 1);
+        // hit
+        assert_eq!(cached_expires_result(1, false, false).unwrap().val, 1);
+        // prime key=1 with expired
+        cached_expires_result_prime_cache(1, true, false).unwrap();
+        // expired miss — re-executes
+        let r = cached_expires_result(1, false, false).unwrap();
+        assert_eq!(r.val, 1);
+        assert!(!r.expired);
+        {
+            let c = CACHED_EXPIRES_RESULT.read();
+            assert_eq!(c.cache_evictions(), Some(1));
+        }
+    }
+
+    #[cached(expires = true, option = true, key = "u32", convert = "{ k }")]
+    fn cached_expires_option(k: u32, expired: bool, none: bool) -> Option<CachedExpiresVal> {
+        if none {
+            None
+        } else {
+            Some(CachedExpiresVal { val: k, expired })
+        }
+    }
+
+    #[test]
+    fn test_cached_expires_option() {
+        // None is not cached — next call re-executes
+        assert!(cached_expires_option(1, false, true).is_none());
+        assert!(cached_expires_option(1, false, true).is_none());
+        // Some is cached
+        assert_eq!(cached_expires_option(1, false, false).unwrap().val, 1);
+        // hit
+        assert_eq!(cached_expires_option(1, false, false).unwrap().val, 1);
+        // prime key=1 with expired
+        cached_expires_option_prime_cache(1, true, false).unwrap();
+        // expired miss — re-executes
+        let r = cached_expires_option(1, false, false).unwrap();
+        assert_eq!(r.val, 1);
+        assert!(!r.expired);
+        {
+            let c = CACHED_EXPIRES_OPTION.read();
+            assert_eq!(c.cache_evictions(), Some(1));
+        }
+    }
+
+    #[cached(
+        expires = true,
+        result = true,
+        result_fallback = true,
+        key = "u32",
+        convert = "{ k }"
+    )]
+    fn cached_expires_result_fallback(
+        k: u32,
+        expired: bool,
+        err: bool,
+    ) -> Result<CachedExpiresVal, String> {
+        if err {
+            Err("forced error".to_string())
+        } else {
+            Ok(CachedExpiresVal { val: k, expired })
+        }
+    }
+
+    #[test]
+    fn test_cached_expires_result_fallback() {
+        // prime key=1 with a non-expired value
+        cached_expires_result_fallback_prime_cache(1, false, false).unwrap();
+        // fresh hit
+        assert_eq!(
+            cached_expires_result_fallback(1, false, false).unwrap().val,
+            1
+        );
+        // prime key=1 with expired value
+        cached_expires_result_fallback_prime_cache(1, true, false).unwrap();
+        // function returns Err + stale value exists → result_fallback returns stale Ok
+        let r = cached_expires_result_fallback(1, false, true).unwrap();
+        assert_eq!(r.val, 1);
+        assert!(r.expired);
+    }
+
+    #[test]
+    fn test_expiring_cache_integration() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Value {
+            val: String,
+            expired: bool,
+        }
+        impl Expires for Value {
+            fn is_expired(&self) -> bool {
+                self.expired
+            }
+        }
+
+        let mut cache = ExpiringCache::new();
+        cache.cache_set(
+            "a".to_string(),
+            Value {
+                val: "hello".to_string(),
+                expired: false,
+            },
+        );
+        cache.cache_set(
+            "b".to_string(),
+            Value {
+                val: "world".to_string(),
+                expired: true,
+            },
+        );
+        assert_eq!(
+            cache.cache_get(&"a".to_string()).map(|v| &v.val),
+            Some(&"hello".to_string())
+        );
+        assert!(cache.cache_get(&"b".to_string()).is_none());
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+        assert_eq!(cache.cache_evictions(), Some(1));
     }
 }
 
@@ -3149,7 +3969,7 @@ fn test_expiring_lru_cache_get_does_not_inflate_inner_metrics() {
     assert!(cache.cache_get(&1).is_some());
     assert_eq!(cache.cache_hits(), Some(1));
     assert_eq!(cache.cache_misses(), Some(0));
-    // The inner LruCache counters must not be inflated by the outer cache_get.
+    // Inner LruCache metrics must not be incremented — ExpiringLruCache manages its own.
     assert_eq!(cache.store().cache_hits(), Some(0));
     assert_eq!(cache.store().cache_misses(), Some(0));
 }
@@ -3175,8 +3995,7 @@ fn test_expiring_lru_cache_evictions_sum_lru_and_expiry() {
     cache.cache_set(1, Expirable { expired: false });
     cache.cache_set(2, Expirable { expired: false });
     cache.cache_set(3, Expirable { expired: false });
-    assert_eq!(cache.store().cache_evictions(), Some(1)); // inner: 1 LRU eviction
-    assert_eq!(cache.cache_evictions(), Some(1)); // sum so far
+    assert_eq!(cache.cache_evictions(), Some(1)); // 1 LRU capacity eviction
 
     // Mark key 2 as expired and access it to trigger an expiry eviction in the
     // outer ExpiringLruCache (outer eviction counter = 1).
