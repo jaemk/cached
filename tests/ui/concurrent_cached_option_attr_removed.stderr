@@ -1,0 +1,5 @@
+error: `option = true` is not a valid attribute for `#[concurrent_cached]`; `Option<T>` returns skip `None` by default. Use `cache_none = true` to force caching `None` values.
+ --> tests/ui/concurrent_cached_option_attr_removed.rs:4:21
+  |
+4 | #[concurrent_cached(option = true)]
+  |                     ^^^^^^

@@ -1,10 +1,10 @@
 use crate::helpers::*;
-use darling::ast::NestedMeta;
 use darling::FromMeta;
+use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Ident, ItemFn, ReturnType};
+use syn::{Ident, ItemFn, ReturnType, parse_macro_input};
 
 #[derive(FromMeta)]
 struct OnceMacroArgs {
@@ -19,13 +19,18 @@ struct OnceMacroArgs {
     #[darling(default = "default_sync_writes_buckets")]
     sync_writes_buckets: usize,
     #[darling(default)]
-    result: bool,
+    cache_err: bool,
     #[darling(default)]
-    option: bool,
+    cache_none: bool,
     #[darling(default)]
     with_cached_flag: bool,
     #[darling(default)]
     expires: bool,
+    // Removed attributes intercepted to provide helpful error messages
+    #[darling(default)]
+    result: Option<bool>,
+    #[darling(default)]
+    option: Option<bool>,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -80,6 +85,36 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    // Reject a zero `ttl` at expansion time (matching `#[concurrent_cached]`),
+    // rather than letting the generated builder `build()` panic at first call.
+    if matches!(args.ttl, Some(0)) {
+        return syn::Error::new(fn_ident.span(), "`ttl` must be >= 1")
+            .to_compile_error()
+            .into();
+    }
+
+    if args.result.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "the `result` attribute has been removed. `Result<T, E>` returns now skip caching \
+             `Err` by default. Remove `result = true` (or `result = false`), or use \
+             `cache_err = true` to force-cache `Err` values.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.option.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "the `option` attribute has been removed. `Option<T>` returns now skip caching \
+             `None` by default. Remove `option = true` (or `option = false`), or use \
+             `cache_none = true` to force-cache `None` values.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     if args.expires && args.ttl.is_some() {
         return syn::Error::new(
             fn_ident.span(),
@@ -96,6 +131,30 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             fn_ident.span(),
             "`expires` and `with_cached_flag` are mutually exclusive — \
              the `Return<T>` wrapper does not implement `Expires`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.cache_none {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires = true` and `cache_none = true` are incompatible — `expires` requires \
+             the cache value type to implement `Expires`, but `cache_none = true` stores \
+             `Option<V>` as the value, which does not implement `Expires`. \
+             Remove `cache_none = true` (None values are not cached by default with `expires = true`).",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.expires && args.cache_err {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires = true` and `cache_err = true` are incompatible — `expires` requires \
+             the cache value type to implement `Expires`, but `cache_err = true` stores \
+             `Result<V, E>` as the value, which does not implement `Expires`. \
+             Remove `cache_err = true` (Err values are not cached by default with `expires = true`).",
         )
         .to_compile_error()
         .into();
@@ -118,7 +177,44 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         return with_cache_flag_error(output_span, output_type_display);
     }
 
-    let cache_value_ty = match find_value_type(args.result, args.option, &output, output_ty) {
+    let is_result_return = is_result_return_type(&output);
+    let is_option_return = is_option_return_type(&output);
+
+    if args.cache_err && !is_result_return {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_err = true` requires the function to return `Result<T, E>`",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.cache_none && !is_option_return {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_none = true` requires the function to return `Option<T>`",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.cache_none && args.with_cached_flag {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_none = true` and `with_cached_flag = true` are structurally incompatible \
+             on `Option<T>` returns: `with_cached_flag` stores the inner `T` from `Return<T>` \
+             while `cache_none = true` stores `Option<T>` as the cached value — the same \
+             cache entry cannot hold both types. Use `with_cached_flag = true` alone (to get \
+             cache-state flags; `None` is not cached by default), or use `cache_none = true` \
+             alone (to force-cache `None` values).",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let is_smart_result = is_result_return && !args.cache_err;
+    let is_smart_option = is_option_return && !args.cache_none;
+
+    let cache_value_ty = match find_value_type(is_smart_result, is_smart_option, &output, output_ty)
+    {
         Ok(value_ty) => value_ty,
         Err(e) => return e.to_compile_error().into(),
     };
@@ -152,7 +248,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the set cache and return cache blocks
-    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+    let (set_cache_block, return_cache_block) = match (is_smart_result, is_smart_option) {
         (false, false) => {
             let set_cache_block = if args.ttl.is_some() {
                 quote! {
@@ -221,14 +317,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 gen_return_cache_block(args.ttl, args.expires, return_cache_block);
             (set_cache_block, return_cache_block)
         }
-        _ => {
-            return syn::Error::new(
-                fn_ident.span(),
-                "`result` and `option` attributes are mutually exclusive",
-            )
-            .to_compile_error()
-            .into();
-        }
+        (true, true) => unreachable!("return type cannot be both Result and Option"),
     };
 
     let set_cache_and_return = quote! {

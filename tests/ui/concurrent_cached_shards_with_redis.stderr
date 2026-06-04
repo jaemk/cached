@@ -1,0 +1,5 @@
+error: `shards` only applies to the default in-memory store, not `redis = true`
+ --> tests/ui/concurrent_cached_shards_with_redis.rs:9:4
+  |
+9 | fn my_fn(k: i32) -> Result<i32, String> {
+  |    ^^^^^

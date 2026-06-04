@@ -1,5 +1,5 @@
 /*
-The basics: `#[cached(size = N)]` (LRU memoization) and `#[once(ttl = N)]`
+The basics: `#[cached(max_size = N)]` (LRU memoization) and `#[once(ttl = N)]`
 (a single cached value that expires), plus reading the generated cache static
 through the `Cached` trait.
 
@@ -12,7 +12,7 @@ use cached::macros::once;
 use cached::time::{Duration, Instant};
 use std::thread::sleep;
 
-#[cached(size = 50)]
+#[cached(max_size = 50)]
 fn slow_fn(n: u32) -> String {
     if n == 0 {
         return "done".to_string();

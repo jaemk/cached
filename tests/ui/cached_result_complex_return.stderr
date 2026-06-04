@@ -1,5 +1,0 @@
-error: function return type is too complex
- --> tests/ui/cached_result_complex_return.rs:4:21
-  |
-4 | fn my_fn(k: i32) -> (i32, i32) {
-  |                     ^^^^^^^^^^

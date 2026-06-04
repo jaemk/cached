@@ -40,13 +40,13 @@ impl<T> LRUList<T> {
         let capacity = capacity
             .checked_add(2)
             .ok_or(crate::stores::BuildError::InvalidValue {
-                field: "size",
+                field: "max_size",
                 reason: "capacity overflow",
             })?;
         let mut values = Vec::new();
         values.try_reserve_exact(capacity).map_err(|_| {
             crate::stores::BuildError::InvalidValue {
-                field: "size",
+                field: "max_size",
                 reason: "allocation failed",
             }
         })?;

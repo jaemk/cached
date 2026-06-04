@@ -1,0 +1,7 @@
+error: cannot specify both `size` and `max_size` — they are aliases; use one
+ --> tests/ui/cached_size_max_size_exclusive.rs:3:1
+  |
+3 | #[cached(size = 2, max_size = 2)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

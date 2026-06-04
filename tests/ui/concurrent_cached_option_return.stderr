@@ -1,5 +1,5 @@
-error: #[concurrent_cached] functions must return `Result`s, found "Option<i32>"
- --> tests/ui/concurrent_cached_option_return.rs:7:21
+error: `Option<T>` return types that skip `None` are only supported for the default in-memory sharded stores, not `disk = true`. Use `Result<T, E>` as the return type, or remove `disk = true` to use the default in-memory sharded path.
+ --> tests/ui/concurrent_cached_option_return.rs:6:4
   |
-7 | fn my_fn(k: i32) -> Option<i32> {
-  |                     ^^^^^^
+6 | fn my_fn(k: i32) -> Option<i32> {
+  |    ^^^^^

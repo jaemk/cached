@@ -1,4 +1,4 @@
-error: #[concurrent_cached] functions must return `Result`s, found "()"
+error: #[concurrent_cached] plain return types are only supported for the default in-memory sharded stores. Use `Result<T, E>` when specifying `redis`, `disk`, or a custom `ty`/`create`.
  --> tests/ui/concurrent_cached_no_return.rs:3:1
   |
 3 | #[concurrent_cached(map_error = "|e| e", disk = true)]

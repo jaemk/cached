@@ -1,0 +1,5 @@
+error: `result_fallback = true` and `expires = true` are mutually exclusive — `expires` selects a per-value expiry store; `result_fallback` requires a fixed-TTL store whose entry expiry can be detected and refreshed by the cache layer, which per-value expiry does not support. Note: `ttl` and `expires` serve different purposes — `ttl` applies a fixed TTL to all entries, while `expires` delegates expiry to each value. If you need time-based expiry together with `result_fallback`, use `ttl` (not `expires`).
+  --> tests/ui/concurrent_cached_result_fallback_expires_exclusive.rs:10:4
+   |
+10 | fn my_fn(x: u32) -> Result<Val, String> {
+   |    ^^^^^

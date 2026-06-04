@@ -9,7 +9,7 @@ use ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
 use std::collections::hash_map::RandomState;
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
@@ -17,8 +17,8 @@ use {super::CachedAsync, std::future::Future};
 use crate::{CachedIter, CachedPeek, CloneCached};
 
 use super::{CacheEvict, Cached, TimedEntry};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Cache store bound by time
 ///
@@ -79,7 +79,8 @@ pub struct TtlCacheBuilder<K, V> {
 }
 
 impl<K, V> TtlCacheBuilder<K, V> {
-    /// Set the TTL for cache entries. Required — panics at build time if not set.
+    /// Set the TTL for cache entries. Required — `build()` returns
+    /// `Err(BuildError::MissingRequired("ttl"))` if not set.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
@@ -95,12 +96,26 @@ impl<K, V> TtlCacheBuilder<K, V> {
 
     /// Set whether cache hits refresh the TTL of the accessed entry.
     #[must_use]
-    pub fn refresh(mut self, refresh: bool) -> Self {
+    pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
     }
 
-    /// Set a callback to be invoked when an entry is evicted.
+    /// Alias for [`refresh_on_hit`](Self::refresh_on_hit).
+    #[must_use]
+    pub fn refresh(self, refresh: bool) -> Self {
+        self.refresh_on_hit(refresh)
+    }
+
+    /// Set a callback to be invoked when an entry is evicted. The callback fires for:
+    /// - TTL-expiry sweeps via [`evict`](TtlCache::evict).
+    /// - Explicit [`cache_remove`](crate::Cached::cache_remove), even when the removed
+    ///   entry was already expired (`cache_remove` returns `None` but still fires the
+    ///   callback and increments the evictions counter).
+    ///
+    /// Does **not** fire on [`cache_clear`](crate::Cached::cache_clear).
+    /// Use [`cache_clear_with_on_evict`](TtlCache::cache_clear_with_on_evict)
+    /// instead to opt into callback firing when clearing all entries.
     #[must_use]
     pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
         self.on_evict = Some(Arc::new(on_evict));
@@ -109,45 +124,23 @@ impl<K, V> TtlCacheBuilder<K, V> {
 
     /// Build the cache.
     ///
-    /// # Panics
-    ///
-    /// Panics if `ttl` was not set.
-    #[must_use]
-    pub fn build(self) -> TtlCache<K, V>
-    where
-        K: Hash + Eq,
-    {
-        let ttl = self
-            .ttl
-            .expect("`TtlCacheBuilder` requires `ttl` to be set");
-        TtlCache {
-            store: TtlCache::<K, V>::new_store(self.capacity),
-            ttl,
-            hits: std::sync::atomic::AtomicU64::new(0),
-            misses: std::sync::atomic::AtomicU64::new(0),
-            evictions: std::sync::atomic::AtomicU64::new(0),
-            initial_capacity: self.capacity,
-            refresh: self.refresh,
-            on_evict: self.on_evict,
-        }
-    }
-
-    /// Build the cache, returning an error instead of panicking.
-    ///
     /// # Errors
     ///
-    /// Returns [`BuildError`](super::BuildError) if `ttl` was not set.
-    pub fn try_build(self) -> Result<TtlCache<K, V>, super::BuildError>
+    /// Returns [`BuildError`](super::BuildError) if `ttl` was not set or is zero
+    /// ([`BuildError::MissingRequired`](super::BuildError::MissingRequired) /
+    /// [`BuildError::InvalidTtl`](super::BuildError::InvalidTtl)).
+    pub fn build(self) -> Result<TtlCache<K, V>, super::BuildError>
     where
         K: Hash + Eq,
     {
         let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
+        super::validate_ttl(ttl)?;
         Ok(TtlCache {
             store: TtlCache::<K, V>::new_store(self.capacity),
             ttl,
-            hits: std::sync::atomic::AtomicU64::new(0),
-            misses: std::sync::atomic::AtomicU64::new(0),
-            evictions: std::sync::atomic::AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
             initial_capacity: self.capacity,
             refresh: self.refresh,
             on_evict: self.on_evict,
@@ -163,44 +156,6 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
             ttl: None,
             capacity: None,
             refresh: false,
-            on_evict: None,
-        }
-    }
-
-    /// Creates a new `TtlCache` with a specified ttl
-    #[must_use]
-    pub fn with_ttl(ttl: Duration) -> TtlCache<K, V> {
-        Self::with_ttl_and_refresh(ttl, false)
-    }
-
-    /// Creates a new `TtlCache` with a specified ttl and
-    /// cache-store with the specified pre-allocated capacity
-    #[must_use]
-    pub fn with_ttl_and_capacity(ttl: Duration, size: usize) -> TtlCache<K, V> {
-        TtlCache {
-            store: Self::new_store(Some(size)),
-            ttl,
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-            initial_capacity: Some(size),
-            refresh: false,
-            on_evict: None,
-        }
-    }
-
-    /// Creates a new `TtlCache` with a specified ttl which
-    /// refreshes the ttl when the entry is retrieved
-    #[must_use]
-    pub fn with_ttl_and_refresh(ttl: Duration, refresh: bool) -> TtlCache<K, V> {
-        TtlCache {
-            store: Self::new_store(None),
-            ttl,
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-            initial_capacity: None,
-            refresh,
             on_evict: None,
         }
     }
@@ -229,14 +184,38 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
         &self.store
     }
 
+    /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
+    /// evictions counter.
+    ///
+    /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
+    /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
+    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
+    /// the plain `cache_clear`.
+    pub fn cache_clear_with_on_evict(&mut self) {
+        if self.on_evict.is_none() {
+            return self.cache_clear();
+        }
+        let entries: Vec<(K, TimedEntry<V>)> = self.store.drain().collect();
+        let count = entries.len() as u64;
+        if count > 0 {
+            self.evictions.fetch_add(count, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (k, entry) in &entries {
+                on_evict(k, &entry.value);
+            }
+        }
+    }
+
     /// Evict expired values from the cache.
     pub fn evict(&mut self) -> usize {
         let ttl = self.ttl;
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
+        let now = Instant::now();
         self.store.retain(|key, entry| {
-            if entry.instant.elapsed() < ttl {
+            if now.saturating_duration_since(entry.instant) < ttl {
                 true
             } else {
                 if let Some(on_evict) = on_evict {
@@ -403,14 +382,37 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.store.remove(k).and_then(|entry| {
+        if let Some((stored_k, entry)) = self.store.remove_entry(k) {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&stored_k, &entry.value);
+            }
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if entry.instant.elapsed() < self.ttl {
                 Some(entry.value)
             } else {
                 None
             }
-        })
+        } else {
+            None
+        }
     }
+
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        if let Some((stored_k, entry)) = self.store.remove_entry(k) {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&stored_k, &entry.value);
+            }
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            Some((stored_k, entry.value))
+        } else {
+            None
+        }
+    }
+
     fn cache_clear(&mut self) {
         self.store.clear();
     }
@@ -625,8 +627,50 @@ impl<K: std::hash::Hash + Eq + Clone, V> CacheEvict for TtlCache<K, V> {
 mod tests {
     use super::*;
     use crate::stores::Cached;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cache_clear_with_on_evict_fires_for_all_entries() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
+    }
+
+    #[test]
+    fn cache_clear_does_not_fire_on_evict() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_clear();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            0,
+            "cache_clear must not fire on_evict"
+        );
+    }
 
     #[test]
     fn cache_reset_does_not_fire_on_evict() {
@@ -637,7 +681,8 @@ mod tests {
             .on_evict(move |_k, _v| {
                 evict_count2.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
         c.cache_set(1, 10);
         c.cache_set(2, 20);
         c.cache_set(3, 30);
@@ -654,7 +699,8 @@ mod tests {
     fn test_diagnostics_and_traits() {
         let mut cache = TtlCache::builder()
             .ttl(crate::time::Duration::from_secs(60))
-            .build();
+            .build()
+            .unwrap();
         cache.cache_set(1, 100);
         cache.cache_set(2, 200);
 
@@ -670,9 +716,118 @@ mod tests {
         assert_eq!(cloned.cache_get(&1), Some(&100));
         assert_eq!(cloned.cache_get(&2), Some(&200));
 
-        // Builder try_build errors
+        // Builder build errors
         let builder = TtlCache::<u32, u32>::builder();
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Missing required ttl
+        let built = builder.build();
+        assert!(built.is_err()); // Missing required ttl
+
+        let builder = TtlCache::<u32, u32>::builder().ttl(crate::time::Duration::ZERO);
+        let built = builder.build();
+        assert!(built.is_err()); // Zero ttl is invalid
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_some_for_live_entry() {
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        assert_eq!(c.cache_remove_entry(&999u32), None); // absent
+        assert_eq!(c.cache_remove_entry(&1u32), Some((1u32, 100u32)));
+        assert_eq!(c.cache_get(&1u32), None);
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_some_for_expired_entry() {
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // cache_remove returns None for an expired entry.
+        assert_eq!(
+            c.cache_remove(&1u32),
+            None,
+            "cache_remove: None for expired"
+        );
+
+        // Re-insert and verify cache_remove_entry returns Some even though expired.
+        c.cache_set(2u32, 200u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let removed = c.cache_remove_entry(&2u32);
+        assert!(
+            removed.is_some(),
+            "cache_remove_entry must return Some even for expired entries"
+        );
+        assert_eq!(
+            removed.expect("cache_remove_entry must return Some for a present entry"),
+            (2u32, 200u32)
+        );
+    }
+
+    #[test]
+    fn cache_delete_returns_true_for_expired_entry() {
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // cache_delete must return true even though the entry is expired.
+        assert!(
+            c.cache_delete(&1u32),
+            "cache_delete must return true when entry deleted, even if expired"
+        );
+
+        // Entry is now gone.
+        assert!(
+            !c.cache_delete(&1u32),
+            "cache_delete returns false when key absent"
+        );
+    }
+
+    #[test]
+    fn cache_remove_entry_fires_on_evict() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(50))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Even for an expired entry, on_evict must fire.
+        c.cache_remove_entry(&1u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+
+        // No fire for absent key.
+        c.cache_remove_entry(&999u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cache_remove_entry_increments_eviction_counter() {
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(10))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let before = c.cache_evictions().expect("evictions are always tracked");
+        c.cache_remove_entry(&1u32); // expired but present — must increment
+        c.cache_remove_entry(&999u32); // absent — must not increment
+        assert_eq!(
+            c.cache_evictions().expect("evictions are always tracked") - before,
+            1,
+            "cache_remove_entry must increment evictions for present key only"
+        );
     }
 }

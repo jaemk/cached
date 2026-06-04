@@ -1,0 +1,5 @@
+error: `expires = true` and `cache_err = true` are mutually exclusive — `expires` requires the cached value to implement `Expires`, but `cache_err = true` stores `Result<T, E>` as the value type, which does not implement `Expires`. Remove `cache_err = true`.
+  --> tests/ui/concurrent_cached_expires_cache_err_exclusive.rs:10:4
+   |
+10 | fn my_fn(x: u32) -> Result<Val, String> {
+   |    ^^^^^

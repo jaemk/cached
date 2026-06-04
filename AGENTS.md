@@ -9,6 +9,16 @@ Key points:
 - After adding or removing Makefile targets, update `make help` and verify with `make check/help`
 - Run `make ci` to validate the full pipeline before submitting
 
+## Git Push Protocol
+Before every `git push`, show a diff summary so the user can see exactly what is going up:
+
+```bash
+git log origin/BRANCH..HEAD --oneline   # commits being pushed
+git diff origin/BRANCH --stat           # files changed
+```
+
+Follow with a one-sentence summary (e.g. "Pushing 2 commits touching src/lib.rs and CHANGELOG.md"). Then push.
+
 ---
 
 ## Temp Files
@@ -25,7 +35,15 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 
 ---
 
-## Store Types (current names as of v1.1)
+## Toolchain & Edition
+- **Rust edition: 2024.** MSRV is **1.85** (the edition-2024 floor), declared via `rust-version` in `Cargo.toml` and `cached_proc_macro/Cargo.toml`.
+- **`rust-toolchain.toml` pins the toolchain to `1.96.0`** (latest stable) for local development and CI. Always build/format/test with this toolchain — it is what keeps `cargo fmt` deterministic.
+- **If `cargo fmt --check` or `make ci` reports formatting diffs in files you did not touch, you are on the wrong rustfmt** — confirm `cargo --version` shows `1.96.0` (run `rustup toolchain install 1.96.0` if missing) instead of reformatting the whole tree.
+- The pin is dev/CI-only: it is not published and does not affect downstream consumers, who only need Rust ≥ 1.85.
+
+---
+
+## Store Types (current names as of v2.0)
 
 | Type | Module | Description |
 |---|---|---|
@@ -36,6 +54,12 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `TtlSortedCache<K,V>` | `cached::stores` | TTL-ordered, optional size limit; requires `time_stores` |
 | `ExpiringLruCache<K,V>` | `cached::stores` | LRU, size-bounded, per-value expiry via `Expires` trait |
 | `ExpiringCache<K,V>` | `cached::stores` | Unbounded HashMap-backed, per-value expiry via `Expires` trait; default store for `#[cached(expires = true)]` |
+| `ShardedCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
+| `ShardedLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU; default for `#[concurrent_cached(max_size = N)]` |
+| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl = T)]`; requires `time_stores` |
+| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl = T)]`; requires `time_stores` |
+| `ShardedExpiringCache<K,V>` | `cached::stores` | Fully concurrent, sharded per-value expiry (unbounded); default for `#[concurrent_cached(expires = true)]` |
+| `ShardedExpiringLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + per-value expiry; default for `#[concurrent_cached(expires = true, max_size = N)]` |
 
 **`ExpiringCache` / `ExpiringLruCache` notes:**
 - Neither store requires the `time_stores` feature — they are always available.
@@ -51,7 +75,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 - `ExpiringSizedCache` → `TtlSortedCache`
 - `ExpiringValueCache` → `ExpiringLruCache`
 
-**Builder APIs**: All stores expose a `::builder()` constructor (e.g., `LruCache::builder()`, `TtlCache::builder()`). Builders support an `on_evict(|k, v| { ... })` callback fired on every evicted entry, and `try_build()` for fallible construction.
+**Builder APIs**: All stores are constructed exclusively through a `::builder()` constructor (e.g., `LruCache::builder()`, `TtlCache::builder()`). `build()` returns `Result<Store, BuildError>` (fallible) — the direct constructors (`new`, `with_*`) and the `try_build()` alias were removed in 2.0. The size-bound setter is `.max_size(n)` (renamed from `.size(n)` in 2.0). Builders support an `on_evict(|k, v| { ... })` callback fired on every evicted entry.
 
 **`TimedEntry<V>`**: Exposed from `TtlCache::store()` and `LruTtlCache::store()` for direct introspection; fields `instant: Instant` and `value: V`.
 
@@ -90,12 +114,14 @@ use cached::macros::concurrent_cached;
 
 The macro attributes use `ttl =` (not `time =`) and `refresh =` (not `time_refresh =`). Note: `#[once]` supports `ttl =` but has never had a `refresh =` attribute (single-value cache, refresh-on-hit is not applicable).
 
-**Additional `#[cached]` / `#[once]` attributes** (beyond `name`, `size`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `result`, `option`, `with_cached_flag`):
+**2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **deprecated alias** for the preferred `max_size = N` (emits a deprecation warning).
+
+**Additional `#[cached]` / `#[once]` attributes** (beyond `name`, `max_size`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`):
 - `sync_writes`: `false` (default), `true` / `"default"` (whole-cache lock), or `"by_key"` (per-key bucketed locks; `#[cached]` only)
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
 - `unsync_reads`: `bool` — use a shared read lock for cache hits; only works for stores implementing `CachedRead` (e.g. `UnboundCache`, `TtlSortedCache`, `HashMap`)
-- `result_fallback`: `bool` — on `Err`, return the last cached `Ok` value instead; requires `result = true` and a `CloneCached` store
+- `result_fallback`: `bool` — on `Err`, return the last cached `Ok` value instead; requires a `Result<T, E>` return type
 
 **`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution). `#[once]` functions emit `foo_prime_cache()` with no arguments.
 
@@ -168,6 +194,17 @@ make check/readme  # verify in sync
 
 ---
 
+## Fixes Require Tests
+
+Any code fix — whether from a PR review finding, a reported bug, or an internal audit — **must be accompanied by a test** that:
+- **Fails without the fix** (demonstrates the bug was real)
+- **Passes with the fix** (confirms the fix is correct)
+- **Prevents future regression** (will catch the same bug if re-introduced)
+
+Use `tests/cached.rs` for integration/behavioral tests and `tests/ui/` for compile-fail tests. The test must be committed in the same change as the fix, not as a follow-up.
+
+---
+
 ## Mandatory Verification After Every Change
 After making **any** code change, run these steps in order:
 1. **Format** — `cargo fmt`
@@ -176,6 +213,19 @@ After making **any** code change, run these steps in order:
 4. If `src/lib.rs` changed — `make docs && make check/readme`
 
 Do **not** present a change as complete until all verification steps pass.
+
+---
+
+## Agent Skills
+
+Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
+
+| Skill | Path | When to use |
+|---|---|---|
+| `pr-cycle` | `.agents/skills/pr-cycle/SKILL.md` | Review → fix → push → re-request loop on an open PR (modes: `full` / `local` / `remote`) |
+| `pr-review` | `.agents/skills/pr-review/SKILL.md` | Read-only review of a PR/branch diff (code-review + consumer sub-agents); no fixes/push |
+| `release` | `.agents/skills/release/SKILL.md` | Bump versions, update CHANGELOG, create migration guide, regenerate README |
+| `consumer-experience-review` | `.agents/skills/consumer-experience-review/SKILL.md` | Evaluate public API surface from a downstream crate-author perspective |
 
 ---
 
@@ -215,7 +265,6 @@ Do **not** present a change as complete until all verification steps pass.
 | `tests/cached.rs` | Integration tests |
 | `tests/ui/` | Compile-fail trybuild tests + `.stderr` golden files |
 | `examples/` | Runnable usage examples |
-| `docs/MIGRATION-1.0.md` | Human-readable 0.x → 1.0 migration guide |
-| `docs/MIGRATION-1.0-AGENT.md` | Machine-oriented 0.x → 1.0 migration rules for automated tooling |
+| `docs/migrations/` | Per-release migration guides; `PREV-to-X.Y.Z.md` (agent) and `PREV-to-X.Y.Z-human.md` (human) |
 | `local/` | Gitignored scratch space — use for any temp/intermediate files |
 | `Makefile` | All build/test/lint/example targets |

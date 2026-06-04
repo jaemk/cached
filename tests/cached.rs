@@ -4,10 +4,10 @@ Full tests of macro-defined functions
 
 #[cfg(feature = "time_stores")]
 use cached::time::Duration;
-#[cfg(feature = "proc_macro")]
-use cached::{macros::cached, macros::once};
 use cached::{Cached, LruCache, UnboundCache};
 use cached::{Expires, ExpiringLruCache};
+#[cfg(feature = "proc_macro")]
+use cached::{macros::cached, macros::once};
 #[cfg(all(not(feature = "time_stores"), feature = "proc_macro"))]
 use std::time::Duration;
 
@@ -50,10 +50,6 @@ fn compile_fail_macro_arg_validation() {
     // ---- #[cached] ----
     t.compile_fail("tests/ui/cached_self_method.rs");
     t.compile_fail("tests/ui/cached_with_cached_flag_no_return.rs");
-    t.compile_fail("tests/ui/cached_result_option_exclusive.rs");
-    t.compile_fail("tests/ui/cached_result_no_return.rs");
-    t.compile_fail("tests/ui/cached_result_no_inner_type.rs");
-    t.compile_fail("tests/ui/cached_result_complex_return.rs");
     t.compile_fail("tests/ui/cached_key_without_convert.rs");
     t.compile_fail("tests/ui/cached_convert_without_key.rs");
     t.compile_fail("tests/ui/cached_ty_without_create.rs");
@@ -70,17 +66,31 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_expires_non_expires_type.rs");
     t.compile_fail("tests/ui/cached_expires_refresh_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_unbound_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_cache_none_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_cache_err_exclusive.rs");
+    t.compile_fail("tests/ui/cached_cache_err_requires_result_return.rs");
+    t.compile_fail("tests/ui/cached_cache_none_requires_option_return.rs");
+    t.compile_fail("tests/ui/cached_cache_err_result_fallback_exclusive.rs");
+    t.compile_fail("tests/ui/cached_cache_none_with_cached_flag_exclusive.rs");
+    t.compile_fail("tests/ui/cached_size_max_size_exclusive.rs");
+    t.compile_fail("tests/ui/cached_size_attr_deprecated.rs");
+    t.compile_fail("tests/ui/cached_ttl_zero.rs");
+    t.compile_fail("tests/ui/cached_max_size_zero.rs");
 
     // ---- #[once] ----
     t.compile_fail("tests/ui/once_self_method.rs");
     t.compile_fail("tests/ui/once_time_attr_renamed.rs");
     t.compile_fail("tests/ui/once_with_cached_flag_foreign.rs");
-    t.compile_fail("tests/ui/once_result_option_exclusive.rs");
     t.compile_fail("tests/ui/once_expires_ttl_exclusive.rs");
     t.compile_fail("tests/ui/once_expires_non_expires_type.rs");
+    t.compile_fail("tests/ui/once_expires_cache_none_exclusive.rs");
+    t.compile_fail("tests/ui/once_expires_cache_err_exclusive.rs");
     t.compile_fail("tests/ui/once_expires_with_cached_flag_exclusive.rs");
-    t.compile_fail("tests/ui/once_result_no_return.rs");
     t.compile_fail("tests/ui/once_sync_writes_buckets_zero.rs");
+    t.compile_fail("tests/ui/once_cache_err_requires_result_return.rs");
+    t.compile_fail("tests/ui/once_cache_none_requires_option_return.rs");
+    t.compile_fail("tests/ui/once_cache_none_with_cached_flag_exclusive.rs");
+    t.compile_fail("tests/ui/once_ttl_zero.rs");
 
     // ---- #[concurrent_cached] ----
     t.compile_fail("tests/ui/concurrent_cached_self_method.rs");
@@ -90,14 +100,54 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_complex_return.rs");
     t.compile_fail("tests/ui/concurrent_cached_non_result_return.rs");
     t.compile_fail("tests/ui/concurrent_cached_redis_create_conflict.rs");
+    t.compile_fail("tests/ui/concurrent_cached_redis_disk_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_async_redis_no_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_redis_no_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_create_conflict.rs");
+    t.compile_fail("tests/ui/concurrent_cached_max_size_create_conflict.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_create_ignored_attrs.rs");
     t.compile_fail("tests/ui/concurrent_cached_option_return.rs");
-    t.compile_fail("tests/ui/concurrent_cached_custom_ty_required.rs");
+    t.compile_fail("tests/ui/concurrent_cached_result_attr_unsupported.rs");
+    t.compile_fail("tests/ui/concurrent_cached_option_attr_unsupported.rs");
+    t.compile_fail("tests/ui/concurrent_cached_sync_writes_attr_unsupported.rs");
     t.compile_fail("tests/ui/concurrent_cached_custom_create_required.rs");
+    t.compile_fail("tests/ui/concurrent_cached_shards_zero.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_zero.rs");
+    t.compile_fail("tests/ui/concurrent_cached_max_size_zero.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_max_size_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_attr_deprecated.rs");
+    t.compile_fail("tests/ui/concurrent_cached_ttl_zero.rs");
+    t.compile_fail("tests/ui/concurrent_cached_shards_with_redis.rs");
+    t.compile_fail("tests/ui/concurrent_cached_shards_with_disk.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_with_redis.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_with_disk.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_with_redis_ty.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_with_disk_ty.rs");
     t.compile_fail("tests/ui/concurrent_cached_key_without_convert.rs");
+    t.compile_fail("tests/ui/concurrent_cached_refresh_without_ttl.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_redis_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_disk_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_ty_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_create_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_refresh_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_cache_none_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_cache_err_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_result_fallback_expires_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_result_fallback_redis_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_result_fallback_disk_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_result_fallback_requires_ttl.rs");
+    t.compile_fail("tests/ui/concurrent_cached_with_cached_flag_option.rs");
+    t.compile_fail("tests/ui/concurrent_cached_option_with_redis.rs");
+    t.compile_fail("tests/ui/concurrent_cached_cache_none_with_redis.rs");
+    t.compile_fail("tests/ui/concurrent_cached_cache_err_result_fallback_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_result_fallback_with_cached_flag_exclusive.rs");
+    t.compile_fail("tests/ui/cached_result_attr_removed.rs");
+    t.compile_fail("tests/ui/cached_option_attr_removed.rs");
+    t.compile_fail("tests/ui/once_result_attr_removed.rs");
+    t.compile_fail("tests/ui/once_option_attr_removed.rs");
+    t.compile_fail("tests/ui/concurrent_cached_option_attr_removed.rs");
+    t.compile_fail("tests/ui/concurrent_cached_map_error_on_infallible.rs");
 }
 
 #[cfg(feature = "proc_macro")]
@@ -125,13 +175,9 @@ fn unsync_double_sync_writes(n: u32) -> u32 {
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(result = true)]
+#[cached]
 fn proc_cached_result(n: u32) -> Result<Vec<u32>, NoClone> {
-    if n < 5 {
-        Ok(vec![n])
-    } else {
-        Err(NoClone {})
-    }
+    if n < 5 { Ok(vec![n]) } else { Err(NoClone {}) }
 }
 
 #[cfg(feature = "proc_macro")]
@@ -152,13 +198,9 @@ fn test_proc_cached_result() {
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(option = true)]
+#[cached]
 fn proc_cached_option(n: u32) -> Option<Vec<u32>> {
-    if n < 5 {
-        Some(vec![n])
-    } else {
-        None
-    }
+    if n < 5 { Some(vec![n]) } else { None }
 }
 
 #[cfg(feature = "proc_macro")]
@@ -178,6 +220,98 @@ fn test_proc_cached_option() {
         assert_eq!(3, cache.cache_hits().unwrap());
         assert_eq!(5, cache.cache_misses().unwrap());
     }
+}
+
+#[cfg(feature = "proc_macro")]
+static CACHED_CACHE_ERR_TRUE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "proc_macro")]
+#[cached(cache_err = true)]
+fn cached_cache_err_true(n: u32) -> Result<u32, u32> {
+    CACHED_CACHE_ERR_TRUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Err(n)
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_cached_cache_err_true_caches_err() {
+    let before = CACHED_CACHE_ERR_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(cached_cache_err_true(7), Err(7));
+    assert_eq!(cached_cache_err_true(7), Err(7));
+    assert_eq!(
+        CACHED_CACHE_ERR_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+}
+
+#[cfg(feature = "proc_macro")]
+static CACHED_CACHE_NONE_TRUE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "proc_macro")]
+#[cached(cache_none = true)]
+fn cached_cache_none_true(n: u32) -> Option<u32> {
+    CACHED_CACHE_NONE_TRUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if n == 0 { None } else { Some(n) }
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_cached_cache_none_true_caches_none() {
+    let before = CACHED_CACHE_NONE_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(cached_cache_none_true(0), None);
+    assert_eq!(cached_cache_none_true(0), None);
+    assert_eq!(
+        CACHED_CACHE_NONE_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+}
+
+#[cfg(feature = "proc_macro")]
+static CONCURRENT_CACHED_CACHE_ERR_TRUE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "proc_macro")]
+#[cached::macros::concurrent_cached(cache_err = true)]
+fn concurrent_cached_cache_err_true(n: u32) -> Result<u32, u32> {
+    CONCURRENT_CACHED_CACHE_ERR_TRUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Err(n)
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_concurrent_cached_cache_err_true_caches_err() {
+    let before = CONCURRENT_CACHED_CACHE_ERR_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(concurrent_cached_cache_err_true(7), Err(7));
+    assert_eq!(concurrent_cached_cache_err_true(7), Err(7));
+    assert_eq!(
+        CONCURRENT_CACHED_CACHE_ERR_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+}
+
+#[cfg(feature = "proc_macro")]
+static CONCURRENT_CACHED_CACHE_NONE_TRUE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "proc_macro")]
+#[cached::macros::concurrent_cached(cache_none = true)]
+fn concurrent_cached_cache_none_true(n: u32) -> Option<u32> {
+    CONCURRENT_CACHED_CACHE_NONE_TRUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if n == 0 { None } else { Some(n) }
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_concurrent_cached_cache_none_true_caches_none() {
+    let before = CONCURRENT_CACHED_CACHE_NONE_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(concurrent_cached_cache_none_true(0), None);
+    assert_eq!(concurrent_cached_cache_none_true(0), None);
+    assert_eq!(
+        CONCURRENT_CACHED_CACHE_NONE_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
 }
 
 #[cfg(feature = "proc_macro")]
@@ -205,7 +339,7 @@ fn test_cached_return_flag() {
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(result = true, with_cached_flag = true)]
+#[cached(with_cached_flag = true)]
 fn cached_return_flag_result(n: i32) -> Result<cached::Return<i32>, ()> {
     if n == 10 {
         return Err(());
@@ -235,7 +369,7 @@ fn test_cached_return_flag_result() {
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(option = true, with_cached_flag = true)]
+#[cached(with_cached_flag = true)]
 fn cached_return_flag_option(n: i32) -> Option<cached::Return<i32>> {
     if n == 10 {
         return None;
@@ -267,13 +401,9 @@ fn test_cached_return_flag_option() {
 /// should only cache the _first_ `Ok` returned.
 /// all arguments are ignored for subsequent calls.
 #[cfg(feature = "proc_macro")]
-#[once(result = true)]
+#[once]
 fn only_cached_result_once(s: String, error: bool) -> std::result::Result<Vec<String>, u32> {
-    if error {
-        Err(1)
-    } else {
-        Ok(vec![s])
-    }
+    if error { Err(1) } else { Ok(vec![s]) }
 }
 
 #[cfg(feature = "proc_macro")]
@@ -288,16 +418,35 @@ fn test_only_cached_result_once() {
     assert_eq!(a, b);
 }
 
+#[cfg(feature = "proc_macro")]
+static ONCE_CACHE_ERR_TRUE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "proc_macro")]
+#[once(cache_err = true)]
+fn once_cache_err_true(code: u32) -> Result<u32, u32> {
+    ONCE_CACHE_ERR_TRUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Err(code)
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_once_cache_err_true_caches_err() {
+    let before = ONCE_CACHE_ERR_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(once_cache_err_true(7), Err(7));
+    assert_eq!(once_cache_err_true(9), Err(7));
+    assert_eq!(
+        ONCE_CACHE_ERR_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+}
+
 /// should only cache the _first_ `Some` returned .
 /// all arguments are ignored for subsequent calls
 #[cfg(feature = "proc_macro")]
-#[once(option = true)]
+#[once]
 fn only_cached_option_once(s: String, none: bool) -> Option<Vec<String>> {
-    if none {
-        None
-    } else {
-        Some(vec![s])
-    }
+    if none { None } else { Some(vec![s]) }
 }
 
 #[cfg(feature = "proc_macro")]
@@ -313,7 +462,30 @@ fn test_only_cached_option_once() {
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(size = 2)]
+static ONCE_CACHE_NONE_TRUE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "proc_macro")]
+#[once(cache_none = true)]
+fn once_cache_none_true(n: u32) -> Option<u32> {
+    ONCE_CACHE_NONE_TRUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if n == 0 { None } else { Some(n) }
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_once_cache_none_true_caches_none() {
+    let before = ONCE_CACHE_NONE_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(once_cache_none_true(0), None);
+    assert_eq!(once_cache_none_true(1), None);
+    assert_eq!(
+        ONCE_CACHE_NONE_TRUE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+}
+
+#[cfg(feature = "proc_macro")]
+#[cached(max_size = 2)]
 fn cached_smartstring(s: smartstring::alias::String) -> smartstring::alias::String {
     if s == "very stringy" {
         smartstring::alias::String::from("equal")
@@ -352,12 +524,96 @@ fn test_cached_smartstring() {
 
 #[cfg(feature = "proc_macro")]
 #[cached(
-    size = 2,
+    max_size = 2,
     key = "smartstring::alias::String",
     convert = r#"{ smartstring::alias::String::from(s) }"#
 )]
 fn cached_smartstring_from_str(s: &str) -> bool {
     s == "true"
+}
+
+// `max_size` is an alias for `size`: it must set the LRU bound identically.
+#[cfg(feature = "proc_macro")]
+#[cached(max_size = 2)]
+fn cached_max_size_alias(n: u32) -> u32 {
+    n * 2
+}
+
+#[cfg(feature = "proc_macro")]
+#[test]
+fn test_cached_max_size_alias_sets_bound() {
+    assert_eq!(cached_max_size_alias(1), 2);
+    assert_eq!(cached_max_size_alias(2), 4);
+    assert_eq!(cached_max_size_alias(3), 6); // evicts the LRU entry
+    let cache = CACHED_MAX_SIZE_ALIAS.read();
+    // capacity reflects the `max_size = 2` bound, and the store never exceeds it
+    assert_eq!(cache.capacity(), 2);
+    assert_eq!(cache.cache_size(), 2);
+}
+
+// Regression coverage for the deprecated `size` attribute spelling. `size` is a
+// deprecated alias for `max_size`: it still compiles and sets the LRU bound
+// identically, but emits a deprecation warning at the `size` token. The module
+// carries `#[allow(deprecated)]` because the macro expands the deprecation marker
+// as a *sibling const* of the function (module scope), not inside the fn body —
+// so a function-level allow would not suppress it.
+#[cfg(feature = "proc_macro")]
+#[allow(deprecated)]
+mod deprecated_size_alias {
+    use super::*;
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cached(size = 2)]
+    fn cached_size_alias(n: u32) -> u32 {
+        n * 2
+    }
+
+    #[test]
+    fn deprecated_size_attr_still_sets_bound() {
+        assert_eq!(cached_size_alias(1), 2);
+        assert_eq!(cached_size_alias(2), 4);
+        assert_eq!(cached_size_alias(3), 6); // evicts the LRU entry
+        let cache = CACHED_SIZE_ALIAS.read();
+        // capacity reflects the `size = 2` bound, identical to `max_size = 2`
+        assert_eq!(cache.capacity(), 2);
+        assert_eq!(cache.cache_size(), 2);
+    }
+
+    static SIZE_ALIAS_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    #[concurrent_cached(size = 100)]
+    fn concurrent_size_alias(x: u64) -> u64 {
+        SIZE_ALIAS_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[test]
+    fn deprecated_size_attr_routes_to_sharded_lru() {
+        SIZE_ALIAS_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(concurrent_size_alias(10), 20);
+        assert_eq!(concurrent_size_alias(10), 20); // cached — no second call
+        assert_eq!(concurrent_size_alias(11), 22); // different key
+        assert_eq!(SIZE_ALIAS_CALLS.load(Ordering::Relaxed), 2);
+    }
+}
+
+// The sync `Cached` trait exposes `remove_entry` / `delete` short aliases, matching
+// the `ConcurrentCached` trait. They delegate to `cache_remove_entry` / `cache_delete`.
+#[test]
+fn sync_cached_remove_entry_and_delete_aliases() {
+    let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
+    cache.cache_set("a".to_string(), 1);
+    cache.cache_set("b".to_string(), 2);
+
+    // `remove_entry` returns the stored key and value, like `cache_remove_entry`.
+    assert_eq!(cache.remove_entry("a"), Some(("a".to_string(), 1)));
+    assert_eq!(cache.remove_entry("a"), None); // already removed
+
+    // `delete` returns true when an entry was physically removed, false if absent.
+    assert!(cache.delete("b"));
+    assert!(!cache.delete("b"));
+    assert_eq!(cache.cache_size(), 0);
 }
 
 #[cfg(feature = "proc_macro")]
@@ -471,7 +727,7 @@ mod expires_macro_tests {
         Val { v: k, expired }
     }
 
-    #[cached(expires = true, size = 4, key = "u32", convert = "{ k }")]
+    #[cached(expires = true, max_size = 4, key = "u32", convert = "{ k }")]
     fn sm_cached_expires_lru(k: u32, expired: bool) -> Val {
         Val { v: k, expired }
     }
@@ -573,7 +829,7 @@ mod time_store_tests {
 
     #[cached(
         ty = "TtlSortedCache<String, usize>",
-        create = "{ TtlSortedCache::new(Duration::from_secs(60)) }",
+        create = "{ TtlSortedCache::builder().ttl(Duration::from_secs(60)).build().unwrap() }",
         key = "String",
         convert = r#"{ input.to_string() }"#,
         unsync_reads = true
@@ -604,7 +860,7 @@ mod time_store_tests {
         assert_eq!(1, slow_once_timestamp_after_body(2));
     }
 
-    #[cached(size = 1, ttl = 1)]
+    #[cached(max_size = 1, ttl = 1)]
     fn proc_timed_sized_sleeper(n: u64) -> u64 {
         sleep(Duration::new(1, 0));
         n
@@ -673,16 +929,12 @@ mod time_store_tests {
     /// should only cache the _first_ `Ok` returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(result = true, ttl = 1)]
+    #[once(ttl = 1)]
     fn only_cached_result_once_per_second(
         s: String,
         error: bool,
     ) -> std::result::Result<Vec<String>, u32> {
-        if error {
-            Err(1)
-        } else {
-            Ok(vec![s])
-        }
+        if error { Err(1) } else { Ok(vec![s]) }
     }
 
     #[test]
@@ -699,13 +951,9 @@ mod time_store_tests {
     /// should only cache the _first_ `Some` returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(option = true, ttl = 1)]
+    #[once(ttl = 1)]
     fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
-        if none {
-            None
-        } else {
-            Some(vec![s])
-        }
+        if none { None } else { Some(vec![s]) }
     }
 
     #[test]
@@ -825,7 +1073,7 @@ mod time_store_tests {
     }
 
     #[cached(
-        size = 2,
+        max_size = 2,
         ttl = 1,
         refresh = true,
         key = "String",
@@ -865,7 +1113,7 @@ mod time_store_tests {
     }
 
     #[cached(
-        size = 2,
+        max_size = 2,
         ttl = 1,
         refresh = true,
         key = "String",
@@ -906,7 +1154,12 @@ mod time_store_tests {
         }
     }
 
-    #[cached(size = 2, ttl = 1, key = "String", convert = r#"{ String::from(s) }"#)]
+    #[cached(
+        max_size = 2,
+        ttl = 1,
+        key = "String",
+        convert = r#"{ String::from(s) }"#
+    )]
     fn cached_timed_sized_prime(s: &str) -> bool {
         s == "true"
     }
@@ -946,7 +1199,7 @@ mod time_store_tests {
         }
     }
 
-    #[cached::macros::cached(result = true, ttl = 1, result_fallback = true)]
+    #[cached::macros::cached(ttl = 1, result_fallback = true)]
     fn always_failing() -> Result<String, ()> {
         Err(())
     }
@@ -987,6 +1240,51 @@ mod time_store_tests {
         }
     }
 
+    // --- concurrent_cached result_fallback ---
+
+    #[cfg(feature = "proc_macro")]
+    static CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(true);
+
+    #[cfg(feature = "proc_macro")]
+    #[cached::macros::concurrent_cached(ttl = 1, result_fallback = true)]
+    fn concurrent_result_fallback_fn() -> Result<u32, &'static str> {
+        if CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok(42)
+        } else {
+            Err("backend down")
+        }
+    }
+
+    #[cfg(feature = "proc_macro")]
+    #[test]
+    fn test_concurrent_cached_result_fallback() {
+        // Ensure any prior cached entry has expired before the test starts.
+        std::thread::sleep(Duration::from_millis(1100));
+
+        // No cached Ok yet; function returns Err → raw Err returned to caller.
+        CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            concurrent_result_fallback_fn().is_err(),
+            "no prior Ok → Err returned directly"
+        );
+
+        // Now succeed: Ok(42) is cached.
+        CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(concurrent_result_fallback_fn(), Ok(42));
+
+        // Wait for TTL to expire.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        // Function returns Err again; fallback returns the stale Ok(42).
+        CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            concurrent_result_fallback_fn(),
+            Ok(42),
+            "expired Ok entry should be returned via fallback"
+        );
+    }
+
     #[derive(Clone, Debug)]
     struct OnceExpiredValue {
         val: u32,
@@ -1025,7 +1323,7 @@ mod time_store_tests {
         assert_eq!(r4.val, 4);
     }
 
-    #[once(result = true, expires = true)]
+    #[once(expires = true)]
     fn get_once_result_expired(val: u32, expired: bool) -> Result<OnceExpiredValue, String> {
         Ok(OnceExpiredValue { val, expired })
     }
@@ -1052,7 +1350,7 @@ mod time_store_tests {
         assert_eq!(get_once_result_expired(5, false).unwrap().val, 4);
     }
 
-    #[once(option = true, expires = true)]
+    #[once(expires = true)]
     fn get_once_option_expired(val: u32, expired: bool) -> Option<OnceExpiredValue> {
         Some(OnceExpiredValue { val, expired })
     }
@@ -1079,7 +1377,7 @@ mod time_store_tests {
         assert_eq!(get_once_option_expired(5, false).unwrap().val, 4);
     }
 
-    #[once(result = true, expires = true)]
+    #[once(expires = true)]
     fn get_once_result_expired_or_err(
         val: u32,
         expired: bool,
@@ -1108,7 +1406,7 @@ mod time_store_tests {
         );
     }
 
-    #[once(option = true, expires = true)]
+    #[once(expires = true)]
     fn get_once_option_expired_or_none(
         val: u32,
         expired: bool,
@@ -1160,23 +1458,21 @@ mod time_store_tests {
             assert_eq!(vec!["b".to_string()], b);
         }
 
-        #[once(result = true, ttl = 1)]
+        #[once(ttl = 1)]
         async fn only_cached_result_once_per_second_a(
             s: String,
             error: bool,
         ) -> std::result::Result<Vec<String>, u32> {
-            if error {
-                Err(1)
-            } else {
-                Ok(vec![s])
-            }
+            if error { Err(1) } else { Ok(vec![s]) }
         }
 
         #[tokio::test]
         async fn test_only_cached_result_once_per_second_a() {
-            assert!(only_cached_result_once_per_second_a("z".to_string(), true)
-                .await
-                .is_err());
+            assert!(
+                only_cached_result_once_per_second_a("z".to_string(), true)
+                    .await
+                    .is_err()
+            );
             let a = only_cached_result_once_per_second_a("a".to_string(), false)
                 .await
                 .unwrap();
@@ -1191,23 +1487,21 @@ mod time_store_tests {
             assert_eq!(vec!["b".to_string()], b);
         }
 
-        #[once(option = true, ttl = 1)]
+        #[once(ttl = 1)]
         async fn only_cached_option_once_per_second_a(
             s: String,
             none: bool,
         ) -> Option<Vec<String>> {
-            if none {
-                None
-            } else {
-                Some(vec![s])
-            }
+            if none { None } else { Some(vec![s]) }
         }
 
         #[tokio::test]
         async fn test_only_cached_option_once_per_second_a() {
-            assert!(only_cached_option_once_per_second_a("z".to_string(), true)
-                .await
-                .is_none());
+            assert!(
+                only_cached_option_once_per_second_a("z".to_string(), true)
+                    .await
+                    .is_none()
+            );
             let a = only_cached_option_once_per_second_a("a".to_string(), false)
                 .await
                 .unwrap();
@@ -1319,7 +1613,7 @@ mod time_store_tests {
             assert_eq!(r4.val, 4);
         }
 
-        #[once(result = true, expires = true)]
+        #[once(expires = true)]
         async fn get_once_result_expired_async(
             val: u32,
             expired: bool,
@@ -1362,7 +1656,7 @@ mod time_store_tests {
             );
         }
 
-        #[once(option = true, expires = true)]
+        #[once(expires = true)]
         async fn get_once_option_expired_async(
             val: u32,
             expired: bool,
@@ -1420,7 +1714,7 @@ mod time_store_tests {
                 }
             }
 
-            let mut cache = ExpiringCache::new();
+            let mut cache = ExpiringCache::builder().build().unwrap();
 
             // async_get_or_set_with: vacant
             let r1 = cache
@@ -1492,7 +1786,7 @@ mod time_store_tests {
             assert_eq!(async_cached_expires_basic(1, false).await.val, 1);
         }
 
-        #[cached(expires = true, result = true, key = "u32", convert = "{ k }")]
+        #[cached(expires = true, key = "u32", convert = "{ k }")]
         async fn async_cached_expires_result(
             k: u32,
             expired: bool,
@@ -1531,7 +1825,7 @@ mod time_store_tests {
             assert!(!r.expired);
         }
 
-        #[cached(expires = true, option = true, key = "u32", convert = "{ k }")]
+        #[cached(expires = true, key = "u32", convert = "{ k }")]
         async fn async_cached_expires_option(
             k: u32,
             expired: bool,
@@ -1570,13 +1864,7 @@ mod time_store_tests {
             assert!(!r.expired);
         }
 
-        #[cached(
-            expires = true,
-            result = true,
-            result_fallback = true,
-            key = "u32",
-            convert = "{ k }"
-        )]
+        #[cached(expires = true, result_fallback = true, key = "u32", convert = "{ k }")]
         async fn async_cached_expires_result_fallback(
             k: u32,
             expired: bool,
@@ -1657,7 +1945,7 @@ mod time_store_tests {
         assert_eq!(cached_expires_basic(1, false).val, 1);
     }
 
-    #[cached(expires = true, size = 4, key = "u32", convert = "{ k }")]
+    #[cached(expires = true, max_size = 4, key = "u32", convert = "{ k }")]
     fn cached_expires_lru(k: u32, expired: bool) -> CachedExpiresVal {
         CachedExpiresVal { val: k, expired }
     }
@@ -1685,7 +1973,7 @@ mod time_store_tests {
         }
     }
 
-    #[cached(expires = true, result = true, key = "u32", convert = "{ k }")]
+    #[cached(expires = true, key = "u32", convert = "{ k }")]
     fn cached_expires_result(k: u32, expired: bool, err: bool) -> Result<CachedExpiresVal, String> {
         if err {
             Err("forced error".to_string())
@@ -1715,7 +2003,7 @@ mod time_store_tests {
         }
     }
 
-    #[cached(expires = true, option = true, key = "u32", convert = "{ k }")]
+    #[cached(expires = true, key = "u32", convert = "{ k }")]
     fn cached_expires_option(k: u32, expired: bool, none: bool) -> Option<CachedExpiresVal> {
         if none {
             None
@@ -1745,13 +2033,7 @@ mod time_store_tests {
         }
     }
 
-    #[cached(
-        expires = true,
-        result = true,
-        result_fallback = true,
-        key = "u32",
-        convert = "{ k }"
-    )]
+    #[cached(expires = true, result_fallback = true, key = "u32", convert = "{ k }")]
     fn cached_expires_result_fallback(
         k: u32,
         expired: bool,
@@ -1794,7 +2076,7 @@ mod time_store_tests {
             }
         }
 
-        let mut cache = ExpiringCache::new();
+        let mut cache = ExpiringCache::builder().build().unwrap();
         cache.cache_set(
             "a".to_string(),
             Value {
@@ -1820,27 +2102,220 @@ mod time_store_tests {
     }
 }
 
+#[cfg(feature = "time_stores")]
+mod sharded_ttl_tests {
+    // Verify that `refresh_on_hit = true` actually extends entry lifetime.
+    #[test]
+    fn sharded_ttl_refresh_on_hit_extends_lifetime() {
+        use cached::ConcurrentCached;
+        use cached::ShardedTtlCache;
+        use cached::time::Duration;
+
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_millis(3_000))
+            .shards(4)
+            .refresh_on_hit(true)
+            .build()
+            .expect("valid config");
+
+        let _ = ConcurrentCached::cache_set(&cache, 1u32, 42u32);
+        // Sleep 500ms; entry should still be well inside its 3s TTL.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            ConcurrentCached::cache_get(&cache, &1u32).expect("infallible"),
+            Some(42),
+            "entry should still be alive before TTL expires"
+        );
+        // Sleep another 1_500ms. This is past the original expiry, but inside the
+        // refreshed TTL window from the previous get (~1_500ms margin to refreshed expiry).
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert_eq!(
+            ConcurrentCached::cache_get(&cache, &1u32).expect("infallible"),
+            Some(42),
+            "entry should still be alive after TTL was refreshed on the previous get"
+        );
+        // Sleep past the last refresh; entry should now be expired.
+        std::thread::sleep(Duration::from_millis(3_200));
+        assert_eq!(
+            ConcurrentCached::cache_get(&cache, &1u32).expect("infallible"),
+            None,
+            "entry should be expired after TTL elapsed with no further refresh"
+        );
+    }
+
+    #[test]
+    fn sharded_ttl_stores_implement_cache_evict_trait() {
+        use cached::time::Duration;
+        use cached::{CacheEvict, ShardedLruTtlCache, ShardedTtlCache};
+
+        fn assert_cache_evict<C: CacheEvict>(cache: &mut C) -> usize {
+            cache.evict()
+        }
+
+        let mut ttl: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("valid config");
+        let mut lru_ttl: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(16)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("valid config");
+
+        assert_eq!(assert_cache_evict(&mut ttl), 0);
+        assert_eq!(assert_cache_evict(&mut lru_ttl), 0);
+    }
+
+    #[test]
+    fn sharded_ttl_builders_accept_refresh_alias() {
+        use cached::time::Duration;
+        use cached::{ShardedLruTtlCache, ShardedTtlCache};
+
+        let ttl = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .refresh(true)
+            .build()
+            .expect("valid config");
+        assert!(ttl.refresh_on_hit());
+
+        let lru_ttl = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .refresh(true)
+            .build()
+            .expect("valid config");
+        assert!(lru_ttl.refresh_on_hit());
+    }
+
+    // The non-sharded TTL builders now expose `refresh_on_hit(..)` as the primary
+    // setter (matching the sharded builders) with `refresh(..)` retained as an alias.
+    #[test]
+    fn non_sharded_ttl_builders_accept_refresh_on_hit_and_refresh_alias() {
+        use cached::time::Duration;
+        use cached::{LruTtlCache, TtlCache};
+
+        // Primary `.refresh_on_hit(true)` setter.
+        let ttl = TtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .refresh_on_hit(true)
+            .build()
+            .expect("valid config");
+        assert!(ttl.refresh_on_hit());
+
+        let lru_ttl = LruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .refresh_on_hit(true)
+            .build()
+            .expect("valid config");
+        assert!(lru_ttl.refresh_on_hit());
+
+        // `.refresh(true)` alias sets the same flag.
+        let ttl_alias = TtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .refresh(true)
+            .build()
+            .expect("valid config");
+        assert!(ttl_alias.refresh_on_hit());
+
+        let lru_ttl_alias = LruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .refresh(true)
+            .build()
+            .expect("valid config");
+        assert!(lru_ttl_alias.refresh_on_hit());
+
+        // Both setters default to / can clear the flag.
+        let ttl_off = TtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .refresh_on_hit(false)
+            .build()
+            .expect("valid config");
+        assert!(!ttl_off.refresh_on_hit());
+    }
+
+    #[test]
+    fn sharded_lru_ttl_evict_does_not_double_count_evictions_or_double_fire_on_evict() {
+        use cached::ConcurrentCached;
+        use cached::ShardedLruTtlCache;
+        use cached::time::Duration;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let fired = Arc::new(AtomicU32::new(0));
+        let fired_clone = fired.clone();
+        let cache = ShardedLruTtlCache::builder()
+            .max_size(16)
+            .ttl(Duration::from_millis(50))
+            .on_evict(move |_k, _v| {
+                fired_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        cache.cache_set(1u32, 10u32).expect("infallible");
+        cache.cache_set(2u32, 20u32).expect("infallible");
+        cache.cache_set(3u32, 30u32).expect("infallible");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        // evict() should report 3, fire on_evict exactly 3 times (not 6), and
+        // metrics().evictions should return 3 (not 6).
+        assert_eq!(cache.evict(), 3);
+        assert_eq!(fired.load(Ordering::Relaxed), 3);
+        assert_eq!(cache.metrics().evictions, Some(3));
+    }
+
+    #[test]
+    fn sharded_ttl_evict_fires_on_evict_and_increments_evictions_counter() {
+        use cached::ConcurrentCached;
+        use cached::ShardedTtlCache;
+        use cached::time::Duration;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let fired = Arc::new(AtomicU32::new(0));
+        let fired_clone = fired.clone();
+        let cache = ShardedTtlCache::builder()
+            .ttl(Duration::from_millis(50))
+            .on_evict(move |_k, _v| {
+                fired_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        cache.cache_set(1u32, 10u32).expect("infallible");
+        cache.cache_set(2u32, 20u32).expect("infallible");
+        cache.cache_set(3u32, 30u32).expect("infallible");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert_eq!(cache.evict(), 3);
+        assert_eq!(fired.load(Ordering::Relaxed), 3);
+        assert_eq!(cache.metrics().evictions, Some(3));
+    }
+}
+
 #[cfg(all(feature = "async", feature = "proc_macro"))]
 mod async_tests {
     use super::*;
 
-    #[once(result = true)]
+    #[once]
     async fn only_cached_result_once_a(
         s: String,
         error: bool,
     ) -> std::result::Result<Vec<String>, u32> {
-        if error {
-            Err(1)
-        } else {
-            Ok(vec![s])
-        }
+        if error { Err(1) } else { Ok(vec![s]) }
     }
 
     #[tokio::test]
     async fn test_only_cached_result_once_a() {
-        assert!(only_cached_result_once_a("z".to_string(), true)
-            .await
-            .is_err());
+        assert!(
+            only_cached_result_once_a("z".to_string(), true)
+                .await
+                .is_err()
+        );
         let a = only_cached_result_once_a("a".to_string(), false)
             .await
             .unwrap();
@@ -1855,20 +2330,18 @@ mod async_tests {
         assert_eq!(a, b);
     }
 
-    #[once(option = true)]
+    #[once]
     async fn only_cached_option_once_a(s: String, none: bool) -> Option<Vec<String>> {
-        if none {
-            None
-        } else {
-            Some(vec![s])
-        }
+        if none { None } else { Some(vec![s]) }
     }
 
     #[tokio::test]
     async fn test_only_cached_option_once_a() {
-        assert!(only_cached_option_once_a("z".to_string(), true)
-            .await
-            .is_none());
+        assert!(
+            only_cached_option_once_a("z".to_string(), true)
+                .await
+                .is_none()
+        );
         let a = only_cached_option_once_a("a".to_string(), false)
             .await
             .unwrap();
@@ -1912,8 +2385,8 @@ mod async_tests {
 #[cfg(all(feature = "disk_store", feature = "proc_macro"))]
 mod disk_tests {
     use super::*;
-    use cached::macros::concurrent_cached;
     use cached::DiskCache;
+    use cached::macros::concurrent_cached;
     use thiserror::Error;
 
     #[derive(Error, Debug, PartialEq, Clone)]
@@ -2093,6 +2566,1556 @@ mod disk_tests {
 // (which `PhantomData<(K, V)>` propagated from `V: Sync`), and the async path
 // failed at the explicit `V: Send + Sync` bound. Compile-only — no server
 // required.
+// Plain (non-Result) return types for `#[concurrent_cached]` on the default
+// in-memory sharded store. The macro generates code that calls `.unwrap()` on
+// the infallible cache operations instead of wrapping in `Ok(...)`.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_plain_return {
+    use cached::macros::concurrent_cached;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static PLAIN_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PLAIN_OPTION_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PLAIN_OPTION_NONE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PLAIN_MAX_SIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached]
+    fn plain_double(x: u64) -> u64 {
+        PLAIN_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[concurrent_cached(max_size = 100)]
+    fn plain_double_lru(x: u64) -> u64 {
+        x * 2
+    }
+
+    // `max_size` is an alias for `size` on #[concurrent_cached] too: it must
+    // route to the sharded LRU store identically.
+    #[concurrent_cached(max_size = 100)]
+    fn plain_double_lru_max_size(x: u64) -> u64 {
+        PLAIN_MAX_SIZE_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    /// Default: Option<T> skips None (smart-option). Only Some(T) is cached.
+    #[concurrent_cached]
+    fn plain_option(x: u64) -> Option<u64> {
+        PLAIN_OPTION_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 { None } else { Some(x * 2) }
+    }
+
+    /// Opt-in: cache_none = true stores None in the cache too.
+    #[concurrent_cached(cache_none = true)]
+    fn plain_option_cache_none(x: u64) -> Option<u64> {
+        PLAIN_OPTION_NONE_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 { None } else { Some(x * 2) }
+    }
+
+    #[concurrent_cached]
+    fn plain_hash_map(x: u64) -> HashMap<u64, u64> {
+        let mut map = HashMap::new();
+        map.insert(x, x * 2);
+        map
+    }
+
+    #[test]
+    fn plain_return_compiles_and_caches() {
+        PLAIN_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(plain_double(21), 42);
+        assert_eq!(plain_double(21), 42); // cached — no second call
+        assert_eq!(plain_double(22), 44); // different key
+        assert_eq!(PLAIN_CALLS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn plain_return_lru_compiles_and_caches() {
+        assert_eq!(plain_double_lru(10), 20);
+        assert_eq!(plain_double_lru(10), 20); // cached
+    }
+
+    #[test]
+    fn plain_return_max_size_alias_compiles_and_caches() {
+        PLAIN_MAX_SIZE_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(plain_double_lru_max_size(10), 20);
+        assert_eq!(plain_double_lru_max_size(10), 20); // cached — no second call
+        assert_eq!(plain_double_lru_max_size(11), 22); // different key
+        assert_eq!(PLAIN_MAX_SIZE_CALLS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn plain_option_return_skips_none_caches_some() {
+        PLAIN_OPTION_CALLS.store(0, Ordering::Relaxed);
+        // None is NOT cached — function runs again each time
+        assert_eq!(plain_option(0), None);
+        assert_eq!(plain_option(0), None);
+        assert_eq!(
+            PLAIN_OPTION_CALLS.load(Ordering::Relaxed),
+            2,
+            "None should NOT be cached by default"
+        );
+        // Some(T) IS cached
+        assert_eq!(plain_option(5), Some(10));
+        assert_eq!(plain_option(5), Some(10));
+        assert_eq!(
+            PLAIN_OPTION_CALLS.load(Ordering::Relaxed),
+            3,
+            "Some should be cached"
+        );
+    }
+
+    #[test]
+    fn plain_option_cache_none_caches_none_and_some() {
+        PLAIN_OPTION_NONE_CALLS.store(0, Ordering::Relaxed);
+        // With cache_none = true, None IS cached
+        assert_eq!(plain_option_cache_none(0), None);
+        assert_eq!(plain_option_cache_none(0), None);
+        assert_eq!(
+            PLAIN_OPTION_NONE_CALLS.load(Ordering::Relaxed),
+            1,
+            "None should be cached with cache_none = true"
+        );
+        // Some(T) is also cached
+        assert_eq!(plain_option_cache_none(5), Some(10));
+        assert_eq!(plain_option_cache_none(5), Some(10));
+        assert_eq!(
+            PLAIN_OPTION_NONE_CALLS.load(Ordering::Relaxed),
+            2,
+            "Some should be cached"
+        );
+    }
+
+    #[test]
+    fn plain_generic_return_is_not_misclassified_as_result() {
+        assert_eq!(plain_hash_map(7).get(&7), Some(&14));
+        assert_eq!(plain_hash_map(7).get(&7), Some(&14));
+    }
+}
+
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_plain_return_ttl {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TTL_PLAIN_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(ttl = 60)]
+    fn plain_double_ttl(x: u64) -> u64 {
+        TTL_PLAIN_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[concurrent_cached(max_size = 50, ttl = 60)]
+    fn plain_double_lru_ttl(x: u64) -> u64 {
+        x * 2
+    }
+
+    #[test]
+    fn plain_ttl_compiles_and_caches() {
+        TTL_PLAIN_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(plain_double_ttl(21), 42);
+        assert_eq!(plain_double_ttl(21), 42); // cached
+        assert_eq!(TTL_PLAIN_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn plain_lru_ttl_compiles_and_caches() {
+        assert_eq!(plain_double_lru_ttl(21), 42);
+        assert_eq!(plain_double_lru_ttl(21), 42); // cached
+    }
+}
+
+// Sharded in-memory default for `#[concurrent_cached]`. No `ty`, `create`,
+// `map_error`, `redis`, or `disk` — the macro defaults to `ShardedCache`.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_default_in_memory {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SLOW_DOUBLE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static FALLIBLE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static CUSTOM_RESULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PLAIN_ALIAS_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static BARE_RESULT_ALIAS_CALLS: AtomicUsize = AtomicUsize::new(0);
+    // Plain return type — no boilerplate required.
+    #[concurrent_cached]
+    fn slow_double(x: u64) -> u64 {
+        SLOW_DOUBLE_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    // Result<T, E>: only Ok values are cached; Err is returned but not stored.
+    #[concurrent_cached]
+    fn slow_double_fallible(x: u64) -> Result<u64, String> {
+        FALLIBLE_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 {
+            Err("zero is not cacheable".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    // Type aliases are not resolved at macro expansion time. Only a last path segment
+    // of exactly `Result` is treated as a Result return; any alias — even one named
+    // `MyResult<T>` — is treated as a plain value and its `Err` variant is cached.
+    type MyResult<T> = Result<T, String>;
+
+    #[concurrent_cached]
+    fn slow_double_custom_result(x: u64) -> MyResult<u64> {
+        CUSTOM_RESULT_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 {
+            Err("zero is cached (plain alias)".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    // Same: `Api<T>` does not resolve to `Result` at macro time, so Err is cached.
+    type Api<T> = Result<T, String>;
+
+    #[concurrent_cached]
+    fn slow_double_plain_alias(x: u64) -> Api<u64> {
+        PLAIN_ALIAS_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 {
+            Err("zero is cached for this plain alias".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    // `BareResult` has no type arguments, so it cannot match `Result<T, E>` at
+    // macro-expansion time; it is treated as a plain value (Err is cached).
+    type BareResult = Result<u64, String>;
+
+    #[concurrent_cached]
+    fn slow_double_bare_result_alias(x: u64) -> BareResult {
+        BARE_RESULT_ALIAS_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 {
+            Err("zero is cached for this bare alias".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    #[test]
+    fn bare_default_compiles_and_caches() {
+        SLOW_DOUBLE_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(slow_double(21), 42);
+        assert_eq!(slow_double(21), 42); // cached — no second call
+        assert_eq!(slow_double(22), 44); // different key
+        assert_eq!(SLOW_DOUBLE_CALLS.load(Ordering::Relaxed), 2); // 21 and 22, not a third for 21
+    }
+
+    #[test]
+    fn result_return_skips_caching_on_err() {
+        FALLIBLE_CALLS.store(0, Ordering::Relaxed);
+        // Err is not cached; each call to the 0 key hits the function body.
+        assert!(slow_double_fallible(0).is_err());
+        assert!(slow_double_fallible(0).is_err());
+        assert_eq!(FALLIBLE_CALLS.load(Ordering::Relaxed), 2);
+        // Ok is cached normally.
+        assert_eq!(slow_double_fallible(5), Ok(10));
+        assert_eq!(slow_double_fallible(5), Ok(10)); // cached
+        assert_eq!(FALLIBLE_CALLS.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn custom_result_alias_treated_as_plain_return() {
+        CUSTOM_RESULT_CALLS.store(0, Ordering::Relaxed);
+        // MyResult<T> is a type alias; the macro sees `MyResult`, not `Result`,
+        // so Err is cached just like any other plain value.
+        assert!(slow_double_custom_result(0).is_err());
+        assert!(slow_double_custom_result(0).is_err()); // served from cache
+        assert_eq!(CUSTOM_RESULT_CALLS.load(Ordering::Relaxed), 1);
+
+        assert_eq!(slow_double_custom_result(21), Ok(42));
+        assert_eq!(slow_double_custom_result(21), Ok(42)); // cached
+        assert_eq!(CUSTOM_RESULT_CALLS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn result_alias_without_result_suffix_is_treated_as_plain_return() {
+        PLAIN_ALIAS_CALLS.store(0, Ordering::Relaxed);
+        assert!(slow_double_plain_alias(0).is_err());
+        assert!(slow_double_plain_alias(0).is_err());
+        assert_eq!(PLAIN_ALIAS_CALLS.load(Ordering::Relaxed), 1);
+
+        assert_eq!(slow_double_plain_alias(21), Ok(42));
+        assert_eq!(slow_double_plain_alias(21), Ok(42));
+        assert_eq!(PLAIN_ALIAS_CALLS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn bare_result_alias_without_type_args_is_treated_as_plain_return() {
+        BARE_RESULT_ALIAS_CALLS.store(0, Ordering::Relaxed);
+        // `BareResult` has ident `BareResult`, not `Result`, so the exact-ident check
+        // rejects it and it is treated as a plain value — `Err` is cached.
+        assert!(slow_double_bare_result_alias(0).is_err());
+        assert!(slow_double_bare_result_alias(0).is_err());
+        assert_eq!(BARE_RESULT_ALIAS_CALLS.load(Ordering::Relaxed), 1);
+
+        assert_eq!(slow_double_bare_result_alias(21), Ok(42));
+        assert_eq!(slow_double_bare_result_alias(21), Ok(42));
+        assert_eq!(BARE_RESULT_ALIAS_CALLS.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[cfg(all(feature = "proc_macro", feature = "async_core"))]
+mod concurrent_cached_default_with_both_traits_in_scope {
+    use cached::macros::concurrent_cached;
+    #[allow(unused_imports)]
+    use cached::{ConcurrentCached, ConcurrentCachedAsync};
+
+    #[concurrent_cached]
+    fn double_with_both_traits_in_scope(x: u64) -> u64 {
+        x * 2
+    }
+
+    #[test]
+    fn sync_macro_uses_ufcs_to_avoid_trait_method_ambiguity() {
+        assert_eq!(double_with_both_traits_in_scope(21), 42);
+    }
+}
+
+// `size = N` selects `ShardedLruCache`.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_default_with_max_size {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SLOW_TRIPLE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(max_size = 100)]
+    fn slow_triple(x: u64) -> u64 {
+        SLOW_TRIPLE_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 3
+    }
+
+    #[test]
+    fn size_attr_compiles_and_caches() {
+        SLOW_TRIPLE_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(slow_triple(21), 63);
+        assert_eq!(slow_triple(21), 63); // cached
+        assert_eq!(SLOW_TRIPLE_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
+
+// `ttl = T` selects `ShardedTtlCache`.
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_default_with_ttl {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SLOW_QUAD_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(ttl = 60)]
+    fn slow_quad(x: u64) -> u64 {
+        SLOW_QUAD_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 4
+    }
+
+    // Verify `refresh = true` compiles and is wired (store created with refresh enabled).
+    #[concurrent_cached(ttl = 60, refresh = true)]
+    fn slow_quad_refresh(x: u64) -> u64 {
+        x * 4
+    }
+
+    #[test]
+    fn ttl_attr_compiles_and_caches() {
+        SLOW_QUAD_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(slow_quad(21), 84);
+        assert_eq!(slow_quad(21), 84); // cached
+        assert_eq!(SLOW_QUAD_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn ttl_refresh_attr_wired() {
+        // Verify the store has refresh enabled; if `refresh` were silently dropped
+        // `refresh_on_hit()` would return false.
+        assert_eq!(slow_quad_refresh(5), 20);
+        assert!(SLOW_QUAD_REFRESH.refresh_on_hit());
+    }
+}
+
+// `size = N, ttl = T` selects `ShardedLruTtlCache`.
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_default_with_max_size_and_ttl {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SLOW_QUINT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(max_size = 50, ttl = 60)]
+    fn slow_quint(x: u64) -> u64 {
+        SLOW_QUINT_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 5
+    }
+
+    // Verify `refresh = true` compiles and is wired for the LRU+TTL variant.
+    #[concurrent_cached(max_size = 50, ttl = 60, refresh = true)]
+    fn slow_quint_refresh(x: u64) -> u64 {
+        x * 5
+    }
+
+    #[test]
+    fn size_and_ttl_compiles_and_caches() {
+        SLOW_QUINT_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(slow_quint(21), 105);
+        assert_eq!(slow_quint(21), 105); // cached
+        assert_eq!(SLOW_QUINT_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn size_and_ttl_refresh_attr_wired() {
+        assert_eq!(slow_quint_refresh(5), 25);
+        assert!(SLOW_QUINT_REFRESH.refresh_on_hit());
+    }
+}
+
+// `shards = N` propagates through every default variant.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_default_with_shards {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DOUBLE_WITH_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(shards = 32)]
+    fn double_with_shards(x: u64) -> u64 {
+        DOUBLE_WITH_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[concurrent_cached(max_size = 100, shards = 32)]
+    fn double_with_max_size_shards(x: u64) -> u64 {
+        x * 2
+    }
+
+    #[test]
+    fn shards_attr_compiles_and_caches() {
+        DOUBLE_WITH_SHARDS_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(double_with_shards(21), 42);
+        assert_eq!(double_with_shards(21), 42); // cached
+        assert_eq!(DOUBLE_WITH_SHARDS_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(double_with_max_size_shards(21), 42);
+    }
+
+    #[test]
+    fn shards_attr_produces_correct_shard_count() {
+        // `shards = 32` must produce a cache with exactly 32 shards (32 is already a power of 2).
+        assert_eq!(DOUBLE_WITH_SHARDS.shards(), 32);
+        assert_eq!(DOUBLE_WITH_MAX_SIZE_SHARDS.shards(), 32);
+    }
+}
+
+// `ttl = T, shards = N` selects `ShardedTtlCache::with_ttl_and_shards`.
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_default_with_ttl_and_shards {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TTL_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(ttl = 60, shards = 16)]
+    fn ttl_shards_double(x: u64) -> u64 {
+        TTL_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[test]
+    fn ttl_shards_compiles_and_caches() {
+        TTL_SHARDS_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(ttl_shards_double(21), 42);
+        assert_eq!(ttl_shards_double(21), 42); // cached
+        assert_eq!(TTL_SHARDS_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
+
+// `size = N, ttl = T, shards = S` selects `ShardedLruTtlCache::with_max_size_and_ttl_and_shards`.
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_default_with_max_size_and_ttl_and_shards {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SIZE_TTL_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(max_size = 100, ttl = 60, shards = 16)]
+    fn size_ttl_shards_double(x: u64) -> u64 {
+        SIZE_TTL_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[test]
+    fn size_ttl_shards_compiles_and_caches() {
+        SIZE_TTL_SHARDS_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(size_ttl_shards_double(21), 42);
+        assert_eq!(size_ttl_shards_double(21), 42); // cached
+        assert_eq!(SIZE_TTL_SHARDS_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
+
+// `result_fallback = true` on the default sharded ttl path: last-known-good Ok
+// value is returned when the function subsequently returns Err (after TTL expiry).
+// The stale value is held in the primary cache slot (via ConcurrentCloneCached)
+// and re-cached with a fresh TTL window — no separate _FALLBACK store.
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_result_fallback {
+    use cached::macros::concurrent_cached;
+    use cached::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::sleep;
+
+    static FAIL: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    fn maybe_double(x: u32) -> Result<u32, String> {
+        if FAIL.load(Ordering::Relaxed) {
+            Err("injected failure".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    #[test]
+    fn result_fallback_returns_stale_ok_after_ttl_expiry() {
+        FAIL.store(false, Ordering::Relaxed);
+        // Populate the TTL cache.
+        assert_eq!(maybe_double(1), Ok(2));
+        // Make the function always fail from here.
+        FAIL.store(true, Ordering::Relaxed);
+        // Within TTL: served from main cache; function body not called.
+        assert_eq!(maybe_double(1), Ok(2));
+        // Wait for TTL to expire.
+        sleep(Duration::from_millis(1100));
+        // After TTL: function returns Err; stale value is returned from the
+        // primary cache slot (ConcurrentCloneCached) and re-cached.
+        assert_eq!(maybe_double(1), Ok(2));
+        // Key with no prior success: Err is propagated.
+        assert_eq!(maybe_double(99), Err("injected failure".to_string()));
+        FAIL.store(false, Ordering::Relaxed);
+    }
+
+    // Metric check: the expired→Err→stale path counts a miss but no eviction.
+    // Uses a dedicated function so its cache is fresh (not shared with above test).
+    static FAIL_METRIC: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    fn maybe_triple(x: u32) -> Result<u32, String> {
+        if FAIL_METRIC.load(Ordering::Relaxed) {
+            Err("metric test failure".to_string())
+        } else {
+            Ok(x * 3)
+        }
+    }
+
+    #[test]
+    fn result_fallback_expired_err_path_counts_miss_no_eviction() {
+        FAIL_METRIC.store(false, Ordering::Relaxed);
+        // Prime: miss + cache_set.
+        assert_eq!(maybe_triple(7), Ok(21));
+        // Within TTL: hit.
+        assert_eq!(maybe_triple(7), Ok(21));
+        // Wait for TTL to expire.
+        sleep(Duration::from_millis(1100));
+        // Expired + Err: cache_get_with_expiry_status returns (Some(21), true) →
+        // misses++; the expired entry is NOT evicted; stale Ok(21) is returned.
+        FAIL_METRIC.store(true, Ordering::Relaxed);
+        assert_eq!(maybe_triple(7), Ok(21));
+        // LazyLock<ShardedTtlCache> is initialized on first call; deref to access store.
+        let m = MAYBE_TRIPLE.metrics();
+        // miss for initial absent lookup + miss for expired-entry lookup = 2
+        assert_eq!(m.misses, Some(2), "expected 2 misses (absent + expired)");
+        // within-TTL hit = 1
+        assert_eq!(m.hits, Some(1), "expected 1 hit (within-TTL)");
+        // the expired entry is held in place — no eviction on the fallback path
+        assert_eq!(
+            m.evictions,
+            Some(0),
+            "no eviction must occur on expired→Err→stale path"
+        );
+        FAIL_METRIC.store(false, Ordering::Relaxed);
+    }
+
+    // Non-Copy key: previously a use-after-move bug caused compile failure when
+    // the key type was not Copy.
+    static FAIL_STR: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(
+        ttl = 1,
+        result_fallback = true,
+        key = "String",
+        convert = r#"{ x.to_string() }"#
+    )]
+    fn maybe_echo(x: &str) -> Result<String, String> {
+        if FAIL_STR.load(Ordering::Relaxed) {
+            Err("injected failure".to_string())
+        } else {
+            Ok(x.to_uppercase())
+        }
+    }
+
+    #[test]
+    fn result_fallback_non_copy_key_compiles_and_works() {
+        FAIL_STR.store(false, Ordering::Relaxed);
+        assert_eq!(maybe_echo("hello"), Ok("HELLO".to_string()));
+        FAIL_STR.store(true, Ordering::Relaxed);
+        sleep(Duration::from_millis(1100));
+        assert_eq!(maybe_echo("hello"), Ok("HELLO".to_string()));
+        assert_eq!(maybe_echo("unknown"), Err("injected failure".to_string()));
+        FAIL_STR.store(false, Ordering::Relaxed);
+    }
+
+    // prime_cache must NOT use the stale-fallback path — it unconditionally reruns the
+    // function and returns the raw result without substituting a stale Ok for Err.
+    static FAIL_PRIME: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    fn prime_fallback_fn(x: u32) -> Result<u32, String> {
+        if FAIL_PRIME.load(Ordering::Relaxed) {
+            Err("prime failure".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    #[test]
+    fn result_fallback_prime_cache_skips_stale_fallback() {
+        FAIL_PRIME.store(false, Ordering::Relaxed);
+        // Populate cache with Ok.
+        assert_eq!(prime_fallback_fn(10), Ok(20));
+        // Wait for TTL to expire.
+        sleep(Duration::from_millis(1100));
+        // prime_cache runs the function directly with no stale-fallback substitution.
+        // The raw Err must be returned, not the stale Ok.
+        FAIL_PRIME.store(true, Ordering::Relaxed);
+        assert_eq!(
+            prime_fallback_fn_prime_cache(10),
+            Err("prime failure".to_string()),
+            "prime_cache must not substitute stale Ok for Err"
+        );
+        // The regular path (result_fallback) still serves the stale Ok because
+        // prime on Err does not overwrite the cache entry.
+        assert_eq!(prime_fallback_fn(10), Ok(20));
+        FAIL_PRIME.store(false, Ordering::Relaxed);
+    }
+}
+
+// `result_fallback = true` with size+ttl selects ShardedLruTtlCache; verify the stale-ok
+// path works identically on the LRU-TTL store.
+#[cfg(all(feature = "proc_macro", feature = "time_stores"))]
+mod concurrent_cached_result_fallback_lru_ttl {
+    use cached::macros::concurrent_cached;
+    use cached::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::sleep;
+
+    static FAIL_LRU: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(ttl = 1, max_size = 100, result_fallback = true)]
+    fn lru_ttl_maybe_double(x: u32) -> Result<u32, String> {
+        if FAIL_LRU.load(Ordering::Relaxed) {
+            Err("lru_ttl failure".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    #[test]
+    fn result_fallback_lru_ttl_returns_stale_ok_after_expiry() {
+        FAIL_LRU.store(false, Ordering::Relaxed);
+        // Populate via ShardedLruTtlCache.
+        assert_eq!(lru_ttl_maybe_double(5), Ok(10));
+        // Within TTL: served from cache.
+        assert_eq!(lru_ttl_maybe_double(5), Ok(10));
+        // Wait for TTL to expire.
+        sleep(Duration::from_millis(1100));
+        // Expired + Err: stale Ok must be returned, entry held in place.
+        FAIL_LRU.store(true, Ordering::Relaxed);
+        assert_eq!(lru_ttl_maybe_double(5), Ok(10));
+        // Metrics before any new-key calls: 2 misses (initial absent + expired),
+        // 1 hit (within-TTL), 0 evictions.
+        let m = LRU_TTL_MAYBE_DOUBLE.metrics();
+        assert_eq!(m.misses, Some(2), "expected 2 misses (absent + expired)");
+        assert_eq!(m.hits, Some(1), "expected 1 hit (within-TTL)");
+        assert_eq!(
+            m.evictions,
+            Some(0),
+            "no eviction must occur on expired→Err→stale path"
+        );
+        // Key with no prior Ok: Err propagated.
+        assert_eq!(lru_ttl_maybe_double(99), Err("lru_ttl failure".to_string()));
+        FAIL_LRU.store(false, Ordering::Relaxed);
+    }
+}
+
+// Async path: `result_fallback = true` returns the last-known-good Ok value after TTL expiry.
+#[cfg(all(
+    feature = "proc_macro",
+    feature = "time_stores",
+    feature = "async_tokio_rt_multi_thread"
+))]
+mod concurrent_cached_result_fallback_async {
+    use cached::macros::concurrent_cached;
+    use cached::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::sleep;
+
+    static FAIL_ASYNC: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    async fn maybe_double_async(x: u32) -> Result<u32, String> {
+        if FAIL_ASYNC.load(Ordering::Relaxed) {
+            Err("async failure".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn result_fallback_async_returns_stale_ok_after_ttl_expiry() {
+        FAIL_ASYNC.store(false, Ordering::Relaxed);
+        assert_eq!(maybe_double_async(5).await, Ok(10));
+        FAIL_ASYNC.store(true, Ordering::Relaxed);
+        sleep(Duration::from_millis(1100)).await;
+        // After TTL expiry, fallback returns last Ok instead of propagating Err.
+        assert_eq!(maybe_double_async(5).await, Ok(10));
+        // Key with no prior success: Err is propagated.
+        assert_eq!(
+            maybe_double_async(99).await,
+            Err("async failure".to_string())
+        );
+        FAIL_ASYNC.store(false, Ordering::Relaxed);
+    }
+}
+
+// Async path: `result_fallback = true` with a non-Copy key — regression guard for
+// use-after-move in async codegen when arguments are cloned to form the cache key.
+#[cfg(all(
+    feature = "proc_macro",
+    feature = "time_stores",
+    feature = "async_tokio_rt_multi_thread"
+))]
+mod concurrent_cached_result_fallback_async_non_copy_key {
+    use cached::macros::concurrent_cached;
+    use cached::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::sleep;
+
+    static FAIL_ASYNC_STR: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(
+        ttl = 1,
+        result_fallback = true,
+        key = "String",
+        convert = r#"{ x.to_string() }"#
+    )]
+    async fn maybe_echo_async(x: &str) -> Result<String, String> {
+        if FAIL_ASYNC_STR.load(Ordering::Relaxed) {
+            Err("async failure".to_string())
+        } else {
+            Ok(x.to_uppercase())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn result_fallback_async_non_copy_key_returns_stale_ok_after_ttl_expiry() {
+        FAIL_ASYNC_STR.store(false, Ordering::Relaxed);
+        assert_eq!(maybe_echo_async("hello").await, Ok("HELLO".to_string()));
+        FAIL_ASYNC_STR.store(true, Ordering::Relaxed);
+        sleep(Duration::from_millis(1100)).await;
+        // After TTL expiry with a non-Copy String key, fallback returns last Ok.
+        assert_eq!(maybe_echo_async("hello").await, Ok("HELLO".to_string()));
+        // Key with no prior success: Err is propagated.
+        assert_eq!(
+            maybe_echo_async("unknown").await,
+            Err("async failure".to_string())
+        );
+        FAIL_ASYNC_STR.store(false, Ordering::Relaxed);
+    }
+}
+
+// Async path: `result_fallback = true` with size+ttl selects ShardedLruTtlCache; verify the
+// stale-ok path and metrics work identically on the async LRU-TTL store.
+#[cfg(all(
+    feature = "proc_macro",
+    feature = "time_stores",
+    feature = "async_tokio_rt_multi_thread"
+))]
+mod concurrent_cached_result_fallback_async_lru_ttl {
+    use cached::macros::concurrent_cached;
+    use cached::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::sleep;
+
+    static FAIL_ASYNC_LRU: AtomicBool = AtomicBool::new(false);
+
+    #[concurrent_cached(ttl = 1, max_size = 100, result_fallback = true)]
+    async fn lru_ttl_maybe_double_async(x: u32) -> Result<u32, String> {
+        if FAIL_ASYNC_LRU.load(Ordering::Relaxed) {
+            Err("async lru_ttl failure".to_string())
+        } else {
+            Ok(x * 2)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn result_fallback_async_lru_ttl_returns_stale_ok_after_expiry() {
+        FAIL_ASYNC_LRU.store(false, Ordering::Relaxed);
+        // Populate via ShardedLruTtlCache.
+        assert_eq!(lru_ttl_maybe_double_async(5).await, Ok(10));
+        // Within TTL: served from cache.
+        assert_eq!(lru_ttl_maybe_double_async(5).await, Ok(10));
+        // Wait for TTL to expire.
+        sleep(Duration::from_millis(1100)).await;
+        // Expired + Err: stale Ok must be returned, entry held in place.
+        FAIL_ASYNC_LRU.store(true, Ordering::Relaxed);
+        assert_eq!(lru_ttl_maybe_double_async(5).await, Ok(10));
+        // Metrics: 2 misses (initial absent + expired), 1 hit (within-TTL), 0 evictions.
+        // The async store lives in a `OnceCell`, initialized by the first call above.
+        let m = LRU_TTL_MAYBE_DOUBLE_ASYNC
+            .get()
+            .expect("store initialized by first call")
+            .metrics();
+        assert_eq!(m.misses, Some(2), "expected 2 misses (absent + expired)");
+        assert_eq!(m.hits, Some(1), "expected 1 hit (within-TTL)");
+        assert_eq!(
+            m.evictions,
+            Some(0),
+            "no eviction must occur on expired→Err→stale path"
+        );
+        // Key with no prior Ok: Err propagated.
+        assert_eq!(
+            lru_ttl_maybe_double_async(99).await,
+            Err("async lru_ttl failure".to_string())
+        );
+        FAIL_ASYNC_LRU.store(false, Ordering::Relaxed);
+    }
+}
+
+// `cache_err = true`: errors are cached — subsequent calls with the same key return
+// the cached Err without re-invoking the function body.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_cache_err {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ERR_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(cache_err = true)]
+    fn err_double(x: u32) -> Result<u32, u32> {
+        ERR_CALLS.fetch_add(1, Ordering::Relaxed);
+        Err(x)
+    }
+
+    #[test]
+    fn cache_err_caches_error_result() {
+        ERR_CALLS.store(0, Ordering::Relaxed);
+        // First call: function executes and returns Err.
+        assert_eq!(err_double(7), Err(7));
+        assert_eq!(ERR_CALLS.load(Ordering::Relaxed), 1);
+        // Second call with same key: served from cache, function not called again.
+        assert_eq!(err_double(7), Err(7));
+        assert_eq!(ERR_CALLS.load(Ordering::Relaxed), 1);
+        // Different key: function executes again.
+        assert_eq!(err_double(8), Err(8));
+        assert_eq!(ERR_CALLS.load(Ordering::Relaxed), 2);
+    }
+}
+
+// Async path uses `OnceCell<ShardedCache>`.
+#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+mod concurrent_cached_default_async {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SLOW_DOUBLE_ASYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached]
+    async fn slow_double_async(x: u64) -> u64 {
+        SLOW_DOUBLE_ASYNC_CALLS.fetch_add(1, Ordering::Relaxed);
+        x * 2
+    }
+
+    #[tokio::test]
+    async fn async_default_compiles_and_caches() {
+        SLOW_DOUBLE_ASYNC_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(slow_double_async(21).await, 42);
+        assert_eq!(slow_double_async(21).await, 42); // cached
+        assert_eq!(SLOW_DOUBLE_ASYNC_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
+
+// `with_cached_flag = true` on the sharded default path: `was_cached` is false on first
+// call and true on subsequent hits.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_default_with_cached_flag {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PLAIN_FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(with_cached_flag = true)]
+    fn flagged_double(x: u64) -> Result<cached::Return<u64>, std::convert::Infallible> {
+        FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+        Ok(cached::Return::new(x * 2))
+    }
+
+    #[concurrent_cached(with_cached_flag = true)]
+    fn flagged_plain_double(x: u64) -> cached::Return<u64> {
+        PLAIN_FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+        cached::Return::new(x * 2)
+    }
+
+    #[test]
+    fn with_cached_flag_reports_cache_state() {
+        FLAG_CALLS.store(0, Ordering::Relaxed);
+        let first = flagged_double(7).unwrap();
+        assert_eq!(*first, 14);
+        assert!(!first.was_cached, "first call should not be cached");
+        let second = flagged_double(7).unwrap();
+        assert_eq!(*second, 14);
+        assert!(second.was_cached, "second call should be cached");
+        assert_eq!(FLAG_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn plain_return_with_cached_flag_reports_cache_state() {
+        PLAIN_FLAG_CALLS.store(0, Ordering::Relaxed);
+        let first = flagged_plain_double(8);
+        assert_eq!(*first, 16);
+        assert!(!first.was_cached, "first call should not be cached");
+        let second = flagged_plain_double(8);
+        assert_eq!(*second, 16);
+        assert!(second.was_cached, "second call should be cached");
+        assert_eq!(PLAIN_FLAG_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
+
+// `option = true` on the sharded default path: None skips caching, Some(T) is cached.
+#[cfg(feature = "proc_macro")]
+mod concurrent_cached_option {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static OPT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static OPT_FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached]
+    fn maybe_double(x: u64) -> Option<u64> {
+        OPT_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 { None } else { Some(x * 2) }
+    }
+
+    #[concurrent_cached(with_cached_flag = true)]
+    fn flagged_maybe_double(x: u64) -> Option<cached::Return<u64>> {
+        OPT_FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 {
+            None
+        } else {
+            Some(cached::Return::new(x * 2))
+        }
+    }
+
+    #[test]
+    fn option_caches_some_not_none() {
+        OPT_CALLS.store(0, Ordering::Relaxed);
+        // None is not cached — subsequent calls still invoke the function.
+        assert_eq!(maybe_double(0), None);
+        assert_eq!(maybe_double(0), None);
+        assert_eq!(
+            OPT_CALLS.load(Ordering::Relaxed),
+            2,
+            "None should not be cached"
+        );
+        // Some(T) is cached — second call is a hit.
+        assert_eq!(maybe_double(3), Some(6));
+        assert_eq!(maybe_double(3), Some(6));
+        assert_eq!(
+            OPT_CALLS.load(Ordering::Relaxed),
+            3,
+            "Some should be cached after first call"
+        );
+    }
+
+    #[test]
+    fn option_with_cached_flag_reports_cache_state() {
+        OPT_FLAG_CALLS.store(0, Ordering::Relaxed);
+        // None — not cached.
+        assert!(flagged_maybe_double(0).is_none());
+        assert!(flagged_maybe_double(0).is_none());
+        assert_eq!(
+            OPT_FLAG_CALLS.load(Ordering::Relaxed),
+            2,
+            "None should not be cached"
+        );
+        // Some — first call not cached, second is.
+        let first = flagged_maybe_double(5).expect("should return Some");
+        assert_eq!(*first, 10);
+        assert!(!first.was_cached, "first Some call should not be cached");
+        let second = flagged_maybe_double(5).expect("should return Some");
+        assert_eq!(*second, 10);
+        assert!(second.was_cached, "second Some call should be cached");
+        assert_eq!(OPT_FLAG_CALLS.load(Ordering::Relaxed), 3);
+    }
+}
+
+// Async `option = true` on the sharded default path.
+#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+mod concurrent_cached_async_option {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ASYNC_OPT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ASYNC_OPT_FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached]
+    async fn async_maybe_double(x: u64) -> Option<u64> {
+        ASYNC_OPT_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 { None } else { Some(x * 2) }
+    }
+
+    #[concurrent_cached(with_cached_flag = true)]
+    async fn async_flagged_maybe_double(x: u64) -> Option<cached::Return<u64>> {
+        ASYNC_OPT_FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+        if x == 0 {
+            None
+        } else {
+            Some(cached::Return::new(x * 2))
+        }
+    }
+
+    #[tokio::test]
+    async fn async_option_caches_some_not_none() {
+        ASYNC_OPT_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(async_maybe_double(0).await, None);
+        assert_eq!(async_maybe_double(0).await, None);
+        assert_eq!(
+            ASYNC_OPT_CALLS.load(Ordering::Relaxed),
+            2,
+            "None should not be cached"
+        );
+        assert_eq!(async_maybe_double(4).await, Some(8));
+        assert_eq!(async_maybe_double(4).await, Some(8));
+        assert_eq!(
+            ASYNC_OPT_CALLS.load(Ordering::Relaxed),
+            3,
+            "Some should be cached after first call"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_option_with_cached_flag_reports_cache_state() {
+        ASYNC_OPT_FLAG_CALLS.store(0, Ordering::Relaxed);
+        assert!(async_flagged_maybe_double(0).await.is_none());
+        assert!(async_flagged_maybe_double(0).await.is_none());
+        assert_eq!(
+            ASYNC_OPT_FLAG_CALLS.load(Ordering::Relaxed),
+            2,
+            "None should not be cached"
+        );
+        let first = async_flagged_maybe_double(6)
+            .await
+            .expect("should return Some");
+        assert_eq!(*first, 12);
+        assert!(!first.was_cached, "first Some call should not be cached");
+        let second = async_flagged_maybe_double(6)
+            .await
+            .expect("should return Some");
+        assert_eq!(*second, 12);
+        assert!(second.was_cached, "second Some call should be cached");
+        assert_eq!(ASYNC_OPT_FLAG_CALLS.load(Ordering::Relaxed), 3);
+    }
+}
+
+// Async `with_cached_flag = true` on the sharded default path (plain and Result variants).
+#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+mod concurrent_cached_default_async_with_cached_flag {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ASYNC_FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static ASYNC_PLAIN_FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(with_cached_flag = true)]
+    async fn async_flagged_double(x: u64) -> Result<cached::Return<u64>, std::convert::Infallible> {
+        ASYNC_FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+        Ok(cached::Return::new(x * 2))
+    }
+
+    #[concurrent_cached(with_cached_flag = true)]
+    async fn async_flagged_plain_double(x: u64) -> cached::Return<u64> {
+        ASYNC_PLAIN_FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+        cached::Return::new(x * 2)
+    }
+
+    #[tokio::test]
+    async fn async_with_cached_flag_result_reports_cache_state() {
+        ASYNC_FLAG_CALLS.store(0, Ordering::Relaxed);
+        let first = async_flagged_double(7).await.unwrap();
+        assert_eq!(*first, 14);
+        assert!(!first.was_cached, "first call should not be cached");
+        let second = async_flagged_double(7).await.unwrap();
+        assert_eq!(*second, 14);
+        assert!(second.was_cached, "second call should be cached");
+        assert_eq!(ASYNC_FLAG_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn async_plain_return_with_cached_flag_reports_cache_state() {
+        ASYNC_PLAIN_FLAG_CALLS.store(0, Ordering::Relaxed);
+        let first = async_flagged_plain_double(8).await;
+        assert_eq!(*first, 16);
+        assert!(!first.was_cached, "first call should not be cached");
+        let second = async_flagged_plain_double(8).await;
+        assert_eq!(*second, 16);
+        assert!(second.was_cached, "second call should be cached");
+        assert_eq!(ASYNC_PLAIN_FLAG_CALLS.load(Ordering::Relaxed), 1);
+    }
+}
+
+// `Send + Sync` typecheck for the sharded stores (mirrors `redis_not_sync_typecheck`).
+#[cfg(feature = "proc_macro")]
+#[allow(dead_code)]
+mod sharded_send_sync_typecheck {
+    fn _typecheck_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<cached::ShardedCache<String, u32>>();
+        assert_sync::<cached::ShardedCache<String, u32>>();
+        assert_send::<cached::ShardedLruCache<String, u32>>();
+        assert_sync::<cached::ShardedLruCache<String, u32>>();
+    }
+
+    #[cfg(feature = "time_stores")]
+    fn _typecheck_sync_timed() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<cached::ShardedTtlCache<String, u32>>();
+        assert_sync::<cached::ShardedTtlCache<String, u32>>();
+        assert_send::<cached::ShardedLruTtlCache<String, u32>>();
+        assert_sync::<cached::ShardedLruTtlCache<String, u32>>();
+    }
+}
+
+#[test]
+fn concurrent_cached_trait_short_aliases_work() {
+    use cached::{ConcurrentCached, ShardedCache};
+
+    let cache = ShardedCache::<String, u32>::builder().build().unwrap();
+    assert_eq!(cache.set("a".to_string(), 1).unwrap(), None);
+    assert_eq!(cache.get(&"a".to_string()).unwrap(), Some(1));
+    assert_eq!(cache.remove(&"a".to_string()).unwrap(), Some(1));
+    assert!(!cache.delete(&"a".to_string()).unwrap());
+}
+
+// `cache_clear_with_on_evict` without a callback delegates to `clear()` and does NOT
+// increment the evictions counter. This test guards against regressions where the counter
+// increment gets moved before the early-return.
+#[test]
+fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
+    use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+
+    // ShardedCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
+    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible ShardedCache set");
+    ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible ShardedCache set");
+    cache.cache_clear_with_on_evict();
+    assert_eq!(cache.len(), 0, "cache should be empty after clear");
+    // ShardedCache does not track evictions — None is expected, not Some(0)
+    assert_eq!(cache.metrics().evictions, None);
+
+    // ShardedLruCache tracks evictions; no on_evict means the counter stays at zero
+    let lru = ShardedLruCache::<u32, u32>::builder()
+        .max_size(64)
+        .build()
+        .unwrap();
+    ConcurrentCached::cache_set(&lru, 1, 10).expect("infallible ShardedLruCache set");
+    ConcurrentCached::cache_set(&lru, 2, 20).expect("infallible ShardedLruCache set");
+    lru.cache_clear_with_on_evict();
+    assert_eq!(
+        lru.metrics().evictions,
+        Some(0),
+        "evictions should remain 0 when no on_evict callback is set"
+    );
+    assert_eq!(lru.len(), 0);
+}
+
+mod sharded_expiring_tests {
+    #[cfg(feature = "proc_macro")]
+    use cached::macros::concurrent_cached;
+    use cached::{
+        CacheEvict, ConcurrentCached, Expires, ShardedExpiringCache, ShardedExpiringLruCache,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone, Debug)]
+    struct ExpiringItem {
+        val: u32,
+        expired: Arc<AtomicBool>,
+    }
+
+    impl Expires for ExpiringItem {
+        fn is_expired(&self) -> bool {
+            self.expired.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn sharded_expiring_cache_basic_ops() {
+        let flag1 = Arc::new(AtomicBool::new(false));
+        let flag2 = Arc::new(AtomicBool::new(true));
+
+        let cache = ShardedExpiringCache::<u32, ExpiringItem>::builder()
+            .build()
+            .unwrap();
+        let _ = ConcurrentCached::cache_set(
+            &cache,
+            1,
+            ExpiringItem {
+                val: 42,
+                expired: flag1.clone(),
+            },
+        );
+        let _ = ConcurrentCached::cache_set(
+            &cache,
+            2,
+            ExpiringItem {
+                val: 99,
+                expired: flag2.clone(),
+            },
+        );
+
+        assert_eq!(
+            ConcurrentCached::cache_get(&cache, &1)
+                .unwrap()
+                .map(|i| i.val),
+            Some(42)
+        );
+        assert_eq!(
+            ConcurrentCached::cache_get(&cache, &2)
+                .unwrap()
+                .map(|i| i.val),
+            None
+        ); // expired
+        assert_eq!(cache.metrics().misses, Some(1));
+        assert_eq!(cache.metrics().hits, Some(1));
+
+        let lru = ShardedExpiringLruCache::<u32, ExpiringItem>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        let _ = ConcurrentCached::cache_set(
+            &lru,
+            1,
+            ExpiringItem {
+                val: 42,
+                expired: flag1.clone(),
+            },
+        );
+        let _ = ConcurrentCached::cache_set(
+            &lru,
+            2,
+            ExpiringItem {
+                val: 99,
+                expired: flag2.clone(),
+            },
+        );
+
+        assert_eq!(
+            ConcurrentCached::cache_get(&lru, &1)
+                .unwrap()
+                .map(|i| i.val),
+            Some(42)
+        );
+        assert_eq!(
+            ConcurrentCached::cache_get(&lru, &2)
+                .unwrap()
+                .map(|i| i.val),
+            None
+        ); // expired
+        assert_eq!(lru.metrics().misses, Some(1));
+        assert_eq!(lru.metrics().hits, Some(1));
+    }
+
+    #[test]
+    fn sharded_expiring_cache_evict() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut cache = ShardedExpiringCache::<u32, ExpiringItem>::builder()
+            .build()
+            .unwrap();
+        let _ = ConcurrentCached::cache_set(
+            &cache,
+            1,
+            ExpiringItem {
+                val: 42,
+                expired: flag.clone(),
+            },
+        );
+        let _ = ConcurrentCached::cache_set(
+            &cache,
+            2,
+            ExpiringItem {
+                val: 99,
+                expired: flag.clone(),
+            },
+        );
+
+        assert_eq!(cache.len(), 2);
+        let evicted = CacheEvict::evict(&mut cache);
+        assert_eq!(evicted, 2);
+        assert_eq!(cache.len(), 0);
+
+        let mut lru = ShardedExpiringLruCache::<u32, ExpiringItem>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        let _ = ConcurrentCached::cache_set(
+            &lru,
+            1,
+            ExpiringItem {
+                val: 42,
+                expired: flag.clone(),
+            },
+        );
+        let _ = ConcurrentCached::cache_set(
+            &lru,
+            2,
+            ExpiringItem {
+                val: 99,
+                expired: flag.clone(),
+            },
+        );
+
+        assert_eq!(lru.len(), 2);
+        let evicted_lru = CacheEvict::evict(&mut lru);
+        assert_eq!(evicted_lru, 2);
+        assert_eq!(lru.len(), 0);
+    }
+
+    #[test]
+    fn sharded_expiring_evict_fires_on_evict_and_increments_evictions_counter() {
+        use std::sync::atomic::AtomicU32;
+
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let fired = Arc::new(AtomicU32::new(0));
+        let fired_clone = fired.clone();
+        let cache = ShardedExpiringCache::<u32, ExpiringItem>::builder()
+            .on_evict(move |_k, _v| {
+                fired_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        let _ = cache.cache_set(
+            1,
+            ExpiringItem {
+                val: 10,
+                expired: flag.clone(),
+            },
+        );
+        let _ = cache.cache_set(
+            2,
+            ExpiringItem {
+                val: 20,
+                expired: flag.clone(),
+            },
+        );
+
+        assert_eq!(cache.evict(), 2);
+        assert_eq!(fired.load(Ordering::Relaxed), 2);
+        assert_eq!(cache.metrics().evictions, Some(2));
+
+        let fired_lru = Arc::new(AtomicU32::new(0));
+        let fired_lru_clone = fired_lru.clone();
+        let lru = ShardedExpiringLruCache::<u32, ExpiringItem>::builder()
+            .max_size(64)
+            .on_evict(move |_k, _v| {
+                fired_lru_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        let _ = lru.cache_set(
+            1,
+            ExpiringItem {
+                val: 10,
+                expired: flag.clone(),
+            },
+        );
+        let _ = lru.cache_set(
+            2,
+            ExpiringItem {
+                val: 20,
+                expired: flag.clone(),
+            },
+        );
+
+        assert_eq!(lru.evict(), 2);
+        assert_eq!(fired_lru.load(Ordering::Relaxed), 2);
+        assert_eq!(lru.metrics().evictions, Some(2));
+    }
+
+    #[cfg(feature = "proc_macro")]
+    static BARE_EXPIRES_CALLS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "proc_macro")]
+    #[concurrent_cached(expires = true, key = "u32", convert = r#"{ x }"#)]
+    fn get_expiring_item(x: u32, flag: Arc<AtomicBool>) -> ExpiringItem {
+        BARE_EXPIRES_CALLS.fetch_add(1, Ordering::Relaxed);
+        ExpiringItem {
+            val: x * 10,
+            expired: flag,
+        }
+    }
+
+    #[cfg(feature = "proc_macro")]
+    static BARE_EXPIRES_LRU_CALLS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "proc_macro")]
+    #[concurrent_cached(expires = true, max_size = 64, key = "u32", convert = r#"{ x }"#)]
+    fn get_expiring_item_lru(x: u32, flag: Arc<AtomicBool>) -> ExpiringItem {
+        BARE_EXPIRES_LRU_CALLS.fetch_add(1, Ordering::Relaxed);
+        ExpiringItem {
+            val: x * 10,
+            expired: flag,
+        }
+    }
+
+    #[cfg(feature = "proc_macro")]
+    #[test]
+    fn concurrent_cached_expires_unbounded() {
+        BARE_EXPIRES_CALLS.store(0, Ordering::Relaxed);
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let res1 = get_expiring_item(5, flag.clone());
+        assert_eq!(res1.val, 50);
+        let res2 = get_expiring_item(5, flag.clone());
+        assert_eq!(res2.val, 50);
+        assert_eq!(BARE_EXPIRES_CALLS.load(Ordering::Relaxed), 1); // cached
+
+        // Expire
+        flag.store(true, Ordering::Relaxed);
+        let res3 = get_expiring_item(5, flag.clone());
+        assert_eq!(res3.val, 50);
+        assert_eq!(BARE_EXPIRES_CALLS.load(Ordering::Relaxed), 2); // recalculated
+    }
+
+    #[cfg(feature = "proc_macro")]
+    #[test]
+    fn concurrent_cached_expires_lru() {
+        BARE_EXPIRES_LRU_CALLS.store(0, Ordering::Relaxed);
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let res1 = get_expiring_item_lru(5, flag.clone());
+        assert_eq!(res1.val, 50);
+        let res2 = get_expiring_item_lru(5, flag.clone());
+        assert_eq!(res2.val, 50);
+        assert_eq!(BARE_EXPIRES_LRU_CALLS.load(Ordering::Relaxed), 1); // cached
+
+        // Expire
+        flag.store(true, Ordering::Relaxed);
+        let res3 = get_expiring_item_lru(5, flag.clone());
+        assert_eq!(res3.val, 50);
+        assert_eq!(BARE_EXPIRES_LRU_CALLS.load(Ordering::Relaxed), 2); // recalculated
+    }
+
+    #[test]
+    fn sharded_expiring_lru_on_evict_fires_on_lru_capacity_pressure() {
+        let evict_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evict_count2 = evict_count.clone();
+        let not_expired = Arc::new(AtomicBool::new(false));
+
+        let cache = ShardedExpiringLruCache::<u32, ExpiringItem>::builder()
+            .max_size(8)
+            .shards(1)
+            .on_evict(move |_k, _v| {
+                evict_count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        // Insert 16 entries into a cache with capacity 8 (1 shard) to force LRU evictions.
+        for i in 0..16 {
+            let _ = ConcurrentCached::cache_set(
+                &cache,
+                i,
+                ExpiringItem {
+                    val: i,
+                    expired: not_expired.clone(),
+                },
+            );
+        }
+
+        // At least 8 entries must have been evicted by LRU capacity pressure.
+        assert!(
+            evict_count.load(Ordering::Relaxed) >= 8,
+            "expected on_evict to fire for LRU evictions, got {}",
+            evict_count.load(Ordering::Relaxed)
+        );
+        // metrics().evictions aggregates both LRU-shard capacity evictions and inner.evictions.
+        let total_evictions = cache.metrics().evictions.unwrap_or(0);
+        assert!(
+            total_evictions >= 8,
+            "expected metrics().evictions >= 8, got {}",
+            total_evictions
+        );
+    }
+
+    #[test]
+    fn sharded_expiring_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ShardedExpiringCache<u32, ExpiringItem>>();
+        assert_send_sync::<ShardedExpiringLruCache<u32, ExpiringItem>>();
+    }
+
+    // `expires = true` + `with_cached_flag = true`: `was_cached` is false on first call
+    // and on re-execution after expiry; true only for a genuine unexpired cache hit.
+    #[cfg(feature = "proc_macro")]
+    mod concurrent_cached_expires_with_cached_flag {
+        use super::*;
+        use cached::macros::concurrent_cached;
+        use std::sync::atomic::AtomicUsize;
+
+        static EXPIRES_FLAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        #[concurrent_cached(
+            expires = true,
+            key = "u32",
+            convert = r#"{ x }"#,
+            with_cached_flag = true
+        )]
+        fn get_flagged_expiring(
+            x: u32,
+            expired: Arc<AtomicBool>,
+        ) -> Result<cached::Return<ExpiringItem>, std::convert::Infallible> {
+            EXPIRES_FLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(cached::Return::new(ExpiringItem { val: x, expired }))
+        }
+
+        #[test]
+        fn expires_with_cached_flag_reports_cache_state() {
+            EXPIRES_FLAG_CALLS.store(0, Ordering::Relaxed);
+            let flag = Arc::new(AtomicBool::new(false));
+
+            // First call: not cached.
+            let r1 = get_flagged_expiring(42, flag.clone()).unwrap();
+            assert!(!r1.was_cached, "first call should not be cached");
+            assert_eq!(r1.val, 42);
+
+            // Second call: cached hit.
+            let r2 = get_flagged_expiring(42, flag.clone()).unwrap();
+            assert!(r2.was_cached, "second call should be a cache hit");
+            assert_eq!(EXPIRES_FLAG_CALLS.load(Ordering::Relaxed), 1);
+
+            // After expiry: function re-executes, was_cached = false.
+            flag.store(true, Ordering::Relaxed);
+            let r3 = get_flagged_expiring(42, flag.clone()).unwrap();
+            assert!(!r3.was_cached, "call after expiry should not be cached");
+            assert_eq!(EXPIRES_FLAG_CALLS.load(Ordering::Relaxed), 2);
+        }
+    }
+}
+
 #[cfg(feature = "redis_store")]
 #[allow(dead_code)]
 mod redis_not_sync_typecheck {
@@ -2146,7 +4169,10 @@ mod concurrent_cached_return_named_error {
         fn cache_remove(&self, k: &String) -> Result<Option<String>, Self::Error> {
             Ok(self.0.lock().unwrap().remove(k))
         }
-        fn set_refresh_on_hit(&mut self, _r: bool) -> bool {
+        fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
+            Ok(self.0.lock().unwrap().remove_entry(k))
+        }
+        fn set_refresh_on_hit(&self, _r: bool) -> bool {
             false
         }
     }
@@ -2173,8 +4199,8 @@ mod concurrent_cached_return_named_error {
 #[cfg(all(feature = "redis_store", feature = "proc_macro"))]
 mod redis_tests {
     use super::*;
-    use cached::macros::concurrent_cached;
     use cached::RedisCache;
+    use cached::macros::concurrent_cached;
     use thiserror::Error;
 
     #[derive(Error, Debug, PartialEq, Clone)]
@@ -2325,6 +4351,20 @@ mod redis_tests {
                 Err(TestError::Count(6))
             );
         }
+
+        #[tokio::test]
+        async fn async_redis_builder_aliases_and_zero_ttl_validation() {
+            let result = cached::AsyncRedisCache::<String, String>::builder(
+                "async-zero-ttl",
+                Duration::ZERO,
+            )
+            .build()
+            .await;
+            assert!(matches!(
+                result,
+                Err(cached::RedisCacheBuildError::InvalidTtl(..))
+            ));
+        }
     }
 }
 
@@ -2350,8 +4390,7 @@ const UNEXPIRED_SLUG: &str = "unexpired_slug";
 #[cfg(feature = "proc_macro")]
 #[cached(
     ty = "ExpiringLruCache<String, NewsArticle>",
-    create = "{ ExpiringLruCache::with_size(3) }",
-    result = true
+    create = "{ ExpiringLruCache::builder().max_size(3).build().unwrap() }"
 )]
 fn fetch_article(slug: String) -> Result<NewsArticle, ()> {
     match slug.as_str() {
@@ -2437,16 +4476,17 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
 #[test]
 fn test_sized_cache_on_evict() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::LruCache::builder()
-        .size(2)
+        .max_size(2)
         .on_evict(move |_k, _v| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.set(1, 10);
     cache.set(2, 20);
@@ -2458,8 +4498,8 @@ fn test_sized_cache_on_evict() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_timed_cache_on_evict() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::TtlCache::builder()
@@ -2467,7 +4507,8 @@ fn test_timed_cache_on_evict() {
         .on_evict(move |_k, _v| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.set(1, 10);
     assert_eq!(evicted_count.load(Ordering::Relaxed), 0);
@@ -2482,7 +4523,10 @@ fn test_timed_cache_on_evict() {
 fn test_cache_evict_trait_returns_count() {
     use cached::CacheEvict;
 
-    let mut cache = cached::TtlCache::with_ttl(cached::time::Duration::from_millis(20));
+    let mut cache = cached::TtlCache::builder()
+        .ttl(cached::time::Duration::from_millis(20))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     std::thread::sleep(cached::time::Duration::from_millis(40));
@@ -2495,17 +4539,18 @@ fn test_cache_evict_trait_returns_count() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_expiring_sized_cache_on_evict() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::stores::TtlSortedCache::builder()
-        .size(2)
+        .max_size(2)
         .ttl(cached::time::Duration::from_secs(10))
         .on_evict(move |_k, _v| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.set(1, 10);
     cache.set(2, 20);
@@ -2518,8 +4563,11 @@ fn test_expiring_sized_cache_on_evict() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_timed_sized_expired_get_does_not_pollute_inner_metrics() {
-    let mut cache =
-        cached::LruTtlCache::with_size_and_ttl(2, cached::time::Duration::from_millis(20));
+    let mut cache = cached::LruTtlCache::builder()
+        .max_size(2)
+        .ttl(cached::time::Duration::from_millis(20))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     cache.cache_reset_metrics();
@@ -2536,18 +4584,19 @@ fn test_timed_sized_expired_get_does_not_pollute_inner_metrics() {
 #[cfg(feature = "time_stores")]
 fn test_timed_sized_cache_expired_get_or_set_invokes_on_evict() {
     use cached::Cached;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::LruTtlCache::builder()
-        .size(4)
+        .max_size(4)
         .ttl(cached::time::Duration::from_millis(50))
         .on_evict(move |_k, _v| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     // Insert an entry, let it expire, then replace it via cache_get_or_set_with.
     cache.cache_set(1, 10);
@@ -2574,8 +4623,8 @@ fn test_timed_sized_cache_expired_get_or_set_invokes_on_evict() {
 #[test]
 fn test_expiring_value_cache_expired_get_or_set_invokes_on_evict() {
     use cached::Cached;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Clone)]
     struct Expirable {
@@ -2591,11 +4640,12 @@ fn test_expiring_value_cache_expired_get_or_set_invokes_on_evict() {
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::ExpiringLruCache::builder()
-        .size(4)
+        .max_size(4)
         .on_evict(move |_k: &i32, _v: &Expirable| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(
         1,
@@ -2627,8 +4677,8 @@ fn test_expiring_value_cache_expired_get_or_set_invokes_on_evict() {
 #[test]
 fn test_expiring_value_cache_get_mut_expired_invokes_on_evict() {
     use cached::Cached;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Clone)]
     struct Expirable {
@@ -2643,11 +4693,12 @@ fn test_expiring_value_cache_get_mut_expired_invokes_on_evict() {
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::ExpiringLruCache::builder()
-        .size(4)
+        .max_size(4)
         .on_evict(move |_k: &i32, _v: &Expirable| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, Expirable { expired: true });
     assert!(cache.cache_get_mut(&1).is_none());
@@ -2664,27 +4715,27 @@ fn test_fallible_builders_return_build_error() {
         }
     }
 
-    let sized = cached::LruCache::<i32, i32>::builder().try_build();
+    let sized = cached::LruCache::<i32, i32>::builder().build();
     assert!(
         matches!(
             sized.unwrap_err(),
-            cached::BuildError::MissingRequired("size")
+            cached::BuildError::MissingRequired("max_size")
         ),
-        "expected MissingRequired(size)"
+        "expected MissingRequired(max_size)"
     );
 
-    let expiring = cached::ExpiringLruCache::<i32, Expirable>::builder().try_build();
+    let expiring = cached::ExpiringLruCache::<i32, Expirable>::builder().build();
     assert!(
         matches!(
             expiring.unwrap_err(),
-            cached::BuildError::MissingRequired("size")
+            cached::BuildError::MissingRequired("max_size")
         ),
-        "expected MissingRequired(size)"
+        "expected MissingRequired(max_size)"
     );
 
     #[cfg(feature = "time_stores")]
     {
-        let timed = cached::TtlCache::<i32, i32>::builder().try_build();
+        let timed = cached::TtlCache::<i32, i32>::builder().build();
         assert!(
             matches!(
                 timed.unwrap_err(),
@@ -2695,15 +4746,84 @@ fn test_fallible_builders_return_build_error() {
 
         let timed_sized = cached::LruTtlCache::<i32, i32>::builder()
             .ttl(cached::time::Duration::from_secs(1))
-            .try_build();
+            .build();
         assert!(
             matches!(
                 timed_sized.unwrap_err(),
-                cached::BuildError::MissingRequired("size")
+                cached::BuildError::MissingRequired("max_size")
             ),
-            "expected MissingRequired(size)"
+            "expected MissingRequired(max_size)"
+        );
+
+        let zero_ttl = cached::TtlCache::<i32, i32>::builder()
+            .ttl(cached::time::Duration::ZERO)
+            .build();
+        assert!(
+            matches!(zero_ttl.unwrap_err(), cached::BuildError::InvalidTtl { .. }),
+            "expected InvalidTtl"
+        );
+
+        let zero_lru_ttl = cached::LruTtlCache::<i32, i32>::builder()
+            .max_size(4)
+            .ttl(cached::time::Duration::ZERO)
+            .build();
+        assert!(
+            matches!(
+                zero_lru_ttl.unwrap_err(),
+                cached::BuildError::InvalidTtl { .. }
+            ),
+            "expected InvalidTtl"
+        );
+
+        let zero_sorted_ttl = cached::TtlSortedCache::<i32, i32>::builder()
+            .ttl(cached::time::Duration::ZERO)
+            .build();
+        assert!(
+            matches!(
+                zero_sorted_ttl.unwrap_err(),
+                cached::BuildError::InvalidTtl { .. }
+            ),
+            "expected InvalidTtl"
         );
     }
+
+    let sharded_unbound = cached::ShardedCache::<i32, i32>::builder()
+        .shards(0)
+        .build();
+    assert!(
+        matches!(
+            sharded_unbound.unwrap_err(),
+            cached::BuildError::InvalidValue {
+                field: "shards",
+                ..
+            }
+        ),
+        "expected InvalidValue(shards) for shards(0)"
+    );
+}
+
+#[cfg(feature = "disk_store")]
+#[test]
+fn disk_cache_builder_aliases_and_zero_ttl_validation() {
+    let result = cached::DiskCache::<String, String>::builder("zero-ttl")
+        .ttl(cached::time::Duration::ZERO)
+        .build();
+    assert!(matches!(
+        result,
+        Err(cached::DiskCacheBuildError::InvalidTtl(..))
+    ));
+}
+
+#[cfg(feature = "redis_store")]
+#[test]
+fn redis_cache_builder_aliases_and_zero_ttl_validation() {
+    let result =
+        cached::RedisCache::<String, String>::builder("zero-ttl", cached::time::Duration::ZERO)
+            .build();
+    assert!(matches!(
+        result,
+        Err(cached::RedisCacheBuildError::InvalidTtl(..))
+    ));
 }
 
 #[test]
@@ -2722,7 +4842,10 @@ fn test_expiring_value_cache_get_does_not_promote_expired_key() {
 
     // Size-2 cache: insert a live entry, then an expired entry.
     // Probing the expired entry via cache_get must not promote it to most-recent.
-    let mut cache = cached::ExpiringLruCache::builder().size(2).build();
+    let mut cache = cached::ExpiringLruCache::builder()
+        .max_size(2)
+        .build()
+        .unwrap();
 
     cache.cache_set(1, Expirable { expired: false }); // live, inserted first (older)
     cache.cache_set(2, Expirable { expired: true }); // expired, inserted second (newer)
@@ -2742,8 +4865,8 @@ fn test_expiring_value_cache_get_does_not_promote_expired_key() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_timed_cache_on_evict_fires_on_cache_get() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
@@ -2752,7 +4875,8 @@ fn test_timed_cache_on_evict_fires_on_cache_get() {
         .on_evict(move |_k: &u32, _v: &u32| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, 10);
     std::thread::sleep(cached::time::Duration::from_millis(100));
@@ -2769,8 +4893,8 @@ fn test_timed_cache_on_evict_fires_on_cache_get() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_timed_cache_on_evict_fires_on_cache_get_or_set() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
@@ -2779,7 +4903,8 @@ fn test_timed_cache_on_evict_fires_on_cache_get_or_set() {
         .on_evict(move |_k: &u32, _v: &u32| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, 10);
     std::thread::sleep(cached::time::Duration::from_millis(100));
@@ -2798,8 +4923,8 @@ fn test_timed_cache_on_evict_fires_on_cache_get_or_set() {
 #[tokio::test]
 async fn test_timed_cache_async_on_evict_fires() {
     use cached::CachedAsync;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
@@ -2808,7 +4933,8 @@ async fn test_timed_cache_async_on_evict_fires() {
         .on_evict(move |_k: &u32, _v: &u32| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, 10);
     tokio::time::sleep(cached::time::Duration::from_millis(100)).await;
@@ -2826,18 +4952,19 @@ async fn test_timed_cache_async_on_evict_fires() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_expiring_sized_cache_get_evicts_expired_and_fires_on_evict() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::stores::TtlSortedCache::builder()
-        .size(4)
+        .max_size(4)
         .ttl(cached::time::Duration::from_millis(50))
         .on_evict(move |_k: &u32, _v: &u32| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.set(1, 10);
     cache.set(2, 20);
@@ -2860,18 +4987,19 @@ fn test_expiring_sized_cache_get_evicts_expired_and_fires_on_evict() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_timed_sized_cache_on_evict_fires_on_cache_get() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::LruTtlCache::builder()
-        .size(4)
+        .max_size(4)
         .ttl(cached::time::Duration::from_millis(50))
         .on_evict(move |_k: &u32, _v: &u32| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, 10);
     std::thread::sleep(cached::time::Duration::from_millis(100));
@@ -2887,8 +5015,8 @@ fn test_timed_sized_cache_on_evict_fires_on_cache_get() {
 
 #[test]
 fn test_expiring_value_cache_on_evict_fires_on_cache_get() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Clone)]
     struct Expirable {
@@ -2903,11 +5031,12 @@ fn test_expiring_value_cache_on_evict_fires_on_cache_get() {
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_count_clone = evicted_count.clone();
     let mut cache = cached::ExpiringLruCache::builder()
-        .size(4)
+        .max_size(4)
         .on_evict(move |_k: &i32, _v: &Expirable| {
             evicted_count_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, Expirable { expired: true });
     assert_eq!(evicted_count.load(Ordering::Relaxed), 0);
@@ -2950,9 +5079,9 @@ fn test_unsync_reads_sync_writes_default_counts_single_miss() {
 // unsync_reads backed by TtlSortedCache (implements CachedRead)
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod unsync_reads_ttl_sorted {
+    use cached::Cached;
     use cached::macros::cached;
     use cached::stores::TtlSortedCache;
-    use cached::Cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -2960,7 +5089,7 @@ mod unsync_reads_ttl_sorted {
 
     #[cached(
         ty = "TtlSortedCache<String, u32>",
-        create = "{ TtlSortedCache::new(Duration::from_secs(60)) }",
+        create = "{ TtlSortedCache::builder().ttl(Duration::from_secs(60)).build().unwrap() }",
         convert = r#"{ format!("{}", n) }"#,
         unsync_reads = true
     )]
@@ -2992,32 +5121,41 @@ mod unsync_reads_ttl_sorted {
 #[test]
 fn test_ttl_cache_zero_ttl() {
     use cached::TtlCache;
-    let mut cache = TtlCache::with_ttl(Duration::from_nanos(0));
-    cache.cache_set(1u32, "hello");
-    // With zero TTL every entry expires immediately.
-    assert!(cache.cache_get(&1u32).is_none());
-    assert_eq!(cache.cache_misses(), Some(1));
+    // Builder-only construction unifies zero-TTL validation: a zero TTL is now
+    // rejected at build time (the old permissive `TtlCache::with_ttl` constructor,
+    // which allowed it, has been removed).
+    let err = TtlCache::<u32, &str>::builder()
+        .ttl(Duration::from_nanos(0))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, cached::BuildError::InvalidTtl { .. }));
 }
 
 #[cfg(feature = "time_stores")]
 #[test]
 fn test_lru_ttl_cache_zero_ttl() {
     use cached::LruTtlCache;
-    let mut cache = LruTtlCache::with_size_and_ttl(4, Duration::from_nanos(0));
-    cache.cache_set(1u32, "hello");
-    assert!(cache.cache_get(&1u32).is_none());
-    assert_eq!(cache.cache_misses(), Some(1));
+    // Zero TTL is rejected at build time (see `test_ttl_cache_zero_ttl`).
+    let err = LruTtlCache::<u32, &str>::builder()
+        .max_size(4)
+        .ttl(Duration::from_nanos(0))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, cached::BuildError::InvalidTtl { .. }));
 }
 
 #[cfg(feature = "time_stores")]
 #[test]
 fn test_ttl_sorted_cache_try_set_time_bounds() {
-    use cached::stores::TtlSortedCache;
     use cached::Cached;
+    use cached::stores::TtlSortedCache;
     // A near-maximum TTL triggers TimeBounds overflow on some platforms.
     // cache_set silently no-ops; cache_try_set returns Err.
     let ttl = Duration::from_secs(u64::MAX / 2);
-    let mut cache = TtlSortedCache::<u32, u32>::new(ttl);
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(ttl)
+        .build()
+        .unwrap();
     // cache_set must not panic
     cache.cache_set(1, 42);
     // cache_try_set must surface the error
@@ -3031,7 +5169,7 @@ fn test_ttl_sorted_cache_try_set_time_bounds() {
 fn test_cache_reset_also_resets_metrics() {
     use cached::Cached;
 
-    let mut c = UnboundCache::new();
+    let mut c = UnboundCache::builder().build().unwrap();
     c.cache_set(1u32, 1u32);
     c.cache_get(&1u32);
     c.cache_get(&99u32);
@@ -3042,7 +5180,7 @@ fn test_cache_reset_also_resets_metrics() {
     assert_eq!(c.cache_misses(), Some(0));
     assert_eq!(c.cache_size(), 0);
 
-    let mut lru = LruCache::with_size(4);
+    let mut lru = LruCache::builder().max_size(4).build().unwrap();
     lru.cache_set(1u32, 1u32);
     lru.cache_get(&1u32);
     lru.cache_get(&99u32);
@@ -3059,7 +5197,10 @@ fn test_cache_reset_also_resets_metrics() {
 fn test_cache_reset_also_resets_metrics_time_stores() {
     use cached::{Cached, LruTtlCache, TtlCache};
 
-    let mut tc = TtlCache::<u32, u32>::with_ttl(Duration::from_secs(60));
+    let mut tc = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     tc.cache_set(1, 1);
     tc.cache_get(&1);
     tc.cache_get(&99);
@@ -3068,7 +5209,11 @@ fn test_cache_reset_also_resets_metrics_time_stores() {
     assert_eq!(tc.cache_misses(), Some(0));
     assert_eq!(tc.cache_size(), 0);
 
-    let mut ltu = LruTtlCache::<u32, u32>::with_size_and_ttl(4, Duration::from_secs(60));
+    let mut ltu = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     ltu.cache_set(1, 1);
     ltu.cache_get(&1);
     ltu.cache_get(&99);
@@ -3082,7 +5227,7 @@ fn test_cache_reset_also_resets_metrics_time_stores() {
 fn test_cache_clear_preserves_metrics() {
     use cached::Cached;
 
-    let mut c = UnboundCache::new();
+    let mut c = UnboundCache::builder().build().unwrap();
     c.cache_set(1u32, 1u32);
     c.cache_get(&1u32);
     c.cache_get(&99u32);
@@ -3093,7 +5238,7 @@ fn test_cache_clear_preserves_metrics() {
     assert_eq!(c.cache_hits(), Some(1));
     assert_eq!(c.cache_misses(), Some(1));
 
-    let mut lru = LruCache::with_size(4);
+    let mut lru = LruCache::builder().max_size(4).build().unwrap();
     lru.cache_set(1u32, 1u32);
     lru.cache_get(&1u32);
     lru.cache_get(&99u32);
@@ -3106,8 +5251,8 @@ fn test_cache_clear_preserves_metrics() {
 #[test]
 fn test_unbound_cache_on_evict_fires_on_remove() {
     use cached::Cached;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let fired = Arc::new(AtomicU32::new(0));
     let fired_clone = fired.clone();
@@ -3115,7 +5260,8 @@ fn test_unbound_cache_on_evict_fires_on_remove() {
         .on_evict(move |_, _| {
             fired_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, 100);
     cache.cache_set(2, 200);
@@ -3136,7 +5282,11 @@ fn test_unbound_cache_on_evict_fires_on_remove() {
 fn test_lru_ttl_cache_retain() {
     use cached::{Cached, LruTtlCache};
 
-    let mut cache = LruTtlCache::<u32, u32>::with_size_and_ttl(10, Duration::from_secs(60));
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(10)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 11); // odd
     cache.cache_set(2, 20); // even
     cache.cache_set(3, 31); // odd
@@ -3152,13 +5302,71 @@ fn test_lru_ttl_cache_retain() {
     assert_eq!(cache.cache_size(), 2);
 }
 
+#[test]
+fn test_lru_retain_fires_on_evict_and_increments_evictions() {
+    use cached::{Cached, LruCache};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let fired = Arc::new(AtomicU32::new(0));
+    let fired_clone = fired.clone();
+    let mut cache = LruCache::builder()
+        .max_size(10)
+        .on_evict(move |_k, _v| {
+            fired_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .build()
+        .unwrap();
+
+    cache.cache_set(1u32, 10u32);
+    cache.cache_set(2u32, 20u32);
+    cache.cache_set(3u32, 30u32);
+    cache.cache_set(4u32, 40u32);
+
+    // Remove odd keys via retain
+    cache.retain(|k, _v| k % 2 == 0);
+
+    assert_eq!(fired.load(Ordering::Relaxed), 2); // keys 1 and 3 removed
+    assert_eq!(cache.cache_evictions(), Some(2));
+    assert_eq!(cache.cache_size(), 2);
+    assert!(cache.cache_get(&1u32).is_none());
+    assert!(cache.cache_get(&2u32).is_some());
+    assert!(cache.cache_get(&3u32).is_none());
+    assert!(cache.cache_get(&4u32).is_some());
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn test_lru_ttl_evict_does_not_double_count_evictions() {
+    use cached::{Cached, LruTtlCache};
+
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(10)
+        .ttl(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    cache.cache_set(1u32, 10u32);
+    cache.cache_set(2u32, 20u32);
+    cache.cache_set(3u32, 30u32);
+
+    std::thread::sleep(Duration::from_millis(100));
+
+    // evict() uses retain_silent internally; cache_evictions() = outer + inner counters.
+    // With retain_silent the inner counter stays 0, so total == 3, not 6.
+    assert_eq!(cache.evict(), 3);
+    assert_eq!(cache.cache_evictions(), Some(3));
+}
+
 #[cfg(feature = "time_stores")]
 #[test]
 fn test_ttl_sorted_cache_clone_cached() {
     use cached::stores::TtlSortedCache;
     use cached::{Cached, CloneCached};
 
-    let mut cache = TtlSortedCache::<u32, u32>::new(Duration::from_secs(60));
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 100);
 
     // Existing, unexpired entry → (Some(v), false)
@@ -3175,10 +5383,13 @@ fn test_ttl_sorted_cache_clone_cached() {
 #[cfg(all(feature = "time_stores", feature = "async_tokio_rt_multi_thread"))]
 #[tokio::test]
 async fn test_ttl_sorted_cache_cached_async() {
-    use cached::stores::TtlSortedCache;
     use cached::CachedAsync;
+    use cached::stores::TtlSortedCache;
 
-    let mut cache = TtlSortedCache::<u32, u32>::new(Duration::from_secs(60));
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
 
     let val = CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { 42u32 }).await;
     assert_eq!(*val, 42);
@@ -3201,7 +5412,10 @@ async fn test_expiring_lru_cache_cached_async() {
         }
     }
 
-    let mut cache = ExpiringLruCache::<u32, NeverExpires>::with_size(4);
+    let mut cache = ExpiringLruCache::<u32, NeverExpires>::builder()
+        .max_size(4)
+        .build()
+        .unwrap();
 
     let val =
         CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(42) }).await;
@@ -3221,7 +5435,7 @@ async fn test_expiring_lru_cache_cached_async() {
 #[test]
 fn test_lru_cache_builder_build() {
     use cached::Cached;
-    let mut cache = LruCache::<u32, u32>::builder().size(4).build();
+    let mut cache = LruCache::<u32, u32>::builder().max_size(4).build().unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
     assert_eq!(cache.cache_capacity(), Some(4));
@@ -3230,7 +5444,7 @@ fn test_lru_cache_builder_build() {
 #[test]
 fn test_unbound_cache_builder_build() {
     use cached::Cached;
-    let mut cache = UnboundCache::<u32, u32>::builder().build();
+    let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
 }
@@ -3246,8 +5460,9 @@ fn test_expiring_lru_cache_builder_build() {
         }
     }
     let mut cache = ExpiringLruCache::<u32, AlwaysFresh>::builder()
-        .size(4)
-        .build();
+        .max_size(4)
+        .build()
+        .unwrap();
     cache.cache_set(1, AlwaysFresh(42));
     assert_eq!(cache.cache_get(&1).map(|v| v.0), Some(42));
 }
@@ -3258,7 +5473,8 @@ fn test_ttl_cache_builder_build() {
     use cached::{Cached, TtlCache};
     let mut cache = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
-        .build();
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
 }
@@ -3268,10 +5484,11 @@ fn test_ttl_cache_builder_build() {
 fn test_lru_ttl_cache_builder_build() {
     use cached::{Cached, LruTtlCache};
     let mut cache = LruTtlCache::<u32, u32>::builder()
-        .size(4)
+        .max_size(4)
         .ttl(Duration::from_secs(60))
         .refresh(true)
-        .build();
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
     assert!(cache.refresh_on_hit());
@@ -3280,11 +5497,12 @@ fn test_lru_ttl_cache_builder_build() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_ttl_sorted_cache_builder_build() {
-    use cached::{stores::TtlSortedCache, Cached};
+    use cached::{Cached, stores::TtlSortedCache};
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
-        .size(4)
-        .build();
+        .max_size(4)
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
 }
@@ -3295,7 +5513,10 @@ fn test_ttl_sorted_cache_builder_build() {
 #[cfg(feature = "time_stores")]
 fn test_ttl_cache_store_getter() {
     use cached::{Cached, TtlCache};
-    let mut cache = TtlCache::<u32, u32>::with_ttl(Duration::from_secs(60));
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     // store() gives direct access to the underlying HashMap<K, TimedEntry<V>>
     assert_eq!(cache.store().len(), 1);
@@ -3305,7 +5526,7 @@ fn test_ttl_cache_store_getter() {
 #[test]
 fn test_unbound_cache_store_getter() {
     use cached::Cached;
-    let mut cache = UnboundCache::<u32, u32>::new();
+    let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     assert_eq!(cache.store().len(), 2);
@@ -3317,7 +5538,11 @@ fn test_unbound_cache_store_getter() {
 #[cfg(feature = "time_stores")]
 fn test_ttl_cache_refresh_getter_and_setter() {
     use cached::TtlCache;
-    let mut cache = TtlCache::<u32, u32>::with_ttl_and_refresh(Duration::from_secs(60), false);
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(false)
+        .build()
+        .unwrap();
     assert!(!cache.refresh_on_hit());
     cache.set_refresh_on_hit(true);
     assert!(cache.refresh_on_hit());
@@ -3330,7 +5555,7 @@ fn test_ttl_cache_refresh_getter_and_setter() {
 #[test]
 fn test_cached_iter_unbound() {
     use cached::{Cached, CachedIter};
-    let mut cache = UnboundCache::<u32, u32>::new();
+    let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     let mut pairs: Vec<_> = CachedIter::iter(&cache).collect();
@@ -3341,7 +5566,7 @@ fn test_cached_iter_unbound() {
 #[test]
 fn test_cached_iter_lru() {
     use cached::{Cached, CachedIter};
-    let mut cache = LruCache::<u32, u32>::with_size(4);
+    let mut cache = LruCache::<u32, u32>::builder().max_size(4).build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     let mut pairs: Vec<_> = CachedIter::iter(&cache).collect();
@@ -3353,7 +5578,10 @@ fn test_cached_iter_lru() {
 #[cfg(feature = "time_stores")]
 fn test_cached_iter_ttl_cache() {
     use cached::{Cached, CachedIter, TtlCache};
-    let mut cache = TtlCache::<u32, u32>::with_ttl(Duration::from_secs(60));
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     let mut pairs: Vec<_> = CachedIter::iter(&cache).collect();
@@ -3365,7 +5593,10 @@ fn test_cached_iter_ttl_cache() {
 #[cfg(feature = "time_stores")]
 fn test_cached_iter_ttl_cache_excludes_expired() {
     use cached::{Cached, CachedIter, TtlCache};
-    let mut cache = TtlCache::<u32, u32>::with_ttl(Duration::from_millis(20));
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     sleep(Duration::from_millis(40));
@@ -3383,7 +5614,10 @@ fn test_cached_iter_expiring_lru() {
             false
         }
     }
-    let mut cache = ExpiringLruCache::<u32, Fresh>::with_size(4);
+    let mut cache = ExpiringLruCache::<u32, Fresh>::builder()
+        .max_size(4)
+        .build()
+        .unwrap();
     cache.cache_set(1, Fresh);
     cache.cache_set(2, Fresh);
     let mut keys: Vec<_> = CachedIter::iter(&cache).map(|(k, _)| *k).collect();
@@ -3397,7 +5631,10 @@ fn test_cached_iter_expiring_lru() {
 #[cfg(feature = "time_stores")]
 fn test_cached_peek_ttl_cache() {
     use cached::{Cached, CachedPeek, TtlCache};
-    let mut cache = TtlCache::<u32, u32>::with_ttl(Duration::from_secs(60));
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_reset_metrics();
 
@@ -3415,7 +5652,11 @@ fn test_cached_peek_ttl_cache() {
 #[cfg(feature = "time_stores")]
 fn test_cached_peek_lru_ttl_cache() {
     use cached::{Cached, CachedPeek, LruTtlCache};
-    let mut cache = LruTtlCache::<u32, u32>::with_size_and_ttl(4, Duration::from_secs(60));
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_reset_metrics();
 
@@ -3427,8 +5668,11 @@ fn test_cached_peek_lru_ttl_cache() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_cached_peek_ttl_sorted_cache() {
-    use cached::{stores::TtlSortedCache, Cached, CachedPeek};
-    let mut cache = TtlSortedCache::<u32, u32>::new(Duration::from_secs(60));
+    use cached::{Cached, CachedPeek, stores::TtlSortedCache};
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_reset_metrics();
 
@@ -3440,7 +5684,7 @@ fn test_cached_peek_ttl_sorted_cache() {
 #[test]
 fn test_cached_peek_lru_cache() {
     use cached::{Cached, CachedPeek};
-    let mut cache = LruCache::<u32, u32>::with_size(4);
+    let mut cache = LruCache::<u32, u32>::builder().max_size(4).build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_reset_metrics();
 
@@ -3467,7 +5711,10 @@ fn test_cached_peek_expiring_lru_cache() {
         }
     }
 
-    let mut cache = ExpiringLruCache::<u32, AlwaysFresh>::with_size(4);
+    let mut cache = ExpiringLruCache::<u32, AlwaysFresh>::builder()
+        .max_size(4)
+        .build()
+        .unwrap();
     cache.cache_set(1, AlwaysFresh(10));
     cache.cache_reset_metrics();
 
@@ -3480,7 +5727,10 @@ fn test_cached_peek_expiring_lru_cache() {
     assert_eq!(cache.cache_misses(), Some(0));
 
     // peek on a logically-expired entry returns None
-    let mut cache2 = ExpiringLruCache::<u32, AlwaysExpired>::with_size(4);
+    let mut cache2 = ExpiringLruCache::<u32, AlwaysExpired>::builder()
+        .max_size(4)
+        .build()
+        .unwrap();
     cache2.cache_set(1, AlwaysExpired);
     cache2.cache_reset_metrics();
     assert!(cache2.cache_peek(&1).is_none());
@@ -3491,7 +5741,7 @@ fn test_cached_peek_expiring_lru_cache() {
 #[test]
 fn test_cached_peek_unbound_cache() {
     use cached::{Cached, CachedPeek, UnboundCache};
-    let mut cache = UnboundCache::<u32, u32>::new();
+    let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_reset_metrics();
 
@@ -3538,7 +5788,10 @@ fn test_cached_read_hashmap() {
 #[cfg(feature = "time_stores")]
 fn test_ttl_cache_clone_cached() {
     use cached::{Cached, CloneCached, TtlCache};
-    let mut cache = TtlCache::<u32, u32>::with_ttl(Duration::from_secs(60));
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.cache_set(1, 100);
 
     let (val, expired) = cache.cache_get_with_expiry_status(&1u32);
@@ -3564,7 +5817,10 @@ fn test_expiring_lru_cache_clone_cached() {
         }
     }
 
-    let mut cache = ExpiringLruCache::<u32, Article>::with_size(4);
+    let mut cache = ExpiringLruCache::<u32, Article>::builder()
+        .max_size(4)
+        .build()
+        .unwrap();
     cache.cache_set(
         1,
         Article {
@@ -3602,7 +5858,10 @@ fn test_expiring_lru_cache_clone_cached() {
 #[cfg(feature = "time_stores")]
 fn test_cache_evict_ttl_cache() {
     use cached::{CacheEvict, Cached, TtlCache};
-    let mut cache = TtlCache::<u32, u32>::with_ttl(Duration::from_millis(20));
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     sleep(Duration::from_millis(40));
@@ -3616,7 +5875,11 @@ fn test_cache_evict_ttl_cache() {
 #[cfg(feature = "time_stores")]
 fn test_cache_evict_lru_ttl_cache() {
     use cached::{CacheEvict, Cached, LruTtlCache};
-    let mut cache = LruTtlCache::<u32, u32>::with_size_and_ttl(4, Duration::from_millis(20));
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
     sleep(Duration::from_millis(40));
@@ -3631,7 +5894,10 @@ fn test_cache_evict_lru_ttl_cache() {
 #[cfg(feature = "time_stores")]
 fn test_ttl_sorted_cache_generic_get_str_key() {
     use cached::stores::TtlSortedCache;
-    let mut cache = TtlSortedCache::<String, u32>::new(Duration::from_secs(60));
+    let mut cache = TtlSortedCache::<String, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.insert(String::from("hello"), 1).unwrap();
     cache.insert(String::from("world"), 2).unwrap();
 
@@ -3645,7 +5911,10 @@ fn test_ttl_sorted_cache_generic_get_str_key() {
 #[cfg(feature = "time_stores")]
 fn test_ttl_sorted_cache_generic_get_slice_key() {
     use cached::stores::TtlSortedCache;
-    let mut cache = TtlSortedCache::<Vec<u32>, &str>::new(Duration::from_secs(60));
+    let mut cache = TtlSortedCache::<Vec<u32>, &str>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     cache.insert(vec![1, 2, 3], "abc").unwrap();
 
     // &[T] lookup works via Borrow<[T]>
@@ -3721,7 +5990,10 @@ mod generic_where_tests {
         fn cache_remove(&self, k: &String) -> Result<Option<String>, Self::Error> {
             Ok(self.inner.lock().unwrap().remove(k))
         }
-        fn set_refresh_on_hit(&mut self, _refresh: bool) -> bool {
+        fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
+            Ok(self.inner.lock().unwrap().remove_entry(k))
+        }
+        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
             false
         }
     }
@@ -3775,7 +6047,7 @@ fn test_cache_metrics_and_hit_ratio() {
     use cached::Cached;
 
     // No lookups yet — hit_ratio should be None
-    let mut cache = UnboundCache::<u32, u32>::new();
+    let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     let m = cache.metrics();
     assert_eq!(m.hits, Some(0));
     assert_eq!(m.misses, Some(0));
@@ -3796,7 +6068,7 @@ fn test_cache_metrics_and_hit_ratio() {
     assert!((ratio - 2.0 / 3.0).abs() < 1e-9);
 
     // LruCache: bounded, so capacity is Some
-    let mut lru = LruCache::<u32, u32>::with_size(4);
+    let mut lru = LruCache::<u32, u32>::builder().max_size(4).build().unwrap();
     lru.cache_set(1, 10);
     lru.cache_get(&1);
     lru.cache_get(&99);
@@ -3808,14 +6080,17 @@ fn test_cache_metrics_and_hit_ratio() {
     assert!((ratio - 0.5).abs() < 1e-9);
 }
 
-// ── TtlSortedCache::reserve and try_size_limit ────────────────────────────────
+// ── TtlSortedCache::reserve and try_set_max_size ──────────────────────────────
 
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_ttl_sorted_cache_reserve() {
-    use cached::stores::TtlSortedCache;
     use cached::Cached;
-    let mut cache = TtlSortedCache::<u32, u32>::new(Duration::from_secs(60));
+    use cached::stores::TtlSortedCache;
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     // reserve should not panic and the cache should still work normally
     cache.reserve(64);
     cache.cache_set(1, 10);
@@ -3827,19 +6102,22 @@ fn test_ttl_sorted_cache_reserve() {
 #[cfg(feature = "time_stores")]
 fn test_ttl_sorted_cache_try_size_limit() {
     use cached::stores::TtlSortedCache;
-    let mut cache = TtlSortedCache::<u32, u32>::new(Duration::from_secs(60));
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
     // Success: set a valid limit
     let prev = cache
-        .try_size_limit(10)
+        .try_set_max_size(10)
         .expect("non-zero limit should succeed");
     assert!(prev.is_none(), "no previous limit");
 
     // Set another limit — returns old one
-    let prev = cache.try_size_limit(20).unwrap();
+    let prev = cache.try_set_max_size(20).unwrap();
     assert_eq!(prev, Some(10));
 
     // Error: size of zero is invalid
-    let err = cache.try_size_limit(0);
+    let err = cache.try_set_max_size(0);
     assert!(err.is_err(), "zero size limit must fail");
     assert_eq!(err.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
 }
@@ -3855,7 +6133,7 @@ mod result_fallback_async_tests {
     use super::sleep;
     use cached::time::Duration;
 
-    #[cached::macros::cached(result = true, ttl = 1, result_fallback = true)]
+    #[cached::macros::cached(ttl = 1, result_fallback = true)]
     async fn async_always_failing() -> Result<String, ()> {
         Err(())
     }
@@ -3887,8 +6165,8 @@ mod result_fallback_async_tests {
 fn test_cache_evict_ttl_sorted_cache() {
     use cached::stores::TtlSortedCache;
     use cached::{CacheEvict, Cached};
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_clone = evicted_count.clone();
@@ -3897,7 +6175,8 @@ fn test_cache_evict_ttl_sorted_cache() {
         .on_evict(move |_k: &u32, _v: &u32| {
             evicted_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
@@ -3916,8 +6195,8 @@ fn test_cache_evict_ttl_sorted_cache() {
 #[test]
 fn test_cache_evict_expiring_lru_cache() {
     use cached::{CacheEvict, Cached};
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Clone)]
     struct Expirable {
@@ -3932,11 +6211,12 @@ fn test_cache_evict_expiring_lru_cache() {
     let evicted_count = Arc::new(AtomicU32::new(0));
     let evicted_clone = evicted_count.clone();
     let mut cache = ExpiringLruCache::<u32, Expirable>::builder()
-        .size(10)
+        .max_size(10)
         .on_evict(move |_k: &u32, _v: &Expirable| {
             evicted_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .build();
+        .build()
+        .unwrap();
 
     cache.cache_set(1, Expirable { expired: true });
     cache.cache_set(2, Expirable { expired: false });
@@ -3962,7 +6242,10 @@ fn test_expiring_lru_cache_get_does_not_inflate_inner_metrics() {
         }
     }
 
-    let mut cache = ExpiringLruCache::<u32, Fresh>::with_size(4);
+    let mut cache = ExpiringLruCache::<u32, Fresh>::builder()
+        .max_size(4)
+        .build()
+        .unwrap();
     cache.cache_set(1, Fresh);
     cache.cache_reset_metrics();
 
@@ -3988,7 +6271,10 @@ fn test_expiring_lru_cache_evictions_sum_lru_and_expiry() {
         }
     }
 
-    let mut cache = ExpiringLruCache::<u32, Expirable>::with_size(2);
+    let mut cache = ExpiringLruCache::<u32, Expirable>::builder()
+        .max_size(2)
+        .build()
+        .unwrap();
 
     // Fill to capacity then insert a third entry: LRU evicts key 1 via the
     // inner LruCache's check_capacity path (inner store eviction counter = 1).
@@ -4032,7 +6318,7 @@ mod macro_arg_pairwise {
     }
 
     // size + sync_lock = "mutex": LruCache behind a Mutex, read via `.lock()`.
-    #[cached(size = 2, sync_lock = "mutex")]
+    #[cached(max_size = 2, sync_lock = "mutex")]
     fn sized_mutex(n: u32) -> u32 {
         n * 2
     }
@@ -4126,7 +6412,7 @@ mod macro_arg_pairwise {
     }
 
     // once + result + with_cached_flag (pairwise).
-    #[once(result = true, with_cached_flag = true)]
+    #[once(with_cached_flag = true)]
     fn once_result_flag(ok: bool) -> Result<cached::Return<u32>, ()> {
         if ok {
             Ok(cached::Return::new(1))
@@ -4146,7 +6432,7 @@ mod macro_arg_pairwise {
     }
 
     // once + option + with_cached_flag (pairwise).
-    #[once(option = true, with_cached_flag = true)]
+    #[once(with_cached_flag = true)]
     fn once_option_flag(some: bool) -> Option<cached::Return<u32>> {
         if some {
             Some(cached::Return::new(2))
@@ -4184,17 +6470,20 @@ mod macro_arg_pairwise {
 
 #[cfg(all(feature = "time_stores", feature = "async"))]
 mod async_cache_store_tests {
-    use cached::time::Duration;
     use cached::Expires;
+    use cached::time::Duration;
     use cached::{
         CachedAsync, ExpiringLruCache, LruTtlCache, TtlCache, TtlSortedCache, UnboundCache,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn test_ttl_cache_async() {
-        let mut cache = TtlCache::builder().ttl(Duration::from_millis(50)).build();
+        let mut cache = TtlCache::builder()
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
 
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
@@ -4242,7 +6531,8 @@ mod async_cache_store_tests {
             .on_evict(move |_, _| {
                 evicted_clone.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
 
         let val = cache
             .async_try_get_or_set_with(1, || async { Ok::<_, ()>("hello".to_string()) })
@@ -4268,12 +6558,13 @@ mod async_cache_store_tests {
         let evicted = Arc::new(AtomicUsize::new(0));
         let evicted_clone = evicted.clone();
         let mut cache = LruTtlCache::builder()
-            .size(2)
+            .max_size(2)
             .ttl(Duration::from_millis(50))
             .on_evict(move |_, _| {
                 evicted_clone.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
 
         cache
             .async_get_or_set_with(1, || async { "one".to_string() })
@@ -4308,7 +6599,8 @@ mod async_cache_store_tests {
             .on_evict(move |_, _| {
                 evicted_clone.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
 
         cache
             .async_get_or_set_with(1, || async { "one".to_string() })
@@ -4338,11 +6630,12 @@ mod async_cache_store_tests {
         let evicted = Arc::new(AtomicUsize::new(0));
         let evicted_clone = evicted.clone();
         let mut cache = ExpiringLruCache::builder()
-            .size(2)
+            .max_size(2)
             .on_evict(move |_, _| {
                 evicted_clone.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
 
         cache
             .async_get_or_set_with(1, || async { ExpiringVal { expired: true } })
@@ -4358,7 +6651,7 @@ mod async_cache_store_tests {
 
     #[tokio::test]
     async fn test_unbound_cache_async() {
-        let mut cache = UnboundCache::new();
+        let mut cache = UnboundCache::builder().build().unwrap();
         let val = cache
             .async_get_or_set_with(1, || async { "hello".to_string() })
             .await;

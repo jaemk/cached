@@ -1,4 +1,4 @@
-error: #[concurrent_cached] functions must return `Result`s, found "(i32,i32)"
+error: #[concurrent_cached] plain return types are only supported for the default in-memory sharded stores. Use `Result<T, E>` when specifying `redis`, `disk`, or a custom `ty`/`create`.
  --> tests/ui/concurrent_cached_complex_return.rs:4:21
   |
 4 | fn my_fn(k: i32) -> (i32, i32) {

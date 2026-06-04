@@ -1,0 +1,5 @@
+error: `cache_none = true` and `with_cached_flag = true` are structurally incompatible on `Option<T>` returns: `with_cached_flag` stores the inner `T` from `Return<T>` while `cache_none = true` stores `Option<T>` as the cached value — the same cache entry cannot hold both types. Use `with_cached_flag = true` alone (to get cache-state flags; `None` is not cached by default), or use `cache_none = true` alone (to force-cache `None` values).
+ --> tests/ui/once_cache_none_with_cached_flag_exclusive.rs:4:4
+  |
+4 | fn my_fn() -> Option<cached::Return<i32>> {
+  |    ^^^^^

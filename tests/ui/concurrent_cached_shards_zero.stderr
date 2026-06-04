@@ -1,0 +1,5 @@
+error: `shards` must be >= 1
+ --> tests/ui/concurrent_cached_shards_zero.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> Result<i32, std::convert::Infallible> {
+  |    ^^^^^

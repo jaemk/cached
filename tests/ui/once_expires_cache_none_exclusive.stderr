@@ -1,0 +1,5 @@
+error: `expires = true` and `cache_none = true` are incompatible — `expires` requires the cache value type to implement `Expires`, but `cache_none = true` stores `Option<V>` as the value, which does not implement `Expires`. Remove `cache_none = true` (None values are not cached by default with `expires = true`).
+  --> tests/ui/once_expires_cache_none_exclusive.rs:10:4
+   |
+10 | fn my_fn() -> Option<Val> {
+   |    ^^^^^

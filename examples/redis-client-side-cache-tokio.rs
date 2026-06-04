@@ -16,9 +16,9 @@ Cleanup:
     docker rm -f cached-csc-example
 */
 
+use cached::AsyncRedisCache;
 use cached::macros::concurrent_cached;
 use cached::time::Duration;
-use cached::AsyncRedisCache;
 use std::io;
 use std::io::Write;
 use thiserror::Error;

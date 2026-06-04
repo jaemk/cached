@@ -55,3 +55,15 @@ make clean
 
 Pull requests should be made against `master`. GitHub Actions will run the full
 test suite on all PRs. Remember to update the changelog!
+
+## Releasing
+
+If you want your change released immediately, bump the crate versions as part of
+your PR. The `release` agent skill (`/release X.Y.Z` in Claude Code) handles the
+full release prep: version bumps across all `Cargo.toml` files, CHANGELOG promotion,
+migration guide creation, and README regeneration.
+
+For self-review before submitting, the `pr-cycle` agent skill (`/pr-cycle` in
+Claude Code) runs a full review → fix → push → re-request loop: it fetches open PR
+comments, spawns independent code-review and library-consumer sub-agents, applies
+valid fixes, runs CI, and re-requests Copilot review — all in one pass.

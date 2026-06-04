@@ -14,9 +14,9 @@ Cleanup:
     docker rm -f async-cached-redis-example
 */
 
+use cached::AsyncRedisCache;
 use cached::macros::concurrent_cached;
 use cached::time::Duration;
-use cached::AsyncRedisCache;
 use std::io;
 use std::io::Write;
 use std::sync::LazyLock;

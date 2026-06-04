@@ -16,8 +16,8 @@ use std::collections::hash_map::RandomState;
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Least Recently Used / `Sized` Cache
 ///
@@ -35,6 +35,10 @@ pub struct LruCache<K, V> {
     pub(super) misses: AtomicU64,
     pub(super) evictions: AtomicU64,
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
+    /// When false, `get_if` / `get_mut_if` / `get_or_set_with_if` skip incrementing `hits` and
+    /// `misses`. Used by wrapper stores that maintain their own counters and delegate to this
+    /// cache solely for LRU ordering / storage — avoids a redundant atomic op per access.
+    pub(crate) track_hit_miss: bool,
 }
 
 impl<K, V> Clone for LruCache<K, V>
@@ -52,6 +56,7 @@ where
             misses: AtomicU64::new(self.misses.load(Ordering::Relaxed)),
             evictions: AtomicU64::new(self.evictions.load(Ordering::Relaxed)),
             on_evict: self.on_evict.clone(),
+            track_hit_miss: self.track_hit_miss,
         }
     }
 }
@@ -99,16 +104,20 @@ pub struct LruCacheBuilder<K, V> {
 }
 
 impl<K, V> LruCacheBuilder<K, V> {
-    /// Set the maximum number of entries. Required — panics at build time if not set.
-    #[doc(alias = "max_size")]
+    /// Set the maximum number of entries. Required — `build` returns `Err` if not set.
+    #[doc(alias = "size")]
     #[doc(alias = "capacity")]
     #[must_use]
-    pub fn size(mut self, size: usize) -> Self {
-        self.size = Some(size);
+    pub fn max_size(mut self, max_size: usize) -> Self {
+        self.size = Some(max_size);
         self
     }
 
     /// Set a callback to be invoked when an entry is evicted.
+    ///
+    /// Use [`cache_clear_with_on_evict`](LruCache::cache_clear_with_on_evict)
+    /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
+    /// firing and eviction counter increments when clearing all entries.
     #[must_use]
     pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
         self.on_evict = Some(Arc::new(on_evict));
@@ -117,35 +126,48 @@ impl<K, V> LruCacheBuilder<K, V> {
 
     /// Build the cache.
     ///
-    /// # Panics
-    ///
-    /// Panics if `size` was not set or is `0`.
-    #[must_use]
-    pub fn build(self) -> LruCache<K, V>
-    where
-        K: Hash + Eq + Clone,
-    {
-        let size = self
-            .size
-            .expect("`LruCacheBuilder` requires `size` to be set");
-        let mut cache = LruCache::with_size(size);
-        cache.on_evict = self.on_evict;
-        cache
-    }
-
-    /// Build the cache, returning an error instead of panicking.
-    ///
     /// # Errors
     ///
-    /// Returns [`BuildError`](super::BuildError) if `size` was not set or is `0`.
-    pub fn try_build(self) -> Result<LruCache<K, V>, super::BuildError>
+    /// Returns [`BuildError::MissingRequired`](super::BuildError) if `max_size` was not set,
+    /// or [`BuildError::InvalidValue`](super::BuildError) if `max_size` is `0` or capacity
+    /// pre-allocation fails.
+    pub fn build(self) -> Result<LruCache<K, V>, super::BuildError>
     where
         K: Hash + Eq + Clone,
     {
         let size = self
             .size
-            .ok_or(super::BuildError::MissingRequired("size"))?;
-        let mut cache = LruCache::try_with_size(size)?;
+            .ok_or(super::BuildError::MissingRequired("max_size"))?;
+        if size == 0 {
+            return Err(super::BuildError::InvalidValue {
+                field: "max_size",
+                reason: "must be greater than zero",
+            });
+        }
+
+        let mut store = HashTable::new();
+        if let Err(_e) = store.try_reserve(size, |&index: &usize| {
+            let hasher = &mut RandomState::new().build_hasher();
+            index.hash(hasher);
+            hasher.finish()
+        }) {
+            return Err(super::BuildError::InvalidValue {
+                field: "max_size",
+                reason: "allocation failed",
+            });
+        }
+
+        let mut cache = LruCache {
+            store,
+            hash_builder: RandomState::new(),
+            order: LRUList::<(K, V)>::try_with_capacity(size)?,
+            capacity: size,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            on_evict: None,
+            track_hit_miss: true,
+        };
         cache.on_evict = self.on_evict;
         Ok(cache)
     }
@@ -161,64 +183,23 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         }
     }
 
-    /// Creates a new `LruCache` with a given size limit and pre-allocated backing data
+    /// Disable hit/miss counter increments on this cache.
     ///
-    /// # Panics
-    ///
-    /// Will panic if size is 0
-    #[must_use]
-    pub fn with_size(size: usize) -> LruCache<K, V> {
-        if size == 0 {
-            panic!("`size` of `LruCache` must be greater than zero.");
-        }
-        LruCache {
-            store: HashTable::with_capacity(size),
-            hash_builder: RandomState::new(),
-            order: LRUList::<(K, V)>::with_capacity(size),
-            capacity: size,
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-            on_evict: None,
-        }
+    /// Called by wrapper stores (`LruTtlCache`, `ExpiringLruCache`, and the sharded equivalents)
+    /// that maintain their own counters and use this cache solely for LRU ordering / storage.
+    pub(crate) fn disable_hit_miss_tracking(&mut self) {
+        self.track_hit_miss = false;
     }
 
-    /// Creates a new `LruCache` with a given size limit and pre-allocated backing data
+    /// Returns the maximum number of entries this cache will hold before evicting.
     ///
-    /// # Errors
-    ///
-    /// Will return a [`BuildError`](super::BuildError) if size is 0, capacity
-    /// overflows, or pre-allocation fails.
-    pub fn try_with_size(size: usize) -> Result<LruCache<K, V>, super::BuildError> {
-        if size == 0 {
-            return Err(super::BuildError::InvalidValue {
-                field: "size",
-                reason: "must be greater than zero",
-            });
-        }
-
-        let mut store = HashTable::new();
-        if let Err(_e) = store.try_reserve(size, |&index: &usize| {
-            let hasher = &mut RandomState::new().build_hasher();
-            index.hash(hasher);
-            hasher.finish()
-        }) {
-            return Err(super::BuildError::InvalidValue {
-                field: "size",
-                reason: "allocation failed",
-            });
-        }
-
-        Ok(LruCache {
-            store,
-            hash_builder: RandomState::new(),
-            order: LRUList::<(K, V)>::try_with_capacity(size)?,
-            capacity: size,
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-            on_evict: None,
-        })
+    /// This is the bound set via [`LruCacheBuilder::max_size`],
+    /// not the current number of entries — use [`cache_size`](crate::Cached::cache_size) for that.
+    #[doc(alias = "size")]
+    #[doc(alias = "max_size")]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Return all entries in current LRU order (most-recently-used first) as a `Vec` of `(K, V)` pairs.
@@ -248,7 +229,7 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         self.order.iter().map(|(_k, v)| v.clone()).collect()
     }
 
-    pub(super) fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    pub(super) fn pop_raw<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -333,11 +314,15 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         if let Some(index) = self.get_index(self.hash(key), key) {
             if is_valid(&self.order.get(index).1) {
                 self.order.move_to_front(index);
-                self.hits.fetch_add(1, Ordering::Relaxed);
+                if self.track_hit_miss {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                }
                 return Some(&self.order.get(index).1);
             }
         }
-        self.misses.fetch_add(1, Ordering::Relaxed);
+        if self.track_hit_miss {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
         None
     }
 
@@ -353,11 +338,15 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         if let Some(index) = self.get_index(self.hash(key), key) {
             if is_valid(&self.order.get(index).1) {
                 self.order.move_to_front(index);
-                self.hits.fetch_add(1, Ordering::Relaxed);
+                if self.track_hit_miss {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                }
                 return Some(&mut self.order.get_mut(index).1);
             }
         }
-        self.misses.fetch_add(1, Ordering::Relaxed);
+        if self.track_hit_miss {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
         None
     }
 
@@ -374,10 +363,12 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 let v = &self.order.get(index).1;
                 !is_valid(v)
             };
-            if replace_existing {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.hits.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                if replace_existing {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                }
             }
             let old_val = if replace_existing {
                 self.order.set(index, (key, f())).map(|(_, v)| v)
@@ -392,7 +383,9 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 &mut self.order.get_mut(index).1,
             )
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+            }
             let index = self.order.push_front((key, f()));
             self.insert_index(hash, index);
             self.check_capacity();
@@ -413,10 +406,12 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 let v = &self.order.get(index).1;
                 !is_valid(v)
             };
-            if replace_existing {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.hits.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                if replace_existing {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                }
             }
             let old_val = if replace_existing {
                 let new_val = f()?;
@@ -432,7 +427,9 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 &mut self.order.get_mut(index).1,
             ))
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+            }
             let index = self.order.push_front((key, f()?));
             self.insert_index(hash, index);
             self.check_capacity();
@@ -440,6 +437,9 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         }
     }
 
+    /// Removes entries for which `keep` returns `false`.
+    /// Each removed entry fires the configured `on_evict` callback and is counted in `evictions`,
+    /// matching [`Cached::cache_remove`] semantics.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
         let remove_keys = {
             self.order
@@ -448,7 +448,50 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 .collect::<Vec<_>>()
         };
         for k in remove_keys {
-            self.remove(&k);
+            self.cache_remove(&k);
+        }
+    }
+
+    /// Removes entries for which `keep` returns `false` without firing `on_evict` or
+    /// incrementing `evictions`. Used internally by TTL/expiring wrapper stores to avoid
+    /// double-counting when those wrappers handle eviction side effects themselves.
+    pub(super) fn retain_silent<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+        let remove_keys = {
+            self.order
+                .iter()
+                .filter_map(|(k, v)| if keep(k, v) { None } else { Some(k.clone()) })
+                .collect::<Vec<_>>()
+        };
+        for k in remove_keys {
+            self.pop_raw(&k);
+        }
+    }
+
+    /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
+    /// evictions counter.
+    ///
+    /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
+    /// this method invokes `on_evict` for every removed entry and increments `evictions`. If no
+    /// `on_evict` callback was configured, it falls back to the plain `cache_clear`.
+    pub fn cache_clear_with_on_evict(&mut self) {
+        if self.on_evict.is_none() {
+            return self.cache_clear();
+        }
+        let keys = self.key_order();
+        let mut removed = Vec::with_capacity(keys.len());
+        for k in &keys {
+            if let Some(pair) = self.pop_raw(k) {
+                removed.push(pair);
+            }
+        }
+        if !removed.is_empty() {
+            self.evictions
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (k, v) in &removed {
+                on_evict(k, v);
+            }
         }
     }
 }
@@ -474,10 +517,12 @@ where
         let index = self.get_index(hash, &key);
         if let Some(index) = index {
             let replace_existing = { !is_valid(&self.order.get(index).1) };
-            if replace_existing {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.hits.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                if replace_existing {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                }
             }
             let old_val = if replace_existing {
                 let new_val = f().await;
@@ -493,7 +538,9 @@ where
                 &mut self.order.get_mut(index).1,
             )
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+            }
             let new_val = f().await;
             let index = self.order.push_front((key, new_val));
             self.insert_index(hash, index);
@@ -518,10 +565,12 @@ where
         let index = self.get_index(hash, &key);
         if let Some(index) = index {
             let replace_existing = { !is_valid(&self.order.get(index).1) };
-            if replace_existing {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.hits.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                if replace_existing {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                }
             }
             let old_val = if replace_existing {
                 let new_val = f().await?;
@@ -537,7 +586,9 @@ where
                 &mut self.order.get_mut(index).1,
             ))
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            if self.track_hit_miss {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+            }
             let new_val = f().await?;
             let index = self.order.push_front((key, new_val));
             self.insert_index(hash, index);
@@ -596,8 +647,24 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruCache<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.cache_remove_entry(k).map(|(_key, value)| value)
+        <Self as Cached<K, V>>::cache_remove_entry(self, k).map(|(_, v)| v)
     }
+
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let removed = self.pop_raw(k);
+        if let Some((ref key, ref value)) = removed {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(key, value);
+            }
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+        }
+        removed
+    }
+
     fn cache_clear(&mut self) {
         self.store.clear();
         self.order.clear();
@@ -701,7 +768,7 @@ mod tests {
 
     #[test]
     fn sized_cache() {
-        let mut c = LruCache::with_size(5);
+        let mut c = LruCache::builder().max_size(5).build().unwrap();
         assert!(c.get(&1).is_none());
         assert_eq!(1, c.cache_misses().unwrap());
 
@@ -741,7 +808,7 @@ mod tests {
         struct MyKey {
             v: String,
         }
-        let mut c = LruCache::with_size(5);
+        let mut c = LruCache::builder().max_size(5).build().unwrap();
         assert_eq!(
             c.cache_set(
                 MyKey {
@@ -782,7 +849,7 @@ mod tests {
 
     #[test]
     fn peek_does_not_update_recency_or_metrics() {
-        let mut c = LruCache::with_size(2);
+        let mut c = LruCache::builder().max_size(2).build().unwrap();
         c.set(1, 10);
         c.set(2, 20);
         c.cache_reset_metrics();
@@ -800,23 +867,29 @@ mod tests {
 
     #[test]
     fn try_new() {
-        let c = LruCache::<i32, i32>::try_with_size(0);
+        let c = LruCache::<i32, i32>::builder().max_size(0).build();
         assert!(matches!(
             c.unwrap_err(),
-            super::super::BuildError::InvalidValue { field: "size", .. }
+            super::super::BuildError::InvalidValue {
+                field: "max_size",
+                ..
+            }
         ));
 
-        let c = LruCache::<i32, i32>::try_with_size(usize::MAX);
+        let c = LruCache::<i32, i32>::builder().max_size(usize::MAX).build();
         assert!(matches!(
             c.unwrap_err(),
-            super::super::BuildError::InvalidValue { field: "size", .. }
+            super::super::BuildError::InvalidValue {
+                field: "max_size",
+                ..
+            }
         ));
     }
 
     #[test]
     fn size_cache_racing_keys_eviction_regression() {
         // Regression: duplicate keys in the internal `order` caused wrong eviction. See issue #7.
-        let mut c = LruCache::with_size(2);
+        let mut c = LruCache::builder().max_size(2).build().unwrap();
         assert_eq!(c.set(1, 100), None);
         assert_eq!(c.set(1, 100), Some(100));
         // size would be 1, but internal order would be [1, 1] before the fix
@@ -828,7 +901,7 @@ mod tests {
 
     #[test]
     fn clear() {
-        let mut c = LruCache::with_size(3);
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
         assert_eq!(c.set(1, 100), None);
         assert_eq!(c.set(2, 200), None);
         assert_eq!(c.set(3, 300), None);
@@ -837,9 +910,28 @@ mod tests {
     }
 
     #[test]
+    fn capacity_returns_bound_not_live_size() {
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
+        // The bound is fixed at construction and independent of live count.
+        assert_eq!(c.capacity(), 3);
+        assert_eq!(c.cache_size(), 0);
+
+        c.set(1, 100);
+        c.set(2, 200);
+        assert_eq!(c.capacity(), 3);
+        assert_eq!(c.cache_size(), 2);
+
+        // Eviction past the bound keeps capacity fixed while live count stays capped.
+        c.set(3, 300);
+        c.set(4, 400);
+        assert_eq!(c.capacity(), 3);
+        assert_eq!(c.cache_size(), 3);
+    }
+
+    #[test]
     fn reset() {
         let init_capacity = 2;
-        let mut c = LruCache::with_size(init_capacity);
+        let mut c = LruCache::builder().max_size(init_capacity).build().unwrap();
         for i in 0..128 {
             assert_eq!(c.set(i, i), None);
         }
@@ -850,7 +942,7 @@ mod tests {
 
     #[test]
     fn remove() {
-        let mut c = LruCache::with_size(3);
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
         assert_eq!(c.set(1, 100), None);
         assert_eq!(c.set(2, 200), None);
         assert_eq!(c.set(3, 300), None);
@@ -870,7 +962,7 @@ mod tests {
 
     #[test]
     fn sized_cache_get_mut() {
-        let mut c = LruCache::with_size(5);
+        let mut c = LruCache::builder().max_size(5).build().unwrap();
         assert!(c.cache_get_mut(&1).is_none());
         assert_eq!(1, c.cache_misses().unwrap());
 
@@ -888,7 +980,7 @@ mod tests {
 
     #[test]
     fn sized_cache_eviction_fix() {
-        let mut cache = LruCache::<u32, ()>::with_size(3);
+        let mut cache = LruCache::<u32, ()>::builder().max_size(3).build().unwrap();
         cache.set(1, ());
         cache.set(2, ());
         cache.set(3, ());
@@ -912,7 +1004,7 @@ mod tests {
 
     #[test]
     fn get_or_set_with() {
-        let mut c = LruCache::with_size(5);
+        let mut c = LruCache::builder().max_size(5).build().unwrap();
         for i in 0..=5usize {
             assert_eq!(c.cache_get_or_set_with(i, || i), &i);
         }
@@ -947,7 +1039,7 @@ mod tests {
 
     #[test]
     fn retain() {
-        let mut c = LruCache::with_size(5);
+        let mut c = LruCache::builder().max_size(5).build().unwrap();
         for i in 0i32..5 {
             c.set(i, i * 10);
         }
@@ -963,7 +1055,7 @@ mod tests {
 
     #[test]
     fn key_order_and_value_order() {
-        let mut c = LruCache::with_size(3);
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
         c.set(1, 10);
         c.set(2, 20);
         c.set(3, 30);
@@ -977,7 +1069,7 @@ mod tests {
 
     #[test]
     fn sized_cache_clone_is_independent() {
-        let mut c = LruCache::with_size(3);
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
         c.set(1, 100);
         c.set(2, 200);
         let mut c2 = c.clone();
@@ -991,7 +1083,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_trait() {
         use crate::CachedAsync;
-        let mut c = LruCache::with_size(5);
+        let mut c = LruCache::builder().max_size(5).build().unwrap();
 
         async fn _get(n: usize) -> usize {
             n
@@ -1070,17 +1162,64 @@ mod tests {
     }
 
     #[test]
-    fn cache_reset_does_not_fire_on_evict() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    fn cache_clear_with_on_evict_fires_for_all_entries() {
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = LruCache::builder()
+            .max_size(5)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(count.load(AOrdering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
+    }
+
+    #[test]
+    fn cache_clear_does_not_fire_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = LruCache::builder()
+            .max_size(5)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_clear();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            count.load(AOrdering::Relaxed),
+            0,
+            "cache_clear must not fire on_evict"
+        );
+    }
+
+    #[test]
+    fn cache_reset_does_not_fire_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let evict_count = Arc::new(AtomicUsize::new(0));
         let evict_count2 = evict_count.clone();
         let mut c = LruCache::builder()
-            .size(4)
+            .max_size(4)
             .on_evict(move |_k, _v| {
                 evict_count2.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
         c.cache_set(1, 10);
         c.cache_set(2, 20);
         c.cache_set(3, 30);
@@ -1095,7 +1234,7 @@ mod tests {
 
     #[test]
     fn test_diagnostics_and_traits() {
-        let mut cache = LruCache::builder().size(3).build();
+        let mut cache = LruCache::builder().max_size(3).build().unwrap();
         cache.cache_set(1, 100);
         cache.cache_set(2, 200);
 
@@ -1116,17 +1255,74 @@ mod tests {
         cloned.cache_set(3, 300);
         assert_ne!(cache, cloned);
 
-        // Builder try_build errors
+        // build errors
         let builder = LruCache::<u32, u32>::builder();
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Missing required size
+        let built = builder.build();
+        assert!(built.is_err()); // Missing required size
 
-        let builder = LruCache::<u32, u32>::builder().size(0);
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Size 0 is invalid
+        let builder = LruCache::<u32, u32>::builder().max_size(0);
+        let built = builder.build();
+        assert!(built.is_err()); // Size 0 is invalid
+    }
 
-        // try_with_size errors
-        let try_built_store = LruCache::<u32, u32>::try_with_size(0);
-        assert!(try_built_store.is_err());
+    #[test]
+    fn cache_remove_entry_basic() {
+        let mut c = LruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1u32, 100u32);
+        c.cache_set(2u32, 200u32);
+
+        // Returns None for absent key.
+        assert_eq!(c.cache_remove_entry(&999u32), None);
+
+        // Returns stored key and value.
+        assert_eq!(c.cache_remove_entry(&1u32), Some((1u32, 100u32)));
+
+        // Entry is gone.
+        assert_eq!(c.cache_get(&1u32), None);
+        assert_eq!(c.cache_size(), 1);
+    }
+
+    #[test]
+    fn cache_remove_entry_fires_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let count = Arc::new(AtomicU32::new(0));
+        let count2 = count.clone();
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(move |_, _| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_remove_entry(&1u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+
+        // No fire for absent key.
+        c.cache_remove_entry(&999u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cache_remove_entry_increments_eviction_counter() {
+        let mut c = LruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1u32, 10u32);
+        let before = c.cache_evictions().expect("evictions are always tracked");
+        c.cache_remove_entry(&1u32);
+        c.cache_remove_entry(&999u32); // absent — must not increment
+        assert_eq!(
+            c.cache_evictions().expect("evictions are always tracked") - before,
+            1,
+            "cache_remove_entry must increment evictions for present key only"
+        );
+    }
+
+    #[test]
+    fn cache_delete_returns_true_for_present_entry() {
+        let mut c = LruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1u32, 10u32);
+        assert!(c.cache_delete(&1u32));
+        assert!(!c.cache_delete(&1u32));
     }
 }

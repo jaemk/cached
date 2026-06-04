@@ -1,6 +1,6 @@
 /*
 Async memoization on the tokio runtime: `#[cached]` on `async fn`s, including
-`result = true, with_cached_flag = true` returning `cached::Return`.
+`with_cached_flag = true` returning `cached::Return` for a fallible function.
 
 Run:
     cargo run --example tokio --features "async_tokio_rt_multi_thread,proc_macro"
@@ -19,7 +19,7 @@ async fn cached_sleep_secs(secs: u64) {
     sleep(Duration::from_secs(secs)).await;
 }
 
-#[cached(result = true, with_cached_flag = true)]
+#[cached(with_cached_flag = true)]
 async fn cached_was_cached(count: u32) -> Result<cached::Return<String>, ()> {
     Ok(cached::Return::new(
         (0..count).map(|_| "a").collect::<Vec<_>>().join(""),

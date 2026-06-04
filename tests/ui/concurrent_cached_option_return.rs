@@ -1,8 +1,7 @@
 use cached::macros::concurrent_cached;
 
-// `#[concurrent_cached]` requires a `Result` return. `Option<T>` (and other
-// single-generic path types) must fail here with a clear message, not deeper
-// inside the generated body.
+// `Option<T>` returns are supported on the default in-memory path, but not
+// with `disk`/`redis`/custom stores. This must fail with a clear message.
 #[concurrent_cached(map_error = "|e| e", disk = true)]
 fn my_fn(k: i32) -> Option<i32> {
     Some(k)

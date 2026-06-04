@@ -1,6 +1,6 @@
 /*
 "Kitchen sink": the default `UnboundCache`, an explicit `ty` + `create` store,
-and `#[cached(size = N)]` (LRU), with direct `Cached`-trait access to the
+and `#[cached(max_size = N)]` (LRU), with direct `Cached`-trait access to the
 generated cache statics.
 
 Run:
@@ -16,7 +16,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 // cached shorthand, uses the default unbounded cache.
-// Equivalent to specifying `FIB: UnboundCache<(u32), u32> = UnboundCache::new();`
+// Equivalent to specifying `FIB: UnboundCache<(u32), u32> = UnboundCache::builder().build().unwrap();`
 #[cached]
 fn fib(n: u32) -> u32 {
     if n == 0 || n == 1 {
@@ -29,7 +29,7 @@ fn fib(n: u32) -> u32 {
 // Note that the cache key type is a tuple of function argument types.
 #[cached(
     ty = "UnboundCache<u32, u32>",
-    create = "{ UnboundCache::with_capacity(50) }"
+    create = "{ UnboundCache::builder().capacity(50).build().unwrap() }"
 )]
 fn fib_specific(n: u32) -> u32 {
     if n == 0 || n == 1 {
@@ -40,7 +40,7 @@ fn fib_specific(n: u32) -> u32 {
 
 // Specify a specific cache type
 // Note that the cache key type is a tuple of function argument types.
-#[cached(size = 100)]
+#[cached(max_size = 100)]
 fn slow(a: u32, b: u32) -> u32 {
     sleep(Duration::new(2, 0));
     a * b
@@ -50,7 +50,7 @@ fn slow(a: u32, b: u32) -> u32 {
 // Note that the cache key type is a `String` created from the borrow arguments
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::with_size(100) }",
+    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
     convert = r#"{ format!("{a}{b}") }"#
 )]
 fn keyed(a: &str, b: &str) -> usize {
@@ -113,6 +113,13 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     {
         self.store.remove(k)
     }
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.store.remove_entry(k)
+    }
     fn cache_clear(&mut self) {
         self.store.clear();
     }
@@ -142,12 +149,12 @@ fn expires(a: i32) -> i32 {
     a
 }
 
-#[cached(ttl = 1, result = true)]
+#[cached(ttl = 1)]
 fn expires_result(a: i32) -> Result<i32, ()> {
     Ok(a)
 }
 
-#[cached(ttl = 1, option = true)]
+#[cached(ttl = 1)]
 fn expires_option(a: i32) -> Option<i32> {
     Some(a)
 }

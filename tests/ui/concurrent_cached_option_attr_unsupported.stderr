@@ -1,0 +1,5 @@
+error: `cache_none = true` requires the function to return `Option<T>`
+ --> tests/ui/concurrent_cached_option_attr_unsupported.rs:5:4
+  |
+5 | fn load(id: u64) -> u64 {
+  |    ^^^^

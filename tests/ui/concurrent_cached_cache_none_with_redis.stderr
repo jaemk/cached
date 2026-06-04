@@ -1,0 +1,5 @@
+error: `cache_none = true` is only supported for the default in-memory sharded stores
+ --> tests/ui/concurrent_cached_cache_none_with_redis.rs:5:4
+  |
+5 | fn my_fn(k: i32) -> Option<i32> {
+  |    ^^^^^

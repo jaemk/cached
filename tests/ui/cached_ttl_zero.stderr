@@ -1,0 +1,5 @@
+error: `ttl` must be >= 1
+ --> tests/ui/cached_ttl_zero.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

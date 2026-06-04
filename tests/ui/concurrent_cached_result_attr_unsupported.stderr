@@ -1,0 +1,5 @@
+error: `result` is not a valid attribute for `#[concurrent_cached]`; return `Result<T, E>` and only `Ok` values are cached by default. Use `cache_err = true` to also cache `Err` values.
+ --> tests/ui/concurrent_cached_result_attr_unsupported.rs:3:21
+  |
+3 | #[concurrent_cached(result = true)]
+  |                     ^^^^^^

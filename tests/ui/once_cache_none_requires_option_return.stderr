@@ -1,0 +1,5 @@
+error: `cache_none = true` requires the function to return `Option<T>`
+ --> tests/ui/once_cache_none_requires_option_return.rs:4:4
+  |
+4 | fn my_fn() -> i32 {
+  |    ^^^^^

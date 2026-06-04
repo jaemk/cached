@@ -1,10 +1,10 @@
 use crate::helpers::*;
-use darling::ast::NestedMeta;
 use darling::FromMeta;
+use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, parse_str, Block, Ident, ItemFn, ReturnType, Type};
+use syn::{Block, Ident, ItemFn, ReturnType, Type, parse_macro_input, parse_str};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 enum SyncLock {
@@ -27,13 +27,17 @@ impl FromMeta for SyncLock {
 }
 
 #[derive(FromMeta)]
-struct MacroArgs {
+struct CachedMacroArgs {
     #[darling(default)]
     name: Option<String>,
     #[darling(default)]
     unbound: bool,
     #[darling(default)]
     size: Option<usize>,
+    /// Alias for `size` — sets the maximum number of cached entries (the LRU bound).
+    /// Mirrors the `max_size` builder/constructor naming on the cache stores.
+    #[darling(default)]
+    max_size: Option<usize>,
     #[darling(default)]
     ttl: Option<u64>,
     #[darling(default)]
@@ -47,9 +51,9 @@ struct MacroArgs {
     #[darling(default)]
     convert: Option<String>,
     #[darling(default)]
-    result: bool,
+    cache_err: bool,
     #[darling(default)]
-    option: bool,
+    cache_none: bool,
     #[darling(default)]
     sync_writes: SyncWriteMode,
     #[darling(default = "default_sync_writes_buckets")]
@@ -68,6 +72,11 @@ struct MacroArgs {
     unsync_reads: bool,
     #[darling(default)]
     expires: bool,
+    // Removed attributes intercepted to provide helpful error messages
+    #[darling(default)]
+    result: Option<bool>,
+    #[darling(default)]
+    option: Option<bool>,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -81,12 +90,25 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
-    let args = match MacroArgs::from_list(&attr_args) {
+    let mut args = match CachedMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
             return TokenStream::from(e.write_errors());
         }
     };
+    // `max_size` is an alias for `size`; reconcile them into `size` so the rest
+    // of the macro only has to consult one field. Specifying both is ambiguous.
+    if args.size.is_some() && args.max_size.is_some() {
+        return TokenStream::from(
+            darling::Error::custom(
+                "cannot specify both `size` and `max_size` — they are aliases; use one",
+            )
+            .write_errors(),
+        );
+    }
+    args.size = args.size.or(args.max_size);
+    // Nudge `size = N` users toward `max_size = N` (empty unless the deprecated spelling was used).
+    let size_deprecation = size_attr_deprecation_notice(&attr_args);
     let input = parse_macro_input!(input as ItemFn);
 
     // pull out the parts of the input
@@ -113,6 +135,19 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    // Reject zero `max_size`/`ttl` at expansion time (matching `#[concurrent_cached]`),
+    // rather than letting the generated builder `build()` panic at first call.
+    if matches!(args.size, Some(0)) {
+        return syn::Error::new(fn_ident.span(), "`max_size` must be >= 1")
+            .to_compile_error()
+            .into();
+    }
+    if matches!(args.ttl, Some(0)) {
+        return syn::Error::new(fn_ident.span(), "`ttl` must be >= 1")
+            .to_compile_error()
+            .into();
+    }
+
     if args.time.is_some() {
         return syn::Error::new(
             fn_ident.span(),
@@ -126,6 +161,28 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         return syn::Error::new(
             fn_ident.span(),
             "`time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.result.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "the `result` attribute has been removed. `Result<T, E>` returns now skip caching \
+             `Err` by default. Remove `result = true` (or `result = false`), or use \
+             `cache_err = true` to force-cache `Err` values.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.option.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "the `option` attribute has been removed. `Option<T>` returns now skip caching \
+             `None` by default. Remove `option = true` (or `option = false`), or use \
+             `cache_none = true` to force-cache `None` values.",
         )
         .to_compile_error()
         .into();
@@ -203,6 +260,28 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+    if args.expires && args.cache_none {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires = true` and `cache_none = true` are incompatible — `expires` requires \
+             the cache value type to implement `Expires`, but `cache_none = true` stores \
+             `Option<V>` as the value, which does not implement `Expires`. \
+             Remove `cache_none = true` (None values are not cached by default with `expires = true`).",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.expires && args.cache_err {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires = true` and `cache_err = true` are incompatible — `expires` requires \
+             the cache value type to implement `Expires`, but `cache_err = true` stores \
+             `Result<V, E>` as the value, which does not implement `Expires`. \
+             Remove `cache_err = true` (Err values are not cached by default with `expires = true`).",
+        )
+        .to_compile_error()
+        .into();
+    }
 
     let input_tys = get_input_types(&inputs);
     let input_names = get_input_names(&inputs);
@@ -221,7 +300,54 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         return with_cache_flag_error(output_span, output_type_display);
     }
 
-    let cache_value_ty = match find_value_type(args.result, args.option, &output, output_ty) {
+    let is_result_return = is_result_return_type(&output);
+    let is_option_return = is_option_return_type(&output);
+
+    if args.cache_err && !is_result_return {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_err = true` requires the function to return `Result<T, E>`",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.cache_none && !is_option_return {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_none = true` requires the function to return `Option<T>`",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.cache_err && args.result_fallback {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_err` and `result_fallback` are mutually exclusive",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.cache_none && args.with_cached_flag {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`cache_none = true` and `with_cached_flag = true` are structurally incompatible \
+             on `Option<T>` returns: `with_cached_flag` stores the inner `T` from `Return<T>` \
+             while `cache_none = true` stores `Option<T>` as the cached value — the same \
+             cache entry cannot hold both types. Use `with_cached_flag = true` alone (to get \
+             cache-state flags; `None` is not cached by default), or use `cache_none = true` \
+             alone (to force-cache `None` values).",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // `is_smart_result`: cache only Ok, skip Err (default for Result returns; opt out with cache_err)
+    // `is_smart_option`: cache only Some, skip None (default for Option returns; opt out with cache_none)
+    let is_smart_result = is_result_return && !args.cache_err;
+    let is_smart_option = is_option_return && !args.cache_none;
+
+    let cache_value_ty = match find_value_type(is_smart_result, is_smart_option, &output, output_ty)
+    {
         Ok(value_ty) => value_ty,
         Err(e) => return e.to_compile_error().into(),
     };
@@ -243,12 +369,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if let Some(size) = args.size {
             (
                 quote! { cached::ExpiringLruCache<#cache_key_ty, #cache_value_ty> },
-                quote! { cached::ExpiringLruCache::with_size(#size) },
+                quote! { cached::ExpiringLruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("ExpiringLruCache build failed in #[cached]: {e}")) },
             )
         } else {
             (
                 quote! { cached::ExpiringCache<#cache_key_ty, #cache_value_ty> },
-                quote! { cached::ExpiringCache::new() },
+                quote! { cached::ExpiringCache::builder().build().unwrap_or_else(|e| panic!("ExpiringCache build failed in #[cached]: {e}")) },
             )
         }
     } else {
@@ -262,27 +388,27 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         ) {
             (true, None, None, None, None, _) => {
                 let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
-                let cache_create = quote! {cached::UnboundCache::new()};
+                let cache_create = quote! {cached::UnboundCache::builder().build().unwrap_or_else(|e| panic!("UnboundCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
             (false, Some(size), None, None, None, _) => {
                 let cache_ty = quote! {cached::LruCache<#cache_key_ty, #cache_value_ty>};
-                let cache_create = quote! {cached::LruCache::with_size(#size)};
+                let cache_create = quote! {cached::LruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("LruCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
             (false, None, Some(ttl), None, None, refresh) => {
                 let cache_ty = quote! {cached::TtlCache<#cache_key_ty, #cache_value_ty>};
-                let cache_create = quote! {cached::TtlCache::with_ttl_and_refresh(::cached::time::Duration::from_secs(#ttl), #refresh)};
+                let cache_create = quote! {cached::TtlCache::builder().ttl(::cached::time::Duration::from_secs(#ttl)).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("TtlCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
             (false, Some(size), Some(ttl), None, None, refresh) => {
                 let cache_ty = quote! {cached::LruTtlCache<#cache_key_ty, #cache_value_ty>};
-                let cache_create = quote! {cached::LruTtlCache::with_size_and_ttl_and_refresh(#size, ::cached::time::Duration::from_secs(#ttl), #refresh)};
+                let cache_create = quote! {cached::LruTtlCache::builder().max_size(#size).ttl(::cached::time::Duration::from_secs(#ttl)).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("LruTtlCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
             (false, None, None, None, None, _) => {
                 let cache_ty = quote! {cached::UnboundCache<#cache_key_ty, #cache_value_ty>};
-                let cache_create = quote! {cached::UnboundCache::new()};
+                let cache_create = quote! {cached::UnboundCache::builder().build().unwrap_or_else(|e| panic!("UnboundCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
             (false, None, None, Some(type_str), Some(create_str), _) => {
@@ -334,7 +460,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the set cache and return cache blocks
-    let (set_cache_block, return_cache_block) = match (&args.result, &args.option) {
+    let (set_cache_block, return_cache_block) = match (is_smart_result, is_smart_option) {
         (false, false) => {
             let set_cache_block = quote! { cache.set(key, result.clone()); };
             let return_cache_block = if args.with_cached_flag {
@@ -370,14 +496,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             };
             (set_cache_block, return_cache_block)
         }
-        _ => {
-            return syn::Error::new(
-                fn_ident.span(),
-                "`result` and `option` attributes are mutually exclusive",
-            )
-            .to_compile_error()
-            .into();
-        }
+        (true, true) => unreachable!("return type cannot be both Result and Option"),
     };
 
     if let Err(error) = validate_sync_writes_buckets(args.sync_writes_buckets, fn_ident.span()) {
@@ -393,10 +512,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    if args.result_fallback && !args.result {
+    if args.result_fallback && !is_result_return {
         return syn::Error::new(
             fn_ident.span(),
-            "`result_fallback` requires `result = true` because it falls back from `Err` to a cached `Ok` value",
+            "`result_fallback` requires a `Result<T, E>` return type",
         )
         .to_compile_error()
         .into();
@@ -407,7 +526,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             fn_ident.span(),
             "`result_fallback` requires a store that implements `CloneCached`. \
              The default `UnboundCache` and `LruCache` (size without ttl) do not implement it. \
-             Use `ttl` (for `TtlCache`), `size` + `ttl` (for `LruTtlCache`), \
+             Use `ttl` (for `TtlCache`), `max_size` + `ttl` (for `LruTtlCache`), \
              `expires` (for `ExpiringCache`/`ExpiringLruCache`), or a custom `ty`.",
         )
         .to_compile_error()
@@ -694,6 +813,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // put it all together
     let expanded = quote! {
+        #size_deprecation
         // Cached static
         #[doc = #cache_ident_doc]
         #ty

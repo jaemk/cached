@@ -1,0 +1,5 @@
+error: `result_fallback` is only supported for the default in-memory sharded stores
+ --> tests/ui/concurrent_cached_result_fallback_redis_exclusive.rs:9:4
+  |
+9 | fn my_fn(k: i32) -> Result<i32, String> {
+  |    ^^^^^

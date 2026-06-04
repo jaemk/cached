@@ -14,6 +14,8 @@ CACHED_BASIC_EXAMPLES = async_std \
                         basic \
                         kitchen_sink \
                         tokio \
+                        sharded \
+                        sharded_expiring \
                         expiring_sized_cache \
                         disk \
                         disk_async

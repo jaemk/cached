@@ -1,0 +1,5 @@
+error: `Option<T>` return types that skip `None` are only supported for the default in-memory sharded stores, not `redis = true`. Use `Result<T, E>` as the return type, or remove `redis = true` to use the default in-memory sharded path.
+ --> tests/ui/concurrent_cached_option_with_redis.rs:5:4
+  |
+5 | fn my_fn(k: i32) -> Option<i32> {
+  |    ^^^^^
