@@ -17,11 +17,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@1.96.0
       with:
-        toolchain: "1.96.0"
-        target: wasm32-unknown-unknown
         components: rustfmt, clippy
+        targets: wasm32-unknown-unknown
 
     - name: Cache cargo dir
       uses: actions/cache@v4
