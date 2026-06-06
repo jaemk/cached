@@ -1,0 +1,5 @@
+error: the `option` attribute has been removed. `Option<T>` returns now skip caching `None` by default. Remove `option = true` (or `option = false`), or use `cache_none = true` to force-cache `None` values.
+ --> tests/ui/cached_option_attr_removed.rs:4:4
+  |
+4 | fn find(id: u64) -> Option<u64> {
+  |    ^^^^

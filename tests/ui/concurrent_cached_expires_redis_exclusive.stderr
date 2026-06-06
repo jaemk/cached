@@ -1,0 +1,5 @@
+error: `expires` and `redis` are mutually exclusive — `expires` selects sharded in-memory expiring stores
+ --> tests/ui/concurrent_cached_expires_redis_exclusive.rs:4:4
+  |
+4 | fn my_fn(x: u32) -> Result<u32, String> {
+  |    ^^^^^

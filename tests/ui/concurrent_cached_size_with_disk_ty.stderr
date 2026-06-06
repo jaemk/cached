@@ -1,0 +1,5 @@
+error: `size` only applies to the default in-memory store, not `disk = true`
+  --> tests/ui/concurrent_cached_size_with_disk_ty.rs:10:4
+   |
+10 | fn my_fn(k: i32) -> Result<i32, String> {
+   |    ^^^^^

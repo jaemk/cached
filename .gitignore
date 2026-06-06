@@ -6,3 +6,4 @@ _tmp_readme.md
 .DS_Store
 local/
 !local/.gitkeep
+.antigravitycli/

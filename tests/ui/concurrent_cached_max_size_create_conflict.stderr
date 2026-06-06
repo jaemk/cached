@@ -1,0 +1,5 @@
+error: `max_size` only applies to the default in-memory store, not `disk = true`
+ --> tests/ui/concurrent_cached_max_size_create_conflict.rs:6:4
+  |
+6 | fn my_fn(k: i32) -> Result<i32, String> {
+  |    ^^^^^

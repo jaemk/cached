@@ -1,8 +1,8 @@
 use super::{CacheEvict, Cached, LruCache};
 use crate::{CachedIter, CachedPeek, CloneCached};
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
@@ -26,14 +26,14 @@ use {super::CachedAsync, std::future::Future};
 /// }
 ///
 /// // Unbounded store (default for `#[cached(expires = true)]`)
-/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::new();
+/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::builder().build().unwrap();
 /// cache.cache_set(1, Token { value: "live".into(), expired: false });
 /// assert!(cache.cache_get(&1).is_some());
 /// cache.cache_set(2, Token { value: "stale".into(), expired: true });
 /// assert!(cache.cache_get(&2).is_none()); // expired -> not returned
 ///
 /// // LRU-bounded store (`#[cached(expires = true, size = N)]`)
-/// let mut lru: ExpiringLruCache<u32, Token> = ExpiringLruCache::with_size(8);
+/// let mut lru: ExpiringLruCache<u32, Token> = ExpiringLruCache::builder().max_size(8).build().unwrap();
 /// lru.cache_set(3, Token { value: "live".into(), expired: false });
 /// assert!(lru.cache_get(&3).is_some());
 /// ```
@@ -49,8 +49,8 @@ pub trait Expires {
 /// values which themselves contain an expiry timestamp.
 ///
 /// For an unbounded variant (no size cap), see [`ExpiringCache`](crate::ExpiringCache).
-/// When using the `#[cached]` proc macro, `expires = true` selects this store when `size`
-/// is also specified; without `size`, it selects the unbounded `ExpiringCache`.
+/// When using the `#[cached]` proc macro, `expires = true` selects this store when `max_size`
+/// is also specified; without `max_size`, it selects the unbounded `ExpiringCache`.
 ///
 /// Note: This cache is in-memory only.
 ///
@@ -94,6 +94,12 @@ where
 }
 
 /// Builder for [`ExpiringLruCache`].
+///
+/// Note: there is intentionally **no `.ttl()` setter**. An `ExpiringLruCache` has no global
+/// expiry duration — each value decides when it is expired via the [`Expires`] trait, while
+/// `max_size` bounds the entry count via LRU. For a single global TTL applied to every entry,
+/// use [`LruTtlCache`](crate::stores::LruTtlCache) instead.
+#[doc(alias = "ttl")]
 pub struct ExpiringLruCacheBuilder<K, V: Expires> {
     size: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
@@ -101,13 +107,19 @@ pub struct ExpiringLruCacheBuilder<K, V: Expires> {
 
 impl<K, V: Expires> ExpiringLruCacheBuilder<K, V> {
     /// Set the maximum number of entries.
+    #[doc(alias = "size")]
+    #[doc(alias = "capacity")]
     #[must_use]
-    pub fn size(mut self, size: usize) -> Self {
-        self.size = Some(size);
+    pub fn max_size(mut self, max_size: usize) -> Self {
+        self.size = Some(max_size);
         self
     }
 
     /// Set a callback to be invoked when an entry is evicted.
+    ///
+    /// Use [`cache_clear_with_on_evict`](ExpiringLruCache::cache_clear_with_on_evict)
+    /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
+    /// firing and eviction counter increments when clearing all entries.
     #[must_use]
     pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
         self.on_evict = Some(Arc::new(on_evict));
@@ -116,43 +128,25 @@ impl<K, V: Expires> ExpiringLruCacheBuilder<K, V> {
 
     /// Build the cache.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `size` was not set or is `0`.
-    #[must_use]
-    pub fn build(self) -> ExpiringLruCache<K, V>
+    /// Returns [`BuildError::MissingRequired`](super::BuildError) if `max_size` was not set,
+    /// or [`BuildError::InvalidValue`](super::BuildError) if `max_size` is `0`.
+    pub fn build(self) -> Result<ExpiringLruCache<K, V>, super::BuildError>
     where
         K: Hash + Eq + Clone,
     {
         let size = self
             .size
-            .expect("`ExpiringLruCacheBuilder` requires `size` to be set");
-        let mut cache = ExpiringLruCache::with_size(size);
+            .ok_or(super::BuildError::MissingRequired("max_size"))?;
+        let mut store = LruCache::builder().max_size(size).build()?;
+        store.disable_hit_miss_tracking();
         // Two separate callbacks for two separate eviction causes:
         //   cache.on_evict    — fires when ExpiringLruCache itself removes an expired entry
         //   cache.store.on_evict — fires when LruCache::check_capacity evicts for capacity
         // Both must be registered independently so neither path is silently skipped.
-        cache.on_evict = self.on_evict.clone();
-        if let Some(on_evict) = self.on_evict {
-            cache.store.on_evict = Some(on_evict);
-        }
-        cache
-    }
-
-    /// Build the cache, returning an error instead of panicking.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BuildError`](super::BuildError) if `size` was not set or is `0`.
-    pub fn try_build(self) -> Result<ExpiringLruCache<K, V>, super::BuildError>
-    where
-        K: Hash + Eq + Clone,
-    {
-        let size = self
-            .size
-            .ok_or(super::BuildError::MissingRequired("size"))?;
         let mut cache = ExpiringLruCache {
-            store: LruCache::try_with_size(size)?,
+            store,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
@@ -175,17 +169,15 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
         }
     }
 
-    /// Creates a new `ExpiringLruCache` with a given size limit and
-    /// pre-allocated backing data.
+    /// Returns the maximum number of entries this cache will hold before evicting.
+    ///
+    /// This is the bound set via [`ExpiringLruCacheBuilder::max_size`],
+    /// not the current number of entries — use [`cache_size`](crate::Cached::cache_size) for that.
+    #[doc(alias = "size")]
+    #[doc(alias = "max_size")]
     #[must_use]
-    pub fn with_size(size: usize) -> ExpiringLruCache<K, V> {
-        ExpiringLruCache {
-            store: LruCache::with_size(size),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-            on_evict: None,
-        }
+    pub fn capacity(&self) -> usize {
+        self.store.capacity()
     }
 
     /// Returns a reference to the inner [`LruCache`].
@@ -199,7 +191,7 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
-        self.store.retain(|key, value| {
+        self.store.retain_silent(|key, value| {
             if value.is_expired() {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, value);
@@ -212,6 +204,35 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
             }
         });
         removed
+    }
+
+    /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
+    /// evictions counter.
+    ///
+    /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
+    /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
+    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
+    /// the plain `cache_clear`.
+    pub fn cache_clear_with_on_evict(&mut self) {
+        if self.on_evict.is_none() {
+            return self.cache_clear();
+        }
+        let keys = self.store.key_order();
+        let mut removed = Vec::with_capacity(keys.len());
+        for k in &keys {
+            if let Some(pair) = self.store.pop_raw(k) {
+                removed.push(pair);
+            }
+        }
+        let count = removed.len() as u64;
+        if count > 0 {
+            self.evictions.fetch_add(count, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (k, v) in &removed {
+                on_evict(k, v);
+            }
+        }
     }
 }
 
@@ -231,7 +252,7 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
                 Some(&self.store.order.get(index).1)
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((key, old)) = self.store.cache_remove_entry(k) {
+                if let Some((key, old)) = self.store.pop_raw(k) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&key, &old);
                     }
@@ -259,7 +280,7 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
                 Some(&mut self.store.order.get_mut(index).1)
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((k, old)) = self.store.cache_remove_entry(key) {
+                if let Some((k, old)) = self.store.pop_raw(key) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&k, &old);
                     }
@@ -322,8 +343,26 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.store.remove(k)
+        self.cache_remove_entry(k)
+            .and_then(|(_, v)| if v.is_expired() { None } else { Some(v) })
     }
+
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        if let Some((stored_k, v)) = self.store.pop_raw(k) {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&stored_k, &v);
+            }
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            Some((stored_k, v))
+        } else {
+            None
+        }
+    }
+
     fn cache_clear(&mut self) {
         self.store.clear();
     }
@@ -331,7 +370,10 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
         let on_evict = self.store.on_evict.clone();
         let capacity = self.store.capacity;
-        self.store = LruCache::with_size(capacity);
+        self.store = LruCache::builder()
+            .max_size(capacity)
+            .build()
+            .expect("LruCache build failed");
         self.store.on_evict = on_evict;
         self.cache_reset_metrics();
     }
@@ -498,6 +540,8 @@ impl<K: std::hash::Hash + Eq + Clone, V: Expires> CacheEvict for ExpiringLruCach
 /// Expiring Value Cache tests
 mod tests {
     use super::*;
+    use crate::Cached;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     type ExpiredU8 = u8;
 
@@ -509,7 +553,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_miss() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         // Getting a non-existent cache key.
         assert!(c.get(&1).is_none());
@@ -522,14 +567,43 @@ mod tests {
         // Regression: `ExpiringLruCache` is size-bounded, so it must report a
         // capacity like the other bounded stores (was falling through to the
         // `Cached` default `None`, making `metrics().capacity` inaccurate).
-        let c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(7);
+        let c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(7).build().unwrap();
         assert_eq!(c.cache_capacity(), Some(7));
         assert_eq!(c.metrics().capacity, Some(7));
     }
 
     #[test]
+    fn capacity_returns_bound_not_live_size() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        assert_eq!(c.capacity(), 3);
+        assert_eq!(c.cache_size(), 0);
+
+        c.cache_set(1, 5);
+        c.cache_set(2, 6);
+        assert_eq!(c.capacity(), 3);
+        assert_eq!(c.cache_size(), 2);
+
+        // Eviction past the bound keeps capacity fixed while live count stays capped.
+        c.cache_set(3, 7);
+        c.cache_set(4, 8);
+        assert_eq!(c.capacity(), 3);
+        assert_eq!(c.cache_size(), 3);
+    }
+
+    #[test]
+    fn builder_rejects_zero_max_size() {
+        let result = ExpiringLruCache::<u8, ExpiredU8>::builder()
+            .max_size(0)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn expiring_value_cache_get_hit() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         // Getting a cached value.
         assert!(c.set(1, 2).is_none());
@@ -540,7 +614,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_expired() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         assert!(c.set(2, 12).is_none());
 
@@ -551,7 +626,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_mut_miss() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         // Getting a non-existent cache key.
         assert!(c.cache_get_mut(&1).is_none());
@@ -561,7 +637,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_mut_hit() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         // Getting a cached value.
         assert!(c.set(1, 2).is_none());
@@ -572,7 +649,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_mut_expired() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         assert!(c.set(2, 12).is_none());
 
@@ -583,7 +661,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_or_set_with_missing() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
         assert_eq!(c.cache_hits(), Some(0));
@@ -592,7 +671,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_or_set_with_present() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
         assert!(c.set(1, 5).is_none());
 
         // Existing value is returned rather than setting new value.
@@ -603,7 +683,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_get_or_set_with_expired() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
         assert!(c.set(1, 11).is_none());
 
         // New value is returned as existing had expired.
@@ -614,7 +695,8 @@ mod tests {
 
     #[test]
     fn expiring_value_cache_try_get_or_set_with_missing() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         assert_eq!(
             c.cache_try_get_or_set_with(1, || Ok::<_, ()>(1)),
@@ -637,7 +719,8 @@ mod tests {
 
     #[test]
     fn evict_expired() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         assert_eq!(c.set(1, 100), None);
         assert_eq!(c.set(1, 200), Some(100));
@@ -655,11 +738,12 @@ mod tests {
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted_for_callback = evicted.clone();
         let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
-            .size(1)
+            .max_size(1)
             .on_evict(move |_key: &u8, _value: &ExpiredU8| {
                 evicted_for_callback.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
 
         c.set(1, 1);
         c.cache_reset();
@@ -678,7 +762,8 @@ mod tests {
     #[test]
     fn cache_get_with_expiry_status_does_not_promote_expired_entry() {
         // Build a capacity-2 cache. Insert A then B, making B the MRU entry.
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(2);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(2).build().unwrap();
         c.set(1, 100); // A — value 100 > 10, so it is expired
         c.set(2, 100); // B — also expired
 
@@ -705,17 +790,68 @@ mod tests {
     }
 
     #[test]
-    fn cache_reset_does_not_fire_on_evict() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    fn cache_clear_with_on_evict_fires_for_all_entries() {
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(5)
+            .on_evict(move |_k: &u8, _v: &ExpiredU8| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 5); // live (value <= 10)
+        c.cache_set(2, 12); // expired (value > 10)
+        c.cache_set(3, 8); // live
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            count.load(AOrdering::Relaxed),
+            3,
+            "on_evict fires for all entries including expired"
+        );
+        assert_eq!(c.evictions.load(AOrdering::Relaxed), 3);
+    }
+
+    #[test]
+    fn cache_clear_does_not_fire_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(5)
+            .on_evict(move |_k: &u8, _v: &ExpiredU8| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 5);
+        c.cache_set(2, 8);
+        c.cache_clear();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            count.load(AOrdering::Relaxed),
+            0,
+            "cache_clear must not fire on_evict"
+        );
+    }
+
+    #[test]
+    fn cache_reset_does_not_fire_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let evict_count = Arc::new(AtomicUsize::new(0));
         let evict_count2 = evict_count.clone();
         let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
-            .size(4)
+            .max_size(4)
             .on_evict(move |_k, _v| {
                 evict_count2.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
         c.cache_set(1, 5);
         c.cache_set(2, 5);
         c.cache_set(3, 5);
@@ -730,7 +866,8 @@ mod tests {
 
     #[test]
     fn test_expiring_value_cache_iter_excludes_expired() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
         c.cache_set(1, 5); // live
         c.cache_set(2, 12); // expired (value > 10)
         c.cache_set(3, 8); // live
@@ -742,7 +879,8 @@ mod tests {
 
     #[test]
     fn test_expiring_value_cache_clone() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
         c.cache_set(1, 5);
         c.cache_set(2, 6);
 
@@ -754,7 +892,8 @@ mod tests {
 
     #[test]
     fn test_expiring_value_cache_debug() {
-        let c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
         let debug_str = format!("{:?}", c);
         assert!(debug_str.contains("ExpiringLruCache"));
         assert!(debug_str.contains("hits"));
@@ -764,7 +903,8 @@ mod tests {
 
     #[test]
     fn test_expiring_value_cache_remove_and_clear() {
-        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::with_size(3);
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
         c.cache_set(1, 5);
         c.cache_set(2, 6);
 
@@ -774,5 +914,91 @@ mod tests {
 
         c.cache_clear();
         assert_eq!(c.cache_size(), 0);
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_some_for_live_entry() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1, 5); // not expired: 5 <= 10
+        let removed = c.cache_remove_entry(&1u8);
+        assert_eq!(removed, Some((1u8, 5u8)));
+        assert_eq!(c.cache_size(), 0);
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_some_for_expired_entry() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1, 20u8); // expired: 20 > 10
+
+        // cache_remove returns None for an expired entry.
+        c.cache_set(2, 20u8);
+        assert_eq!(c.cache_remove(&2u8), None); // expired
+
+        // cache_remove_entry returns Some even for an expired entry.
+        let removed = c.cache_remove_entry(&1u8);
+        assert_eq!(
+            removed.expect("cache_remove_entry must return Some for expired entry"),
+            (1u8, 20u8)
+        );
+    }
+
+    #[test]
+    fn cache_delete_returns_true_for_expired_entry() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1, 20u8); // expired
+        assert!(
+            c.cache_delete(&1u8),
+            "cache_delete must return true for expired entry"
+        );
+        assert!(!c.cache_delete(&1u8), "cache_delete false when absent");
+    }
+
+    #[test]
+    fn cache_remove_entry_fires_on_evict_for_expired() {
+        let count = std::sync::Arc::new(AtomicU64::new(0));
+        let count2 = count.clone();
+        let mut c = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |_k: &u8, _v: &ExpiredU8| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u8, 20u8); // expired
+
+        c.cache_remove_entry(&1u8);
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "on_evict fires for expired entries"
+        );
+
+        c.cache_remove_entry(&99u8);
+        assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
+    }
+
+    #[test]
+    fn cache_remove_entry_absent_returns_none() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        assert_eq!(c.cache_remove_entry(&42u8), None);
+    }
+
+    #[test]
+    fn cache_remove_entry_increments_eviction_counter() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1u8, 20u8); // expired: 20 > 10
+        let before = c.cache_evictions().expect("evictions are always tracked");
+        c.cache_remove_entry(&1u8); // expired but present — must increment
+        c.cache_remove_entry(&99u8); // absent — must not increment
+        assert_eq!(
+            c.cache_evictions().expect("evictions are always tracked") - before,
+            1,
+            "cache_remove_entry must increment evictions for present key only"
+        );
     }
 }

@@ -10,8 +10,8 @@ use crate::{CachedIter, CachedPeek, CloneCached};
 
 use super::{CacheEvict, Cached, LruCache, TimedEntry};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Timed LRU Cache
 ///
@@ -72,9 +72,9 @@ pub struct NoEvict;
 
 /// Typestate marker for [`LruTtlCacheBuilder`]: eviction callback has been set.
 ///
-/// When this marker is active, [`LruTtlCacheBuilder::build`] and
-/// [`LruTtlCacheBuilder::try_build`] require `K: 'static` and `V: 'static`
-/// because the callback must be wired into the inner LRU store.
+/// When this marker is active, [`LruTtlCacheBuilder::build`] requires
+/// `K: 'static` and `V: 'static` because the callback must be wired into
+/// the inner LRU store.
 pub struct HasEvict;
 
 /// Builder for [`LruTtlCache`].
@@ -82,10 +82,10 @@ pub struct HasEvict;
 /// Obtain one via [`LruTtlCache::builder`].
 ///
 /// The `E` type parameter is a compile-time marker:
-/// - [`NoEvict`] (the default): no eviction callback has been set; `build` /
-///   `try_build` do **not** require `K: 'static` or `V: 'static`.
+/// - [`NoEvict`] (the default): no eviction callback has been set; `build`
+///   does **not** require `K: 'static` or `V: 'static`.
 /// - [`HasEvict`]: an eviction callback was registered via [`on_evict`](LruTtlCacheBuilder::on_evict);
-///   `build` / `try_build` require `K: 'static + V: 'static` so the callback
+///   `build` requires `K: 'static + V: 'static` so the callback
 ///   can be wired into the inner LRU eviction path.
 pub struct LruTtlCacheBuilder<K, V, E = NoEvict> {
     size: Option<usize>,
@@ -98,11 +98,11 @@ pub struct LruTtlCacheBuilder<K, V, E = NoEvict> {
 // size / ttl / refresh work regardless of eviction state
 impl<K, V, E> LruTtlCacheBuilder<K, V, E> {
     /// Set the maximum number of entries. Required.
-    #[doc(alias = "max_size")]
+    #[doc(alias = "size")]
     #[doc(alias = "capacity")]
     #[must_use]
-    pub fn size(mut self, size: usize) -> Self {
-        self.size = Some(size);
+    pub fn max_size(mut self, max_size: usize) -> Self {
+        self.size = Some(max_size);
         self
     }
 
@@ -115,9 +115,15 @@ impl<K, V, E> LruTtlCacheBuilder<K, V, E> {
 
     /// Set whether cache hits refresh the TTL of the accessed entry.
     #[must_use]
-    pub fn refresh(mut self, refresh: bool) -> Self {
+    pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
+    }
+
+    /// Alias for [`refresh_on_hit`](Self::refresh_on_hit).
+    #[must_use]
+    pub fn refresh(self, refresh: bool) -> Self {
+        self.refresh_on_hit(refresh)
     }
 }
 
@@ -129,6 +135,10 @@ impl<K, V> LruTtlCacheBuilder<K, V, NoEvict> {
     /// `LruTtlCacheBuilder<K, V, `[`HasEvict`]`>`, which requires `K: 'static`
     /// and `V: 'static` at [`build`](LruTtlCacheBuilder::build) time so the
     /// callback can be wired into the inner LRU eviction path.
+    ///
+    /// Use [`cache_clear_with_on_evict`](LruTtlCache::cache_clear_with_on_evict)
+    /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
+    /// firing and eviction counter increments when clearing all entries.
     #[must_use]
     pub fn on_evict(
         self,
@@ -144,83 +154,43 @@ impl<K, V> LruTtlCacheBuilder<K, V, NoEvict> {
     }
 }
 
-// build / try_build without an eviction callback — no 'static required
+// build without an eviction callback — no 'static required
 impl<K, V> LruTtlCacheBuilder<K, V, NoEvict> {
     /// Build the cache.
     ///
-    /// # Panics
-    ///
-    /// Panics if `size` or `ttl` was not set, or if `size` is `0`.
-    #[must_use]
-    pub fn build(self) -> LruTtlCache<K, V>
-    where
-        K: Hash + Eq + Clone,
-    {
-        let size = self
-            .size
-            .expect("`LruTtlCacheBuilder` requires `size` to be set");
-        let ttl = self
-            .ttl
-            .expect("`LruTtlCacheBuilder` requires `ttl` to be set");
-        LruTtlCache::with_size_and_ttl_and_refresh(size, ttl, self.refresh)
-    }
-
-    /// Build the cache, returning an error instead of panicking.
-    ///
     /// # Errors
     ///
-    /// Returns [`BuildError`](super::BuildError) if `size` or `ttl` was not set, or `size` is `0`.
-    pub fn try_build(self) -> Result<LruTtlCache<K, V>, super::BuildError>
+    /// Returns [`BuildError`](super::BuildError) if `max_size` or `ttl` was not set, if `ttl` is zero, or if `max_size` is `0`.
+    pub fn build(self) -> Result<LruTtlCache<K, V>, super::BuildError>
     where
         K: Hash + Eq + Clone,
     {
         let size = self
             .size
-            .ok_or(super::BuildError::MissingRequired("size"))?;
+            .ok_or(super::BuildError::MissingRequired("max_size"))?;
         let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
+        super::validate_ttl(ttl)?;
         LruTtlCache::new_internal(size, ttl, self.refresh)
     }
 }
 
-// build / try_build with an eviction callback — 'static required for sync_on_evict
+// build with an eviction callback — 'static required for sync_on_evict
 impl<K, V> LruTtlCacheBuilder<K, V, HasEvict> {
     /// Build the cache.
     ///
-    /// # Panics
-    ///
-    /// Panics if `size` or `ttl` was not set, or if `size` is `0`.
-    #[must_use]
-    pub fn build(self) -> LruTtlCache<K, V>
-    where
-        K: Hash + Eq + Clone + 'static,
-        V: 'static,
-    {
-        let size = self
-            .size
-            .expect("`LruTtlCacheBuilder` requires `size` to be set");
-        let ttl = self
-            .ttl
-            .expect("`LruTtlCacheBuilder` requires `ttl` to be set");
-        let mut cache = LruTtlCache::with_size_and_ttl_and_refresh(size, ttl, self.refresh);
-        cache.on_evict = self.on_evict;
-        cache.sync_on_evict();
-        cache
-    }
-
-    /// Build the cache, returning an error instead of panicking.
-    ///
     /// # Errors
     ///
-    /// Returns [`BuildError`](super::BuildError) if `size` or `ttl` was not set, or `size` is `0`.
-    pub fn try_build(self) -> Result<LruTtlCache<K, V>, super::BuildError>
+    /// Returns [`BuildError`](super::BuildError) if `max_size` or `ttl` was not set, if `ttl` is zero, or if `max_size` is `0`.
+    pub fn build(self) -> Result<LruTtlCache<K, V>, super::BuildError>
     where
         K: Hash + Eq + Clone + 'static,
         V: 'static,
     {
         let size = self
             .size
-            .ok_or(super::BuildError::MissingRequired("size"))?;
+            .ok_or(super::BuildError::MissingRequired("max_size"))?;
         let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
+        super::validate_ttl(ttl)?;
         let mut cache = LruTtlCache::new_internal(size, ttl, self.refresh)?;
         cache.on_evict = self.on_evict;
         cache.sync_on_evict();
@@ -257,7 +227,8 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     }
 
     fn new_internal(size: usize, ttl: Duration, refresh: bool) -> Result<Self, super::BuildError> {
-        let store = LruCache::try_with_size(size)?;
+        let mut store = LruCache::builder().max_size(size).build()?;
+        store.disable_hit_miss_tracking();
         Ok(LruTtlCache {
             store,
             size,
@@ -268,38 +239,6 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
             refresh,
             on_evict: None,
         })
-    }
-
-    /// Creates a new `LruTtlCache` with a given size limit and TTL
-    #[must_use]
-    pub fn with_size_and_ttl(size: usize, ttl: Duration) -> LruTtlCache<K, V> {
-        Self::with_size_and_ttl_and_refresh(size, ttl, false)
-    }
-
-    /// Creates a new `LruTtlCache` with a given size limit, TTL, and refresh-on-hit flag.
-    ///
-    /// # Panics
-    ///
-    /// Will panic if size is 0
-    #[must_use]
-    pub fn with_size_and_ttl_and_refresh(
-        size: usize,
-        ttl: Duration,
-        refresh: bool,
-    ) -> LruTtlCache<K, V> {
-        Self::new_internal(size, ttl, refresh).unwrap_or_else(|e| panic!("{}", e))
-    }
-
-    /// Creates a new `LruTtlCache` with a specified ttl and a given size limit and pre-allocated backing data
-    ///
-    /// # Errors
-    ///
-    /// Will return a [`BuildError`](super::BuildError) if size is 0 or memory allocation fails.
-    pub fn try_with_size_and_ttl(
-        size: usize,
-        ttl: Duration,
-    ) -> Result<LruTtlCache<K, V>, super::BuildError> {
-        Self::new_internal(size, ttl, false)
     }
 
     pub fn iter_order(&self) -> Vec<(K, (Instant, V))>
@@ -365,6 +304,17 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
             .collect()
     }
 
+    /// Returns the maximum number of entries this cache will hold before evicting.
+    ///
+    /// This is the bound set via [`LruTtlCacheBuilder::max_size`], not the current number
+    /// of entries — use [`cache_size`](crate::Cached::cache_size) for that.
+    #[doc(alias = "size")]
+    #[doc(alias = "max_size")]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.size
+    }
+
     /// Returns whether the ttl is refreshed when the value is retrieved.
     #[must_use]
     pub fn refresh_on_hit(&self) -> bool {
@@ -388,7 +338,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
-        self.store.retain(|key, entry| {
+        self.store.retain_silent(|key, entry| {
             if entry.instant.elapsed() < ttl {
                 true
             } else {
@@ -412,7 +362,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         let ttl = self.ttl;
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
-        self.store.retain(|key, entry| {
+        self.store.retain_silent(|key, entry| {
             let expired = entry.instant.elapsed() >= ttl;
             if expired || !keep(key, &entry.value) {
                 if let Some(on_evict) = on_evict {
@@ -424,6 +374,35 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
                 true
             }
         });
+    }
+
+    /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
+    /// evictions counter.
+    ///
+    /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
+    /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
+    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
+    /// the plain `cache_clear`.
+    pub fn cache_clear_with_on_evict(&mut self) {
+        if self.on_evict.is_none() {
+            return self.cache_clear();
+        }
+        let keys = self.store.key_order();
+        let mut removed = Vec::with_capacity(keys.len());
+        for k in &keys {
+            if let Some(pair) = self.store.pop_raw(k) {
+                removed.push(pair);
+            }
+        }
+        let count = removed.len() as u64;
+        if count > 0 {
+            self.evictions.fetch_add(count, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (k, entry) in &removed {
+                on_evict(k, &entry.value);
+            }
+        }
     }
 }
 
@@ -445,7 +424,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
                 Some(&self.store.order.get(index).1.value)
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((k, entry)) = self.store.cache_remove_entry(key) {
+                if let Some((k, entry)) = self.store.pop_raw(key) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&k, &entry.value);
                     }
@@ -476,7 +455,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
                 Some(&mut self.store.order.get_mut(index).1.value)
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((k, entry)) = self.store.cache_remove_entry(key) {
+                if let Some((k, entry)) = self.store.pop_raw(key) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&k, &entry.value);
                     }
@@ -572,22 +551,47 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        let stamped = self.store.remove(k);
-        stamped.and_then(|entry| {
+        if let Some((stored_k, entry)) = self.store.pop_raw(k) {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&stored_k, &entry.value);
+            }
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if entry.instant.elapsed() < self.ttl {
                 Some(entry.value)
             } else {
                 None
             }
-        })
+        } else {
+            None
+        }
     }
+
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        if let Some((stored_k, entry)) = self.store.pop_raw(k) {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&stored_k, &entry.value);
+            }
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            Some((stored_k, entry.value))
+        } else {
+            None
+        }
+    }
+
     fn cache_clear(&mut self) {
         self.store.clear();
     }
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
         let on_evict = self.store.on_evict.clone();
-        self.store = LruCache::with_size(self.size);
+        self.store = LruCache::builder()
+            .max_size(self.size)
+            .build()
+            .expect("LruCache build failed");
         self.store.on_evict = on_evict;
         self.cache_reset_metrics();
     }
@@ -805,7 +809,11 @@ mod tests {
 
     #[test]
     fn status_does_not_inflate_inner_store_hits() {
-        let mut cache = LruTtlCache::with_size_and_ttl(4, Duration::from_secs(60));
+        let mut cache = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
         cache.cache_set(1, 10);
         cache.cache_set(2, 20);
         cache.store.cache_reset_metrics();
@@ -825,16 +833,39 @@ mod tests {
     }
 
     #[test]
+    fn capacity_returns_bound_not_live_size() {
+        let mut cache = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(cache.capacity(), 3);
+        assert_eq!(cache.cache_size(), 0);
+
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        assert_eq!(cache.capacity(), 3);
+        assert_eq!(cache.cache_size(), 2);
+
+        // Eviction past the bound keeps capacity fixed while live count stays capped.
+        cache.cache_set(3, 30);
+        cache.cache_set(4, 40);
+        assert_eq!(cache.capacity(), 3);
+        assert_eq!(cache.cache_size(), 3);
+    }
+
+    #[test]
     fn reset_rebuilds_store_and_preserves_on_evict() {
         let evicted = Arc::new(AtomicUsize::new(0));
         let evicted_for_callback = evicted.clone();
         let mut cache = LruTtlCache::builder()
-            .size(1)
+            .max_size(1)
             .ttl(Duration::from_secs(60))
             .on_evict(move |_key: &u8, _value: &u8| {
                 evicted_for_callback.fetch_add(1, AtomicOrdering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
 
         cache.set(1, 10);
         cache.cache_reset();
@@ -847,32 +878,89 @@ mod tests {
 
     #[test]
     fn try_new() {
-        let c = LruTtlCache::<i32, i32>::try_with_size_and_ttl(0, Duration::from_secs(1));
+        let c = LruTtlCache::<i32, i32>::builder()
+            .max_size(0)
+            .ttl(Duration::from_secs(1))
+            .build();
         assert!(matches!(
             c.unwrap_err(),
-            super::super::BuildError::InvalidValue { field: "size", .. }
+            super::super::BuildError::InvalidValue {
+                field: "max_size",
+                ..
+            }
         ));
 
-        let c = LruTtlCache::<i32, i32>::try_with_size_and_ttl(usize::MAX, Duration::from_secs(1));
+        let c = LruTtlCache::<i32, i32>::builder()
+            .max_size(usize::MAX)
+            .ttl(Duration::from_secs(1))
+            .build();
         assert!(matches!(
             c.unwrap_err(),
-            super::super::BuildError::InvalidValue { field: "size", .. }
+            super::super::BuildError::InvalidValue {
+                field: "max_size",
+                ..
+            }
         ));
     }
 
     #[test]
+    fn cache_clear_with_on_evict_fires_for_all_entries() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = LruTtlCache::builder()
+            .max_size(5)
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, AtomicOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(count.load(AtomicOrdering::Relaxed), 3);
+        assert_eq!(c.evictions.load(AtomicOrdering::Relaxed), 3);
+    }
+
+    #[test]
+    fn cache_clear_does_not_fire_on_evict() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c = LruTtlCache::builder()
+            .max_size(5)
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, AtomicOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_clear();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            fired.load(AtomicOrdering::Relaxed),
+            0,
+            "cache_clear must not fire on_evict"
+        );
+    }
+
+    #[test]
     fn cache_reset_does_not_fire_on_evict() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let evict_count = Arc::new(AtomicUsize::new(0));
         let evict_count2 = evict_count.clone();
         let mut c = LruTtlCache::builder()
-            .size(4)
+            .max_size(4)
             .ttl(Duration::from_secs(60))
             .on_evict(move |_k, _v| {
                 evict_count2.fetch_add(1, Ordering::Relaxed);
             })
-            .build();
+            .build()
+            .unwrap();
         c.cache_set(1, 10);
         c.cache_set(2, 20);
         c.cache_set(3, 30);
@@ -887,13 +975,14 @@ mod tests {
 
     #[test]
     fn builder_does_not_require_static_without_on_evict() {
-        // LruTtlCacheBuilder::build / try_build must not impose K: 'static or V: 'static
+        // LruTtlCacheBuilder::build must not impose K: 'static or V: 'static
         // when no on_evict callback is configured.
         fn build_with_borrowed<'a>(_k: &'a str, _v: &'a str) -> LruTtlCache<&'a str, &'a str> {
             LruTtlCache::builder()
-                .size(4)
+                .max_size(4)
                 .ttl(Duration::from_secs(60))
                 .build()
+                .unwrap()
         }
         let mut cache = build_with_borrowed("key", "val");
         cache.cache_set("key", "val");
@@ -904,7 +993,11 @@ mod tests {
     #[tokio::test]
     async fn test_async_trait() {
         use crate::CachedAsync;
-        let mut c = LruTtlCache::with_size_and_ttl(4, Duration::from_secs(60));
+        let mut c = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
 
         async fn _get(n: usize) -> usize {
             n
@@ -927,9 +1020,10 @@ mod tests {
     #[test]
     fn test_diagnostics_and_traits() {
         let mut cache = LruTtlCache::builder()
-            .size(3)
+            .max_size(3)
             .ttl(Duration::from_secs(60))
-            .build();
+            .build()
+            .unwrap();
         cache.cache_set(1, 100);
         cache.cache_set(2, 200);
 
@@ -946,23 +1040,129 @@ mod tests {
         assert_eq!(cloned.cache_get(&1), Some(&100));
         assert_eq!(cloned.cache_get(&2), Some(&200));
 
-        // Builder try_build errors
+        // Builder build errors
         let builder = LruTtlCache::<u32, u32>::builder();
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Missing both size and ttl
+        let built = builder.build();
+        assert!(built.is_err()); // Missing both size and ttl
 
-        let builder = LruTtlCache::<u32, u32>::builder().size(3);
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Missing ttl
+        let builder = LruTtlCache::<u32, u32>::builder().max_size(3);
+        let built = builder.build();
+        assert!(built.is_err()); // Missing ttl
 
         let builder = LruTtlCache::<u32, u32>::builder().ttl(Duration::from_secs(60));
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Missing size
+        let built = builder.build();
+        assert!(built.is_err()); // Missing size
 
         let builder = LruTtlCache::<u32, u32>::builder()
-            .size(0)
+            .max_size(0)
             .ttl(Duration::from_secs(60));
-        let try_built = builder.try_build();
-        assert!(try_built.is_err()); // Size 0 is invalid
+        let built = builder.build();
+        assert!(built.is_err()); // Size 0 is invalid
+
+        let builder = LruTtlCache::<u32, u32>::builder()
+            .max_size(3)
+            .ttl(Duration::ZERO);
+        let built = builder.build();
+        assert!(built.is_err()); // Zero ttl is invalid
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_some_for_live_entry() {
+        let mut c = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        assert_eq!(c.cache_remove_entry(&999u32), None); // absent
+        assert_eq!(c.cache_remove_entry(&1u32), Some((1u32, 100u32)));
+        assert_eq!(c.cache_get(&1u32), None);
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_some_for_expired_entry() {
+        let mut c = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // cache_remove returns None for expired.
+        assert_eq!(c.cache_remove(&1u32), None);
+
+        // cache_remove_entry returns Some even for expired.
+        c.cache_set(2u32, 200u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let removed = c.cache_remove_entry(&2u32);
+        assert!(removed.is_some());
+        assert_eq!(
+            removed.expect("cache_remove_entry returns Some for expired"),
+            (2u32, 200u32)
+        );
+    }
+
+    #[test]
+    fn cache_delete_returns_true_for_expired_entry() {
+        let mut c = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            c.cache_delete(&1u32),
+            "cache_delete must be true even for expired entry"
+        );
+        assert!(!c.cache_delete(&1u32), "cache_delete false when absent");
+    }
+
+    #[test]
+    fn cache_remove_entry_fires_on_evict_for_expired() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(50))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        c.cache_remove_entry(&1u32);
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "on_evict fires for expired entries"
+        );
+
+        c.cache_remove_entry(&999u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
+    }
+
+    #[test]
+    fn cache_remove_entry_increments_eviction_counter() {
+        let mut c = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(10))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let before = c.cache_evictions().expect("evictions are always tracked");
+        c.cache_remove_entry(&1u32); // expired but present — must increment
+        c.cache_remove_entry(&999u32); // absent — must not increment
+        assert_eq!(
+            c.cache_evictions().expect("evictions are always tracked") - before,
+            1,
+            "cache_remove_entry must increment evictions for present key only"
+        );
     }
 }

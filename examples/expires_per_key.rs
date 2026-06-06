@@ -72,7 +72,7 @@ fn main() {
     // 1. ExpiringLruCache (Size-bounded cache with per-value expiration)
     // =========================================================================
     println!("--- 1. ExpiringLruCache (Size-bounded) ---");
-    let mut lru_cache = ExpiringLruCache::with_size(10);
+    let mut lru_cache = ExpiringLruCache::builder().max_size(10).build().unwrap();
 
     let quick_expiry = MyValue {
         data: "Short-lived LRU response".to_string(),
@@ -111,7 +111,7 @@ fn main() {
     // 2. ExpiringCache (Size-unbounded cache with per-value expiration)
     // =========================================================================
     println!("\n--- 2. ExpiringCache (Size-unbounded) ---");
-    let mut expiring_cache = ExpiringCache::new();
+    let mut expiring_cache = ExpiringCache::builder().build().unwrap();
 
     let quick_expiry = MyValue {
         data: "Short-lived response".to_string(),

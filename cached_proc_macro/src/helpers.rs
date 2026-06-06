@@ -1,15 +1,67 @@
+use darling::ast::NestedMeta;
 use darling::{Error, FromMeta};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::__private::Span;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::token::Comma;
 use syn::{
-    parse_quote, parse_str, Attribute, Block, FnArg, GenericArgument, Pat, PatType, PathArguments,
-    ReturnType, Signature, Type,
+    Attribute, Block, FnArg, GenericArgument, Pat, PatType, PathArguments, ReturnType, Signature,
+    Type, parse_quote, parse_str,
 };
+
+/// Span of the named attribute (`name = …`) within a parsed attribute list, if present.
+/// Used to anchor the `size` → `max_size` deprecation warning at the exact attribute.
+fn named_meta_span(attr_args: &[NestedMeta], name: &str) -> Option<Span> {
+    attr_args.iter().find_map(|nm| match nm {
+        NestedMeta::Meta(meta) if meta.path().is_ident(name) => Some(meta.span()),
+        _ => None,
+    })
+}
+
+/// Tokens that emit a `deprecated` compiler warning nudging `size = N` users toward
+/// `max_size = N`, anchored at the user's `size` attribute. Expands to a zero-cost
+/// anonymous `const` item (valid at module or block scope) referencing the deprecated
+/// `cached::__DEPRECATED_SIZE_ATTR` marker. Returns an empty stream when the
+/// (non-deprecated) `max_size` spelling — or neither — was used.
+pub(super) fn size_attr_deprecation_notice(attr_args: &[NestedMeta]) -> TokenStream2 {
+    match named_meta_span(attr_args, "size") {
+        Some(span) => quote_spanned! {span=>
+            const _: () = ::cached::__DEPRECATED_SIZE_ATTR;
+        },
+        None => TokenStream2::new(),
+    }
+}
+
+/// Returns `true` if `output` is a `Result<…>` type (last path segment is
+/// exactly `"Result"` and carries type arguments).
+pub(super) fn is_result_return_type(output: &ReturnType) -> bool {
+    match output {
+        ReturnType::Default => false,
+        ReturnType::Type(_, ty) => match &**ty {
+            Type::Path(tp) => tp.path.segments.last().is_some_and(|s| {
+                !matches!(s.arguments, PathArguments::None) && s.ident == "Result"
+            }),
+            _ => false,
+        },
+    }
+}
+
+/// Returns `true` if `output` is an `Option<…>` type (last path segment is `"Option"` with type args).
+pub(super) fn is_option_return_type(output: &ReturnType) -> bool {
+    match output {
+        ReturnType::Default => false,
+        ReturnType::Type(_, ty) => match &**ty {
+            Type::Path(tp) => tp.path.segments.last().is_some_and(|s| {
+                !matches!(s.arguments, PathArguments::None) && s.ident == "Option"
+            }),
+            _ => false,
+        },
+    }
+}
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(super) enum SyncWriteMode {
@@ -123,13 +175,13 @@ pub(super) fn match_pattern_type(pat_type: &&PatType) -> Box<Pat> {
 // for Options and Results it's the (first) inner type. So for
 // Option<u32>, store u32, for Result<i32, String>, store i32, etc.
 pub(super) fn find_value_type(
-    result: bool,
-    option: bool,
+    is_smart_result: bool,
+    is_smart_option: bool,
     output: &ReturnType,
     output_ty: TokenStream2,
 ) -> Result<TokenStream2, syn::Error> {
     use syn::spanned::Spanned;
-    match (result, option) {
+    match (is_smart_result, is_smart_option) {
         (false, false) => Ok(output_ty),
         (true, true) => Err(syn::Error::new(
             output_ty.span(),

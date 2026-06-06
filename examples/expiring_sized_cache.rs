@@ -6,16 +6,19 @@ Run:
     cargo run --example expiring_sized_cache --features "async_tokio_rt_multi_thread,time_stores"
 */
 
+use cached::CachedRead; // shared-borrow reads via `cache_get_read` (RwLockReadGuard)
 use cached::stores::TtlSortedCache;
 use cached::time::{Duration, Instant};
-use cached::CachedRead; // shared-borrow reads via `cache_get_read` (RwLockReadGuard)
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
-    let mut cache = TtlSortedCache::new(Duration::from_millis(20_000));
-    cache.size_limit(100);
+    let mut cache = TtlSortedCache::builder()
+        .ttl(Duration::from_millis(20_000))
+        .build()
+        .unwrap();
+    cache.set_max_size(100);
 
     let cache = Arc::new(RwLock::new(cache));
 

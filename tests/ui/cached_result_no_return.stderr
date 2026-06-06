@@ -1,7 +1,0 @@
-error: function must return something when `result` or `option` is set
- --> tests/ui/cached_result_no_return.rs:3:1
-  |
-3 | #[cached(result = true)]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

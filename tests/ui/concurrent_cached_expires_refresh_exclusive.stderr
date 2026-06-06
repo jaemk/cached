@@ -1,0 +1,5 @@
+error: `expires` and `refresh` are mutually exclusive — `expires` delegates expiry to the value via `Expires::is_expired`
+ --> tests/ui/concurrent_cached_expires_refresh_exclusive.rs:4:4
+  |
+4 | fn my_fn(x: u32) -> Result<u32, String> {
+  |    ^^^^^

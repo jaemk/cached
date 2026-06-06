@@ -1,0 +1,5 @@
+error: `max_size` must be >= 1
+ --> tests/ui/cached_max_size_zero.rs:4:4
+  |
+4 | fn my_fn(k: i32) -> i32 {
+  |    ^^^^^

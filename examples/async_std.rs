@@ -24,7 +24,7 @@ async fn cached_sleep_secs(secs: u64) {
 
 /// should only cache the result for a second, and only when
 /// the result is `Ok`
-#[cached(ttl = 1, key = "bool", convert = r#"{ true }"#, result = true)]
+#[cached(ttl = 1, key = "bool", convert = r#"{ true }"#)]
 async fn only_cached_a_second(
     s: String,
 ) -> std::result::Result<Vec<String>, &'static dyn std::error::Error> {
@@ -33,51 +33,35 @@ async fn only_cached_a_second(
 
 /// should only cache the _first_ `Ok` returned.
 /// all arguments are ignored for subsequent calls.
-#[once(result = true)]
+#[once]
 async fn only_cached_result_once(s: String, error: bool) -> std::result::Result<Vec<String>, u32> {
-    if error {
-        Err(1)
-    } else {
-        Ok(vec![s])
-    }
+    if error { Err(1) } else { Ok(vec![s]) }
 }
 
 /// should only cache the _first_ `Ok` returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
-#[once(result = true, ttl = 1)]
+#[once(ttl = 1)]
 async fn only_cached_result_once_per_second(
     s: String,
     error: bool,
 ) -> std::result::Result<Vec<String>, u32> {
-    if error {
-        Err(1)
-    } else {
-        Ok(vec![s])
-    }
+    if error { Err(1) } else { Ok(vec![s]) }
 }
 
 /// should only cache the _first_ `Some` returned .
 /// all arguments are ignored for subsequent calls
-#[once(option = true)]
+#[once]
 async fn only_cached_option_once(s: String, none: bool) -> Option<Vec<String>> {
-    if none {
-        None
-    } else {
-        Some(vec![s])
-    }
+    if none { None } else { Some(vec![s]) }
 }
 
 /// should only cache the _first_ `Some` returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
-#[once(option = true, ttl = 1)]
+#[once(ttl = 1)]
 async fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
-    if none {
-        None
-    } else {
-        Some(vec![s])
-    }
+    if none { None } else { Some(vec![s]) }
 }
 
 /// should only cache the _first_ value returned for 1 second.
@@ -115,9 +99,11 @@ async fn main() {
     cached_sleep_secs(1).await;
 
     println!("cached result once");
-    assert!(only_cached_result_once("z".to_string(), true)
-        .await
-        .is_err());
+    assert!(
+        only_cached_result_once("z".to_string(), true)
+            .await
+            .is_err()
+    );
     let a = only_cached_result_once("a".to_string(), false)
         .await
         .unwrap();
@@ -132,9 +118,11 @@ async fn main() {
     assert_eq!(a, b);
 
     println!("cached result once per second");
-    assert!(only_cached_result_once_per_second("z".to_string(), true)
-        .await
-        .is_err());
+    assert!(
+        only_cached_result_once_per_second("z".to_string(), true)
+            .await
+            .is_err()
+    );
     let a = only_cached_result_once_per_second("a".to_string(), false)
         .await
         .unwrap();
@@ -149,9 +137,11 @@ async fn main() {
     assert_eq!(vec!["b".to_string()], b);
 
     println!("cached option once");
-    assert!(only_cached_option_once("z".to_string(), true)
-        .await
-        .is_none());
+    assert!(
+        only_cached_option_once("z".to_string(), true)
+            .await
+            .is_none()
+    );
     let a = only_cached_option_once("a".to_string(), false)
         .await
         .unwrap();
@@ -166,9 +156,11 @@ async fn main() {
     assert_eq!(a, b);
 
     println!("cached option once per second");
-    assert!(only_cached_option_once_per_second("z".to_string(), true)
-        .await
-        .is_none());
+    assert!(
+        only_cached_option_once_per_second("z".to_string(), true)
+            .await
+            .is_none()
+    );
     let a = only_cached_option_once_per_second("a".to_string(), false)
         .await
         .unwrap();

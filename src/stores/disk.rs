@@ -1,16 +1,18 @@
-use crate::time::Duration;
-use crate::time::SystemTime;
 #[cfg(feature = "time_stores")]
 use crate::CacheTtl;
 use crate::ConcurrentCached;
+use crate::time::Duration;
+use crate::time::SystemTime;
 use directories::BaseDirs;
-use serde::de::DeserializeOwned;
+use parking_lot::Mutex;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sled::Db;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct DiskCacheBuilder<K, V> {
     ttl: Option<Duration>,
@@ -30,6 +32,8 @@ use thiserror::Error;
 pub enum DiskCacheBuildError {
     #[error("Storage connection error")]
     ConnectionError(#[from] sled::Error),
+    #[error(transparent)]
+    InvalidTtl(#[from] super::BuildError),
     #[error("Connection string not specified or invalid in env var {env_key:?}: {error:?}")]
     MissingDiskPath {
         env_key: String,
@@ -160,6 +164,9 @@ where
     }
 
     pub fn build(self) -> Result<DiskCache<K, V>, DiskCacheBuildError> {
+        if let Some(ttl) = self.ttl {
+            super::validate_ttl(ttl)?;
+        }
         let cache_dir_name = format!("{}_v{}", self.cache_name, DISK_FILE_VERSION);
 
         let (disk_path, connection) = if let Some(disk_dir) = self.disk_dir {
@@ -173,8 +180,8 @@ where
         };
 
         Ok(DiskCache {
-            ttl: self.ttl,
-            refresh: self.refresh,
+            ttl: Mutex::new(self.ttl),
+            refresh: AtomicBool::new(self.refresh),
             sync_to_disk_on_cache_change: self.sync_to_disk_on_cache_change,
             version: DISK_FILE_VERSION,
             disk_path,
@@ -186,8 +193,8 @@ where
 
 /// Cache store backed by disk
 pub struct DiskCache<K, V> {
-    pub(super) ttl: Option<Duration>,
-    pub(super) refresh: bool,
+    pub(super) ttl: Mutex<Option<Duration>>,
+    pub(super) refresh: AtomicBool,
     sync_to_disk_on_cache_change: bool,
     #[allow(unused)]
     version: u64,
@@ -213,13 +220,19 @@ where
         DiskCacheBuilder::new(cache_name)
     }
 
+    /// Initialize a `DiskCacheBuilder`.
+    pub fn builder(cache_name: &str) -> DiskCacheBuilder<K, V> {
+        DiskCacheBuilder::new(cache_name)
+    }
+
     pub fn remove_expired_entries(&self) -> Result<(), DiskCacheError> {
         let now = SystemTime::now();
 
+        let ttl = *self.ttl.lock();
         for item in self.connection.iter() {
             let (key, value) = item?;
             let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&value)?;
-            if let Some(ttl) = self.ttl {
+            if let Some(ttl) = ttl {
                 if now
                     .duration_since(cached.created_at)
                     .unwrap_or(Duration::from_secs(0))
@@ -401,6 +414,28 @@ where
     result
 }
 
+fn disk_cache_remove_entry<V>(
+    connection: &Db,
+    key: &str,
+    sync_to_disk_on_cache_change: bool,
+) -> Result<Option<V>, DiskCacheError>
+where
+    V: DeserializeOwned,
+{
+    let result = if let Some(data) = connection.remove(key)? {
+        let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(&data)?;
+        Ok(Some(cached.value))
+    } else {
+        Ok(None)
+    };
+
+    if sync_to_disk_on_cache_change {
+        connection.flush()?;
+    }
+
+    result
+}
+
 fn disk_cache_delete(
     connection: &Db,
     key: &str,
@@ -417,17 +452,19 @@ fn disk_cache_delete(
 
 impl<K, V> ConcurrentCached<K, V> for DiskCache<K, V>
 where
-    K: ToString,
+    K: ToString + Clone,
     V: Serialize + DeserializeOwned,
 {
     type Error = DiskCacheError;
 
     fn cache_get(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
+        let ttl = *self.ttl.lock();
+        let refresh = self.refresh.load(Ordering::Relaxed);
         disk_cache_get(
             &self.connection,
             &key.to_string(),
-            self.ttl,
-            self.refresh,
+            ttl,
+            refresh,
             self.sync_to_disk_on_cache_change,
         )
     }
@@ -443,12 +480,22 @@ where
     }
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
+        let ttl = *self.ttl.lock();
         disk_cache_remove(
             &self.connection,
             &key.to_string(),
-            self.ttl,
+            ttl,
             self.sync_to_disk_on_cache_change,
         )
+    }
+
+    fn cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
+        disk_cache_remove_entry(
+            &self.connection,
+            &key.to_string(),
+            self.sync_to_disk_on_cache_change,
+        )
+        .map(|opt| opt.map(|v| (key.clone(), v)))
     }
 
     fn cache_delete(&self, key: &K) -> Result<bool, DiskCacheError> {
@@ -460,23 +507,19 @@ where
     }
 
     fn ttl(&self) -> Option<Duration> {
-        self.ttl
+        *self.ttl.lock()
     }
 
-    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let old = self.ttl;
-        self.ttl = Some(ttl);
-        old
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        self.ttl.lock().replace(ttl)
     }
 
-    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-        let old = self.refresh;
-        self.refresh = refresh;
-        old
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.refresh.swap(refresh, Ordering::Relaxed)
     }
 
-    fn unset_ttl(&mut self) -> Option<Duration> {
-        self.ttl.take()
+    fn unset_ttl(&self) -> Option<Duration> {
+        self.ttl.lock().take()
     }
 }
 
@@ -507,7 +550,7 @@ where
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 impl<K, V> crate::ConcurrentCachedAsync<K, V> for DiskCache<K, V>
 where
-    K: ToString + Send + Sync,
+    K: ToString + Clone + Send + Sync,
     V: Serialize + DeserializeOwned + Send + 'static,
 {
     type Error = DiskCacheError;
@@ -515,7 +558,11 @@ where
     async fn cache_get(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
-        let (ttl, refresh, sync) = (self.ttl, self.refresh, self.sync_to_disk_on_cache_change);
+        let (ttl, refresh, sync) = (
+            *self.ttl.lock(),
+            self.refresh.load(Ordering::Relaxed),
+            self.sync_to_disk_on_cache_change,
+        );
         tokio::task::spawn_blocking(move || {
             disk_cache_get::<V>(&connection, &key, ttl, refresh, sync)
         })
@@ -538,10 +585,22 @@ where
     async fn cache_remove(&self, key: &K) -> Result<Option<V>, DiskCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
-        let (ttl, sync) = (self.ttl, self.sync_to_disk_on_cache_change);
+        let (ttl, sync) = (*self.ttl.lock(), self.sync_to_disk_on_cache_change);
         tokio::task::spawn_blocking(move || disk_cache_remove::<V>(&connection, &key, ttl, sync))
             .await
             .map_err(|_| DiskCacheError::BackgroundTaskFailed)?
+    }
+
+    async fn cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
+        let connection = self.connection.clone();
+        let key_str = key.to_string();
+        let sync = self.sync_to_disk_on_cache_change;
+        let v: Option<V> = tokio::task::spawn_blocking(move || {
+            disk_cache_remove_entry::<V>(&connection, &key_str, sync)
+        })
+        .await
+        .map_err(|_| DiskCacheError::BackgroundTaskFailed)??;
+        Ok(v.map(|v| (key.clone(), v)))
     }
 
     async fn cache_delete(&self, key: &K) -> Result<bool, DiskCacheError> {
@@ -553,45 +612,39 @@ where
             .map_err(|_| DiskCacheError::BackgroundTaskFailed)?
     }
 
-    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-        let old = self.refresh;
-        self.refresh = refresh;
-        old
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.refresh.swap(refresh, Ordering::Relaxed)
     }
 
     fn ttl(&self) -> Option<Duration> {
-        self.ttl
+        *self.ttl.lock()
     }
 
-    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let old = self.ttl;
-        self.ttl = Some(ttl);
-        old
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        self.ttl.lock().replace(ttl)
     }
 
-    fn unset_ttl(&mut self) -> Option<Duration> {
-        self.ttl.take()
+    fn unset_ttl(&self) -> Option<Duration> {
+        self.ttl.lock().take()
     }
 }
 
 #[cfg(feature = "time_stores")]
 impl<K, V> CacheTtl for DiskCache<K, V> {
     fn ttl(&self) -> Option<Duration> {
-        self.ttl
+        *self.ttl.lock()
     }
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        self.ttl.replace(ttl)
+        self.ttl.lock().replace(ttl)
     }
     fn unset_ttl(&mut self) -> Option<Duration> {
-        self.ttl.take()
+        self.ttl.lock().take()
     }
     fn refresh_on_hit(&self) -> bool {
-        self.refresh
+        self.refresh.load(Ordering::Relaxed)
     }
     fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-        let old = self.refresh;
-        self.refresh = refresh;
-        old
+        self.refresh.swap(refresh, Ordering::Relaxed)
     }
 }
 
@@ -600,9 +653,8 @@ impl<K, V> CacheTtl for DiskCache<K, V> {
 mod test_DiskCache {
     use crate::time::Duration;
     use googletest::{
-        assert_that,
+        GoogleTestSupport as _, assert_that,
         matchers::{anything, eq, none, ok, some},
-        GoogleTestSupport as _,
     };
     use std::thread::sleep;
     use tempfile::TempDir;
@@ -704,11 +756,13 @@ mod test_DiskCache {
             cache.cache_get(&TEST_KEY),
             Err(DiskCacheError::CacheDeserializationError(_))
         ));
-        assert!(cache
-            .connection
-            .get(TEST_KEY.to_string())
-            .unwrap()
-            .is_some());
+        assert!(
+            cache
+                .connection
+                .get(TEST_KEY.to_string())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -834,7 +888,7 @@ mod test_DiskCache {
     fn set_ttl_to_a_different_ttl_is_respected() {
         // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
         let tmp_dir = temp_dir!();
-        let mut cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
+        let cache: DiskCache<u32, u32> = DiskCache::new("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_2_SECS)
             .build()
@@ -862,7 +916,7 @@ mod test_DiskCache {
         );
 
         let old_from_setting_lifespan =
-            ConcurrentCached::set_ttl(&mut cache, LIFE_SPAN_1_SEC).expect("error setting new ttl");
+            ConcurrentCached::set_ttl(&cache, LIFE_SPAN_1_SEC).expect("error setting new ttl");
         assert_that!(
             old_from_setting_lifespan,
             eq(LIFE_SPAN_2_SECS),
@@ -888,7 +942,7 @@ mod test_DiskCache {
             "Getting an expired key-value should return None"
         );
 
-        ConcurrentCached::set_ttl(&mut cache, Duration::from_secs(10)).expect("error setting ttl");
+        ConcurrentCached::set_ttl(&cache, Duration::from_secs(10)).expect("error setting ttl");
         assert_that!(
             cache.cache_set(TEST_KEY, TEST_VAL),
             ok(none()),
@@ -1039,10 +1093,10 @@ mod test_DiskCache {
                         },
                         |recovered_cache| {
                             assert_that!(
-                                    recovered_cache.cache_get(&TEST_KEY),
-                                    ok(none()),
-                                    "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache should not have persisted"
-                                );
+                                recovered_cache.cache_get(&TEST_KEY),
+                                ok(none()),
+                                "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache should not have persisted"
+                            );
                         },
                     )
                 }
@@ -1066,10 +1120,10 @@ mod test_DiskCache {
                         },
                         |recovered_cache| {
                             assert_that!(
-                                    recovered_cache.cache_get(&TEST_KEY),
-                                    ok(some(eq(TEST_VAL))),
-                                    "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache_remove should not have persisted"
-                                );
+                                recovered_cache.cache_get(&TEST_KEY),
+                                ok(some(eq(TEST_VAL))),
+                                "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache_remove should not have persisted"
+                            );
                         },
                     )
                 }

@@ -1,0 +1,5 @@
+error: `shards` only applies to the default in-memory store, not `disk = true`
+  --> tests/ui/concurrent_cached_shards_with_disk.rs:10:4
+   |
+10 | fn my_fn(k: i32) -> Result<i32, String> {
+   |    ^^^^^

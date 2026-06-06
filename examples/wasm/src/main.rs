@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 use reqwasm::http::Request;
 use yew::prelude::*;
 
-use cached::macros::cached;
 use cached::TtlCache;
+use cached::macros::cached;
 
 const URL: &'static str = "https://echo.zuplo.io/";
 
@@ -57,7 +57,8 @@ fn app() -> Html {
 
 #[cached(
     ty = "TtlCache<String, Option<String>>",
-    create = "{ TtlCache::with_ttl(cached::time::Duration::from_secs(5)) }"
+    create = "{ TtlCache::builder().ttl(cached::time::Duration::from_secs(5)).build().unwrap() }",
+    cache_none = true
 )]
 async fn fetch(body: String) -> Option<String> {
     Request::post(URL)

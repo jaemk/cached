@@ -2,15 +2,16 @@
 [![Build Status](https://github.com/jaemk/cached/actions/workflows/build.yml/badge.svg)](https://github.com/jaemk/cached/actions/workflows/build.yml)
 [![crates.io](https://img.shields.io/crates/v/cached.svg)](https://crates.io/crates/cached)
 [![docs](https://docs.rs/cached/badge.svg)](https://docs.rs/cached)
-[![CodSpeed Badge](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/jaemk/cached?utm_source=badge)
 
 > Caching structures and simplified function memoization
 
 `cached` provides implementations of several caching structures as well as macros
 for defining memoized functions.
 
-Memoized functions defined using `#[cached]`/`#[once]`/`#[concurrent_cached]` macros are thread-safe with the backing
-function-cache wrapped in a mutex/rwlock, or externally synchronized in the case of `#[concurrent_cached]`.
+Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe with the backing
+function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
+store's own internal synchronization: sharded stores use per-shard `parking_lot::RwLock`; Redis and
+disk stores rely on their respective server/file-system concurrency.
 By default, the function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
 concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
 the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`. To synchronize the execution and caching
@@ -21,12 +22,18 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 - See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
 
+> **Upgrading from 1.x?** 2.0 contains breaking changes (new `cache_remove_entry` required method,
+> `Result`/`Option` caching behavior flipped to smart-by-default, `result`/`option` attributes
+> removed, and more). See the
+> [2.0 migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/1.1-to-2.0-human.md)
+> for a step-by-step walkthrough.
+>
 > **Upgrading from a pre-1.0 release?** 1.0 contains breaking changes (store
 > renames, removed declarative macros, renamed macro/builder attributes, and a
 > changed Redis key format). See the
-> [1.0 migration guide](https://github.com/jaemk/cached/blob/master/docs/MIGRATION-1.0.md)
+> [1.0 migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/0.x-to-1.0-human.md)
 > for a step-by-step walkthrough, or the
-> [agent-oriented guide](https://github.com/jaemk/cached/blob/master/docs/MIGRATION-1.0-AGENT.md)
+> [agent-oriented guide](https://github.com/jaemk/cached/blob/master/docs/migrations/0.x-to-1.0.md)
 > for automated migration tooling.
 
 **Features**
@@ -49,7 +56,8 @@ of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_w
 - `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
   runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_tokio`, `redis_ahash`)
-- `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), and [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html)).
+- `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
+  Also required when using `#[concurrent_cached(ttl = …)]` on the default in-memory path.
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
 
 The procedural macros (`#[cached]`, `#[once]`, `#[concurrent_cached]`) offer a number of features, including async support.
@@ -61,38 +69,128 @@ help output stays in sync with supported Makefile targets.
 Any custom cache that implements `cached::Cached`/`cached::CachedAsync` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins.
 Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentCachedAsync` can be used with the `#[concurrent_cached]` macro.
 
+**Macro quick reference**
+
+| Use case | Annotated signature |
+|---|---|
+| **`#[cached]`** | |
+| Unbounded memoize (default) | `#[cached] fn fib(n: u64) -> u64` |
+| LRU-bounded — evict past N entries | `#[cached(max_size = 1_000)] fn lookup(id: u32) -> Row` |
+| TTL — expire results after N seconds | `#[cached(ttl = 60)] fn config() -> Config` |
+| LRU + TTL | `#[cached(max_size = 500, ttl = 300)] fn search(q: String) -> Vec<Hit>` |
+| Don't cache `None` returns (implicit for `Option<T>`) | `#[cached] fn find(id: u64) -> Option<User>` |
+| Don't cache `Err` returns (implicit for `Result<T, E>`) | `#[cached] fn load(id: u64) -> Result<Data, E>` |
+| Force-cache `None` returns | `#[cached(cache_none = true)] fn find(id: u64) -> Option<User>` |
+| Force-cache `Err` returns | `#[cached(cache_err = true)] fn load(id: u64) -> Result<Data, E>` |
+| Serve stale value when function returns `Err` | `#[cached(result_fallback = true, ttl = 60)] fn fetch(id: u64) -> Result<Data, E>` |
+| Per-value expiry (value carries its own TTL) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
+| Deduplicate concurrent first calls for same key | `#[cached(ttl = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
+| Async | `#[cached(max_size = 100)] async fn remote(id: u64) -> Data` |
+| **`#[once]`** | |
+| Compute and cache a global value forever | `#[once] fn app_config() -> Config` |
+| Refresh a global value periodically | `#[once(ttl = 300, sync_writes = true)] fn pubkey() -> Key` |
+| Optional global — skip caching if `None` (implicit) | `#[once] fn feature_flag() -> Option<Flag>` |
+| **`#[concurrent_cached]`** | |
+| Thread-safe sharded memoize (no global lock per call) | `#[concurrent_cached] fn compute(x: u64) -> u64` |
+| Sharded with LRU | `#[concurrent_cached(max_size = 1_000)] fn lookup(id: u64) -> Row` |
+| Sharded with TTL | `#[concurrent_cached(ttl = 60)] fn fetch(url: String) -> Body` |
+| Sharded LRU + TTL with custom shard count | `#[concurrent_cached(max_size = 1_000, ttl = 60, shards = 32)] fn query(id: u64) -> Row` |
+| Per-value expiry, thread-safe | `#[concurrent_cached(expires = true)] fn session(id: u32) -> Token` |
+| Per-value expiry with LRU bound | `#[concurrent_cached(expires = true, max_size = 1_000)] fn session(id: u32) -> Token` |
+| Cache only successful results (implicit for `Result<T, E>`) | `#[concurrent_cached] fn load(id: u64) -> Result<Row, DbError>` |
+| Don't cache `None` returns (implicit for `Option<T>`) | `#[concurrent_cached] fn find(id: u64) -> Option<Row>` |
+| Serve stale value when function returns `Err` | `#[concurrent_cached(result_fallback = true, ttl = 60)] fn fetch(id: u64) -> Result<Data, E>` |
+| Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
+| Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
+
+On `#[cached]` and `#[concurrent_cached]`, the preferred attribute is `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The legacy `size = N` is still accepted as a deprecated alias, but emits a deprecation warning nudging you toward `max_size = N`. Either spelling works; setting both on one annotation is a compile error.
+
+For the default in-memory sharded stores, `#[concurrent_cached]` accepts any return type — plain values, `Option<T>`, or `Result<T, E>`.
+Plain values are always cached as-is. `Option<T>` returns skip caching `None` by default; use `cache_none = true` to also cache `None` values. `Result<T, E>` only caches `Ok` values; `Err` is returned without being stored. Use `cache_err = true` to also cache `Err` values.
+The macro detects `Result<T, E>` by matching the exact identifier `Result` (including fully-qualified paths such as `std::result::Result<T, E>`). Type aliases are not resolved at macro-expansion time, so any alias — even one whose name ends with `Result` (e.g. `type MyResult<T> = Result<T, E>`) — is treated as a plain value and its `Err` variant is cached. Use `Result<T, E>` directly when you need Ok-only caching behavior.
+The same applies to `Option<T>` detection: a type alias such as `type MaybeRow<T> = Option<T>` is treated as a plain value and its `None` variant is cached. Use `Option<T>` directly when you need `None`-skipping behavior.
+On the default in-memory path, do **not** specify `map_error` — the sharded stores are infallible and supplying it is a compile error.
+For `disk` and `redis` stores, `Result<T, E>` is required and `map_error` must convert the store's error into your `E`.
+
 **Store comparison**
 
-| Store | Eviction policy | Size limit | TTL | Refresh on hit | `on_evict` | Async |
-|---|---|---|---|---|---|---|
-| [`UnboundCache`](https://docs.rs/cached/latest/cached/struct.UnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes |
-| [`LruCache`](https://docs.rs/cached/latest/cached/struct.LruCache.html) | LRU | Yes | No | N/A | Yes | Yes |
-| [`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes |
-| [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes | Yes |
-| [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html) | TTL (expiry-ordered) | Optional | Global | No | Yes | Yes |
-| [`ExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes |
-| [`ExpiringCache`](https://docs.rs/cached/latest/cached/struct.ExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes |
+| Store | Eviction policy | Size limit | TTL | Refresh on hit | `on_evict` | Concurrent | Async |
+|---|---|---|---|---|---|---|---|
+| [`UnboundCache`](https://docs.rs/cached/latest/cached/struct.UnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | No | Yes |
+| [`LruCache`](https://docs.rs/cached/latest/cached/struct.LruCache.html) | LRU | Yes | No | N/A | Yes | No | Yes |
+| [`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | No | Yes |
+| [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes | No | Yes |
+| [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html) | TTL (expiry-ordered) | Optional | Global | No | Yes | No | Yes |
+| [`ExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | No | Yes |
+| [`ExpiringCache`](https://docs.rs/cached/latest/cached/struct.ExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | No | Yes |
+| [`ShardedCache`](https://docs.rs/cached/latest/cached/type.ShardedCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
+| [`ShardedLruCache`](https://docs.rs/cached/latest/cached/type.ShardedLruCache.html) | LRU | Yes | No | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes (`Arc`) | Yes |
+| [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes (†) | Yes (`Arc`) | Yes |
+| [`ShardedExpiringCache`](https://docs.rs/cached/latest/cached/type.ShardedExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedExpiringLruCache`](https://docs.rs/cached/latest/cached/type.ShardedExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
 
-`TtlCache`/`LruTtlCache`/`TtlSortedCache` require the `time_stores` feature.
+> "On explicit remove" — `on_evict` fires only on `cache_remove`; there is no capacity eviction or TTL expiry trigger for these stores.
+> † `ShardedLruTtlCacheBuilder::on_evict` requires `K: 'static + V: 'static`; see the builder docs for details.
+
+`TtlCache`/`LruTtlCache`/`TtlSortedCache`/`ShardedTtlCache`/`ShardedLruTtlCache` require the `time_stores` feature.
+
+`ShardedCache` and its variants are partitioned across power-of-two shards (default: `available_parallelism() × 4`, clamped to 8–1024; the 8–1024 clamp applies only to this computed default — an explicit `shards = N` is rounded up to a power of two but never clamped) each protected by a `parking_lot::RwLock`. Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
+For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
+Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled — enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes.
+
+> **`*Base` types:** Each sharded store has a corresponding `*Base` generic (`ShardedCacheBase<K, V, H>`, `ShardedLruCacheBase<K, V, H>`, etc.) parameterized on a custom [`ShardHasher`]. The named aliases (`ShardedCache`, `ShardedLruCache`, …) use the default hasher and are what most users should reach for. Use the `*Base` types only when implementing a custom `ShardHasher` for non-standard shard routing.
 
 **Behavioral guarantees**
 
-- In-memory cache stores are not internally synchronized. Macro-defined functions wrap their
-  backing stores in generated locks; users managing stores directly should add synchronization
-  at the call site when sharing across threads.
+- Non-sharded in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, etc.) are not internally
+  synchronized. Macro-generated `#[cached]`/`#[once]` functions wrap them in locks; users
+  managing these stores directly must add their own synchronization when sharing across threads.
+  `Sharded*` stores are internally synchronized (per-shard `parking_lot::RwLock`) and implement
+  `ConcurrentCached`/`ConcurrentCachedAsync` — no external lock is needed.
+  Direct sharded-store method syntax is synchronous because these stores expose inherent
+  `cache_get` / `cache_set` / `cache_remove` helpers. Use Universal Function Call Syntax (UFCS)
+  for async trait calls (e.g., `cached::ConcurrentCachedAsync::cache_get(&*STORE, &key).await.expect("ShardedCache is infallible")`), where `&*STORE` dereferences a `LazyLock<Store>` or `OnceCell<Store>` static to obtain a `&Store` reference.
 - `Cached::get` (and its legacy alias `cache_get`) requires mutable access because some
   stores update recency, expiration timestamps, or metrics during reads.
 - Expired values can remain allocated until a mutating operation, `evict`, or
   store-specific cleanup removes them. Methods such as `len` may include expired values
   unless a store documents otherwise.
+- `cache_remove` fires the `on_evict` callback (if set) and counts as an eviction for
+  every successful removal, across all stores that track evictions. `ShardedCache` is the
+  exception: it has no evictions counter and always returns `None` from
+  `metrics().evictions`, though its `on_evict` callback still fires. The `on_evict` column
+  above marks the unbounded stores where explicit removal is the *only* eviction trigger. For stores with
+  expiry, removing a present-but-already-expired entry still evicts and fires `on_evict`,
+  but `cache_remove` returns `None`; use `cache_delete` or `cache_remove_entry` when you
+  need to know whether an entry was physically removed.
+- `cache_clear()` is fast and side-effect-free: it does **not** fire `on_evict` and does
+  not increment the evictions counter. Use `cache_clear_with_on_evict()` when you need the
+  callback to fire for every removed entry (e.g., to release resources tracked via `on_evict`).
+  Note: neither `clear()` nor `cache_clear_with_on_evict()` is part of `ConcurrentCached`
+  or its async counterpart — `clear()` is exposed as an inherent method on each concrete
+  sharded store type, and `cache_clear_with_on_evict()` is inherent-only as well; generic code
+  parameterized over `ConcurrentCached` cannot call either.
 - Bounded caches enforce capacity on insertion. Time-bounded caches enforce freshness on lookup.
-- Redis and disk stores serialize values and return owned values; in-memory stores return
-  references from direct store APIs and macro-generated functions clone cached return values.
-- Macro-generated cache statics use `RwLock` by default. Named cache
-  statics should be inspected with `.read()` or `.write()` unless `sync_lock = "mutex"` is set.
+- Redis and disk stores serialize values and return owned values. Non-sharded in-memory stores
+  return references from direct store APIs; sharded stores return owned `Option<V>` values
+  (cloned under a shard lock). Macro-generated functions clone cached return values in all cases.
+- Macro-generated `#[cached]` / `#[once]` cache statics use `RwLock` by default. Named cache
+  statics for those macros should be inspected with `.read()` or `.write()` unless
+  `sync_lock = "mutex"` is set. Named `#[concurrent_cached]` statics hold a self-synchronizing
+  store directly: sync functions use `LazyLock<Store>`, and async functions use
+  `OnceCell<Store>`.
 - `CachedPeek` provides non-mutating lookups that do not update recency, refresh TTLs, or record
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
+- Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
+  `Cached`/`CachedAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
+  stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
+  Sharded stores also do not implement `CachedIter` or `CachedPeek`. Code that is generic over
+  `CachedIter<K, V>` or uses `.iter()` / `cache_peek` must use non-sharded stores instead.
+  The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
+  [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
+  which provides `cache_get_with_expiry_status` for reading stale entries without evicting them.
 
 **Per-Value Expiry via the `Expires` Trait**
 
@@ -100,12 +198,17 @@ While standard timed stores (`TtlCache`, `LruTtlCache`, `TtlSortedCache`) enforc
 
 This approach is highly useful when caching payloads like OAuth tokens, HTTP responses with varying `Cache-Control` headers, or database records that contain their own absolute expiration timestamps.
 
-When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
+When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `max_size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
 
-> **Memory note:** `ExpiringCache` is unbounded and only removes expired entries when the same
-> key is accessed again. `CachedIter::iter()` filters expired entries from the iterator but does
-> not remove them from the map. For high-cardinality workloads, call `evict()` periodically or
-> prefer `ExpiringLruCache` with a `size` bound.
+For concurrent (multi-thread, no external lock) use, the sharded equivalents [`ShardedExpiringCache`] and [`ShardedExpiringLruCache`] provide the same per-value expiry with internally-synchronized sharded storage. Use `#[concurrent_cached(expires = true)]` to select them automatically.
+
+> **Memory note:** `ExpiringCache` and `ShardedExpiringCache` are unbounded and only remove
+> expired entries when the same key is accessed again. `CachedIter::iter()` (implemented on the
+> non-sharded `ExpiringCache` / `ExpiringLruCache` only, not on the sharded variants) filters
+> expired entries from the iterator but does not remove them from the map. For high-cardinality workloads,
+> call `evict()` periodically (bring [`CacheEvict`] into scope: `use cached::CacheEvict;`; note
+> that `evict()` on sharded TTL and expiring stores requires `K: Clone`) or
+> prefer `ExpiringLruCache` / `ShardedExpiringLruCache` with a `max_size` bound.
 
 ```rust
 use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
@@ -126,7 +229,7 @@ impl Expires for Response {
 let now = Instant::now();
 
 // ExpiringCache — unbounded, default for `#[cached(expires = true)]`
-let mut cache = ExpiringCache::new();
+let mut cache = ExpiringCache::builder().build().unwrap();
 cache.cache_set("key1", Response {
     payload: "a".to_string(),
     expires_at: now + Duration::from_secs(1),
@@ -136,8 +239,8 @@ cache.cache_set("key2", Response {
     expires_at: now + Duration::from_secs(3600),
 });
 
-// ExpiringLruCache — LRU-bounded, used with `#[cached(expires = true, size = N)]`
-let mut lru = ExpiringLruCache::with_size(10);
+// ExpiringLruCache — LRU-bounded, used with `#[cached(expires = true, max_size = N)]`
+let mut lru = ExpiringLruCache::builder().max_size(10).build().unwrap();
 lru.cache_set("key1", Response {
     payload: "a".to_string(),
     expires_at: now + Duration::from_secs(1),
@@ -173,7 +276,7 @@ use cached::LruCache;
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::with_size(100) }",
+    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
     convert = r#"{ format!("{}{}", a, b) }"#
 )]
 fn keyed(a: &str, b: &str) -> usize {
@@ -196,7 +299,7 @@ use cached::macros::once;
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
 # #[cfg(feature = "time_stores")]
-#[once(ttl =10, option = true, sync_writes = true)]
+#[once(ttl =10, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -214,7 +317,6 @@ use cached::macros::cached;
 
 /// Cannot use sync_writes and result_fallback together
 #[cached(
-    result = true,
     ttl = 1,
     sync_writes = "default",
     result_fallback = true
@@ -239,14 +341,13 @@ enum ExampleError {
 
 /// Cache the results of an async function in redis. Cache
 /// keys will be prefixed with `cache_redis_prefix`.
-/// A `map_error` closure must be specified to convert any
-/// redis cache errors into the same type of error returned
-/// by your function. All `concurrent_cached` functions must return `Result`s.
+/// Redis and disk stores require `Result<T, E>`; supply a `map_error` closure
+/// to convert store errors into your error type.
 #[concurrent_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::new("cached_redis_prefix", Duration::from_secs(1))
+        AsyncRedisCache::builder("cached_redis_prefix", Duration::from_secs(1))
             .refresh(true)
             .build()
             .await
@@ -275,9 +376,8 @@ enum ExampleError {
 /// Cache the results of a function on disk.
 /// Cache files will be stored under the system cache dir
 /// unless otherwise specified with `disk_dir` or the `create` argument.
-/// A `map_error` closure must be specified to convert any
-/// disk cache errors into the same type of error returned
-/// by your function. All `concurrent_cached` functions must return `Result`s.
+/// Disk stores require `Result<T, E>`; supply a `map_error` closure
+/// to convert store errors into your error type.
 #[concurrent_cached(
     map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##,
     disk = true
@@ -285,6 +385,41 @@ enum ExampleError {
 fn cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
     std::thread::sleep(cached::time::Duration::from_secs(secs));
     Ok(secs.to_string())
+}
+```
+
+----
+
+```rust,no_run,ignore
+use cached::macros::concurrent_cached;
+
+/// Memoize with the default in-memory sharded store — no `map_error`, `ty`,
+/// or `create` needed. Add `max_size` for LRU eviction or `ttl` for time-based
+/// expiry (requires the `time_stores` feature).
+///
+/// `#[concurrent_cached]` does **not** support `sync_writes`.
+/// For `Option<T>` returns, `None` is skipped by default (use `cache_none = true` to cache it).
+/// For `Result<T, E>` returns, only `Ok` values are cached by default (use `cache_err = true`
+/// to also cache `Err`). `result_fallback = true` is supported (requires `ttl`): on an `Err`
+/// return, the last cached `Ok` value for the same key is returned instead. The stale value
+/// is held in the primary cache slot and re-cached with a fresh TTL window on `Err`; no
+/// secondary store is created.
+#[concurrent_cached]
+fn slow_double(x: u64) -> u64 {
+    std::thread::sleep(cached::time::Duration::from_millis(10));
+    x * 2
+}
+
+/// LRU capacity of 1 000 entries spread across shards.
+#[concurrent_cached(max_size = 1000)]
+fn slow_triple(x: u64) -> u64 {
+    x * 3
+}
+
+/// Only cache successful lookups — `Err` is returned but not stored.
+#[concurrent_cached]
+fn load_user(id: u64) -> Result<String, std::io::Error> {
+    Ok(format!("user_{id}"))
 }
 ```
 
@@ -299,14 +434,26 @@ Due to the requirements of storing arguments and return values in a global cache
 
 - Function return types:
   - For in-memory stores (`#[cached]` / `#[once]`), must be owned and implement `Clone`
-  - For I/O-backed stores used by `#[concurrent_cached]` (Redis and disk), must be owned, implement
-    `Clone` (the generated code clones the successful value), and additionally implement
-    `serde::Serialize + serde::DeserializeOwned` (the store serializes it)
+  - For in-memory `#[concurrent_cached]` (sharded stores — the default), must implement `Clone`.
+    Any return type is accepted: plain `T`, `Option<T>`, or `Result<T, E>`. `Option<T>` skips
+    caching `None` by default; use `cache_none = true` to also cache `None`. When the
+    return type is `Result<T, E>`, only `Ok(v)` is stored — `Err` values are returned but not cached.
+    Use `cache_err = true` to also cache `Err` values.
+  - For I/O-backed stores used by `#[concurrent_cached]` (Redis and disk), must be `Result<T, E>`
+    where `T: Clone + serde::Serialize + serde::DeserializeOwned` (the store serializes it).
+    `map_error` must be supplied to convert the store's error into `E`.
 - Function arguments:
   - For in-memory stores (`#[cached]` / `#[once]`), must either be owned and implement `Hash + Eq + Clone`,
     or a `convert` expression must be specified on the macro to produce a key of a `Hash + Eq + Clone` type.
+  - For in-memory `#[concurrent_cached]` (sharded stores), must implement `Hash + Eq + Clone`. The
+    macro's default key construction always clones function arguments, so `K: Clone` is required on
+    every in-memory path. (When using `convert` to supply an already-owned key, only the store's
+    own bounds apply: `K: Hash + Eq` for unbounded/TTL-only variants, `K: Hash + Eq + Clone` for LRU
+    variants — except when `result_fallback = true` is also set, which always requires `K: Clone`
+    regardless of store variant because the generated code clones the key into the fallback store.)
   - For I/O-backed stores used by `#[concurrent_cached]` (Redis and disk), must either be owned and
-    implement `Display`, or a `convert` expression must be used to produce a key of a `Display` type.
+    implement `Display + Clone`, or a `convert` expression must be used to produce a key of a
+    `Display + Clone` type. `Clone` is needed so removal APIs can return the stored key.
 - Arguments and return values will be `cloned` in the process of insertion and retrieval. For Redis and
   disk stores, keys are additionally formatted into `String`s and values are de/serialized.
 - Macro-defined functions should not be used to produce side-effectual results!
@@ -323,7 +470,7 @@ Due to the requirements of storing arguments and return values in a global cache
 use crate::time::Duration;
 #[cfg(feature = "proc_macro")]
 #[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
-pub use macros::{cached, concurrent_cached, once, Return};
+pub use macros::{Return, cached, concurrent_cached, once};
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 use std::future::Future;
@@ -331,17 +478,25 @@ use std::future::Future;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "redis_smol", feature = "redis_tokio"))))]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
-    BuildError, CacheEvict, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
-    ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, UnboundCache, UnboundCacheBuilder,
+    BuildError, CacheEvict, DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder,
+    ExpiringLruCache, ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, ShardHasher,
+    ShardedCache, ShardedCacheBase, ShardedCacheBuilder, ShardedExpiringCache,
+    ShardedExpiringCacheBase, ShardedExpiringCacheBuilder, ShardedExpiringLruCache,
+    ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder, ShardedLruCache,
+    ShardedLruCacheBase, ShardedLruCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
 pub use stores::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError};
 #[cfg(feature = "time_stores")]
+#[doc(hidden)]
+pub use stores::{HasEvict, NoEvict};
+#[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use stores::{
-    HasEvict, LruTtlCache, LruTtlCacheBuilder, NoEvict, TtlCache, TtlCacheBuilder, TtlSortedCache,
-    TtlSortedCacheBuilder, TtlSortedCacheError,
+    LruTtlCache, LruTtlCacheBuilder, ShardedLruTtlCache, ShardedLruTtlCacheBase,
+    ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder,
+    TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder, TtlSortedCacheError,
 };
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
@@ -372,12 +527,22 @@ pub mod sync_sync {
     pub use parking_lot::RwLock;
 }
 
+/// Internal marker referenced by `#[cached(size = N)]` / `#[concurrent_cached(size = N)]`
+/// expansions to surface a deprecation warning steering users to the `max_size` spelling.
+/// Not part of the public API.
+#[doc(hidden)]
+#[deprecated(
+    since = "2.0.0",
+    note = "the `size` macro attribute is deprecated; use `max_size` instead (same meaning)"
+)]
+pub const __DEPRECATED_SIZE_ATTR: () = ();
+
 /// Cache operations
 ///
 /// ```rust
 /// use cached::{Cached, UnboundCache};
 ///
-/// let mut cache: UnboundCache<String, String> = UnboundCache::new();
+/// let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
 ///
 /// cache.set("key".to_string(), "owned value".to_string());
 ///
@@ -394,7 +559,7 @@ pub trait Cached<K, V> {
     ///
     /// ```rust
     /// # use cached::{Cached, UnboundCache};
-    /// # let mut cache: UnboundCache<String, String> = UnboundCache::new();
+    /// # let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
     /// # cache.set("key".to_string(), "owned value".to_string());
     /// let v1 = cache.get("key").map(String::clone);
     /// let v2 = cache.get(&"key".to_string()).map(String::clone);
@@ -431,11 +596,22 @@ pub trait Cached<K, V> {
         f: F,
     ) -> Result<&mut V, E>;
 
-    /// Remove a cached value.
+    /// Remove a cached value, returning it if it was both present and still live.
+    ///
+    /// Removing any present entry fires the store's `on_evict` callback (if set) and,
+    /// for stores that track evictions, increments the `evictions` metric consistent
+    /// with automatic eviction. For stores with expiry, an entry that is present but
+    /// already expired is still removed (and still fires `on_evict` / counts as an
+    /// eviction when the store tracks evictions), but `None` is returned because the
+    /// value is no longer valid.
+    ///
+    /// Use [`cache_remove_entry`](Cached::cache_remove_entry) when you need to
+    /// distinguish "key absent" from "key present but expired", or when you need
+    /// the stored key back (relevant when `K`'s `Eq` ignores some fields).
     ///
     /// ```rust
     /// # use cached::{Cached, UnboundCache};
-    /// # let mut cache: UnboundCache<String, String> = UnboundCache::new();
+    /// # let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
     /// # cache.set("k1".to_string(), "v1".to_string());
     /// # cache.set("k2".to_string(), "v2".to_string());
     /// let r1 = cache.remove("k1");
@@ -444,6 +620,39 @@ pub trait Cached<K, V> {
     /// # assert_eq!(r2, Some("v2".to_string()));
     /// ```
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized;
+
+    /// Remove a cached entry, returning the stored key and value whenever an entry
+    /// was physically deleted — including entries that were present but already expired.
+    ///
+    /// This is the key difference from [`cache_remove`](Cached::cache_remove):
+    /// - `cache_remove` returns `None` for both "key absent" and "key present but expired"
+    /// - `cache_remove_entry` returns `Some((stored_key, value))` whenever anything was
+    ///   physically deleted, and `None` only when the key was not in the store at all
+    ///
+    /// This lets callers distinguish between the two cases, and also returns the *stored*
+    /// key rather than the lookup key — relevant when `K`'s `Eq`/`Hash` ignores some
+    /// fields and the stored and lookup instances may differ.
+    ///
+    /// Removing any present entry fires the store's `on_evict` callback (if set) and,
+    /// for stores that track evictions, increments the `evictions` metric.
+    ///
+    /// ```rust
+    /// use cached::{Cached, UnboundCache};
+    ///
+    /// let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
+    /// cache.cache_set("key".to_string(), 42);
+    ///
+    /// // cache_remove_entry returns Some even for the key that was just inserted.
+    /// let entry = cache.cache_remove_entry("key");
+    /// assert_eq!(entry, Some(("key".to_string(), 42)));
+    ///
+    /// // Returns None only when the key was never present.
+    /// assert_eq!(cache.cache_remove_entry("missing"), None);
+    /// ```
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized;
@@ -535,6 +744,50 @@ pub trait Cached<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         self.cache_remove(k)
+    }
+
+    /// Remove a cached entry, returning the stored key and value. Delegates to
+    /// [`cache_remove_entry`](Cached::cache_remove_entry).
+    fn remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_remove_entry(k)
+    }
+
+    /// Delete a cached entry without returning it. Returns `true` if an entry was
+    /// physically deleted (including expired entries), `false` if the key was absent.
+    ///
+    /// Unlike [`cache_remove`](Cached::cache_remove), this returns `true` even when the
+    /// deleted entry was already expired. Delegates to
+    /// [`cache_remove_entry`](Cached::cache_remove_entry).
+    ///
+    /// ```rust
+    /// use cached::{Cached, UnboundCache};
+    ///
+    /// let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
+    /// cache.cache_set("key".to_string(), 42);
+    /// assert!(cache.cache_delete("key"));    // present — returns true
+    /// assert!(!cache.cache_delete("key"));   // already gone — returns false
+    /// ```
+    fn cache_delete<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_remove_entry(k).is_some()
+    }
+
+    /// Delete a cached entry without returning it. Returns `true` if an entry was
+    /// physically deleted (including expired entries). Delegates to
+    /// [`cache_delete`](Cached::cache_delete).
+    fn delete<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_delete(k)
     }
 
     /// Return `true` if the cache contains a value for the given key.
@@ -697,7 +950,7 @@ pub trait CachedRead<K, V>: CachedPeek<K, V> {
 /// use cached::{Cached, CloneCached, TtlCache};
 /// use cached::time::Duration;
 ///
-/// let mut c = TtlCache::with_ttl(Duration::from_secs(60));
+/// let mut c = TtlCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
 /// c.cache_set("k".to_string(), 1);
 /// assert_eq!(c.cache_get_with_expiry_status(&"k".to_string()), (Some(1), false)); // live
 /// assert_eq!(c.cache_get_with_expiry_status(&"x".to_string()), (None, false));    // absent
@@ -727,10 +980,64 @@ pub trait CloneCached<K, V> {
     }
 }
 
+/// Concurrent analogue of [`CloneCached`] for the internally-synchronized sharded stores.
+///
+/// Like [`CloneCached`], [`cache_get_with_expiry_status`](ConcurrentCloneCached::cache_get_with_expiry_status)
+/// returns a present-but-expired entry **without removing it**, so callers (e.g.
+/// [`result_fallback`](macro@crate::macros::concurrent_cached)) can fall back to the stale
+/// value if a refresh fails. Takes `&self` instead of `&mut self` because sharded stores are
+/// internally synchronized and never need exclusive ownership from the caller.
+///
+/// Implemented by the four expiry-capable sharded stores:
+/// [`ShardedTtlCache`], [`ShardedLruTtlCache`], [`ShardedExpiringCache`], and
+/// [`ShardedExpiringLruCache`].
+/// Non-expiry stores ([`ShardedCache`], [`ShardedLruCache`]) do not implement this trait,
+/// mirroring how [`CloneCached`] is absent on [`UnboundCache`] and [`LruCache`].
+///
+/// **Why `&K` instead of `&Q` (`Borrow<Q>`)**: same reason as [`ConcurrentCached`] — the
+/// concurrent cache trait family includes external stores that must serialize the key, so
+/// the trait takes `&K` directly rather than a generic `Borrow<Q>` that carries no
+/// serialization guarantee.
+///
+/// **Race window**: between the expiry check and the subsequent re-cache on `Err`, another
+/// thread may have stored a fresh `Ok`. The re-cache will overwrite that fresh value, but
+/// the outcome is only a redundant function call on the next expiry — not data corruption.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "time_stores")]
+/// # {
+/// use cached::{ConcurrentCached, ConcurrentCloneCached, ShardedTtlCache};
+/// use cached::time::Duration;
+///
+/// let c = ShardedTtlCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
+/// c.cache_set("k".to_string(), 1_i32).expect("infallible ShardedTtlCache set");
+/// assert_eq!(c.cache_get_with_expiry_status(&"k".to_string()), (Some(1_i32), false)); // live
+/// assert_eq!(c.cache_get_with_expiry_status(&"x".to_string()), (None, false));        // absent
+/// // a present-but-expired entry yields (Some(v), true)
+/// # }
+/// ```
+pub trait ConcurrentCloneCached<K, V> {
+    /// Look up a cached value and report whether the found entry is expired.
+    ///
+    /// Returns `(value, expired)` where:
+    /// - `(None, false)` — key not present
+    /// - `(Some(v), false)` — key present and live (hits counter incremented)
+    /// - `(Some(v), true)` — key present but expired; the stale value is returned so callers
+    ///   can fall back to it if a refresh fails. The entry is **not** removed from the cache
+    ///   and eviction counters are **not** incremented (misses counter incremented).
+    ///
+    /// Unlike [`ConcurrentCached::cache_get`], this never removes an expired entry — it
+    /// intentionally leaves it in place so it can be returned as a stale fallback. Expired
+    /// entries are swept by a subsequent `cache_get`, an explicit `cache_remove`, or `evict()`.
+    fn cache_get_with_expiry_status(&self, key: &K) -> (Option<V>, bool);
+}
+
 /// TTL management for time-bounded cache stores.
 ///
 /// Implemented by [`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
-/// [`RedisCache`], and [`DiskCache`].
+/// [`ShardedTtlCache`], [`ShardedLruTtlCache`], [`RedisCache`], and [`DiskCache`].
 ///
 /// This trait requires the `time_stores` feature. `DiskCache` implements it only when
 /// both `disk_store` and `time_stores` features are enabled.
@@ -747,6 +1054,11 @@ pub trait CacheTtl {
     fn ttl(&self) -> Option<Duration>;
 
     /// Set the TTL for newly inserted entries, returning the previous value.
+    ///
+    /// # Panics
+    ///
+    /// Implementations that accept a TTL panic if `ttl.is_zero()` — use
+    /// [`unset_ttl`](Self::unset_ttl) to disable expiry instead.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration>;
 
     /// Remove the TTL so entries are retained indefinitely.
@@ -874,15 +1186,38 @@ pub trait CachedAsync<K, V> {
 ///     fn cache_remove(&self, k: &String) -> Result<Option<u32>, Self::Error> {
 ///         Ok(self.0.lock().unwrap().remove(k))
 ///     }
-///     fn set_refresh_on_hit(&mut self, _refresh: bool) -> bool { false }
+///     fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, u32)>, Self::Error> {
+///         Ok(self.0.lock().unwrap().remove_entry(k))
+///     }
+///     fn set_refresh_on_hit(&self, _refresh: bool) -> bool { false }
 /// }
 ///
 /// let store = MyStore(Mutex::new(HashMap::new()));
-/// assert_eq!(store.cache_get(&"k".to_string()).unwrap(), None);
-/// assert_eq!(store.cache_set("k".to_string(), 7).unwrap(), None);
-/// assert_eq!(store.cache_get(&"k".to_string()).unwrap(), Some(7));
-/// assert_eq!(store.cache_remove(&"k".to_string()).unwrap(), Some(7));
+/// assert_eq!(store.cache_get(&"k".to_string()).expect("MyStore is infallible"), None);
+/// assert_eq!(store.cache_set("k".to_string(), 7).expect("MyStore is infallible"), None);
+/// assert_eq!(store.cache_get(&"k".to_string()).expect("MyStore is infallible"), Some(7));
+/// assert_eq!(store.cache_remove(&"k".to_string()).expect("MyStore is infallible"), Some(7));
 /// ```
+/// **Direct-call syntax warning**:
+///
+/// Both `ConcurrentCached` and `ConcurrentCachedAsync` define identical method names for their core
+/// operations (`cache_get`, `cache_set`, `cache_remove`, `cache_delete`). Sharded in-memory stores
+/// also expose synchronous inherent helpers with those names, so method-call syntax on a sharded
+/// store resolves to the sync helper even if only `ConcurrentCachedAsync` is imported.
+///
+/// To resolve this, use Universal Function Call Syntax (UFCS) when calling these methods manually:
+/// ```rust,ignore
+/// ::cached::ConcurrentCached::cache_get(&cache, &key)
+/// ```
+///
+/// **Why key-lookup methods take `&K` instead of `&Q` (`Borrow<Q>`)**:
+///
+/// [`Cached`] uses `Borrow<Q>` for all key-lookup methods (e.g. look up a `String` key with a
+/// `&str`). `ConcurrentCached` cannot follow the same pattern because its implementors include
+/// external stores (`DiskCache`, `RedisCache`) that must *serialize* the key in order to perform
+/// a lookup. A generic `&Q` where only `K: Borrow<Q>` carries no serialization guarantee, and
+/// adding a `Q: Serialize` bound to the trait would bleed a serde dependency into every
+/// `ConcurrentCached` implementation. All key-lookup methods therefore take `&K` directly.
 pub trait ConcurrentCached<K, V> {
     type Error;
 
@@ -894,35 +1229,154 @@ pub trait ConcurrentCached<K, V> {
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Insert a key, value pair and return the previous value at the key, if any,
-    /// without checking TTL expiry.
+    /// without checking expiry. For TTL-based stores the returned value may have
+    /// elapsed its TTL; for per-value expiry stores (implementing [`Expires`]) the
+    /// returned value may report `is_expired() == true`. Check expiry on the returned
+    /// value if you need to distinguish a live previous entry from an expired one.
     ///
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
 
-    /// Remove a cached value
+    /// Remove a cached value, returning it if it was both present and still live.
+    ///
+    /// For stores with expiry, an entry that is present but already expired is still
+    /// removed (and fires `on_evict` / counts an eviction), but `None` is returned.
+    /// Use [`cache_remove_entry`](ConcurrentCached::cache_remove_entry) when you need
+    /// to distinguish "key absent" from "key present but expired".
     ///
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
+    /// Remove a cached entry, returning the stored key and value whenever an entry
+    /// was physically deleted — including entries that were present but already expired.
+    ///
+    /// This is the key difference from [`cache_remove`](ConcurrentCached::cache_remove):
+    /// - `cache_remove` returns `None` for both "key absent" and "key present but expired"
+    /// - `cache_remove_entry` returns `Some((stored_key, value))` whenever anything was
+    ///   physically deleted, and `None` only when the key was not in the store at all
+    ///
+    /// This expired-but-present guarantee holds for the in-memory stores (sharded and
+    /// non-sharded). Stores that enforce TTL server-side — `RedisCache` / `AsyncRedisCache` —
+    /// cannot read the value of a TTL-expired key and so return `None` for it, exactly like
+    /// `cache_remove`; see ["Note on Redis and external stores"](#note-on-redis-and-external-stores)
+    /// below.
+    ///
+    /// Removing any present entry fires the store's `on_evict` callback (if set) and,
+    /// for stores that track evictions, increments the `evictions` metric.
+    ///
+    /// # Note on `K: Clone`
+    ///
+    /// Implementations that reconstruct the stored key from the lookup key — such as
+    /// `DiskCache` and `RedisCache` — require `K: Clone` to produce the stored-key half
+    /// of the returned tuple.  Sharded in-memory stores return the physically stored key
+    /// and do not impose this bound.
+    ///
+    /// # Note on Redis and external stores
+    ///
+    /// Stores that enforce TTL server-side (e.g. `RedisCache`, `AsyncRedisCache`) cannot
+    /// retrieve the value of a TTL-expired key — `GET` returns nil once the TTL elapses,
+    /// even before the background expiry sweep removes the key.  For such stores,
+    /// `cache_remove_entry` behaves identically to `cache_remove` and returns `None` for
+    /// server-side-expired entries.  Use [`cache_delete`](ConcurrentCached::cache_delete)
+    /// (which issues `DEL` directly) to reliably confirm whether any physical entry was removed.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::{ConcurrentCached, ShardedCache};
+    ///
+    /// let cache: ShardedCache<String, u32> = ShardedCache::builder().build().unwrap();
+    /// cache.cache_set("key".to_string(), 42).expect("ShardedCache is infallible");
+    ///
+    /// // cache_remove_entry always returns Some when the key was present.
+    /// let entry = cache.cache_remove_entry(&"key".to_string()).expect("ShardedCache is infallible");
+    /// assert_eq!(entry, Some(("key".to_string(), 42)));
+    ///
+    /// // Returns None only when the key was never present.
+    /// assert_eq!(cache.cache_remove_entry(&"missing".to_string()).expect("ShardedCache is infallible"), None);
+    /// ```
+    fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error>;
+
     /// Delete a cached value without returning or decoding the stored value.
     ///
-    /// This is useful when callers do not need the previous value, or when an
-    /// IO-backed store may contain corrupted serialized data that should be
-    /// removed directly.
+    /// Returns `true` if an entry (live or expired) was physically removed from the
+    /// store, `false` if the key was not present. This differs from the 1.x
+    /// behaviour where `cache_delete` returned `false` for expired entries — use
+    /// [`cache_remove`](ConcurrentCached::cache_remove) if you need to distinguish
+    /// a live removal from an expired one.
     ///
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
     fn cache_delete(&self, k: &K) -> Result<bool, Self::Error> {
-        self.cache_remove(k).map(|removed| removed.is_some())
+        self.cache_remove_entry(k).map(|removed| removed.is_some())
+    }
+
+    /// Retrieve a cached value. Delegates to [`cache_get`](ConcurrentCached::cache_get).
+    #[inline]
+    fn get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        self.cache_get(k)
+    }
+
+    /// Insert a key-value pair and return the previous value. Delegates to [`cache_set`](ConcurrentCached::cache_set).
+    #[inline]
+    fn set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+        self.cache_set(k, v)
+    }
+
+    /// Remove a cached value and return it. Delegates to [`cache_remove`](ConcurrentCached::cache_remove).
+    #[inline]
+    fn remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        self.cache_remove(k)
+    }
+
+    /// Remove a cached entry and return the stored key and value. Delegates to [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    #[inline]
+    fn remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+        self.cache_remove_entry(k)
+    }
+
+    /// Delete a cached value without returning it. Delegates to [`cache_delete`](ConcurrentCached::cache_delete).
+    #[inline]
+    fn delete(&self, k: &K) -> Result<bool, Self::Error> {
+        self.cache_delete(k)
+    }
+
+    /// Report the number of entries currently held by the store, if the store can
+    /// determine it cheaply.
+    ///
+    /// Returns `Ok(Some(n))` for stores that track their own size (all in-memory sharded
+    /// stores), and `Ok(None)` for stores that cannot answer without an expensive or
+    /// semantically-ambiguous query — `RedisCache` / `AsyncRedisCache` (the key count is a
+    /// server-side `DBSIZE`/`SCAN` over a shared keyspace, not just this cache's entries) and
+    /// `DiskCache` (an `O(n)` scan of the backing tree). Those stores return `Ok(None)` rather
+    /// than pay that cost implicitly; query the backend directly if you need their size.
+    ///
+    /// This is the concurrent analogue of [`Cached::cache_size`], widened to
+    /// `Result<Option<usize>, _>` because concurrent stores may be fallible and may not know
+    /// their size. The default returns `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if determining the size fails.
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(None)
     }
 
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
-    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool;
+    ///
+    /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
+    /// `AtomicBool`; `RedisCache` / `DiskCache` use interior mutability), so this is callable
+    /// through a shared reference such as an `Arc` or a `LazyLock` static.
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 
     /// Return the ttl of cached values (time to eviction).
     fn ttl(&self) -> Option<Duration> {
@@ -930,41 +1384,94 @@ pub trait ConcurrentCached<K, V> {
     }
 
     /// Set the ttl of cached values, returning the previous value.
-    fn set_ttl(&mut self, _ttl: Duration) -> Option<Duration> {
+    ///
+    /// Takes `&self`: concurrent stores are internally synchronized, so this is callable
+    /// through a shared reference. The default is a no-op returning `None`.
+    fn set_ttl(&self, _ttl: Duration) -> Option<Duration> {
         None
     }
 
     /// Remove the ttl for cached values, returning the previous value.
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
-    /// a no-op.
-    fn unset_ttl(&mut self) -> Option<Duration> {
+    /// a no-op. Takes `&self`: concurrent stores are internally synchronized, so this is
+    /// callable through a shared reference.
+    fn unset_ttl(&self) -> Option<Duration> {
         None
     }
 }
 
+/// **Direct-call syntax warning**:
+///
+/// Both `ConcurrentCached` and `ConcurrentCachedAsync` define identical method names for their core
+/// operations (`cache_get`, `cache_set`, `cache_remove`, `cache_delete`). Sharded in-memory stores
+/// also expose synchronous inherent helpers with those names, so method-call syntax on a sharded
+/// store resolves to the sync helper even if only `ConcurrentCachedAsync` is imported.
+///
+/// To resolve this, use Universal Function Call Syntax (UFCS) when calling these methods manually:
+/// ```rust,ignore
+/// ::cached::ConcurrentCachedAsync::cache_get(&cache, &key).await
+/// ```
+///
+/// **Short aliases not provided**: Unlike [`ConcurrentCached`], this trait intentionally does
+/// **not** expose `get`/`set`/`remove`/`delete` short aliases. Adding them would worsen the
+/// method-resolution ambiguity described above: a sharded store that implements both sync and
+/// async concurrent traits would then have colliding inherent helpers and two sets of alias
+/// defaults, making UFCS mandatory even for the aliases.
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 pub trait ConcurrentCachedAsync<K, V> {
     type Error;
+    #[doc(alias = "get")]
     fn cache_get(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
+    #[doc(alias = "set")]
     fn cache_set(&self, k: K, v: V) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
-    /// Remove a cached value
+    /// Remove a cached value, returning it if it was both present and still live.
+    #[doc(alias = "remove")]
     fn cache_remove(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
+    /// Remove a cached entry, returning the stored key and value whenever an entry
+    /// was physically deleted — including entries that were present but already expired.
+    #[doc(alias = "remove_entry")]
+    fn cache_remove_entry(
+        &self,
+        k: &K,
+    ) -> impl Future<Output = Result<Option<(K, V)>, Self::Error>> + Send;
+
     /// Delete a cached value without returning or decoding the stored value.
+    /// Returns `true` if an entry (live or expired) was physically removed from the
+    /// store, `false` if the key was not present.
+    #[doc(alias = "delete")]
     fn cache_delete(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
     where
         Self: Sync,
         K: Sync,
     {
-        async move { self.cache_remove(k).await.map(|removed| removed.is_some()) }
+        async move { self.cache_remove_entry(k).await.map(|r| r.is_some()) }
+    }
+
+    /// Report the number of entries currently held by the store, if the store can
+    /// determine it cheaply.
+    ///
+    /// The concurrent-async analogue of [`Cached::cache_size`]. Returns `Ok(None)` by default;
+    /// external stores (`DiskCache`, `RedisCache`, `AsyncRedisCache`) keep that default because
+    /// they cannot report their entry count without an expensive or ambiguous backend query.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if determining the size fails.
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(None)
     }
 
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
-    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool;
+    ///
+    /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
+    /// `AtomicBool`; `RedisCache` / `DiskCache` use interior mutability), so this is callable
+    /// through a shared reference such as an `Arc` or a `LazyLock` static.
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 
     /// Return the ttl of cached values (time to eviction).
     fn ttl(&self) -> Option<Duration> {
@@ -972,15 +1479,19 @@ pub trait ConcurrentCachedAsync<K, V> {
     }
 
     /// Set the ttl of cached values, returning the previous value.
-    fn set_ttl(&mut self, _ttl: Duration) -> Option<Duration> {
+    ///
+    /// Takes `&self`: concurrent stores are internally synchronized, so this is callable
+    /// through a shared reference. The default is a no-op returning `None`.
+    fn set_ttl(&self, _ttl: Duration) -> Option<Duration> {
         None
     }
 
     /// Remove the ttl for cached values, returning the previous value.
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
-    /// a no-op.
-    fn unset_ttl(&mut self) -> Option<Duration> {
+    /// a no-op. Takes `&self`: concurrent stores are internally synchronized, so this is
+    /// callable through a shared reference.
+    fn unset_ttl(&self) -> Option<Duration> {
         None
     }
 }

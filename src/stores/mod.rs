@@ -1,8 +1,77 @@
 use crate::{Cached, CachedIter, CachedPeek, CachedRead};
 use std::cmp::Eq;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+const STRIPE_COUNT: usize = 16;
+
+#[repr(align(128))]
+struct Slot(AtomicU64);
+
+/// A hit/miss counter distributed across [`STRIPE_COUNT`] cache-line-padded
+/// slots to reduce cross-core cache-line bouncing under concurrent increments.
+///
+/// Each thread is assigned a stable slot on first use via a thread-local index;
+/// [`load`](StripedCounter::load) sums all slots for the aggregate value.
+///
+/// Used only by stores that implement [`CachedRead`], which allow concurrent
+/// shared-lock reads. Stores that are always accessed under an exclusive write
+/// lock use plain [`AtomicU64`] instead.
+pub(super) struct StripedCounter {
+    slots: Box<[Slot]>,
+}
+
+impl StripedCounter {
+    pub(super) fn new() -> Self {
+        let slots = (0..STRIPE_COUNT)
+            .map(|_| Slot(AtomicU64::new(0)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { slots }
+    }
+
+    /// Increment the current thread's stripe by one.
+    #[inline]
+    pub(super) fn increment(&self) {
+        self.slots[thread_stripe()]
+            .0
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Sum across all stripes.
+    pub(super) fn load(&self) -> u64 {
+        self.slots.iter().map(|s| s.0.load(Ordering::Relaxed)).sum()
+    }
+
+    /// Zero all stripes (used by `cache_reset`).
+    pub(super) fn reset(&self) {
+        for slot in self.slots.iter() {
+            slot.0.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Return a new `StripedCounter` whose slot 0 holds the current aggregate.
+    /// Used by manual `Clone` impls that carry counter state across the copy.
+    pub(super) fn snapshot(&self) -> Self {
+        let total = self.load();
+        let new = Self::new();
+        new.slots[0].0.store(total, Ordering::Relaxed);
+        new
+    }
+}
+
+#[inline]
+fn thread_stripe() -> usize {
+    thread_local! {
+        static SLOT: usize = {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            NEXT.fetch_add(1, Ordering::Relaxed) % STRIPE_COUNT
+        };
+    }
+    SLOT.with(|&s| s)
+}
 
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
@@ -16,17 +85,18 @@ mod lru;
 mod lru_ttl;
 #[cfg(feature = "redis_store")]
 mod redis;
+pub mod sharded;
 #[cfg(feature = "time_stores")]
 mod ttl;
 #[cfg(feature = "time_stores")]
 mod ttl_sorted;
 mod unbound;
 
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 
 pub(super) type OnEvict<K, V> = std::sync::Arc<dyn Fn(&K, &V) + Send + Sync>;
 
-/// Error returned by cache builder `try_build()` methods.
+/// Error returned by cache builder `build()` methods.
 #[derive(Debug)]
 pub enum BuildError {
     /// A required field was not supplied to the builder.
@@ -38,6 +108,11 @@ pub enum BuildError {
         /// Human-readable reason.
         reason: &'static str,
     },
+    /// A zero TTL was supplied; TTL must be greater than zero.
+    InvalidTtl {
+        /// The invalid TTL value.
+        ttl: Duration,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -47,11 +122,23 @@ impl std::fmt::Display for BuildError {
             BuildError::InvalidValue { field, reason } => {
                 write!(f, "invalid value for field `{field}`: {reason}")
             }
+            BuildError::InvalidTtl { ttl } => {
+                write!(f, "invalid ttl {ttl:?}: must be greater than zero")
+            }
         }
     }
 }
 
 impl std::error::Error for BuildError {}
+
+/// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
+pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
+    if ttl.is_zero() {
+        Err(BuildError::InvalidTtl { ttl })
+    } else {
+        Ok(())
+    }
+}
 
 /// A cached value paired with its insertion timestamp for TTL tracking.
 ///
@@ -94,6 +181,19 @@ pub use ttl::{TtlCache, TtlCacheBuilder};
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder, TtlSortedCacheError};
 pub use unbound::{UnboundCache, UnboundCacheBuilder};
+
+pub use sharded::{
+    DefaultShardHasher, ShardHasher, ShardedCache, ShardedCacheBase, ShardedCacheBuilder,
+    ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
+    ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
+    ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder,
+};
+#[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+pub use sharded::{
+    ShardedLruTtlCache, ShardedLruTtlCacheBase, ShardedLruTtlCacheBuilder, ShardedTtlCache,
+    ShardedTtlCacheBase, ShardedTtlCacheBuilder,
+};
 
 #[cfg(all(
     feature = "async_core",
@@ -153,6 +253,13 @@ where
         Q: std::hash::Hash + Eq + ?Sized,
     {
         HashMap::remove(self, k)
+    }
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        HashMap::remove_entry(self, k)
     }
     fn cache_clear(&mut self) {
         HashMap::clear(self);
@@ -262,6 +369,10 @@ pub trait CacheEvict {
     /// Fires the `on_evict` callback and increments `cache_evictions()` for each removed entry.
     /// Hit/miss metrics are not affected; call [`cache_reset_metrics`](crate::Cached::cache_reset_metrics)
     /// separately if needed.
+    ///
+    /// **Note for sharded in-memory stores**: the concrete types expose an inherent `evict(&self)`
+    /// method that does not require `&mut self`. When you hold only a shared reference (e.g., via
+    /// `Arc`), call the inherent method directly instead of going through this trait.
     fn evict(&mut self) -> usize;
 }
 
@@ -288,12 +399,12 @@ mod tests {
         assert_eq!(err1.to_string(), "required field `ttl` was not set");
 
         let err2 = BuildError::InvalidValue {
-            field: "size",
+            field: "max_size",
             reason: "must be greater than zero",
         };
         assert_eq!(
             err2.to_string(),
-            "invalid value for field `size`: must be greater than zero"
+            "invalid value for field `max_size`: must be greater than zero"
         );
     }
 }

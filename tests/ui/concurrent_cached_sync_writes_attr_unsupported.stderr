@@ -1,0 +1,5 @@
+error: `sync_writes` is not supported by #[concurrent_cached]; concurrent stores synchronize cache access internally but do not deduplicate first-call execution
+ --> tests/ui/concurrent_cached_sync_writes_attr_unsupported.rs:3:21
+  |
+3 | #[concurrent_cached(sync_writes = true)]
+  |                     ^^^^^^^^^^^

@@ -97,7 +97,7 @@ use cached::macros::cached;
 # }
 
 /// Cache a fallible function. Only `Ok` results are cached.
-#[cached(size=1, result = true)]
+#[cached(size=1)]
 fn keyed(a: String) -> Result<usize, ()> {
     do_something_fallible()?;
     Ok(a.len())
@@ -111,7 +111,7 @@ fn keyed(a: String) -> Result<usize, ()> {
 use cached::macros::cached;
 
 /// Cache an optional function. Only `Some` results are cached.
-#[cached(size=1, option = true)]
+#[cached(size=1)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -131,7 +131,7 @@ use cached::macros::cached;
 /// When called concurrently, duplicate argument-calls will be
 /// synchronized so as to only run once - the remaining concurrent
 /// calls return a cached value.
-#[cached(size=1, option = true, sync_writes = true)]
+#[cached(size=1, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -177,7 +177,7 @@ use cached::Return;
 # }
 
 /// Same as the previous, but returning a Result
-#[cached(size=1, result = true, with_cached_flag = true)]
+#[cached(size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Result<Return<usize>, ()> {
     do_something_fallible()?;
     Ok(Return::new(a.len()))
@@ -200,7 +200,7 @@ use cached::macros::cached;
 use cached::Return;
 
 /// Same as the previous, but returning an Option
-#[cached(size=1, option = true, with_cached_flag = true)]
+#[cached(size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Option<Return<usize>> {
     if a == "a" {
         Some(Return::new(a.len()))
@@ -227,7 +227,7 @@ use cached::LruCache;
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::with_size(100) }",
+    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
     convert = r#"{ format!("{}{}", a, b) }"#
 )]
 fn keyed(a: &str, b: &str) -> usize {
@@ -251,7 +251,7 @@ use cached::time::Duration;
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
 # #[cfg(feature = "time_stores")]
-#[once(ttl =10, option = true, sync_writes = true)]
+#[once(ttl =10, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())

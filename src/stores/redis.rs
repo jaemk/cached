@@ -1,11 +1,13 @@
-use crate::time::Duration;
 #[cfg(feature = "time_stores")]
 use crate::CacheTtl;
 use crate::ConcurrentCached;
-use serde::de::DeserializeOwned;
+use crate::time::Duration;
+use parking_lot::Mutex;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct RedisCacheBuilder<K, V> {
     ttl: Duration,
@@ -28,7 +30,7 @@ fn ttl_seconds(ttl: Duration) -> Result<u64, RedisCacheError> {
     if ttl.is_zero() {
         return Err(redis::RedisError::from((
             redis::ErrorKind::InvalidClientConfig,
-            "TTL must be greater than zero for Redis",
+            "invalid ttl: must be greater than zero",
             format!("got {ttl:?}"),
         ))
         .into());
@@ -79,7 +81,7 @@ fn generate_redis_key(namespace: &str, prefix: &str, key: &str) -> String {
 #[cfg(test)]
 mod generate_key_tests {
     // No Redis server needed — pins the data-impacting 1.0 key format (§8).
-    use super::{generate_redis_key, DEFAULT_NAMESPACE};
+    use super::{DEFAULT_NAMESPACE, generate_redis_key};
 
     #[test]
     fn default_namespace_trailing_colon_trimmed_and_rejoined() {
@@ -199,6 +201,8 @@ pub enum RedisCacheBuildError {
     Connection(#[from] redis::RedisError),
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
+    #[error(transparent)]
+    InvalidTtl(#[from] super::BuildError),
     #[error("Connection string not specified or invalid in env var {env_key:?}: {error:?}")]
     MissingConnectionString {
         env_key: String,
@@ -357,9 +361,10 @@ where
     ///
     /// Will return a `RedisCacheBuildError`, depending on the error
     pub fn build(self) -> Result<RedisCache<K, V>, RedisCacheBuildError> {
+        super::validate_ttl(self.ttl)?;
         Ok(RedisCache {
-            ttl: self.ttl,
-            refresh: self.refresh,
+            ttl: Mutex::new(self.ttl),
+            refresh: AtomicBool::new(self.refresh),
             connection_string: ConnectionString(self.resolve_connection_string()?),
             pool: self.create_pool()?,
             namespace: self.namespace,
@@ -374,8 +379,8 @@ where
 /// Values have a ttl applied and enforced by redis.
 /// Uses an r2d2 connection pool under the hood.
 pub struct RedisCache<K, V> {
-    pub(super) ttl: Duration,
-    pub(super) refresh: bool,
+    pub(super) ttl: Mutex<Duration>,
+    pub(super) refresh: AtomicBool,
     pub(super) namespace: String,
     pub(super) prefix: String,
     connection_string: ConnectionString,
@@ -399,6 +404,11 @@ where
     #[allow(clippy::new_ret_no_self)]
     /// Initialize a `RedisCacheBuilder`
     pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
+        RedisCacheBuilder::new(prefix, ttl)
+    }
+
+    /// Initialize a `RedisCacheBuilder`.
+    pub fn builder<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
         RedisCacheBuilder::new(prefix, ttl)
     }
 
@@ -450,7 +460,7 @@ impl<V> CachedRedisValue<V> {
 
 impl<K, V> ConcurrentCached<K, V> for RedisCache<K, V>
 where
-    K: Display,
+    K: Display + Clone,
     V: Serialize + DeserializeOwned,
 {
     type Error = RedisCacheError;
@@ -461,8 +471,9 @@ where
         let key = self.generate_key(key);
 
         pipe.get(&key);
-        if self.refresh {
-            pipe.expire(key, ttl_seconds_i64(self.ttl)?).ignore();
+        if self.refresh.load(Ordering::Relaxed) {
+            let ttl = *self.ttl.lock();
+            pipe.expire(key, ttl_seconds_i64(ttl)?).ignore();
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
@@ -485,7 +496,7 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(&key);
 
-        let ttl_secs = ttl_seconds(self.ttl)?;
+        let ttl_secs = ttl_seconds(*self.ttl.lock())?;
 
         let val = CachedRedisValue::new(val);
         pipe.get(&key);
@@ -534,6 +545,17 @@ where
         }
     }
 
+    /// Remove an entry and return the stored key and value.
+    ///
+    /// **Note:** Unlike in-memory stores, Redis manages TTL expiry server-side. A `GET` on a
+    /// TTL-expired key returns nil, so this method returns `None` for expired entries even
+    /// though the key may still be physically present in Redis. Use [`cache_delete`](ConcurrentCached::cache_delete)
+    /// (which uses `DEL` directly) to reliably detect whether any physical entry was removed.
+    fn cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
+        self.cache_remove(key)
+            .map(|opt| opt.map(|v| (key.clone(), v)))
+    }
+
     fn cache_delete(&self, key: &K) -> Result<bool, RedisCacheError> {
         let mut conn = self.pool.get()?;
         let key = self.generate_key(key);
@@ -542,25 +564,24 @@ where
     }
 
     fn ttl(&self) -> Option<Duration> {
-        Some(self.ttl)
+        Some(*self.ttl.lock())
     }
 
     /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
     /// they retain whatever TTL was applied when they were originally inserted.
-    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let old = self.ttl;
-        self.ttl = ttl;
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = ttl;
         Some(old)
     }
 
-    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-        let old = self.refresh;
-        self.refresh = refresh;
-        old
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.refresh.swap(refresh, Ordering::Relaxed)
     }
 
     /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
-    fn unset_ttl(&mut self) -> Option<Duration> {
+    fn unset_ttl(&self) -> Option<Duration> {
         None
     }
 }
@@ -568,13 +589,14 @@ where
 #[cfg(feature = "time_stores")]
 impl<K, V> CacheTtl for RedisCache<K, V> {
     fn ttl(&self) -> Option<Duration> {
-        Some(self.ttl)
+        Some(*self.ttl.lock())
     }
     /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
     /// they retain whatever TTL was applied when they were originally inserted.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let old = self.ttl;
-        self.ttl = ttl;
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = ttl;
         Some(old)
     }
     /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
@@ -582,12 +604,10 @@ impl<K, V> CacheTtl for RedisCache<K, V> {
         None
     }
     fn refresh_on_hit(&self) -> bool {
-        self.refresh
+        self.refresh.load(Ordering::Relaxed)
     }
     fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-        let old = self.refresh;
-        self.refresh = refresh;
-        old
+        self.refresh.swap(refresh, Ordering::Relaxed)
     }
 }
 
@@ -601,10 +621,12 @@ impl<K, V> CacheTtl for RedisCache<K, V> {
 ))]
 mod async_redis {
     use crate::time::Duration;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        CachedRedisValue, ConnectionString, DeserializeOwned, Display, PhantomData,
-        RedisCacheBuildError, RedisCacheError, Serialize, DEFAULT_NAMESPACE, ENV_KEY,
+        CachedRedisValue, ConnectionString, DEFAULT_NAMESPACE, DeserializeOwned, Display, ENV_KEY,
+        PhantomData, RedisCacheBuildError, RedisCacheError, Serialize,
     };
     #[cfg(feature = "time_stores")]
     use crate::CacheTtl;
@@ -780,9 +802,10 @@ mod async_redis {
         ///
         /// Will return a `RedisCacheBuildError`, depending on the error
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
+            super::super::validate_ttl(self.ttl)?;
             Ok(AsyncRedisCache {
-                ttl: self.ttl,
-                refresh: self.refresh,
+                ttl: Mutex::new(self.ttl),
+                refresh: AtomicBool::new(self.refresh),
                 connection_string: ConnectionString(self.resolve_connection_string()?),
                 #[cfg(not(feature = "redis_connection_manager"))]
                 connection: self.create_multiplexed_connection().await?,
@@ -801,8 +824,8 @@ mod async_redis {
     /// Uses a `redis::aio::MultiplexedConnection` or `redis::aio::ConnectionManager`
     /// under the hood depending if feature `redis_connection_manager` is used or not.
     pub struct AsyncRedisCache<K, V> {
-        pub(super) ttl: Duration,
-        pub(super) refresh: bool,
+        pub(super) ttl: Mutex<Duration>,
+        pub(super) refresh: AtomicBool,
         pub(super) namespace: String,
         pub(super) prefix: String,
         connection_string: ConnectionString,
@@ -832,6 +855,11 @@ mod async_redis {
             AsyncRedisCacheBuilder::new(prefix, ttl)
         }
 
+        /// Initialize an `AsyncRedisCacheBuilder`.
+        pub fn builder<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
+            AsyncRedisCacheBuilder::new(prefix, ttl)
+        }
+
         fn generate_key(&self, key: &K) -> String {
             // Same format as the sync store — see `super::generate_redis_key`.
             super::generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
@@ -851,7 +879,7 @@ mod async_redis {
     where
         // `V: Sync` not needed — values cross the async boundary by value, never
         // by shared reference. Matches the async `DiskCache` impl.
-        K: Display + Send + Sync,
+        K: Display + Clone + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
         type Error = RedisCacheError;
@@ -863,8 +891,9 @@ mod async_redis {
             let key = self.generate_key(key);
 
             pipe.get(&key);
-            if self.refresh {
-                pipe.expire(key, super::ttl_seconds_i64(self.ttl)?).ignore();
+            if self.refresh.load(Ordering::Relaxed) {
+                let ttl = *self.ttl.lock();
+                pipe.expire(key, super::ttl_seconds_i64(ttl)?).ignore();
             }
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
@@ -887,7 +916,7 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
 
-            let ttl_secs = super::ttl_seconds(self.ttl)?;
+            let ttl_secs = super::ttl_seconds(*self.ttl.lock())?;
 
             let val = CachedRedisValue::new(val);
             pipe.get(&key);
@@ -937,6 +966,18 @@ mod async_redis {
             }
         }
 
+        /// Remove an entry and return the stored key and value.
+        ///
+        /// **Note:** Unlike in-memory stores, Redis manages TTL expiry server-side. A `GET` on a
+        /// TTL-expired key returns nil, so this method returns `None` for expired entries even
+        /// though the key may still be physically present in Redis. Use [`cache_delete`](ConcurrentCachedAsync::cache_delete)
+        /// (which uses `DEL` directly) to reliably detect whether any physical entry was removed.
+        async fn cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
+            self.cache_remove(key)
+                .await
+                .map(|opt| opt.map(|v| (key.clone(), v)))
+        }
+
         async fn cache_delete(&self, key: &K) -> Result<bool, Self::Error> {
             let mut conn = self.connection.clone();
             let key = self.generate_key(key);
@@ -945,27 +986,26 @@ mod async_redis {
         }
 
         /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
-        fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-            let old = self.refresh;
-            self.refresh = refresh;
-            old
+        fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+            self.refresh.swap(refresh, Ordering::Relaxed)
         }
 
         /// Return the ttl of cached values (time to eviction).
         fn ttl(&self) -> Option<Duration> {
-            Some(self.ttl)
+            Some(*self.ttl.lock())
         }
 
         /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
         /// they retain whatever TTL was applied when they were originally inserted.
-        fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-            let old = self.ttl;
-            self.ttl = ttl;
+        fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = ttl;
             Some(old)
         }
 
         /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
-        fn unset_ttl(&mut self) -> Option<Duration> {
+        fn unset_ttl(&self) -> Option<Duration> {
             None
         }
     }
@@ -973,13 +1013,14 @@ mod async_redis {
     #[cfg(feature = "time_stores")]
     impl<K, V> CacheTtl for AsyncRedisCache<K, V> {
         fn ttl(&self) -> Option<Duration> {
-            Some(self.ttl)
+            Some(*self.ttl.lock())
         }
         /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
         /// they retain whatever TTL was applied when they were originally inserted.
         fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-            let old = self.ttl;
-            self.ttl = ttl;
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = ttl;
             Some(old)
         }
         /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
@@ -987,12 +1028,10 @@ mod async_redis {
             None
         }
         fn refresh_on_hit(&self) -> bool {
-            self.refresh
+            self.refresh.load(Ordering::Relaxed)
         }
         fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-            let old = self.refresh;
-            self.refresh = refresh;
-            old
+            self.refresh.swap(refresh, Ordering::Relaxed)
         }
     }
 
@@ -1011,7 +1050,7 @@ mod async_redis {
 
         #[tokio::test]
         async fn test_async_redis_cache() {
-            let mut c: AsyncRedisCache<u32, u32> = AsyncRedisCache::new(
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::new(
                 format!("{}:async-redis-cache-test", now_millis()),
                 Duration::from_secs(2),
             )
@@ -1027,7 +1066,7 @@ mod async_redis {
             sleep(Duration::new(2, 500_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            let old = ConcurrentCachedAsync::set_ttl(&mut c, Duration::from_secs(1)).unwrap();
+            let old = ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(1)).unwrap();
             assert_eq!(2, old.as_secs());
             assert!(c.cache_set(1, 100).await.unwrap().is_none());
             assert!(c.cache_get(&1).await.unwrap().is_some());
@@ -1035,7 +1074,7 @@ mod async_redis {
             sleep(Duration::new(1, 600_000));
             assert!(c.cache_get(&1).await.unwrap().is_none());
 
-            ConcurrentCachedAsync::set_ttl(&mut c, Duration::from_secs(10)).unwrap();
+            ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(10)).unwrap();
             assert!(c.cache_set(1, 100).await.unwrap().is_none());
             assert!(c.cache_set(2, 100).await.unwrap().is_none());
             assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
@@ -1082,7 +1121,7 @@ mod tests {
 
     #[test]
     fn redis_cache() {
-        let mut c: RedisCache<u32, u32> = RedisCache::new(
+        let c: RedisCache<u32, u32> = RedisCache::new(
             format!("{}:redis-cache-test", now_millis()),
             Duration::from_secs(2),
         )
@@ -1098,7 +1137,7 @@ mod tests {
         sleep(Duration::new(2, 500_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        let old = ConcurrentCached::set_ttl(&mut c, Duration::from_secs(1)).unwrap();
+        let old = ConcurrentCached::set_ttl(&c, Duration::from_secs(1)).unwrap();
         assert_eq!(2, old.as_secs());
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
@@ -1106,7 +1145,7 @@ mod tests {
         sleep(Duration::new(1, 600_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        ConcurrentCached::set_ttl(&mut c, Duration::from_secs(10)).unwrap();
+        ConcurrentCached::set_ttl(&c, Duration::from_secs(10)).unwrap();
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);

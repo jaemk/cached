@@ -1,0 +1,5 @@
+error: the `result` attribute has been removed. `Result<T, E>` returns now skip caching `Err` by default. Remove `result = true` (or `result = false`), or use `cache_err = true` to force-cache `Err` values.
+ --> tests/ui/once_result_attr_removed.rs:4:4
+  |
+4 | fn load() -> Result<u64, String> {
+  |    ^^^^

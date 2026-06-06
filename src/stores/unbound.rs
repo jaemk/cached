@@ -10,12 +10,12 @@ use ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
 use std::collections::hash_map::RandomState;
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use super::StripedCounter;
 
 /// Default unbounded cache
 ///
@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Note: This cache is in-memory only
 pub struct UnboundCache<K, V> {
     pub(super) store: HashMap<K, V, RandomState>,
-    pub(super) hits: AtomicU64,
-    pub(super) misses: AtomicU64,
+    pub(super) hits: StripedCounter,
+    pub(super) misses: StripedCounter,
     pub(super) initial_capacity: Option<usize>,
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
@@ -33,8 +33,8 @@ pub struct UnboundCache<K, V> {
 impl<K, V> std::fmt::Debug for UnboundCache<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnboundCache")
-            .field("hits", &self.hits.load(Ordering::Relaxed))
-            .field("misses", &self.misses.load(Ordering::Relaxed))
+            .field("hits", &self.hits.load())
+            .field("misses", &self.misses.load())
             .field("on_evict", &self.on_evict.as_ref().map(|_| "on_evict"))
             .finish()
     }
@@ -48,8 +48,8 @@ where
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
-            hits: AtomicU64::new(self.hits.load(Ordering::Relaxed)),
-            misses: AtomicU64::new(self.misses.load(Ordering::Relaxed)),
+            hits: self.hits.snapshot(),
+            misses: self.misses.snapshot(),
             initial_capacity: self.initial_capacity,
             on_evict: self.on_evict.clone(),
         }
@@ -101,6 +101,9 @@ impl<K, V> UnboundCacheBuilder<K, V> {
     ///
     /// Note: because `UnboundCache` has no eviction policy, `on_evict` will
     /// not fire during normal cache operations — only on explicit removal.
+    /// Use [`cache_clear_with_on_evict`](UnboundCache::cache_clear_with_on_evict)
+    /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
+    /// firing when clearing all entries.
     #[must_use]
     pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
         self.on_evict = Some(std::sync::Arc::new(on_evict));
@@ -108,32 +111,24 @@ impl<K, V> UnboundCacheBuilder<K, V> {
     }
 
     /// Build the cache.
-    #[must_use]
-    pub fn build(self) -> UnboundCache<K, V>
-    where
-        K: Hash + Eq,
-    {
-        let mut cache = match self.capacity {
-            Some(cap) => UnboundCache::with_capacity(cap),
-            None => UnboundCache::new(),
-        };
-        cache.on_evict = self.on_evict;
-        cache
-    }
-
-    /// Build the cache, returning an error instead of panicking.
     ///
-    /// `UnboundCache` has no required fields, so this always succeeds.
-    /// Provided for API consistency with other builders.
+    /// `UnboundCache` has no required fields and this always succeeds.
     ///
     /// # Errors
     ///
     /// This method currently never returns an error.
-    pub fn try_build(self) -> Result<UnboundCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<UnboundCache<K, V>, super::BuildError>
     where
         K: Hash + Eq,
     {
-        Ok(self.build())
+        let store = UnboundCache::<K, V>::new_store(self.capacity);
+        Ok(UnboundCache {
+            store,
+            hits: StripedCounter::new(),
+            misses: StripedCounter::new(),
+            initial_capacity: self.capacity,
+            on_evict: self.on_evict,
+        })
     }
 }
 
@@ -142,31 +137,6 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     #[must_use]
     pub fn builder() -> UnboundCacheBuilder<K, V> {
         UnboundCacheBuilder::default()
-    }
-
-    /// Creates an empty `UnboundCache`
-    #[allow(clippy::new_without_default)]
-    #[must_use]
-    pub fn new() -> UnboundCache<K, V> {
-        UnboundCache {
-            store: Self::new_store(None),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            initial_capacity: None,
-            on_evict: None,
-        }
-    }
-
-    /// Creates an empty `UnboundCache` with a given pre-allocated capacity
-    #[must_use]
-    pub fn with_capacity(size: usize) -> UnboundCache<K, V> {
-        UnboundCache {
-            store: Self::new_store(Some(size)),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            initial_capacity: Some(size),
-            on_evict: None,
-        }
     }
 
     fn new_store(capacity: Option<usize>) -> HashMap<K, V, RandomState> {
@@ -181,6 +151,23 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     pub fn store(&self) -> &HashMap<K, V, RandomState> {
         &self.store
     }
+
+    /// Remove all entries and fire the `on_evict` callback for each one.
+    ///
+    /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
+    /// this method invokes `on_evict` for every removed entry. If no `on_evict` callback was
+    /// configured, it falls back to the plain `cache_clear`.
+    pub fn cache_clear_with_on_evict(&mut self) {
+        if self.on_evict.is_none() {
+            return self.cache_clear();
+        }
+        let entries: Vec<(K, V)> = self.store.drain().collect();
+        if let Some(on_evict) = &self.on_evict {
+            for (k, v) in &entries {
+                on_evict(k, v);
+            }
+        }
+    }
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
@@ -190,10 +177,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(v) = self.store.get(key) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.hits.increment();
             Some(v)
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.misses.increment();
             None
         }
     }
@@ -203,10 +190,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(v) = self.store.get_mut(key) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.hits.increment();
             Some(v)
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.misses.increment();
             None
         }
     }
@@ -216,12 +203,12 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
-                self.hits.fetch_add(1, Ordering::Relaxed);
+                self.hits.increment();
                 occupied.into_mut()
             }
 
             Entry::Vacant(vacant) => {
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.misses.increment();
                 vacant.insert(f())
             }
         }
@@ -233,12 +220,12 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     ) -> Result<&mut V, E> {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
-                self.hits.fetch_add(1, Ordering::Relaxed);
+                self.hits.increment();
                 Ok(occupied.into_mut())
             }
 
             Entry::Vacant(vacant) => {
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.misses.increment();
                 Ok(vacant.insert(f()?))
             }
         }
@@ -248,34 +235,43 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
+        self.cache_remove_entry(k).map(|(_, v)| v)
+    }
+
+    fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let removed = self.store.remove_entry(k);
-        if let Some((ref k, ref v)) = removed {
+        if let Some((ref stored_k, ref v)) = removed {
             if let Some(on_evict) = &self.on_evict {
-                on_evict(k, v);
+                on_evict(stored_k, v);
             }
         }
-        removed.map(|(_, v)| v)
+        removed
     }
+
     fn cache_clear(&mut self) {
         self.store.clear();
     }
     fn cache_reset(&mut self) {
-        // Entries are dropped in-place. UnboundCache has no `on_evict` callback.
+        // Entries are dropped in-place; `on_evict` is not called during reset.
         self.store = Self::new_store(self.initial_capacity);
         self.cache_reset_metrics();
     }
     fn cache_reset_metrics(&mut self) {
-        self.misses.store(0, Ordering::Relaxed);
-        self.hits.store(0, Ordering::Relaxed);
+        self.misses.reset();
+        self.hits.reset();
     }
     fn cache_size(&self) -> usize {
         self.store.len()
     }
     fn cache_hits(&self) -> Option<u64> {
-        Some(self.hits.load(Ordering::Relaxed))
+        Some(self.hits.load())
     }
     fn cache_misses(&self) -> Option<u64> {
-        Some(self.misses.load(Ordering::Relaxed))
+        Some(self.misses.load())
     }
 }
 
@@ -306,10 +302,10 @@ impl<K: Hash + Eq, V> CachedRead<K, V> for UnboundCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(value) = self.cache_peek(k) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.hits.increment();
             Some(value)
         } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.misses.increment();
             None
         }
     }
@@ -334,11 +330,11 @@ where
         async move {
             match self.store.entry(key) {
                 Entry::Occupied(occupied) => {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    self.hits.increment();
                     occupied.into_mut()
                 }
                 Entry::Vacant(vacant) => {
-                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    self.misses.increment();
                     vacant.insert(f().await)
                 }
             }
@@ -360,11 +356,11 @@ where
         async move {
             let v = match self.store.entry(key) {
                 Entry::Occupied(occupied) => {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    self.hits.increment();
                     occupied.into_mut()
                 }
                 Entry::Vacant(vacant) => {
-                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    self.misses.increment();
                     vacant.insert(f().await?)
                 }
             };
@@ -377,10 +373,11 @@ where
 /// Cache store tests
 mod tests {
     use super::*;
+    use crate::Cached;
 
     #[test]
     fn basic_cache() {
-        let mut c = UnboundCache::new();
+        let mut c = UnboundCache::builder().build().unwrap();
         assert!(c.cache_get(&1).is_none());
         let misses = c.cache_misses().unwrap();
         assert_eq!(1, misses);
@@ -405,7 +402,7 @@ mod tests {
 
     #[test]
     fn clear() {
-        let mut c = UnboundCache::new();
+        let mut c = UnboundCache::builder().build().unwrap();
 
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
@@ -434,7 +431,7 @@ mod tests {
         assert!(3 <= c.store.capacity()); // Keeps the allocated memory for reuse.
 
         let capacity = 1;
-        let mut c = UnboundCache::with_capacity(capacity);
+        let mut c = UnboundCache::builder().capacity(capacity).build().unwrap();
         assert!(capacity <= c.store.capacity());
 
         assert_eq!(c.cache_set(1, 100), None);
@@ -450,7 +447,7 @@ mod tests {
 
     #[test]
     fn reset() {
-        let mut c = UnboundCache::new();
+        let mut c = UnboundCache::builder().build().unwrap();
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
@@ -461,7 +458,10 @@ mod tests {
         assert_eq!(0, c.store.capacity());
 
         let init_capacity = 1;
-        let mut c = UnboundCache::with_capacity(init_capacity);
+        let mut c = UnboundCache::builder()
+            .capacity(init_capacity)
+            .build()
+            .unwrap();
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
         assert_eq!(c.cache_set(3, 300), None);
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn remove() {
-        let mut c = UnboundCache::new();
+        let mut c = UnboundCache::builder().build().unwrap();
 
         assert_eq!(c.cache_set(1, 100), None);
         assert_eq!(c.cache_set(2, 200), None);
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn get_or_set_with() {
-        let mut c = UnboundCache::new();
+        let mut c = UnboundCache::builder().build().unwrap();
 
         assert_eq!(c.cache_get_or_set_with(0, || 0), &0);
         assert_eq!(c.cache_get_or_set_with(1, || 1), &1);
@@ -553,8 +553,51 @@ mod tests {
     }
 
     #[test]
+    fn cache_clear_with_on_evict_fires_for_all_entries() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = UnboundCache::builder()
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(count.load(AOrdering::Relaxed), 3);
+    }
+
+    #[test]
+    fn cache_clear_does_not_fire_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = UnboundCache::builder()
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_clear();
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            count.load(AOrdering::Relaxed),
+            0,
+            "cache_clear must not fire on_evict"
+        );
+    }
+
+    #[test]
     fn test_diagnostics_and_traits() {
-        let mut cache = UnboundCache::builder().capacity(10).build();
+        let mut cache = UnboundCache::builder().capacity(10).build().unwrap();
         cache.cache_set(1, 100);
         cache.cache_set(2, 200);
 
@@ -574,9 +617,105 @@ mod tests {
         cloned.cache_set(3, 300);
         assert_ne!(cache, cloned);
 
-        // Builder try_build always succeeds for UnboundCache
+        // Builder build always succeeds for UnboundCache
         let builder = UnboundCache::<u32, u32>::builder().on_evict(|_, _| {});
-        let try_built = builder.try_build();
-        assert!(try_built.is_ok());
+        let built = builder.build();
+        assert!(built.is_ok());
+    }
+
+    #[test]
+    fn cache_remove_entry_basic() {
+        let mut c = UnboundCache::builder().build().unwrap();
+        c.cache_set(1u32, 100u32);
+
+        // Returns None when key absent.
+        assert_eq!(c.cache_remove_entry(&999u32), None);
+
+        // Returns stored key and value.
+        let removed = c.cache_remove_entry(&1u32);
+        assert_eq!(removed, Some((1u32, 100u32)));
+
+        // Entry is gone.
+        assert_eq!(c.cache_get(&1u32), None);
+    }
+
+    #[test]
+    fn cache_remove_entry_fires_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let count = Arc::new(AtomicU32::new(0));
+        let count2 = count.clone();
+        let mut c = UnboundCache::builder()
+            .on_evict(move |_, _| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_remove_entry(&1u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+
+        // No fire for absent key.
+        c.cache_remove_entry(&999u32);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cache_delete_uses_cache_remove_entry() {
+        let mut c = UnboundCache::<u32, u32>::builder().build().unwrap();
+        c.cache_set(1, 10);
+        assert!(
+            c.cache_delete(&1),
+            "cache_delete must return true for existing entry"
+        );
+        assert!(
+            !c.cache_delete(&1),
+            "cache_delete must return false for absent entry"
+        );
+    }
+
+    #[test]
+    fn cache_remove_entry_returns_stored_key_not_lookup_key() {
+        // Verify the doc promise: cache_remove_entry returns the *stored* key,
+        // not the lookup key. Uses a key type where Hash+Eq only check `lower`
+        // so two instances can be "equal" but have different `original` fields.
+        use std::hash::{Hash, Hasher};
+        #[derive(Clone, Debug)]
+        struct CaseKey {
+            lower: String,
+            original: String,
+        }
+        impl PartialEq for CaseKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.lower == other.lower
+            }
+        }
+        impl Eq for CaseKey {}
+        impl Hash for CaseKey {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                self.lower.hash(state);
+            }
+        }
+
+        let stored = CaseKey {
+            lower: "hello".to_string(),
+            original: "Hello".to_string(),
+        };
+        let lookup = CaseKey {
+            lower: "hello".to_string(),
+            original: "HELLO".to_string(),
+        };
+
+        let mut c = UnboundCache::<CaseKey, u32>::builder().build().unwrap();
+        c.cache_set(stored, 42);
+
+        let (returned_key, returned_val) =
+            c.cache_remove_entry(&lookup).expect("key must be found");
+        assert_eq!(returned_val, 42);
+        // The *stored* original casing must come back, not the lookup's casing.
+        assert_eq!(
+            returned_key.original, "Hello",
+            "cache_remove_entry must return the stored key instance"
+        );
     }
 }
