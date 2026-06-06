@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## [2.0.1]
+- Fix `TtlSortedCacheBuilder`: an explicit `.capacity(n)` is now honored even when `.max_size(m)` is also set. Previously the `max_size`-derived `m + 1` preallocation ran first, and because `HashMap::reserve` never shrinks, a smaller `.capacity(n)` had no effect. The explicit capacity now takes precedence as the preallocation hint while `max_size` continues to bound entry count ([#266](https://github.com/jaemk/cached/issues/266)).
+
 ## [2.0.0 / cached_proc_macro 2.0.0]
 > **Upgrading from 1.1?** See the [2.0 migration guide](docs/migrations/1.1-to-2.0-human.md).
 

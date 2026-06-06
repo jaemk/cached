@@ -247,7 +247,6 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
     /// [`capacity`](Self::capacity), this is a hard cap on entry count, not a preallocation
     /// hint.
     #[doc(alias = "size")]
-    #[doc(alias = "capacity")]
     #[must_use]
     pub fn max_size(mut self, max_size: usize) -> Self {
         self.size = Some(max_size);
@@ -256,8 +255,19 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
 
     /// Pre-allocate capacity for the backing store. This is a *preallocation hint* only —
     /// it does **not** bound the cache. Use [`max_size`](Self::max_size) to set the eviction
-    /// bound. Mirrors the old `TtlSortedCache::with_ttl_and_capacity` behavior, reserving
-    /// exactly `capacity` entries in the backing map.
+    /// bound. Reserves room for at least `capacity` entries in the backing map (the exact
+    /// amount may be rounded up by the allocator), matching the preallocation semantics of
+    /// the pre-2.0 `with_ttl_and_capacity` constructor.
+    ///
+    /// When set, this takes precedence over the preallocation implied by
+    /// [`max_size`](Self::max_size): the backing map reserves for `capacity` entries rather
+    /// than `max_size + 1`. This lets you cap entries at a large `max_size` while starting
+    /// with a small allocation that grows on demand. Passing `capacity` larger than
+    /// `max_size` is valid — the map simply starts larger; `max_size` still bounds the entry
+    /// count. Only the backing map is pre-allocated; the `BTreeSet` TTL index is not.
+    ///
+    /// Note that [`set_max_size`](TtlSortedCache::set_max_size) on a live cache may re-grow
+    /// the backing map to `max_size + 1`, overriding a smaller `capacity` set here.
     #[must_use]
     pub fn capacity(mut self, capacity: usize) -> Self {
         self.capacity = Some(capacity);
@@ -315,15 +325,18 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
             evictions: AtomicU64::new(0),
             on_evict: self.on_evict,
         };
-        // Preserve the previous internal behavior: a size limit pre-reserved
-        // `size + 1` entries in the backing map.
-        if let Some(size) = self.size {
-            cache.map.reserve(size.saturating_add(1));
-        }
-        // Apply the explicit preallocation hint, mirroring the old
-        // `with_ttl_and_capacity` which reserved exactly `capacity`.
-        if let Some(capacity) = self.capacity {
-            cache.map.reserve(capacity);
+        // Decide the single preallocation amount once all options are known.
+        // An explicit `capacity` is the preallocation hint and takes precedence,
+        // reserving for `capacity` and matching the old `with_ttl_and_capacity`.
+        // Otherwise fall back to the previous internal behavior where a size limit
+        // pre-reserved `size + 1` entries. We reserve only once: issuing the
+        // `size + 1` reservation first would defeat a smaller explicit `capacity`,
+        // since `HashMap::reserve` does not reduce an existing allocation.
+        let preallocate = self
+            .capacity
+            .or_else(|| self.size.map(|size| size.saturating_add(1)));
+        if let Some(amount) = preallocate {
+            cache.map.reserve(amount);
         }
         Ok(cache)
     }
@@ -343,6 +356,10 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
 
     /// Set the maximum number of entries. When reached, the next entries to expire are evicted.
     /// Returns the previous value if one was set.
+    ///
+    /// This grows the backing map to hold at least `max_size + 1` entries, so calling it on a
+    /// cache built with a deliberately small [`capacity`](TtlSortedCacheBuilder::capacity) will
+    /// override that smaller allocation.
     ///
     /// # Panics
     ///
@@ -1303,6 +1320,40 @@ mod test {
                 "expected InvalidValue, got {error:?}"
             ),
         }
+    }
+
+    #[test]
+    fn explicit_capacity_takes_precedence_over_max_size_preallocation() {
+        // Regression for #266: an explicit, smaller `capacity` must not be defeated
+        // by `max_size`'s `size + 1` preallocation (HashMap::reserve does not reduce
+        // an existing allocation).
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(300))
+            .max_size(65_536)
+            .capacity(16)
+            .build()
+            .unwrap();
+        // The backing map must not have taken the max_size path, which would reserve
+        // for max_size + 1 (= 65_537) entries.
+        assert!(
+            cache.map.capacity() < 65_537,
+            "expected the explicit capacity(16) to take precedence, got {}",
+            cache.map.capacity()
+        );
+        assert!(cache.map.capacity() >= 16);
+        // The eviction bound still reflects max_size.
+        assert_eq!(cache.size_limit, Some(65_536));
+    }
+
+    #[test]
+    fn max_size_alone_preallocates() {
+        // Without an explicit capacity, max_size still drives preallocation.
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(300))
+            .max_size(64)
+            .build()
+            .unwrap();
+        assert!(cache.map.capacity() >= 65);
     }
 
     #[test]
