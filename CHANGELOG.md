@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Update `hashbrown` to 0.17 (internal only; not part of the public API). Dev-only: bump `criterion` to 0.8 and `googletest` to 0.14. No API or behavior change.
 
 ## [2.0.2]
 - Docs/tests only (no API change): document the `Expires` trait / `expires = true` as the idiomatic way to set a dynamic, per-entry TTL (a lifetime computed at call time rather than the uniform `ttl = N`), with a runnable example reference, and add a regression test for the runtime-argument-driven TTL case ([#246](https://github.com/jaemk/cached/issues/246)).
