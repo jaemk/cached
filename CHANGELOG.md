@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## [2.0.2]
+- Docs/tests only (no API change): document the `Expires` trait / `expires = true` as the idiomatic way to set a dynamic, per-entry TTL (a lifetime computed at call time rather than the uniform `ttl = N`), with a runnable example reference, and add a regression test for the runtime-argument-driven TTL case ([#246](https://github.com/jaemk/cached/issues/246)).
+
 ## [2.0.1]
 - Fix `TtlSortedCacheBuilder`: an explicit `.capacity(n)` is now honored even when `.max_size(m)` is also set. Previously the `max_size`-derived `m + 1` preallocation ran first, and because `HashMap::reserve` never shrinks, a smaller `.capacity(n)` had no effect. The explicit capacity now takes precedence as the preallocation hint while `max_size` continues to bound entry count ([#266](https://github.com/jaemk/cached/issues/266)).
 
