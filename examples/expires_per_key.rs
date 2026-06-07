@@ -9,6 +9,10 @@ these features allow each value to determine its own expiration time. This is id
 for caching OAuth tokens, HTTP responses with Cache-Control headers, or any payload
 that carries its own absolute expiration timestamp.
 
+It also shows `expires = true` composing with `Result` and `Option` return types:
+only `Ok`/`Some` values are cached (and expire per-value), while `Err`/`None` are
+never cached.
+
 Run:
     cargo run --example expires_per_key --features proc_macro
 */
@@ -63,6 +67,38 @@ fn get_session_token(expiry_offset_ms: u64) -> MyValue {
         data: format!("session-token-{n}"),
         expires_at: Instant::now() + Duration::from_millis(expiry_offset_ms),
     }
+}
+
+// `expires = true` composes with a `Result` return: only the `Ok(MyValue)` is
+// cached (and expires per-value via `Expires`); an `Err` is never cached, so a
+// failing call always re-executes.
+#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+fn fetch_token_result(user_id: u64, expiry_offset_ms: u64, fail: bool) -> Result<MyValue, String> {
+    println!("  -> [fetch_token_result] generating token for user {user_id} (fail={fail})...");
+    if fail {
+        return Err(format!("upstream error fetching token for user {user_id}"));
+    }
+    let n = CALL_N.fetch_add(1, Ordering::Relaxed);
+    Ok(MyValue {
+        data: format!("token-{user_id}-{n}"),
+        expires_at: Instant::now() + Duration::from_millis(expiry_offset_ms),
+    })
+}
+
+// `expires = true` composes with an `Option` return: only `Some(MyValue)` is
+// cached (and expires per-value); a `None` is never cached, so a miss keeps
+// re-executing until a `Some` is produced.
+#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+fn fetch_token_option(user_id: u64, expiry_offset_ms: u64, found: bool) -> Option<MyValue> {
+    println!("  -> [fetch_token_option] generating token for user {user_id} (found={found})...");
+    if !found {
+        return None;
+    }
+    let n = CALL_N.fetch_add(1, Ordering::Relaxed);
+    Some(MyValue {
+        data: format!("token-{user_id}-{n}"),
+        expires_at: Instant::now() + Duration::from_millis(expiry_offset_ms),
+    })
 }
 
 fn main() {
@@ -198,4 +234,62 @@ fn main() {
     println!("Third call (after token has expired):");
     let t3 = get_session_token(500);
     println!("  Returned: '{}' (cache miss, re-evaluated)", t3.data);
+
+    // =========================================================================
+    // 5. #[cached(expires = true)] with a `Result` return
+    // =========================================================================
+    println!("\n--- 5. #[cached(expires = true)] returning Result ---");
+
+    // Err is never cached, so the failing call re-executes every time.
+    println!("First call for user 1 (fails):");
+    assert!(fetch_token_result(1, 500, true).is_err());
+    println!("Second call for user 1 (still fails, Err was not cached):");
+    assert!(fetch_token_result(1, 500, true).is_err());
+
+    // A successful call caches the Ok value (expires in 500ms).
+    println!("\nThird call for user 1 (succeeds, Ok is cached):");
+    let r1 = fetch_token_result(1, 500, false).unwrap();
+    println!("  Returned: '{}'", r1.data);
+
+    // Same key, fail = true is ignored because the live Ok value is a cache hit.
+    println!("Fourth call for user 1 (cache hit, function not run):");
+    let r2 = fetch_token_result(1, 500, true).unwrap();
+    println!("  Returned: '{}' (same token)", r2.data);
+
+    println!("\nWaiting 1 second...");
+    std::thread::sleep(Duration::from_secs(1));
+
+    // The cached Ok has expired, so the function runs again.
+    println!("Fifth call for user 1 (cached Ok expired, re-evaluated):");
+    let r3 = fetch_token_result(1, 500, false).unwrap();
+    println!("  Returned: '{}'", r3.data);
+
+    // =========================================================================
+    // 6. #[cached(expires = true)] with an `Option` return
+    // =========================================================================
+    println!("\n--- 6. #[cached(expires = true)] returning Option ---");
+
+    // None is never cached, so the missing call re-executes every time.
+    println!("First call for user 2 (None):");
+    assert!(fetch_token_option(2, 500, false).is_none());
+    println!("Second call for user 2 (still None, None was not cached):");
+    assert!(fetch_token_option(2, 500, false).is_none());
+
+    // A Some value is cached (expires in 500ms).
+    println!("\nThird call for user 2 (Some, cached):");
+    let o1 = fetch_token_option(2, 500, true).unwrap();
+    println!("  Returned: '{}'", o1.data);
+
+    // Same key, found = false is ignored because the live Some value is a cache hit.
+    println!("Fourth call for user 2 (cache hit, function not run):");
+    let o2 = fetch_token_option(2, 500, false).unwrap();
+    println!("  Returned: '{}' (same token)", o2.data);
+
+    println!("\nWaiting 1 second...");
+    std::thread::sleep(Duration::from_secs(1));
+
+    // The cached Some has expired, so the function runs again.
+    println!("Fifth call for user 2 (cached Some expired, re-evaluated):");
+    let o3 = fetch_token_option(2, 500, true).unwrap();
+    println!("  Returned: '{}'", o3.data);
 }
