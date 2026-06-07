@@ -708,6 +708,7 @@ fn test_mutable_args_once() {
 #[cfg(feature = "proc_macro")]
 mod expires_macro_tests {
     use cached::macros::{cached, once};
+    use cached::time::{Duration, Instant};
     use cached::{Cached, Expires};
 
     #[derive(Clone, Debug)]
@@ -718,6 +719,29 @@ mod expires_macro_tests {
     impl Expires for Val {
         fn is_expired(&self) -> bool {
             self.expired
+        }
+    }
+
+    // A value whose expiry is computed from a runtime `Duration` argument — the
+    // `#[cached]` way to get a dynamic, per-entry TTL (issue #246).
+    #[derive(Clone, Debug)]
+    struct TtlVal {
+        v: u32,
+        expires_at: Instant,
+    }
+    impl Expires for TtlVal {
+        fn is_expired(&self) -> bool {
+            Instant::now() >= self.expires_at
+        }
+    }
+
+    // `key`/`convert` keep `ttl_ms` out of the cache key so it only affects the
+    // entry's lifetime, not which slot it occupies.
+    #[cached(expires = true, key = "u32", convert = "{ k }")]
+    fn dyn_ttl(k: u32, ttl_ms: u64) -> TtlVal {
+        TtlVal {
+            v: k,
+            expires_at: Instant::now() + Duration::from_millis(ttl_ms),
         }
     }
 
@@ -817,6 +841,31 @@ mod expires_macro_tests {
         // expired entry — re-executes
         let v4 = sm_once_expires(false);
         assert!(!v4.expired);
+    }
+
+    // Regression for issue #246: a dynamic, per-entry TTL derived from a runtime
+    // argument. Two keys are inserted with different lifetimes — a 0ms TTL (already
+    // expired on the next read) and a long TTL (stays live) — so the assertions are
+    // deterministic without sleeping (time only ever moves forward).
+    #[test]
+    fn test_expires_macro_dynamic_ttl_from_arg() {
+        {
+            let mut c = DYN_TTL.write();
+            c.cache_clear();
+            c.cache_reset_metrics();
+        }
+
+        // key 1: 0ms lifetime → expires immediately. key 2: long lifetime → stays live.
+        assert_eq!(dyn_ttl(1, 0).v, 1); // miss
+        assert_eq!(dyn_ttl(2, 60_000).v, 2); // miss
+
+        // key 1's entry has expired → re-executes (no hit); key 2 is still live → hit.
+        assert_eq!(dyn_ttl(1, 0).v, 1);
+        assert_eq!(dyn_ttl(2, 60_000).v, 2);
+
+        let c = DYN_TTL.read();
+        // Only the long-TTL key produced a live hit; the 0ms key never hits.
+        assert_eq!(c.cache_hits(), Some(1));
     }
 }
 

@@ -83,7 +83,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Force-cache `None` returns | `#[cached(cache_none = true)] fn find(id: u64) -> Option<User>` |
 | Force-cache `Err` returns | `#[cached(cache_err = true)] fn load(id: u64) -> Result<Data, E>` |
 | Serve stale value when function returns `Err` | `#[cached(result_fallback = true, ttl = 60)] fn fetch(id: u64) -> Result<Data, E>` |
-| Per-value expiry (value carries its own TTL) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
+| Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
 | Deduplicate concurrent first calls for same key | `#[cached(ttl = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
 | Async | `#[cached(max_size = 100)] async fn remote(id: u64) -> Data` |
 | **`#[once]`** | |
@@ -198,7 +198,34 @@ While standard timed stores (`TtlCache`, `LruTtlCache`, `TtlSortedCache`) enforc
 
 This approach is highly useful when caching payloads like OAuth tokens, HTTP responses with varying `Cache-Control` headers, or database records that contain their own absolute expiration timestamps.
 
+It is also the idiomatic way to give entries a **dynamic, per-entry TTL** — a lifetime computed at call time rather than the single uniform duration that `ttl = N` applies to every entry. Because the value carries its own expiry, each entry can be given a different lifetime derived from a function argument, runtime configuration, or a response header. (`expires = true` is mutually exclusive with `ttl`.) See the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example for a runnable demonstration.
+
 When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `max_size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
+
+The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies:
+
+```rust
+use cached::macros::cached;
+use cached::Expires;
+use cached::time::{Duration, Instant};
+
+#[derive(Clone)]
+struct Token { value: String, expires_at: Instant }
+
+impl Expires for Token {
+    fn is_expired(&self) -> bool { Instant::now() >= self.expires_at }
+}
+
+// `ttl_secs` is a runtime argument — each user's token expires on its own schedule.
+#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+fn fetch_token(user_id: u64, ttl_secs: u64) -> Token {
+    Token {
+        value: format!("token-{user_id}"),
+        expires_at: Instant::now() + Duration::from_secs(ttl_secs),
+    }
+}
+# fn main() {}
+```
 
 For concurrent (multi-thread, no external lock) use, the sharded equivalents [`ShardedExpiringCache`] and [`ShardedExpiringLruCache`] provide the same per-value expiry with internally-synchronized sharded storage. Use `#[concurrent_cached(expires = true)]` to select them automatically.
 
