@@ -4,9 +4,10 @@ use cached::{
     LruTtlCache, ShardedCache, ShardedLruCache, ShardedLruTtlCache, TtlCache, TtlSortedCache,
     UnboundCache,
 };
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;

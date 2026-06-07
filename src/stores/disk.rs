@@ -653,7 +653,7 @@ impl<K, V> CacheTtl for DiskCache<K, V> {
 mod test_DiskCache {
     use crate::time::Duration;
     use googletest::{
-        GoogleTestSupport as _, assert_that,
+        assert_that,
         matchers::{anything, eq, none, ok, some},
     };
     use std::thread::sleep;
@@ -929,7 +929,7 @@ mod test_DiskCache {
         );
         assert_that!(
             cache.cache_get(&TEST_KEY),
-            ok(some(eq(TEST_VAL))),
+            ok(some(eq(&TEST_VAL))),
             "Getting a newly set (previously expired) key-value should return the value"
         );
 
@@ -951,12 +951,12 @@ mod test_DiskCache {
 
         assert_that!(
             cache.cache_get(&TEST_KEY),
-            ok(some(eq(TEST_VAL))),
+            ok(some(eq(&TEST_VAL))),
             "Getting a newly set (previously expired) key-value should return the value"
         );
         assert_that!(
             cache.cache_get(&TEST_KEY),
-            ok(some(eq(TEST_VAL))),
+            ok(some(eq(&TEST_VAL))),
             "Getting the same value again should return the value"
         );
     }
@@ -980,7 +980,7 @@ mod test_DiskCache {
         sleep(HALF_LIFE_SPAN);
         assert_that!(
             cache.cache_get(&TEST_KEY),
-            ok(some(eq(TEST_VAL))),
+            ok(some(eq(&TEST_VAL))),
             "Getting a value before expiry should return the value"
         );
 
@@ -988,7 +988,7 @@ mod test_DiskCache {
         sleep(HALF_LIFE_SPAN);
         assert_that!(
             cache.cache_get(&TEST_KEY),
-            ok(some(eq(TEST_VAL))),
+            ok(some(eq(&TEST_VAL))),
             "Getting a value after the initial expiry should return the value as we have refreshed"
         );
 
@@ -1121,7 +1121,7 @@ mod test_DiskCache {
                         |recovered_cache| {
                             assert_that!(
                                 recovered_cache.cache_get(&TEST_KEY),
-                                ok(some(eq(TEST_VAL))),
+                                ok(some(eq(&TEST_VAL))),
                                 "set_sync_to_disk_on_cache_change is false, and there is no auto-flushing, so the cache_remove should not have persisted"
                             );
                         },
@@ -1146,7 +1146,7 @@ mod test_DiskCache {
                         |recovered_cache| {
                             assert_that!(
                                 recovered_cache.cache_get(&TEST_KEY),
-                                ok(some(eq(TEST_VAL))),
+                                ok(some(eq(&TEST_VAL))),
                                 "Getting a set key should return the value"
                             );
                         },
