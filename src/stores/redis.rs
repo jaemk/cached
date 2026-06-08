@@ -1,5 +1,3 @@
-#[cfg(feature = "time_stores")]
-use crate::CacheTtl;
 use crate::ConcurrentCached;
 use crate::time::Duration;
 use parking_lot::Mutex;
@@ -195,6 +193,7 @@ impl std::fmt::Display for ConnectionString {
 
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedisCacheBuildError {
     #[error("redis connection error")]
@@ -241,7 +240,7 @@ where
 
     /// Specify whether cache hits refresh the TTL
     #[must_use]
-    pub fn refresh(mut self, refresh: bool) -> Self {
+    pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
     }
@@ -402,7 +401,7 @@ where
     V: Serialize + DeserializeOwned,
 {
     #[allow(clippy::new_ret_no_self)]
-    /// Initialize a `RedisCacheBuilder`
+    /// Initialize a `RedisCacheBuilder`.
     pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
         RedisCacheBuilder::new(prefix, ttl)
     }
@@ -429,19 +428,20 @@ where
     }
 }
 
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedisCacheError {
     #[error("redis error")]
-    RedisCacheError(#[from] redis::RedisError),
+    Redis(#[from] redis::RedisError),
     #[error("redis pool error")]
-    PoolError(#[from] r2d2::Error),
+    Pool(#[from] r2d2::Error),
     #[error("Error deserializing cached value {cached_value:?}: {error:?}")]
-    CacheDeserializationError {
+    CacheDeserialization {
         cached_value: String,
         error: serde_json::Error,
     },
     #[error("Error serializing cached value: {error:?}")]
-    CacheSerializationError { error: serde_json::Error },
+    CacheSerialization { error: serde_json::Error },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -481,7 +481,7 @@ where
             None => Ok(None),
             Some(s) => {
                 let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                    RedisCacheError::CacheDeserializationError {
+                    RedisCacheError::CacheDeserialization {
                         cached_value: s,
                         error: e,
                     }
@@ -503,7 +503,7 @@ where
         pipe.set_ex::<String, String>(
             key,
             serde_json::to_string(&val)
-                .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
+                .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
             ttl_secs,
         )
         .ignore();
@@ -513,7 +513,7 @@ where
             None => Ok(None),
             Some(s) => {
                 let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                    RedisCacheError::CacheDeserializationError {
+                    RedisCacheError::CacheDeserialization {
                         cached_value: s,
                         error: e,
                     }
@@ -535,7 +535,7 @@ where
             None => Ok(None),
             Some(s) => {
                 let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                    RedisCacheError::CacheDeserializationError {
+                    RedisCacheError::CacheDeserialization {
                         cached_value: s,
                         error: e,
                     }
@@ -586,31 +586,6 @@ where
     }
 }
 
-#[cfg(feature = "time_stores")]
-impl<K, V> CacheTtl for RedisCache<K, V> {
-    fn ttl(&self) -> Option<Duration> {
-        Some(*self.ttl.lock())
-    }
-    /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
-    /// they retain whatever TTL was applied when they were originally inserted.
-    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let mut guard = self.ttl.lock();
-        let old = *guard;
-        *guard = ttl;
-        Some(old)
-    }
-    /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
-    fn unset_ttl(&mut self) -> Option<Duration> {
-        None
-    }
-    fn refresh_on_hit(&self) -> bool {
-        self.refresh.load(Ordering::Relaxed)
-    }
-    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-        self.refresh.swap(refresh, Ordering::Relaxed)
-    }
-}
-
 #[cfg(all(
     feature = "async",
     any(
@@ -628,8 +603,6 @@ mod async_redis {
         CachedRedisValue, ConnectionString, DEFAULT_NAMESPACE, DeserializeOwned, Display, ENV_KEY,
         PhantomData, RedisCacheBuildError, RedisCacheError, Serialize,
     };
-    #[cfg(feature = "time_stores")]
-    use crate::CacheTtl;
     use crate::ConcurrentCachedAsync;
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
@@ -675,7 +648,7 @@ mod async_redis {
 
         /// Specify whether cache hits refresh the TTL
         #[must_use]
-        pub fn refresh(mut self, refresh: bool) -> Self {
+        pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
             self.refresh = refresh;
             self
         }
@@ -878,14 +851,14 @@ mod async_redis {
     impl<K, V> ConcurrentCachedAsync<K, V> for AsyncRedisCache<K, V>
     where
         // `V: Sync` not needed — values cross the async boundary by value, never
-        // by shared reference. Matches the async `DiskCache` impl.
+        // by shared reference. Matches the async `RedbCache` impl.
         K: Display + Clone + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
         type Error = RedisCacheError;
 
         /// Get a cached value
-        async fn cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
+        async fn async_cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
             let key = self.generate_key(key);
@@ -900,7 +873,7 @@ mod async_redis {
                 None => Ok(None),
                 Some(s) => {
                     let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                        RedisCacheError::CacheDeserializationError {
+                        RedisCacheError::CacheDeserialization {
                             cached_value: s,
                             error: e,
                         }
@@ -911,7 +884,7 @@ mod async_redis {
         }
 
         /// Set a cached value
-        async fn cache_set(&self, key: K, val: V) -> Result<Option<V>, Self::Error> {
+        async fn async_cache_set(&self, key: K, val: V) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
@@ -923,7 +896,7 @@ mod async_redis {
             pipe.set_ex::<String, String>(
                 key,
                 serde_json::to_string(&val)
-                    .map_err(|e| RedisCacheError::CacheSerializationError { error: e })?,
+                    .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
                 ttl_secs,
             )
             .ignore();
@@ -933,7 +906,7 @@ mod async_redis {
                 None => Ok(None),
                 Some(s) => {
                     let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                        RedisCacheError::CacheDeserializationError {
+                        RedisCacheError::CacheDeserialization {
                             cached_value: s,
                             error: e,
                         }
@@ -944,7 +917,7 @@ mod async_redis {
         }
 
         /// Remove a cached value
-        async fn cache_remove(&self, key: &K) -> Result<Option<V>, Self::Error> {
+        async fn async_cache_remove(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
             let key = self.generate_key(key);
@@ -956,7 +929,7 @@ mod async_redis {
                 None => Ok(None),
                 Some(s) => {
                     let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                        RedisCacheError::CacheDeserializationError {
+                        RedisCacheError::CacheDeserialization {
                             cached_value: s,
                             error: e,
                         }
@@ -970,15 +943,15 @@ mod async_redis {
         ///
         /// **Note:** Unlike in-memory stores, Redis manages TTL expiry server-side. A `GET` on a
         /// TTL-expired key returns nil, so this method returns `None` for expired entries even
-        /// though the key may still be physically present in Redis. Use [`cache_delete`](ConcurrentCachedAsync::cache_delete)
+        /// though the key may still be physically present in Redis. Use [`async_cache_delete`](ConcurrentCachedAsync::async_cache_delete)
         /// (which uses `DEL` directly) to reliably detect whether any physical entry was removed.
-        async fn cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
-            self.cache_remove(key)
+        async fn async_cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
+            self.async_cache_remove(key)
                 .await
                 .map(|opt| opt.map(|v| (key.clone(), v)))
         }
 
-        async fn cache_delete(&self, key: &K) -> Result<bool, Self::Error> {
+        async fn async_cache_delete(&self, key: &K) -> Result<bool, Self::Error> {
             let mut conn = self.connection.clone();
             let key = self.generate_key(key);
             let removed: usize = redis::cmd("DEL").arg(key).query_async(&mut conn).await?;
@@ -1010,31 +983,6 @@ mod async_redis {
         }
     }
 
-    #[cfg(feature = "time_stores")]
-    impl<K, V> CacheTtl for AsyncRedisCache<K, V> {
-        fn ttl(&self) -> Option<Duration> {
-            Some(*self.ttl.lock())
-        }
-        /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
-        /// they retain whatever TTL was applied when they were originally inserted.
-        fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-            let mut guard = self.ttl.lock();
-            let old = *guard;
-            *guard = ttl;
-            Some(old)
-        }
-        /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
-        fn unset_ttl(&mut self) -> Option<Duration> {
-            None
-        }
-        fn refresh_on_hit(&self) -> bool {
-            self.refresh.load(Ordering::Relaxed)
-        }
-        fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
-            self.refresh.swap(refresh, Ordering::Relaxed)
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1058,27 +1006,27 @@ mod async_redis {
             .await
             .unwrap();
 
-            assert!(c.cache_get(&1).await.unwrap().is_none());
+            assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
-            assert!(c.cache_set(1, 100).await.unwrap().is_none());
-            assert!(c.cache_get(&1).await.unwrap().is_some());
+            assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.async_cache_get(&1).await.unwrap().is_some());
 
             sleep(Duration::new(2, 500_000));
-            assert!(c.cache_get(&1).await.unwrap().is_none());
+            assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
             let old = ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(1)).unwrap();
             assert_eq!(2, old.as_secs());
-            assert!(c.cache_set(1, 100).await.unwrap().is_none());
-            assert!(c.cache_get(&1).await.unwrap().is_some());
+            assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.async_cache_get(&1).await.unwrap().is_some());
 
             sleep(Duration::new(1, 600_000));
-            assert!(c.cache_get(&1).await.unwrap().is_none());
+            assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
             ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(10)).unwrap();
-            assert!(c.cache_set(1, 100).await.unwrap().is_none());
-            assert!(c.cache_set(2, 100).await.unwrap().is_none());
-            assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
-            assert_eq!(c.cache_get(&1).await.unwrap().unwrap(), 100);
+            assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
+            assert!(c.async_cache_set(2, 100).await.unwrap().is_none());
+            assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
+            assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
         }
     }
 }

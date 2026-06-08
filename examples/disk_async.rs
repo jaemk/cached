@@ -1,5 +1,5 @@
 /*
-Async disk cache. `sled` has no async API, so `#[concurrent_cached(disk = true)]`
+Async disk cache. `redb` has no async API, so `#[concurrent_cached(disk = true)]`
 on an `async fn` runs the blocking I/O on tokio's blocking pool via
 `spawn_blocking` — it never stalls the async runtime.
 
@@ -21,7 +21,7 @@ enum ExampleError {
 
 // Distinct cache name so this example's on-disk store does not collide with the
 // synchronous `disk` example (default files under
-// $system_cache_dir/cached_disk_cache/).
+// $system_cache_dir/<exe>_cached_disk_cache/).
 #[concurrent_cached(
     disk = true,
     ttl = 30,

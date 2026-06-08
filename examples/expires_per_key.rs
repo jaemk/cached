@@ -45,7 +45,7 @@ impl Expires for MyValue {
 // when its stored value reports `is_expired() == true`.
 //
 // `expires = true` alone gives an unbounded ExpiringCache.
-// Add `size = N` to switch to an LRU-bounded ExpiringLruCache.
+// Add `max_size = N` to switch to an LRU-bounded ExpiringLruCache.
 // `key`/`convert` narrow the cache key to just user_id so expiry_offset_ms only
 // influences the token's lifetime, not which cache slot it occupies.
 #[cached(expires = true, key = "u64", convert = "{ user_id }")]

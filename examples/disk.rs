@@ -1,6 +1,6 @@
 /*
-Synchronous on-disk cache: `#[concurrent_cached(disk = true)]` backed by `sled`.
-Default cache files live under $system_cache_dir/cached_disk_cache/.
+Synchronous on-disk cache: `#[concurrent_cached(disk = true)]` backed by `redb`.
+Default cache files live under $system_cache_dir/<exe>_cached_disk_cache/.
 
 Run:
     cargo run --example disk --features "disk_store,proc_macro"
@@ -18,8 +18,9 @@ enum ExampleError {
     DiskError(String),
 }
 
-// When the macro constructs your DiskCache instance, the default
-// cache files will be stored under $system_cache_dir/cached_disk_cache/
+// When the macro constructs your RedbCache instance (the default disk engine;
+// `DiskCache` is a kept type alias), the default cache files will be stored
+// under $system_cache_dir/<exe>_cached_disk_cache/
 #[concurrent_cached(
     disk = true,
     ttl = 30,
@@ -46,4 +47,20 @@ fn main() {
     io::stdout().flush().unwrap();
     cached_sleep_secs(2).unwrap();
     println!("done");
+
+    // Cheap-writes-then-flush pattern: build a cache with
+    // `durable(false)` so each write commits with
+    // `Durability::None` (no per-write fsync). This trades per-write durability
+    // for write throughput; call `flush()` at a chosen point (periodically or
+    // before shutdown) to force a single durable commit that persists them all.
+    use cached::RedbCache;
+    let cache: RedbCache<u64, u64> = RedbCache::new("disk-example-flush")
+        .durable(false)
+        .build()
+        .unwrap();
+    for i in 0..3 {
+        cache.cache_set(i, i * 10).unwrap();
+    }
+    cache.flush().unwrap(); // one durable commit persisting the cheap writes above
+    println!("flushed 3 cheap writes to disk in a single durable commit");
 }

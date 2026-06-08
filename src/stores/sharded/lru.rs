@@ -154,7 +154,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(evictions),
-            size,
+            entry_count: size,
             capacity: Some(self.inner.total_capacity),
         }
     }
@@ -292,16 +292,36 @@ where
             }
             removed
         };
-        if let Some((ref key, ref value)) = removed {
-            if let Some(on_evict) = &self.inner.on_evict {
-                on_evict(key, value);
-            }
+        if let Some((ref key, ref value)) = removed
+            && let Some(on_evict) = &self.inner.on_evict
+        {
+            on_evict(key, value);
         }
         Ok(removed)
     }
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
+    }
+
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        self.clear();
+        Ok(())
+    }
+
+    fn cache_reset(&self) -> Result<(), Self::Error> {
+        self.clear();
+        ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    fn cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        for shard in self.inner.shards.iter() {
+            shard.hits.store(0, Ordering::Relaxed);
+            shard.misses.store(0, Ordering::Relaxed);
+            // Zero the per-shard inner store's metrics, including its eviction counter.
+            shard.lock.write().cache_reset_metrics();
+        }
+        Ok(())
     }
 
     /// No-op: this store has no TTL to refresh on hit. Always returns `false`.
@@ -319,20 +339,32 @@ where
 {
     type Error = std::convert::Infallible;
 
-    async fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
 
-    async fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_set(self, k, v)
     }
 
-    async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_remove(self, k)
     }
 
-    async fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+    async fn async_cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         ConcurrentCached::cache_remove_entry(self, k)
+    }
+
+    async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_clear(self)
+    }
+
+    async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset(self)
+    }
+
+    async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset_metrics(self)
     }
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
@@ -375,6 +407,16 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
     /// Eviction is enforced independently per shard. Each shard gets
     /// `ceil(size / shards)` entries, with a minimum of 16 per shard when
     /// `shards > 1` to avoid capacity fragmentation/eviction flakes.
+    ///
+    /// # Minimum capacity
+    ///
+    /// Because each shard reserves a minimum of **16** entries when `shards > 1`, the effective
+    /// total capacity is at least `shards * 16` and may **exceed** the requested `max_size` for
+    /// small values (e.g. `max_size = 10` with 8 shards yields an effective capacity of 128).
+    /// [`metrics()`](ShardedLruCacheBase::metrics)'s `capacity` and `entry_count` reflect the
+    /// actual (possibly larger) amount. Use [`per_shard_max_size`](Self::per_shard_max_size) or
+    /// `shards = 1` if you need a strict small cap.
+    ///
     /// Use [`per_shard_max_size`](Self::per_shard_max_size) for an exact per-shard cap.
     /// Mutually exclusive with [`per_shard_max_size`](Self::per_shard_max_size).
     #[doc(alias = "size")]

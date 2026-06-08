@@ -12,12 +12,12 @@ use std::collections::HashMap;
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
-use crate::{CacheMetrics, CacheTtl, ConcurrentCached, ConcurrentCloneCached};
+use crate::{CacheMetrics, ConcurrentCacheEvict, ConcurrentCached, ConcurrentCloneCached};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
 };
-use crate::stores::{BuildError, CacheEvict, TimedEntry};
+use crate::stores::{BuildError, TimedEntry};
 
 type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
@@ -176,7 +176,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(self.inner.evictions.load(Ordering::Relaxed)),
-            size,
+            entry_count: size,
             capacity: None,
         }
     }
@@ -341,30 +341,12 @@ where
     }
 }
 
-impl<K, V, H> CacheTtl for ShardedTtlCacheBase<K, V, H>
-where
-    K: Hash + Eq,
-    H: ShardHasher<K>,
-{
-    fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        ShardedTtlCacheBase::set_ttl(self, ttl)
-    }
-
-    fn unset_ttl(&mut self) -> Option<Duration> {
-        ShardedTtlCacheBase::unset_ttl(self)
-    }
-}
-
-impl<K, V, H> CacheEvict for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedTtlCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
     H: ShardHasher<K>,
 {
-    fn evict(&mut self) -> usize {
+    fn evict(&self) -> usize {
         ShardedTtlCacheBase::evict(self)
     }
 }
@@ -502,6 +484,25 @@ where
         Ok(Some(self.len()))
     }
 
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        self.clear();
+        Ok(())
+    }
+
+    fn cache_reset(&self) -> Result<(), Self::Error> {
+        self.clear();
+        ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    fn cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        for shard in self.inner.shards.iter() {
+            shard.hits.store(0, Ordering::Relaxed);
+            shard.misses.store(0, Ordering::Relaxed);
+        }
+        self.inner.evictions.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
         self.inner.refresh.swap(refresh, Ordering::Relaxed)
     }
@@ -528,20 +529,32 @@ where
 {
     type Error = std::convert::Infallible;
 
-    async fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
 
-    async fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_set(self, k, v)
     }
 
-    async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_remove(self, k)
     }
 
-    async fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+    async fn async_cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         ConcurrentCached::cache_remove_entry(self, k)
+    }
+
+    async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_clear(self)
+    }
+
+    async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset(self)
+    }
+
+    async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset_metrics(self)
     }
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
@@ -613,12 +626,6 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
-    }
-
-    /// Alias for [`refresh_on_hit`](Self::refresh_on_hit).
-    #[must_use]
-    pub fn refresh(self, refresh: bool) -> Self {
-        self.refresh_on_hit(refresh)
     }
 
     /// Set a custom shard-selection hasher, changing the type parameter.

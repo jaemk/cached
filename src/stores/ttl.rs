@@ -101,12 +101,6 @@ impl<K, V> TtlCacheBuilder<K, V> {
         self
     }
 
-    /// Alias for [`refresh_on_hit`](Self::refresh_on_hit).
-    #[must_use]
-    pub fn refresh(self, refresh: bool) -> Self {
-        self.refresh_on_hit(refresh)
-    }
-
     /// Set a callback to be invoked when an entry is evicted. The callback fires for:
     /// - TTL-expiry sweeps via [`evict`](TtlCache::evict).
     /// - Explicit [`cache_remove`](crate::Cached::cache_remove), even when the removed
@@ -236,20 +230,20 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(entry) = self.store.get_mut(key) {
-            if entry.instant.elapsed() < self.ttl {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                if self.refresh {
-                    entry.instant = Instant::now();
-                }
-                // SAFETY: `ptr` points into a HashMap entry obtained from `get_mut`.
-                // We return immediately without modifying the map, so the entry is
-                // not moved while the returned reference is live. The raw pointer is
-                // needed because the borrow checker cannot see that the `&mut entry`
-                // borrow ends here when `refresh` mutated `entry.instant` above.
-                let ptr = &entry.value as *const V;
-                return Some(unsafe { &*ptr });
+        if let Some(entry) = self.store.get_mut(key)
+            && entry.instant.elapsed() < self.ttl
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            if self.refresh {
+                entry.instant = Instant::now();
             }
+            // SAFETY: `ptr` points into a HashMap entry obtained from `get_mut`.
+            // We return immediately without modifying the map, so the entry is
+            // not moved while the returned reference is live. The raw pointer is
+            // needed because the borrow checker cannot see that the `&mut entry`
+            // borrow ends here when `refresh` mutated `entry.instant` above.
+            let ptr = &entry.value as *const V;
+            return Some(unsafe { &*ptr });
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         if let Some((k, entry)) = self.store.remove_entry(key) {
@@ -266,17 +260,17 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(entry) = self.store.get_mut(key) {
-            if entry.instant.elapsed() < self.ttl {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                if self.refresh {
-                    entry.instant = Instant::now();
-                }
-                // SAFETY: same as `cache_get` — entry is not moved between obtaining
-                // the pointer and returning, and `&mut self` prevents concurrent access.
-                let ptr = &mut entry.value as *mut V;
-                return Some(unsafe { &mut *ptr });
+        if let Some(entry) = self.store.get_mut(key)
+            && entry.instant.elapsed() < self.ttl
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            if self.refresh {
+                entry.instant = Instant::now();
             }
+            // SAFETY: same as `cache_get` — entry is not moved between obtaining
+            // the pointer and returning, and `&mut self` prevents concurrent access.
+            let ptr = &mut entry.value as *mut V;
+            return Some(unsafe { &mut *ptr });
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         if let Some((k, entry)) = self.store.remove_entry(key) {
@@ -463,10 +457,10 @@ impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(entry) = self.store.get(k) {
-            if entry.instant.elapsed() < self.ttl {
-                return Some(&entry.value);
-            }
+        if let Some(entry) = self.store.get(k)
+            && entry.instant.elapsed() < self.ttl
+        {
+            return Some(&entry.value);
         }
         None
     }

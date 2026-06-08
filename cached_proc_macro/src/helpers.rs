@@ -1,40 +1,15 @@
-use darling::ast::NestedMeta;
 use darling::{Error, FromMeta};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::__private::Span;
-use quote::{quote, quote_spanned};
+use quote::quote;
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
 use syn::token::Comma;
 use syn::{
     Attribute, Block, FnArg, GenericArgument, Pat, PatType, PathArguments, ReturnType, Signature,
     Type, parse_quote, parse_str,
 };
-
-/// Span of the named attribute (`name = …`) within a parsed attribute list, if present.
-/// Used to anchor the `size` → `max_size` deprecation warning at the exact attribute.
-fn named_meta_span(attr_args: &[NestedMeta], name: &str) -> Option<Span> {
-    attr_args.iter().find_map(|nm| match nm {
-        NestedMeta::Meta(meta) if meta.path().is_ident(name) => Some(meta.span()),
-        _ => None,
-    })
-}
-
-/// Tokens that emit a `deprecated` compiler warning nudging `size = N` users toward
-/// `max_size = N`, anchored at the user's `size` attribute. Expands to a zero-cost
-/// anonymous `const` item (valid at module or block scope) referencing the deprecated
-/// `cached::__DEPRECATED_SIZE_ATTR` marker. Returns an empty stream when the
-/// (non-deprecated) `max_size` spelling — or neither — was used.
-pub(super) fn size_attr_deprecation_notice(attr_args: &[NestedMeta]) -> TokenStream2 {
-    match named_meta_span(attr_args, "size") {
-        Some(span) => quote_spanned! {span=>
-            const _: () = ::cached::__DEPRECATED_SIZE_ATTR;
-        },
-        None => TokenStream2::new(),
-    }
-}
 
 /// Returns `true` if `output` is a `Result<…>` type (last path segment is
 /// exactly `"Result"` and carries type arguments).

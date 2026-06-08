@@ -119,12 +119,6 @@ impl<K, V, E> LruTtlCacheBuilder<K, V, E> {
         self.refresh = refresh;
         self
     }
-
-    /// Alias for [`refresh_on_hit`](Self::refresh_on_hit).
-    #[must_use]
-    pub fn refresh(self, refresh: bool) -> Self {
-        self.refresh_on_hit(refresh)
-    }
 }
 
 // on_evict transitions the builder from NoEvict → HasEvict
@@ -642,10 +636,10 @@ impl<K: Hash + Eq + Clone, V> CachedPeek<K, V> for LruTtlCache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(entry) = self.store.cache_peek(k) {
-            if entry.instant.elapsed() < self.ttl {
-                return Some(&entry.value);
-            }
+        if let Some(entry) = self.store.cache_peek(k)
+            && entry.instant.elapsed() < self.ttl
+        {
+            return Some(&entry.value);
         }
         None
     }

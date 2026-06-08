@@ -16,7 +16,7 @@ use crate::{CacheMetrics, ConcurrentCached, ConcurrentCloneCached, Expires};
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
 };
-use crate::CacheEvict;
+use crate::ConcurrentCacheEvict;
 use crate::stores::BuildError;
 
 type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
@@ -33,10 +33,10 @@ struct ExpiringInner<K, V, H> {
 /// A fully-concurrent, partitioned, unbounded in-memory cache with per-value expiry.
 ///
 /// Each value controls its own expiration by implementing [`Expires`]. Expired entries
-/// are checked on lookup and evicted on access or during explicit [`evict`](CacheEvict::evict) sweeps.
+/// are checked on lookup and evicted on access or during explicit [`evict`](ConcurrentCacheEvict::evict) sweeps.
 ///
 /// **Memory note:** This store is unbounded. Expired entries are only removed on access or
-/// when [`evict`](CacheEvict::evict) is called explicitly. For high-cardinality workloads,
+/// when [`evict`](ConcurrentCacheEvict::evict) is called explicitly. For high-cardinality workloads,
 /// call `evict()` periodically or use [`ShardedExpiringLruCache`](crate::ShardedExpiringLruCache) with a `max_size` bound.
 ///
 /// Wraps an `Arc` — `clone()` is an Arc-share (shared state), not a deep copy.
@@ -166,7 +166,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(self.inner.evictions.load(Ordering::Relaxed)),
-            size,
+            entry_count: size,
             capacity: None,
         }
     }
@@ -368,6 +368,25 @@ where
         Ok(Some(self.len()))
     }
 
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        self.clear();
+        Ok(())
+    }
+
+    fn cache_reset(&self) -> Result<(), Self::Error> {
+        self.clear();
+        ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    fn cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        for shard in self.inner.shards.iter() {
+            shard.hits.store(0, Ordering::Relaxed);
+            shard.misses.store(0, Ordering::Relaxed);
+        }
+        self.inner.evictions.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// No-op: this store uses value-defined expiry, not a refreshable TTL. Always returns `false`.
     fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
         false
@@ -383,20 +402,32 @@ where
 {
     type Error = std::convert::Infallible;
 
-    async fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
 
-    async fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_set(self, k, v)
     }
 
-    async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_remove(self, k)
     }
 
-    async fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+    async fn async_cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         ConcurrentCached::cache_remove_entry(self, k)
+    }
+
+    async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_clear(self)
+    }
+
+    async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset(self)
+    }
+
+    async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset_metrics(self)
     }
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
@@ -408,13 +439,13 @@ where
     }
 }
 
-impl<K, V, H> CacheEvict for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedExpiringCacheBase<K, V, H>
 where
     K: Clone + Hash + Eq,
     V: Expires,
     H: ShardHasher<K>,
 {
-    fn evict(&mut self) -> usize {
+    fn evict(&self) -> usize {
         ShardedExpiringCacheBase::evict(self)
     }
 }

@@ -1,9 +1,9 @@
 use cached::macros::concurrent_cached;
 
 #[concurrent_cached(
-    redis = true,
-    ttl = 60,
-    size = 100,
+    disk = true,
+    disk_dir = "/tmp/cached-trybuild",
+    max_size = 100,
     ty = "cached::UnboundCache<i32, i32>",
     map_error = r#"|e| format!("{:?}", e)"#
 )]

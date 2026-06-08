@@ -32,7 +32,7 @@ use {super::CachedAsync, std::future::Future};
 /// cache.cache_set(2, Token { value: "stale".into(), expired: true });
 /// assert!(cache.cache_get(&2).is_none()); // expired -> not returned
 ///
-/// // LRU-bounded store (`#[cached(expires = true, size = N)]`)
+/// // LRU-bounded store (`#[cached(expires = true, max_size = N)]`)
 /// let mut lru: ExpiringLruCache<u32, Token> = ExpiringLruCache::builder().max_size(8).build().unwrap();
 /// lru.cache_set(3, Token { value: "live".into(), expired: false });
 /// assert!(lru.cache_get(&3).is_some());

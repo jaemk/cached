@@ -5,7 +5,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    Block, Expr, ExprClosure, GenericArgument, Ident, ItemFn, ReturnType, Type, parse_macro_input,
+    Block, ExprClosure, GenericArgument, Ident, ItemFn, ReturnType, Type, parse_macro_input,
     parse_str,
 };
 
@@ -29,6 +29,9 @@ struct ConcurrentCachedArgs {
     time: Option<u64>,
     #[darling(default)]
     time_refresh: Option<bool>,
+    /// Removed alias for `max_size`; kept only to emit a helpful rename error.
+    #[darling(default)]
+    size: Option<usize>,
     #[darling(default)]
     refresh: Option<bool>,
     #[darling(default)]
@@ -52,15 +55,10 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     create: Option<String>,
     #[darling(default)]
-    sync_to_disk_on_cache_change: Option<bool>,
-    #[darling(default)]
-    connection_config: Option<String>,
+    durable: Option<bool>,
     /// Total LRU capacity for the default in-memory sharded store.
-    /// Only meaningful when `redis=false`, `disk=false`, and `create` is not set.
-    #[darling(default)]
-    size: Option<usize>,
-    /// Alias for `size` — sets the maximum number of cached entries (the LRU bound).
     /// Mirrors the `max_size` builder/constructor naming on the cache stores.
+    /// Only meaningful when `redis=false`, `disk=false`, and `create` is not set.
     #[darling(default)]
     max_size: Option<usize>,
     /// Number of shards for the default in-memory sharded store.
@@ -74,20 +72,8 @@ struct ConcurrentCachedArgs {
 /// When a `create` block is supplied the user fully constructs the store, so
 /// every store-builder attribute the macro would otherwise apply is dropped.
 /// Reject those attributes with a precise message instead of silently ignoring
-/// them — otherwise `disk_dir` / `sync_to_disk_on_cache_change` /
-/// `connection_config` (and `ttl` / `refresh` / `cache_prefix_block`) look
-/// applied but are not.
-/// Returns the attribute name the user actually wrote for the LRU bound.
-/// `max_size` is an alias for `size` and is reconciled into `size` early in
-/// expansion, so diagnostics must consult `max_size` to echo the user's wording.
-fn size_attr_name(args: &ConcurrentCachedArgs) -> &'static str {
-    if args.max_size.is_some() {
-        "max_size"
-    } else {
-        "size"
-    }
-}
-
+/// them — otherwise `disk_dir` / `durable` (and `ttl` /
+/// `refresh` / `cache_prefix_block`) look applied but are not.
 fn check_create_conflicts(
     args: &ConcurrentCachedArgs,
     span: proc_macro2::Span,
@@ -105,14 +91,11 @@ fn check_create_conflicts(
     if args.disk_dir.is_some() {
         conflicting.push("disk_dir");
     }
-    if args.connection_config.is_some() {
-        conflicting.push("connection_config");
+    if args.durable.is_some() {
+        conflicting.push("durable");
     }
-    if args.sync_to_disk_on_cache_change.is_some() {
-        conflicting.push("sync_to_disk_on_cache_change");
-    }
-    if args.size.is_some() {
-        conflicting.push(size_attr_name(args));
+    if args.max_size.is_some() {
+        conflicting.push("max_size");
     }
     if args.shards.is_some() {
         conflicting.push("shards");
@@ -180,25 +163,12 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if let Err(e) = reject_cached_only_attrs(&attr_args) {
         return e.to_compile_error().into();
     }
-    let mut args = match ConcurrentCachedArgs::from_list(&attr_args) {
+    let args = match ConcurrentCachedArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
             return TokenStream::from(e.write_errors());
         }
     };
-    // `max_size` is an alias for `size`; reconcile them into `size` so the rest
-    // of the macro only has to consult one field. Specifying both is ambiguous.
-    if args.size.is_some() && args.max_size.is_some() {
-        return TokenStream::from(
-            darling::Error::custom(
-                "cannot specify both `size` and `max_size` — they are aliases; use one",
-            )
-            .write_errors(),
-        );
-    }
-    args.size = args.size.or(args.max_size);
-    // Nudge `size = N` users toward `max_size = N` (empty unless the deprecated spelling was used).
-    let size_deprecation = size_attr_deprecation_notice(&attr_args);
     let input = parse_macro_input!(input as ItemFn);
 
     // pull out the parts of the input
@@ -238,6 +208,15 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         return syn::Error::new(
             fn_ident.span(),
             "`time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.size.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`size` was renamed to `max_size`; use `max_size = ...`",
         )
         .to_compile_error()
         .into();
@@ -606,13 +585,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            if args.size.is_some() {
+            if args.max_size.is_some() {
                 return syn::Error::new(
                     fn_ident.span(),
-                    format!(
-                        "`{}` only applies to the default in-memory store, not `redis = true`",
-                        size_attr_name(&args)
-                    ),
+                    "`max_size` only applies to the default in-memory store, not `redis = true`",
                 )
                 .to_compile_error()
                 .into();
@@ -637,13 +613,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            if args.size.is_some() {
+            if args.max_size.is_some() {
                 return syn::Error::new(
                     fn_ident.span(),
-                    format!(
-                        "`{}` only applies to the default in-memory store, not `disk = true`",
-                        size_attr_name(&args)
-                    ),
+                    "`max_size` only applies to the default in-memory store, not `disk = true`",
                 )
                 .to_compile_error()
                 .into();
@@ -827,7 +800,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             if asyncness.is_some() {
                 quote! {
                     if let Ok(result) = &result {
-                        ::cached::ConcurrentCachedAsync::cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
+                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
                     }
                 }
             } else {
@@ -845,7 +818,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             if asyncness.is_some() {
                 quote! {
                     if let Some(result) = &result {
-                        ::cached::ConcurrentCachedAsync::cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
+                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
                     }
                 }
             } else {
@@ -862,7 +835,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (
             if asyncness.is_some() {
                 quote! {
-                    ::cached::ConcurrentCachedAsync::cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
+                    ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
                 }
             } else {
                 quote! {
@@ -877,7 +850,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             if asyncness.is_some() {
                 quote! {
                     if let Ok(result) = &result {
-                        ::cached::ConcurrentCachedAsync::cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
+                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
                     }
                 }
             } else {
@@ -895,7 +868,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             if asyncness.is_some() {
                 quote! {
                     if let Some(result) = &result {
-                        ::cached::ConcurrentCachedAsync::cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
+                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
                     }
                 }
             } else {
@@ -913,7 +886,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (
             if asyncness.is_some() {
                 quote! {
-                    ::cached::ConcurrentCachedAsync::cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
+                    ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
                 }
             } else {
                 quote! {
@@ -950,7 +923,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 _ => result,
             };
             if let Ok(ok_val) = &result {
-                ::cached::ConcurrentCachedAsync::cache_set(cache, key.clone(), ok_val.clone()).await #cache_set_unwrap_async;
+                ::cached::ConcurrentCachedAsync::async_cache_set(cache, key.clone(), ok_val.clone()).await #cache_set_unwrap_async;
             }
             result
         }
@@ -1019,7 +992,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let result = inner(#(#input_names),*).await;
             let cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
             if let Ok(ok_val) = &result {
-                ::cached::ConcurrentCachedAsync::cache_set(cache, key.clone(), ok_val.clone()).await #cache_set_unwrap_async;
+                ::cached::ConcurrentCachedAsync::async_cache_set(cache, key.clone(), ok_val.clone()).await #cache_set_unwrap_async;
             }
             result
         }
@@ -1047,7 +1020,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             {
                 // check if the result is cached
                 let cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
-                if let Some(result) = ::cached::ConcurrentCachedAsync::cache_get(cache, &key).await #cache_get_unwrap_async {
+                if let Some(result) = ::cached::ConcurrentCachedAsync::async_cache_get(cache, &key).await #cache_get_unwrap_async {
                     #return_cache_block
                 }
             }
@@ -1070,7 +1043,6 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            #size_deprecation
             // Cached static
             #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::cached::async_sync::OnceCell<#cache_ty> = ::cached::async_sync::OnceCell::const_new();
@@ -1091,7 +1063,6 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            #size_deprecation
             // Cached static
             #[doc = #cache_ident_doc]
             #visibility static #cache_ident: ::std::sync::LazyLock<#cache_ty> = ::std::sync::LazyLock::new(|| #cache_create);
@@ -1122,6 +1093,30 @@ fn get_redis_cache_type_and_create(
     cache_value_ty: &proc_macro2::TokenStream,
     is_async: bool,
 ) -> Result<(proc_macro2::TokenStream, proc_macro2::TokenStream), syn::Error> {
+    // `durable` / `disk_dir` configure the redb disk store only. Reject them on the
+    // redis path rather than silently ignoring them (the in-memory and `create`
+    // paths reject them too).
+    let mut disk_only = Vec::new();
+    if args.disk_dir.is_some() {
+        disk_only.push("disk_dir");
+    }
+    if args.durable.is_some() {
+        disk_only.push("durable");
+    }
+    if !disk_only.is_empty() {
+        let list = disk_only
+            .iter()
+            .map(|a| format!("`{a}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(syn::Error::new(
+            cache_ident.span(),
+            format!(
+                "{list} can only be used with `disk = true` (the redb store), not the redis path"
+            ),
+        ));
+    }
+
     let cache_ty = match &args.ty {
         Some(ty) => {
             let ty = parse_str::<Type>(ty).map_err(|e| {
@@ -1170,10 +1165,10 @@ fn get_redis_cache_type_and_create(
                 match args.refresh {
                     Some(refresh) => {
                         if is_async {
-                            quote! { cached::AsyncRedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).refresh(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                            quote! { cached::AsyncRedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                         } else {
                             quote! {
-                                cached::RedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).refresh(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                                cached::RedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                             }
                         }
                     }
@@ -1218,20 +1213,8 @@ fn get_disk_cache_type_and_create(
             quote! { #ty }
         }
         None => {
-            quote! { cached::DiskCache<#cache_key_ty, #cache_value_ty> }
+            quote! { cached::RedbCache<#cache_key_ty, #cache_value_ty> }
         }
-    };
-    let connection_config = match &args.connection_config {
-        Some(connection_config) => {
-            let connection_config = parse_str::<Expr>(connection_config).map_err(|e| {
-                syn::Error::new(
-                    fn_ident.span(),
-                    format!("unable to parse connection_config block: {e}"),
-                )
-            })?;
-            Some(quote! { #connection_config })
-        }
-        None => None,
     };
     let cache_create = match &args.create {
         Some(cache_create) => {
@@ -1246,7 +1229,7 @@ fn get_disk_cache_type_and_create(
         }
         None => {
             let create = quote! {
-                cached::DiskCache::new(#cache_name)
+                cached::RedbCache::new(#cache_name)
             };
             let create = match args.ttl {
                 None => create,
@@ -1260,23 +1243,15 @@ fn get_disk_cache_type_and_create(
                 None => create,
                 Some(refresh) => {
                     quote! {
-                        (#create).refresh(#refresh)
+                        (#create).refresh_on_hit(#refresh)
                     }
                 }
             };
-            let create = match args.sync_to_disk_on_cache_change {
+            let create = match args.durable {
                 None => create,
-                Some(sync_to_disk_on_cache_change) => {
+                Some(durable) => {
                     quote! {
-                        (#create).sync_to_disk_on_cache_change(#sync_to_disk_on_cache_change)
-                    }
-                }
-            };
-            let create = match connection_config {
-                None => create,
-                Some(connection_config) => {
-                    quote! {
-                        (#create).connection_config(#connection_config)
+                        (#create).durable(#durable)
                     }
                 }
             };
@@ -1286,7 +1261,7 @@ fn get_disk_cache_type_and_create(
                     quote! { (#create).disk_directory(#disk_dir) }
                 }
             };
-            quote! { (#create).build().unwrap_or_else(|e| panic!("error constructing DiskCache in #[concurrent_cached] macro: {e}")) }
+            quote! { (#create).build().unwrap_or_else(|e| panic!("error constructing RedbCache in #[concurrent_cached] macro: {e}")) }
         }
     };
     Ok((cache_ty, cache_create))
@@ -1294,11 +1269,11 @@ fn get_disk_cache_type_and_create(
 
 /// Default in-memory sharded store selector.
 ///
-/// Selects one of the four `Sharded*Cache` variants based on the `size` / `ttl`
+/// Selects one of the four `Sharded*Cache` variants based on the `max_size` / `ttl`
 /// attributes supplied to the macro:
 ///
-/// | size | ttl | expires | store |
-/// |------|-----|---------|-------|
+/// | max_size | ttl | expires | store |
+/// |----------|-----|---------|-------|
 /// |  no  |  no |   no    | `ShardedCache` |
 /// | yes  |  no |   no    | `ShardedLruCache` |
 /// |  no  | yes |   no    | `ShardedTtlCache`         (requires `time_stores` feature on `cached`) |
@@ -1317,11 +1292,8 @@ fn get_sharded_cache_type_and_create(
     if matches!(args.shards, Some(0)) {
         return Err(syn::Error::new(fn_ident.span(), "`shards` must be >= 1"));
     }
-    if matches!(args.size, Some(0)) {
-        return Err(syn::Error::new(
-            fn_ident.span(),
-            format!("`{}` must be >= 1", size_attr_name(args)),
-        ));
+    if matches!(args.max_size, Some(0)) {
+        return Err(syn::Error::new(fn_ident.span(), "`max_size` must be >= 1"));
     }
     if matches!(args.ttl, Some(0)) {
         return Err(syn::Error::new(fn_ident.span(), "`ttl` must be >= 1"));
@@ -1341,11 +1313,8 @@ fn get_sharded_cache_type_and_create(
     if args.disk_dir.is_some() {
         conflicting.push("disk_dir");
     }
-    if args.connection_config.is_some() {
-        conflicting.push("connection_config");
-    }
-    if args.sync_to_disk_on_cache_change.is_some() {
-        conflicting.push("sync_to_disk_on_cache_change");
+    if args.durable.is_some() {
+        conflicting.push("durable");
     }
     if !conflicting.is_empty() {
         let list = conflicting
@@ -1363,7 +1332,7 @@ fn get_sharded_cache_type_and_create(
     }
 
     let (cache_ty, cache_create) = if args.expires {
-        match args.size {
+        match args.max_size {
             Some(size) => {
                 let ty =
                     quote! { ::cached::ShardedExpiringLruCache<#cache_key_ty, #cache_value_ty> };
@@ -1391,7 +1360,7 @@ fn get_sharded_cache_type_and_create(
             }
         }
     } else {
-        match (args.size, args.ttl) {
+        match (args.max_size, args.ttl) {
             (None, None) => {
                 let ty = quote! { ::cached::ShardedCache<#cache_key_ty, #cache_value_ty> };
                 let create = match args.shards {

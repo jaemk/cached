@@ -244,10 +244,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         let removed = self.store.remove_entry(k);
-        if let Some((ref stored_k, ref v)) = removed {
-            if let Some(on_evict) = &self.on_evict {
-                on_evict(stored_k, v);
-            }
+        if let Some((ref stored_k, ref v)) = removed
+            && let Some(on_evict) = &self.on_evict
+        {
+            on_evict(stored_k, v);
         }
         removed
     }

@@ -244,7 +244,7 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `redis_smol` | Async Redis backend (smol); implies `redis_store` + `async` |
 | `redis_connection_manager` | Redis connection-manager support |
 | `redis_async_cache` | Redis client-side caching over RESP3 for async caches |
-| `disk_store` | Disk-backed cache via `sled` |
+| `disk_store` | Disk-backed cache via `redb` |
 | `wasm` | WASM compatibility |
 
 ---

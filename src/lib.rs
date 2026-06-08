@@ -103,7 +103,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
 | Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
 
-On `#[cached]` and `#[concurrent_cached]`, the preferred attribute is `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The legacy `size = N` is still accepted as a deprecated alias, but emits a deprecation warning nudging you toward `max_size = N`. Either spelling works; setting both on one annotation is a compile error.
+On `#[cached]` and `#[concurrent_cached]`, the LRU bound is set with `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The `size = N` spelling — a deprecated alias in 2.x — has been removed; only `max_size = N` is accepted.
 
 For the default in-memory sharded stores, `#[concurrent_cached]` accepts any return type — plain values, `Option<T>`, or `Result<T, E>`.
 Plain values are always cached as-is. `Option<T>` returns skip caching `None` by default; use `cache_none = true` to also cache `None` values. `Result<T, E>` only caches `Ok` values; `Err` is returned without being stored. Use `cache_err = true` to also cache `Err` values.
@@ -148,9 +148,10 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   managing these stores directly must add their own synchronization when sharing across threads.
   `Sharded*` stores are internally synchronized (per-shard `parking_lot::RwLock`) and implement
   `ConcurrentCached`/`ConcurrentCachedAsync` — no external lock is needed.
-  Direct sharded-store method syntax is synchronous because these stores expose inherent
-  `cache_get` / `cache_set` / `cache_remove` helpers. Use Universal Function Call Syntax (UFCS)
-  for async trait calls (e.g., `cached::ConcurrentCachedAsync::cache_get(&*STORE, &key).await.expect("ShardedCache is infallible")`), where `&*STORE` dereferences a `LazyLock<Store>` or `OnceCell<Store>` static to obtain a `&Store` reference.
+  The synchronous `cache_get` / `cache_set` / `cache_remove` operations come from the
+  `ConcurrentCached` trait (it must be in scope — `use cached::ConcurrentCached;` or
+  `use cached::prelude::*;`), not from inherent methods. The async trait operations are
+  `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedCache is infallible")`).
 - `Cached::get` (and its legacy alias `cache_get`) requires mutable access because some
   stores update recency, expiration timestamps, or metrics during reads.
 - Expired values can remain allocated until a mutating operation, `evict`, or
@@ -233,9 +234,12 @@ For concurrent (multi-thread, no external lock) use, the sharded equivalents [`S
 > expired entries when the same key is accessed again. `CachedIter::iter()` (implemented on the
 > non-sharded `ExpiringCache` / `ExpiringLruCache` only, not on the sharded variants) filters
 > expired entries from the iterator but does not remove them from the map. For high-cardinality workloads,
-> call `evict()` periodically (bring [`CacheEvict`] into scope: `use cached::CacheEvict;`; note
-> that `evict()` on sharded TTL and expiring stores requires `K: Clone`) or
-> prefer `ExpiringLruCache` / `ShardedExpiringLruCache` with a `max_size` bound.
+> call `evict()` periodically — on the single-owner `ExpiringCache` via [`CacheEvict`]
+> (`use cached::CacheEvict;`, `&mut self`), and on the sharded `ShardedExpiringCache` via
+> [`ConcurrentCacheEvict`] (`use cached::ConcurrentCacheEvict;`, `&self`) or its inherent
+> `evict(&self)` method; note that `evict()` on sharded TTL and expiring stores requires
+> `K: Clone`. Alternatively, prefer `ExpiringLruCache` / `ShardedExpiringLruCache` with a
+> `max_size` bound.
 
 ```rust
 use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
@@ -375,7 +379,7 @@ enum ExampleError {
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
         AsyncRedisCache::builder("cached_redis_prefix", Duration::from_secs(1))
-            .refresh(true)
+            .refresh_on_hit(true)
             .build()
             .await
             .expect("error building example redis cache")
@@ -391,7 +395,7 @@ async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
 
 ```rust,no_run,ignore
 use cached::macros::concurrent_cached;
-use cached::DiskCache;
+use cached::RedbCache;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -505,16 +509,19 @@ use std::future::Future;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "redis_smol", feature = "redis_tokio"))))]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
-    BuildError, CacheEvict, DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder,
-    ExpiringLruCache, ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, ShardHasher,
-    ShardedCache, ShardedCacheBase, ShardedCacheBuilder, ShardedExpiringCache,
+    BuildError, CacheEvict, ConcurrentCacheEvict, DefaultShardHasher, Expires, ExpiringCache,
+    ExpiringCacheBuilder, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache, LruCacheBuilder,
+    ShardHasher, ShardedCache, ShardedCacheBase, ShardedCacheBuilder, ShardedExpiringCache,
     ShardedExpiringCacheBase, ShardedExpiringCacheBuilder, ShardedExpiringLruCache,
     ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder, ShardedLruCache,
     ShardedLruCacheBase, ShardedLruCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
-pub use stores::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError};
+pub use stores::{
+    DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError, RedbCache,
+    RedbCacheBuildError, RedbCacheBuilder, RedbCacheError,
+};
 #[cfg(feature = "time_stores")]
 #[doc(hidden)]
 pub use stores::{HasEvict, NoEvict};
@@ -554,15 +561,29 @@ pub mod sync_sync {
     pub use parking_lot::RwLock;
 }
 
-/// Internal marker referenced by `#[cached(size = N)]` / `#[concurrent_cached(size = N)]`
-/// expansions to surface a deprecation warning steering users to the `max_size` spelling.
-/// Not part of the public API.
-#[doc(hidden)]
-#[deprecated(
-    since = "2.0.0",
-    note = "the `size` macro attribute is deprecated; use `max_size` instead (same meaning)"
-)]
-pub const __DEPRECATED_SIZE_ATTR: () = ();
+/// Convenience re-exports of the commonly-needed cache traits.
+///
+/// Glob-import this module to bring the public cache traits into scope in one line —
+/// `use cached::prelude::*;` — instead of importing each trait individually. This is
+/// especially handy for the `ConcurrentCached` family, whose methods (`cache_get`,
+/// `cache_set`, …) are trait methods and require the trait to be in scope to call.
+///
+/// Only traits are re-exported here; concrete store types are intentionally omitted to
+/// avoid name clashes. Import those directly (e.g. `use cached::ShardedCache;`).
+pub mod prelude {
+    pub use crate::{
+        CacheEvict, Cached, CachedIter, CachedPeek, CachedRead, CloneCached, ConcurrentCacheEvict,
+        ConcurrentCached, ConcurrentCloneCached, Expires,
+    };
+
+    #[cfg(feature = "time_stores")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+    pub use crate::CacheTtl;
+
+    #[cfg(feature = "async_core")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
+    pub use crate::{CachedAsync, ConcurrentCachedAsync};
+}
 
 /// Cache operations
 ///
@@ -723,6 +744,14 @@ pub trait Cached<K, V> {
     // ── Ergonomic aliases (new preferred API) ────────────────────────────
 
     /// Retrieve a cached value. Delegates to [`cache_get`](Cached::cache_get).
+    ///
+    /// # Mutability
+    ///
+    /// Like [`cache_get`](Cached::cache_get), this takes `&mut self` (unlike
+    /// [`HashMap::get`](std::collections::HashMap::get)) because some stores update recency
+    /// or refresh TTL on read. For a `&self` read where the store supports it, use
+    /// [`CachedPeek::cache_peek`] (non-mutating, no recency/TTL/metrics updates) or
+    /// [`CachedRead::cache_get_read`] (shared-lock read preserving normal read semantics).
     fn get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -861,7 +890,7 @@ pub trait Cached<K, V> {
             hits: self.cache_hits(),
             misses: self.cache_misses(),
             evictions: self.cache_evictions(),
-            size: self.cache_size(),
+            entry_count: self.cache_size(),
             capacity: self.cache_capacity(),
         }
     }
@@ -914,7 +943,7 @@ pub struct CacheMetrics {
     /// Number of entries evicted from the cache, if tracked.
     pub evictions: Option<u64>,
     /// Current number of entries in the cache.
-    pub size: usize,
+    pub entry_count: usize,
     /// Maximum capacity, if bounded.
     pub capacity: Option<usize>,
 }
@@ -1061,19 +1090,18 @@ pub trait ConcurrentCloneCached<K, V> {
     fn cache_get_with_expiry_status(&self, key: &K) -> (Option<V>, bool);
 }
 
-/// TTL management for time-bounded cache stores.
+/// TTL management for single-owner time-bounded cache stores.
 ///
-/// Implemented by [`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
-/// [`ShardedTtlCache`], [`ShardedLruTtlCache`], [`RedisCache`], and [`DiskCache`].
+/// Implemented by the `&mut self` single-owner in-memory stores [`TtlCache`],
+/// [`LruTtlCache`], and [`TtlSortedCache`].
 ///
-/// This trait requires the `time_stores` feature. `DiskCache` implements it only when
-/// both `disk_store` and `time_stores` features are enabled.
+/// Internally-synchronized concurrent stores (the sharded TTL stores, `RedisCache`,
+/// `AsyncRedisCache`, and `RedbCache`) do **not** implement this trait. They are held
+/// behind an `Arc`/`static` and cannot offer `&mut self`. Manage their TTL through the
+/// `&self` methods on [`ConcurrentCached`]/[`ConcurrentCachedAsync`]
+/// (`ttl`/`set_ttl`/`unset_ttl`/`set_refresh_on_hit`) instead.
 ///
-/// > **Note for `DiskCache` users**: if you disable the `default` feature set and
-/// > enable only `disk_store`, the `time_stores` feature will not be present and
-/// > `DiskCache` will not implement this trait — `set_ttl`, `ttl`, and related methods
-/// > will be unavailable. Re-enable `time_stores` (or use the `default` feature set)
-/// > to restore them.
+/// This trait requires the `time_stores` feature.
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub trait CacheTtl {
@@ -1191,7 +1219,7 @@ pub trait CachedAsync<K, V> {
 
 /// Cache operations on a store that manages its own synchronization (a shared,
 /// `&self` API with owned return values and a fallible `Error`). Implemented by
-/// `RedisCache`/`DiskCache`; implement it directly for a custom concurrent or
+/// `RedisCache`/`RedbCache`; implement it directly for a custom concurrent or
 /// IO-backed store (this is the ~10-line pattern the 1.0 migration guide
 /// recommends in place of the removed `InMemoryAdapter`):
 ///
@@ -1225,23 +1253,17 @@ pub trait CachedAsync<K, V> {
 /// assert_eq!(store.cache_get(&"k".to_string()).expect("MyStore is infallible"), Some(7));
 /// assert_eq!(store.cache_remove(&"k".to_string()).expect("MyStore is infallible"), Some(7));
 /// ```
-/// **Direct-call syntax warning**:
+/// **Async counterpart**:
 ///
-/// Both `ConcurrentCached` and `ConcurrentCachedAsync` define identical method names for their core
-/// operations (`cache_get`, `cache_set`, `cache_remove`, `cache_delete`). Sharded in-memory stores
-/// also expose synchronous inherent helpers with those names, so method-call syntax on a sharded
-/// store resolves to the sync helper even if only `ConcurrentCachedAsync` is imported.
-///
-/// To resolve this, use Universal Function Call Syntax (UFCS) when calling these methods manually:
-/// ```rust,ignore
-/// ::cached::ConcurrentCached::cache_get(&cache, &key)
-/// ```
+/// The asynchronous [`ConcurrentCachedAsync`] trait names its core operations with an `async_`
+/// prefix (`async_cache_get`, `async_cache_set`, …) so they never collide with these synchronous
+/// operations when both traits are imported.
 ///
 /// **Why key-lookup methods take `&K` instead of `&Q` (`Borrow<Q>`)**:
 ///
 /// [`Cached`] uses `Borrow<Q>` for all key-lookup methods (e.g. look up a `String` key with a
 /// `&str`). `ConcurrentCached` cannot follow the same pattern because its implementors include
-/// external stores (`DiskCache`, `RedisCache`) that must *serialize* the key in order to perform
+/// external stores (`RedbCache`, `RedisCache`) that must *serialize* the key in order to perform
 /// a lookup. A generic `&Q` where only `K: Borrow<Q>` carries no serialization guarantee, and
 /// adding a `Q: Serialize` bound to the trait would bleed a serde dependency into every
 /// `ConcurrentCached` implementation. All key-lookup methods therefore take `&K` directly.
@@ -1287,10 +1309,11 @@ pub trait ConcurrentCached<K, V> {
     ///   physically deleted, and `None` only when the key was not in the store at all
     ///
     /// This expired-but-present guarantee holds for the in-memory stores (sharded and
-    /// non-sharded). Stores that enforce TTL server-side — `RedisCache` / `AsyncRedisCache` —
-    /// cannot read the value of a TTL-expired key and so return `None` for it, exactly like
-    /// `cache_remove`; see ["Note on Redis and external stores"](#note-on-redis-and-external-stores)
-    /// below.
+    /// non-sharded) and for `RedbCache`, which enforces TTL client-side and can still read
+    /// the stored value of an expired entry. Stores that enforce TTL server-side —
+    /// `RedisCache` / `AsyncRedisCache` — cannot read the value of a TTL-expired key and so
+    /// return `None` for it, exactly like `cache_remove`; see
+    /// ["Note on Redis and external stores"](#note-on-redis-and-external-stores) below.
     ///
     /// Removing any present entry fires the store's `on_evict` callback (if set) and,
     /// for stores that track evictions, increments the `evictions` metric.
@@ -1298,7 +1321,7 @@ pub trait ConcurrentCached<K, V> {
     /// # Note on `K: Clone`
     ///
     /// Implementations that reconstruct the stored key from the lookup key — such as
-    /// `DiskCache` and `RedisCache` — require `K: Clone` to produce the stored-key half
+    /// `RedbCache` and `RedisCache` — require `K: Clone` to produce the stored-key half
     /// of the returned tuple.  Sharded in-memory stores return the physically stored key
     /// and do not impose this bound.
     ///
@@ -1384,8 +1407,11 @@ pub trait ConcurrentCached<K, V> {
     /// stores), and `Ok(None)` for stores that cannot answer without an expensive or
     /// semantically-ambiguous query — `RedisCache` / `AsyncRedisCache` (the key count is a
     /// server-side `DBSIZE`/`SCAN` over a shared keyspace, not just this cache's entries) and
-    /// `DiskCache` (an `O(n)` scan of the backing tree). Those stores return `Ok(None)` rather
-    /// than pay that cost implicitly; query the backend directly if you need their size.
+    /// `RedbCache` (an `O(n)` scan of the backing table). Those stores return `Ok(None)` rather
+    /// than pay that cost implicitly. For `RedisCache` / `AsyncRedisCache` you can query the server
+    /// directly if you need a count; `RedbCache` holds an exclusive lock on its file and exposes no
+    /// live database handle (`RedbCache::disk_path()` gives the file location for offline inspection,
+    /// but the database cannot be opened by a second instance while the cache is live).
     ///
     /// This is the concurrent analogue of [`Cached::cache_size`], widened to
     /// `Result<Option<usize>, _>` because concurrent stores may be fallible and may not know
@@ -1398,10 +1424,56 @@ pub trait ConcurrentCached<K, V> {
         Ok(None)
     }
 
+    /// Remove all cached entries while preserving capacity allocation and metrics.
+    ///
+    /// The concurrent analogue of [`Cached::cache_clear`]. The default implementation is a
+    /// **no-op that does nothing and returns `Ok(())`**: `RedisCache` / `AsyncRedisCache` keep
+    /// this default because clearing a shared external keyspace is expensive and potentially
+    /// destructive — calling `cache_clear()` on them succeeds without removing anything. The
+    /// internally-synchronized sharded in-memory stores override this to clear every shard, and
+    /// `RedbCache` overrides it to clear its (local, single-file) redb table. To also reset metrics, call
+    /// [`cache_reset_metrics`](ConcurrentCached::cache_reset_metrics), or use
+    /// [`cache_reset`](ConcurrentCached::cache_reset) to do both at once.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Reset all entries and metrics (hits, misses, evictions) to zero.
+    ///
+    /// The concurrent analogue of [`Cached::cache_reset`]. Store configuration — capacity,
+    /// TTL, and `on_evict` callbacks — is preserved. The default is a **no-op** for the same
+    /// reason as [`cache_clear`](ConcurrentCached::cache_clear); the sharded in-memory stores
+    /// override it to clear every shard and zero their metrics, and `RedbCache` overrides it to
+    /// clear its redb table (it tracks no in-memory metrics). To reset entries without
+    /// resetting metrics, use [`cache_clear`](ConcurrentCached::cache_clear).
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    fn cache_reset(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Reset hit/miss/eviction counters to zero without removing entries.
+    ///
+    /// The concurrent analogue of [`Cached::cache_reset_metrics`]. The default is a **no-op**;
+    /// the sharded in-memory stores override it to zero their per-shard metrics.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    fn cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
     ///
     /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
-    /// `AtomicBool`; `RedisCache` / `DiskCache` use interior mutability), so this is callable
+    /// `AtomicBool`; `RedisCache` / `RedbCache` use interior mutability), so this is callable
     /// through a shared reference such as an `Arc` or a `LazyLock` static.
     fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 
@@ -1430,39 +1502,53 @@ pub trait ConcurrentCached<K, V> {
 
 /// **Direct-call syntax warning**:
 ///
-/// Both `ConcurrentCached` and `ConcurrentCachedAsync` define identical method names for their core
-/// operations (`cache_get`, `cache_set`, `cache_remove`, `cache_delete`). Sharded in-memory stores
-/// also expose synchronous inherent helpers with those names, so method-call syntax on a sharded
-/// store resolves to the sync helper even if only `ConcurrentCachedAsync` is imported.
-///
-/// To resolve this, use Universal Function Call Syntax (UFCS) when calling these methods manually:
+/// `ConcurrentCachedAsync` names its core operations with an `async_` prefix
+/// (`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_remove_entry`,
+/// `async_cache_delete`) so they never collide with the synchronous [`ConcurrentCached`]
+/// operations (`cache_get`, `cache_set`, …) even when both traits are imported. This means
+/// method-call syntax on a store that implements both traits is unambiguous:
 /// ```rust,ignore
-/// ::cached::ConcurrentCachedAsync::cache_get(&cache, &key).await
+/// store.async_cache_get(&key).await
 /// ```
 ///
 /// **Short aliases not provided**: Unlike [`ConcurrentCached`], this trait intentionally does
-/// **not** expose `get`/`set`/`remove`/`delete` short aliases. Adding them would worsen the
-/// method-resolution ambiguity described above: a sharded store that implements both sync and
-/// async concurrent traits would then have colliding inherent helpers and two sets of alias
-/// defaults, making UFCS mandatory even for the aliases.
+/// **not** expose `get`/`set`/`remove`/`delete` short aliases. The `async_`-prefixed names are
+/// the full and only spelling of these operations.
+///
+/// **Custom `!Sync` implementors**: the default method bodies (`async_cache_delete`,
+/// `async_cache_clear`, `async_cache_reset`, `async_cache_reset_metrics`) require `Self: Sync`
+/// so the returned future is `Send`. A store that is not `Sync` must provide its own override
+/// for these methods (even an identical no-op) rather than relying on the defaults.
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 pub trait ConcurrentCachedAsync<K, V> {
     type Error;
-    #[doc(alias = "get")]
-    fn cache_get(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+    #[doc(alias = "async_get")]
+    #[doc(alias = "cache_get")]
+    fn async_cache_get(&self, k: &K)
+    -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
-    #[doc(alias = "set")]
-    fn cache_set(&self, k: K, v: V) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+    #[doc(alias = "async_set")]
+    #[doc(alias = "cache_set")]
+    fn async_cache_set(
+        &self,
+        k: K,
+        v: V,
+    ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
     /// Remove a cached value, returning it if it was both present and still live.
-    #[doc(alias = "remove")]
-    fn cache_remove(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+    #[doc(alias = "async_remove")]
+    #[doc(alias = "cache_remove")]
+    fn async_cache_remove(
+        &self,
+        k: &K,
+    ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
     /// Remove a cached entry, returning the stored key and value whenever an entry
     /// was physically deleted — including entries that were present but already expired.
-    #[doc(alias = "remove_entry")]
-    fn cache_remove_entry(
+    #[doc(alias = "async_remove_entry")]
+    #[doc(alias = "cache_remove_entry")]
+    fn async_cache_remove_entry(
         &self,
         k: &K,
     ) -> impl Future<Output = Result<Option<(K, V)>, Self::Error>> + Send;
@@ -1470,20 +1556,74 @@ pub trait ConcurrentCachedAsync<K, V> {
     /// Delete a cached value without returning or decoding the stored value.
     /// Returns `true` if an entry (live or expired) was physically removed from the
     /// store, `false` if the key was not present.
-    #[doc(alias = "delete")]
-    fn cache_delete(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    #[doc(alias = "async_delete")]
+    #[doc(alias = "cache_delete")]
+    fn async_cache_delete(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
     where
         Self: Sync,
         K: Sync,
     {
-        async move { self.cache_remove_entry(k).await.map(|r| r.is_some()) }
+        async move { self.async_cache_remove_entry(k).await.map(|r| r.is_some()) }
+    }
+
+    /// Remove all cached entries while preserving capacity allocation and metrics.
+    ///
+    /// The async counterpart of [`ConcurrentCached::cache_clear`]. The default is a **no-op**
+    /// that resolves to `Ok(())`: external stores (`AsyncRedisCache`) keep this default because
+    /// clearing a shared external keyspace is destructive. The internally-synchronized sharded
+    /// in-memory stores and `RedbCache` override it.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    #[doc(alias = "cache_clear")]
+    fn async_cache_clear(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync,
+    {
+        async move { Ok(()) }
+    }
+
+    /// Reset all entries and metrics (hits, misses, evictions) to zero.
+    ///
+    /// The async counterpart of [`ConcurrentCached::cache_reset`]. The default is a **no-op**
+    /// that resolves to `Ok(())`, for the same reason as
+    /// [`async_cache_clear`](ConcurrentCachedAsync::async_cache_clear); the sharded in-memory
+    /// stores and `RedbCache` override it.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    #[doc(alias = "cache_reset")]
+    fn async_cache_reset(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync,
+    {
+        async move { Ok(()) }
+    }
+
+    /// Reset hit/miss/eviction counters to zero without removing entries.
+    ///
+    /// The async counterpart of [`ConcurrentCached::cache_reset_metrics`]. The default is a
+    /// **no-op** that resolves to `Ok(())`; the sharded in-memory stores override it to zero
+    /// their per-shard metrics.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    #[doc(alias = "cache_reset_metrics")]
+    fn async_cache_reset_metrics(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync,
+    {
+        async move { Ok(()) }
     }
 
     /// Report the number of entries currently held by the store, if the store can
     /// determine it cheaply.
     ///
     /// The concurrent-async analogue of [`Cached::cache_size`]. Returns `Ok(None)` by default;
-    /// external stores (`DiskCache`, `RedisCache`, `AsyncRedisCache`) keep that default because
+    /// external stores (`RedbCache`, `RedisCache`, `AsyncRedisCache`) keep that default because
     /// they cannot report their entry count without an expensive or ambiguous backend query.
     ///
     /// # Errors
@@ -1496,7 +1636,7 @@ pub trait ConcurrentCachedAsync<K, V> {
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
     ///
     /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
-    /// `AtomicBool`; `RedisCache` / `DiskCache` use interior mutability), so this is callable
+    /// `AtomicBool`; `RedisCache` / `RedbCache` use interior mutability), so this is callable
     /// through a shared reference such as an `Arc` or a `LazyLock` static.
     fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 
@@ -1526,4 +1666,4 @@ pub trait ConcurrentCachedAsync<K, V> {
 // `Cached` stores are single-owner (`&mut self`); to share one across threads,
 // bring your own lock or use a macro (`#[cached]`/`#[once]` generate the lock).
 // `ConcurrentCached`/`ConcurrentCachedAsync` is the contract for stores that
-// manage their own synchronization (`RedisCache`, `DiskCache`).
+// manage their own synchronization (`RedisCache`, `RedbCache`).

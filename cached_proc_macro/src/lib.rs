@@ -11,7 +11,6 @@ use proc_macro::TokenStream;
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
 /// - `max_size`: (optional, usize) specify an LRU max size, implies the cache type is a `LruCache` or `LruTtlCache`.
-/// - `size`: **deprecated** alias for `max_size` — using it emits a deprecation warning. Prefer `max_size`.
 /// - `ttl`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TtlCache` or `LruTtlCache` (requires the `time_stores` feature).
 /// - `refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
 /// - `sync_writes`: (optional, bool or string) specify whether to synchronize the execution and writing of uncached values.
@@ -178,11 +177,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// `ShardedLruCache::builder().max_size(N).on_evict(|k, v| { ... }).build()`) and supply it via
 /// `ty`/`create` (see the `ty` and `create` attributes below).
 ///
-/// **Note (async + method disambiguation):** When calling `ConcurrentCachedAsync` methods
-/// (`.cache_get`, `.cache_set`, etc.) directly on an async sharded store, both
-/// `ConcurrentCached` and `ConcurrentCachedAsync` are in scope and the compiler may report
-/// "multiple applicable items in scope". Use fully-qualified syntax to disambiguate:
-/// `ConcurrentCachedAsync::cache_get(&*STORE, &key).await`.
+/// **Note (async methods):** The `ConcurrentCachedAsync` operations are named with an `async_`
+/// prefix (`.async_cache_get`, `.async_cache_set`, etc.) so they never collide with the
+/// synchronous `ConcurrentCached` operations even when both traits are in scope. Call them
+/// directly on an async sharded store: `STORE.async_cache_get(&key).await`.
 ///
 /// **Clone requirement:** When no `key` or `convert` attribute is specified, function arguments
 /// are cloned to form the cache key tuple, so all argument types must implement `Clone`.
@@ -195,10 +193,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   by your function.
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
 /// - `redis`: (optional, bool) default to a `RedisCache` or `AsyncRedisCache`
-/// - `disk`: (optional, bool) use a `DiskCache`, this must be set to true even if `type` and `create` are specified.
-///   On an `async fn`, `sled`'s blocking I/O is run on `tokio`'s blocking pool via
+/// - `disk`: (optional, bool) selects `RedbCache` (the default disk engine), this must be set to true even if `type` and `create` are specified.
+///   On an `async fn`, `redb`'s blocking I/O is run on `tokio`'s blocking pool via
 ///   `spawn_blocking` (so it does not stall the async runtime); this requires a Tokio
-///   runtime context and surfaces a `DiskCacheError::BackgroundTaskFailed` if that task is
+///   runtime context and surfaces a `RedbCacheError::BackgroundTaskFailed` if that task is
 ///   cancelled or panics.
 /// - `max_size`: (optional, usize) total LRU capacity for the default in-memory store. Selects
 ///   `ShardedLruCache` (or `ShardedLruTtlCache` when combined with `ttl`). A compile error is
@@ -206,7 +204,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   **Note:** effective capacity may exceed `N` — shards enforce a 16-entry minimum floor, so
 ///   `max_size = 4` on an 8-shard build silently gives 128 effective slots. For a strict cap use
 ///   `shards = 1` or the builder's `per_shard_max_size`.
-/// - `size`: **deprecated** alias for `max_size` — using it emits a deprecation warning. Prefer `max_size`.
 /// - `ttl`: (optional, u64) TTL in seconds. For the default in-memory path, selects
 ///   `ShardedTtlCache` or `ShardedLruTtlCache` (requires the `time_stores` feature). For `redis`
 ///   and `disk` stores, sets the key/entry TTL on those backends.
@@ -278,11 +275,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   to be named `Return<T>` passes the attribute check but then fails to
 ///   compile in the generated body (it calls `::cached::Return::new` /
 ///   `.was_cached`). Use a different name for any non-`cached` `Return` type.
-/// - `sync_to_disk_on_cache_change`: (optional, bool) in the case of `DiskCache` specify whether to synchronize the cache to disk each
-///   time the cache changes.
-/// - connection_config: (optional, string expr) specify an expression which returns a `sled::Config`
-///   to give more control over the connection to the disk cache, i.e. useful for controlling the rate at which the cache syncs to disk.
-///   See the docs of `cached::stores::DiskCacheBuilder::connection_config` for more info.
+/// - `disk_dir`: (optional, string) in the case of `RedbCache` specify the directory in which the redb
+///   database file is stored. Defaults to a system cache directory. Requires `disk = true`; mutually
+///   exclusive with `create`. Using it on the in-memory or `redis` path is a compile error.
+/// - `durable`: (optional, bool) in the case of `RedbCache` specify whether to synchronize the cache to disk
+///   (fsync) on each cache change. Defaults to `true` (durable). Set `false` to trade durability for write
+///   throughput. Requires `disk = true`; using it on the in-memory or `redis` path is a compile error.
 ///
 /// ## Note
 /// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
