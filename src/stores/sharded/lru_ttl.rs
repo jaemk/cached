@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
-use crate::{CacheMetrics, CacheTtl, ConcurrentCached, ConcurrentCloneCached};
+use crate::{CacheMetrics, ConcurrentCacheEvict, ConcurrentCached, ConcurrentCloneCached};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
 };
-use crate::stores::{BuildError, CacheEvict, HasEvict, LruCache, NoEvict, TimedEntry};
+use crate::stores::{BuildError, HasEvict, LruCache, NoEvict, TimedEntry};
 use crate::{Cached, CachedIter, CachedPeek};
 
 type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
@@ -192,7 +192,7 @@ where
             evictions: Some(
                 lru_evictions + self.inner.non_capacity_evictions.load(Ordering::Relaxed),
             ),
-            size,
+            entry_count: size,
             capacity: Some(self.inner.total_capacity),
         }
     }
@@ -383,30 +383,12 @@ where
     }
 }
 
-impl<K, V, H> CacheTtl for ShardedLruTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedLruTtlCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
     H: ShardHasher<K>,
 {
-    fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        ShardedLruTtlCacheBase::set_ttl(self, ttl)
-    }
-
-    fn unset_ttl(&mut self) -> Option<Duration> {
-        ShardedLruTtlCacheBase::unset_ttl(self)
-    }
-}
-
-impl<K, V, H> CacheEvict for ShardedLruTtlCacheBase<K, V, H>
-where
-    K: Hash + Eq + Clone,
-    H: ShardHasher<K>,
-{
-    fn evict(&mut self) -> usize {
+    fn evict(&self) -> usize {
         ShardedLruTtlCacheBase::evict(self)
     }
 }
@@ -523,6 +505,29 @@ where
         Ok(Some(self.len()))
     }
 
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        self.clear();
+        Ok(())
+    }
+
+    fn cache_reset(&self) -> Result<(), Self::Error> {
+        self.clear();
+        ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    fn cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        for shard in self.inner.shards.iter() {
+            shard.hits.store(0, Ordering::Relaxed);
+            shard.misses.store(0, Ordering::Relaxed);
+            // Zero the per-shard inner store's metrics, including its LRU capacity-eviction counter.
+            shard.lock.write().cache_reset_metrics();
+        }
+        self.inner
+            .non_capacity_evictions
+            .store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
         self.inner.refresh.swap(refresh, Ordering::Relaxed)
     }
@@ -549,20 +554,32 @@ where
 {
     type Error = std::convert::Infallible;
 
-    async fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
 
-    async fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_set(self, k, v)
     }
 
-    async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_remove(self, k)
     }
 
-    async fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+    async fn async_cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         ConcurrentCached::cache_remove_entry(self, k)
+    }
+
+    async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_clear(self)
+    }
+
+    async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset(self)
+    }
+
+    async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset_metrics(self)
     }
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
@@ -628,6 +645,16 @@ impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     /// `shards > 1`. This protects against premature evictions due to hash
     /// collisions in extremely small caches; if you require smaller, strict
     /// limits, configure `shards = 1`.
+    ///
+    /// # Minimum capacity
+    ///
+    /// Because each shard reserves a minimum of **16** entries when `shards > 1`, the effective
+    /// total capacity is at least `shards * 16` and may **exceed** the requested `max_size` for
+    /// small values (e.g. `max_size = 10` with 8 shards yields an effective capacity of 128).
+    /// [`metrics()`](ShardedLruTtlCacheBase::metrics)'s `capacity` and `entry_count` reflect the
+    /// actual (possibly larger) amount. Use [`per_shard_max_size`](Self::per_shard_max_size) or
+    /// `shards = 1` if you need a strict small cap.
+    ///
     /// Use [`per_shard_max_size`](Self::per_shard_max_size) for an exact per-shard cap.
     /// Mutually exclusive with [`per_shard_max_size`](Self::per_shard_max_size).
     #[doc(alias = "size")]
@@ -665,12 +692,6 @@ impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
         self
-    }
-
-    /// Alias for [`refresh_on_hit`](Self::refresh_on_hit).
-    #[must_use]
-    pub fn refresh(self, refresh: bool) -> Self {
-        self.refresh_on_hit(refresh)
     }
 
     /// Set a custom shard-selection hasher, changing the type parameter.
@@ -991,10 +1012,10 @@ where
             guard.iter_order()
         };
         for (k, entry) in entries.into_iter().rev() {
-            if let Some(ttl) = existing_ttl {
-                if entry.instant.elapsed() >= ttl {
-                    continue;
-                }
+            if let Some(ttl) = existing_ttl
+                && entry.instant.elapsed() >= ttl
+            {
+                continue;
             }
             let new_shard = new_cache.shard_of(&k);
             new_shard.lock.write().cache_set(k, entry);

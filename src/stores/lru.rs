@@ -311,14 +311,14 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        if let Some(index) = self.get_index(self.hash(key), key) {
-            if is_valid(&self.order.get(index).1) {
-                self.order.move_to_front(index);
-                if self.track_hit_miss {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                }
-                return Some(&self.order.get(index).1);
+        if let Some(index) = self.get_index(self.hash(key), key)
+            && is_valid(&self.order.get(index).1)
+        {
+            self.order.move_to_front(index);
+            if self.track_hit_miss {
+                self.hits.fetch_add(1, Ordering::Relaxed);
             }
+            return Some(&self.order.get(index).1);
         }
         if self.track_hit_miss {
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -335,14 +335,14 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        if let Some(index) = self.get_index(self.hash(key), key) {
-            if is_valid(&self.order.get(index).1) {
-                self.order.move_to_front(index);
-                if self.track_hit_miss {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                }
-                return Some(&mut self.order.get_mut(index).1);
+        if let Some(index) = self.get_index(self.hash(key), key)
+            && is_valid(&self.order.get(index).1)
+        {
+            self.order.move_to_front(index);
+            if self.track_hit_miss {
+                self.hits.fetch_add(1, Ordering::Relaxed);
             }
+            return Some(&mut self.order.get_mut(index).1);
         }
         if self.track_hit_miss {
             self.misses.fetch_add(1, Ordering::Relaxed);

@@ -133,9 +133,9 @@ fn main() {
         h.join().expect("thread panicked");
     }
 
-    // Inspect the cache directly. Direct method-call syntax on a sharded store resolves
-    // to the inherent sync helper, not the ConcurrentCached/ConcurrentCachedAsync trait
-    // method. For the async trait, use UFCS: `ConcurrentCachedAsync::cache_get(&*COMPUTE, &7)`.
+    // Inspect the cache directly. The `cache_get`/`cache_set`/... methods come from the
+    // `ConcurrentCached` trait (it must be in scope). The async trait's operations are
+    // `async_`-prefixed: `COMPUTE.async_cache_get(&7).await`.
     {
         let val = COMPUTE.cache_get(&7).expect("infallible");
         assert_eq!(val, Some(49));

@@ -1,7 +1,42 @@
 # Changelog
 
 ## [Unreleased]
-- Update `hashbrown` to 0.17 (internal only; not part of the public API). Dev-only: bump `criterion` to 0.8 and `googletest` to 0.14. No API or behavior change.
+> Staged for the next major release (not yet cut). See the [unreleased migration guide](docs/migrations/2.0-to-unreleased.md).
+
+### Breaking Changes
+
+#### Minimum supported Rust version
+- MSRV raised from 1.85 to 1.89 (required by `redb` 4.x).
+
+#### `DiskCache` backend: sled → redb ([#237](https://github.com/jaemk/cached/issues/237))
+- Renamed `DiskCache` → `RedbCache` (names the backend explicitly, like `RedisCache`); `DiskCache`, `DiskCacheBuilder`, `DiskCacheError`, and `DiskCacheBuildError` remain as type aliases, so existing code keeps compiling.
+- `DiskCache` is now backed by [`redb`](https://crates.io/crates/redb) 4.x instead of the unmaintained `sled`, dropping the RustSec-flagged `fxhash` transitive dependency. Still pure-Rust (no C toolchain).
+- On-disk format changed: existing caches are not read (entries are recomputed); `DISK_FILE_VERSION` was bumped.
+- `RedbCacheError::Storage` and `RedbCacheBuildError::Connection` now wrap `redb::Error` instead of `sled::Error`; `RedbCacheBuildError` gained an `Io` variant and dropped the never-constructed `MissingDiskPath` variant.
+- Removed `DiskCache::connection()` / `connection_mut()`, `DiskCacheBuilder::connection_config`, and the `connection_config` macro attribute. The backend handle is no longer exposed.
+- `durable` maps to redb durability and defaults to `true` (durable, fsync per write), so a disk cache persists by default. Set `false` to trade durability for write throughput: writes then use `Durability::None`, which is not persisted until a later durable commit, so they can be lost on process exit or crash; call `RedbCache::flush()` / `async_flush()` to force one.
+
+#### Macro attribute changes
+- Removed the deprecated `size` attribute from `#[cached]` / `#[concurrent_cached]` (deprecated since 2.0). Use `max_size = N`; the macros still detect `size` and emit a compile error directing you to `max_size`.
+
+#### Trait API changes
+- `ConcurrentCachedAsync` cache operations are renamed with an `async_` prefix (`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_remove_entry`, `async_cache_delete`), removing the `E0034` "multiple applicable items" error when both concurrent traits are imported. The sync config methods (`ttl`/`set_ttl`/`unset_ttl`/`set_refresh_on_hit`) are unchanged.
+- `CacheTtl` and `CacheEvict` are now single-owner (`&mut self`) traits only, since `&mut self` was unusable on stores held through `Arc`/`static`. `CacheTtl` was removed from `DiskCache`, `RedisCache`, `AsyncRedisCache`, `ShardedTtlCache`, and `ShardedLruTtlCache`; `CacheEvict` from the four TTL/expiring sharded stores. Set TTL on concurrent stores via `ConcurrentCached::set_ttl` / `ConcurrentCachedAsync::set_ttl` (`&self`), and evict via the new `ConcurrentCacheEvict` trait (`fn evict(&self) -> usize`, implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`). Single-owner in-memory stores are unchanged.
+
+#### Other breaking changes
+- Error enum variants dropped their redundant `Error` suffix: `RedbCacheError::{StorageError, CacheDeserializationError, CacheSerializationError}` became `{Storage, CacheDeserialization, CacheSerialization}`; `RedbCacheBuildError::ConnectionError` became `Connection`; `RedisCacheError::{RedisCacheError, PoolError, CacheDeserializationError, CacheSerializationError}` became `{Redis, Pool, CacheDeserialization, CacheSerialization}`.
+- The public store error enums (`RedbCacheError`, `RedbCacheBuildError`, `RedisCacheError`, `RedisCacheBuildError`, `BuildError`, and the `TtlSortedCache` error) are now `#[non_exhaustive]`, so external matches must include a wildcard arm.
+- `RedbCache::remove_expired_entries` now returns `Result<usize, RedbCacheError>` (the number of entries removed) instead of `Result<(), RedbCacheError>`, matching `CacheEvict::evict` / `ConcurrentCacheEvict::evict`.
+- `CacheMetrics.size` renamed to `entry_count` (the only field not matching its `cache_*` accessor).
+- Builder refresh naming unified on `refresh_on_hit`: the `refresh()` alias was removed from the in-memory TTL builders, and `DiskCacheBuilder` / `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `refresh` was renamed to `refresh_on_hit`. The `#[cached(refresh = true)]` attribute is unchanged.
+
+### Additive / non-breaking
+- `cached::prelude` re-exports the common traits for a single glob import.
+- `ConcurrentCached` gained `cache_clear` / `cache_reset` / `cache_reset_metrics` (`&self`, default no-op). The sharded stores override all three; `DiskCache` overrides `cache_clear` / `cache_reset` but keeps the no-op `cache_reset_metrics` (it tracks no in-memory metrics). `ConcurrentCachedAsync` gained the async counterparts.
+- `RedbCache::flush` and `RedbCache::async_flush` force a durable (fsync) commit, so you can run with `durable(false)` for cheap writes and flush at chosen points (periodically or before shutdown) to persist them.
+- `RedbCache::disk_path()` returns the path of the on-disk redb database file backing the cache.
+- Doc fixes: corrected the "sharded stores expose inherent helpers" note, added a `Cached::get` mutability note, and documented the sharded-LRU minimum-per-shard capacity.
+- `hashbrown` updated to 0.17 (internal). Dev-only: `criterion` 0.8, `googletest` 0.14.
 
 ## [2.0.2]
 - Docs/tests only (no API change): document the `Expires` trait / `expires = true` as the idiomatic way to set a dynamic, per-entry TTL (a lifetime computed at call time rather than the uniform `ttl = N`), with a runnable example reference, and add a regression test for the runtime-argument-driven TTL case ([#246](https://github.com/jaemk/cached/issues/246)).
@@ -23,7 +58,7 @@
 - `Cached::cache_delete<Q>(&mut self, k: &Q) -> bool`: new default method on `Cached` that deletes an entry without returning it; returns `true` if an entry was physically removed (including expired entries), `false` if the key was absent. Implemented via `cache_remove_entry`.
 - `DiskCache` and `RedisCache` / `AsyncRedisCache` now require `K: Clone` (in addition to existing bounds) for their `ConcurrentCached` / `ConcurrentCachedAsync` impls, which is needed to return the stored key from `cache_remove_entry`.
 - **`ConcurrentCached` / `ConcurrentCachedAsync` mutators now take `&self`** instead of `&mut self`: `set_refresh_on_hit`, `set_ttl`, and `unset_ttl` are defined with a shared receiver, matching the internally-synchronized `&self` contract of the rest of these traits (`cache_set`, `cache_remove`, …). This lets you flip the refresh flag or change the TTL on a shared store (e.g. one behind an `Arc` or a `static`) without exclusive access. Implementors must update their method signatures (`fn set_ttl(&self, …)` etc.); the bundled `DiskCache` / `RedisCache` / `AsyncRedisCache` stores do this via interior mutability (`parking_lot::Mutex` + `AtomicBool`). The single-owner `Cached` and `CacheTtl` traits are unaffected and keep their `&mut self` mutators.
-- **`ConcurrentCached::cache_size` / `ConcurrentCachedAsync::cache_size`**: new method `fn cache_size(&self) -> Result<Option<usize>, Self::Error>` reporting the number of entries, with a default of `Ok(None)`. The default makes it non-breaking for existing external implementors and honest for stores that cannot cheaply produce a count: the six sharded stores override it to return `Ok(Some(len))`, while the external-store impls (`DiskCache`, `RedisCache`, `AsyncRedisCache`) keep the `Ok(None)` default because their backends (sled, Redis) expose no O(1) size. Sharded stores also retain their inherent `len()` / `is_empty()` for a non-`Result` count.
+- **`ConcurrentCached::cache_size` / `ConcurrentCachedAsync::cache_size`**: new method `fn cache_size(&self) -> Result<Option<usize>, Self::Error>` reporting the number of entries, with a default of `Ok(None)`. The default makes it non-breaking for existing external implementors and honest for stores that cannot cheaply produce a count: the six sharded stores override it to return `Ok(Some(len))`, while the external-store impls (`DiskCache`, `RedisCache`, `AsyncRedisCache`) keep the `Ok(None)` default because their backends (redb, Redis) expose no O(1) size. Sharded stores also retain their inherent `len()` / `is_empty()` for a non-`Result` count.
 
 #### Macro attribute changes (`#[cached]`, `#[once]`, `#[concurrent_cached]`)
 - **`result = true` removed from `#[cached]` and `#[once]`**: All `Result<T, E>` return types now automatically skip caching `Err` values. Remove `result = true` from all `#[cached]` and `#[once]` annotations — the behavior is now the default. To force-cache `Err` values, use the new `cache_err = true` opt-in.

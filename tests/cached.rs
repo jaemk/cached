@@ -72,10 +72,9 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_cache_none_requires_option_return.rs");
     t.compile_fail("tests/ui/cached_cache_err_result_fallback_exclusive.rs");
     t.compile_fail("tests/ui/cached_cache_none_with_cached_flag_exclusive.rs");
-    t.compile_fail("tests/ui/cached_size_max_size_exclusive.rs");
-    t.compile_fail("tests/ui/cached_size_attr_deprecated.rs");
     t.compile_fail("tests/ui/cached_ttl_zero.rs");
     t.compile_fail("tests/ui/cached_max_size_zero.rs");
+    t.compile_fail("tests/ui/cached_size_attr_removed.rs");
 
     // ---- #[once] ----
     t.compile_fail("tests/ui/once_self_method.rs");
@@ -112,17 +111,16 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_sync_writes_attr_unsupported.rs");
     t.compile_fail("tests/ui/concurrent_cached_custom_create_required.rs");
     t.compile_fail("tests/ui/concurrent_cached_shards_zero.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_zero.rs");
     t.compile_fail("tests/ui/concurrent_cached_max_size_zero.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_max_size_exclusive.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_attr_deprecated.rs");
     t.compile_fail("tests/ui/concurrent_cached_ttl_zero.rs");
     t.compile_fail("tests/ui/concurrent_cached_shards_with_redis.rs");
     t.compile_fail("tests/ui/concurrent_cached_shards_with_disk.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_with_redis.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_with_disk.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_with_redis_ty.rs");
-    t.compile_fail("tests/ui/concurrent_cached_size_with_disk_ty.rs");
+    t.compile_fail("tests/ui/concurrent_cached_max_size_with_redis.rs");
+    t.compile_fail("tests/ui/concurrent_cached_max_size_with_disk.rs");
+    t.compile_fail("tests/ui/concurrent_cached_max_size_with_redis_ty.rs");
+    t.compile_fail("tests/ui/concurrent_cached_max_size_with_disk_ty.rs");
+    t.compile_fail("tests/ui/concurrent_cached_size_attr_removed.rs");
+    t.compile_fail("tests/ui/concurrent_cached_durable_with_redis.rs");
     t.compile_fail("tests/ui/concurrent_cached_key_without_convert.rs");
     t.compile_fail("tests/ui/concurrent_cached_refresh_without_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_ttl_exclusive.rs");
@@ -532,7 +530,7 @@ fn cached_smartstring_from_str(s: &str) -> bool {
     s == "true"
 }
 
-// `max_size` is an alias for `size`: it must set the LRU bound identically.
+// `max_size` sets the LRU bound.
 #[cfg(feature = "proc_macro")]
 #[cached(max_size = 2)]
 fn cached_max_size_alias(n: u32) -> u32 {
@@ -549,53 +547,6 @@ fn test_cached_max_size_alias_sets_bound() {
     // capacity reflects the `max_size = 2` bound, and the store never exceeds it
     assert_eq!(cache.capacity(), 2);
     assert_eq!(cache.cache_size(), 2);
-}
-
-// Regression coverage for the deprecated `size` attribute spelling. `size` is a
-// deprecated alias for `max_size`: it still compiles and sets the LRU bound
-// identically, but emits a deprecation warning at the `size` token. The module
-// carries `#[allow(deprecated)]` because the macro expands the deprecation marker
-// as a *sibling const* of the function (module scope), not inside the fn body —
-// so a function-level allow would not suppress it.
-#[cfg(feature = "proc_macro")]
-#[allow(deprecated)]
-mod deprecated_size_alias {
-    use super::*;
-    use cached::macros::concurrent_cached;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    #[cached(size = 2)]
-    fn cached_size_alias(n: u32) -> u32 {
-        n * 2
-    }
-
-    #[test]
-    fn deprecated_size_attr_still_sets_bound() {
-        assert_eq!(cached_size_alias(1), 2);
-        assert_eq!(cached_size_alias(2), 4);
-        assert_eq!(cached_size_alias(3), 6); // evicts the LRU entry
-        let cache = CACHED_SIZE_ALIAS.read();
-        // capacity reflects the `size = 2` bound, identical to `max_size = 2`
-        assert_eq!(cache.capacity(), 2);
-        assert_eq!(cache.cache_size(), 2);
-    }
-
-    static SIZE_ALIAS_CALLS: AtomicU64 = AtomicU64::new(0);
-
-    #[concurrent_cached(size = 100)]
-    fn concurrent_size_alias(x: u64) -> u64 {
-        SIZE_ALIAS_CALLS.fetch_add(1, Ordering::Relaxed);
-        x * 2
-    }
-
-    #[test]
-    fn deprecated_size_attr_routes_to_sharded_lru() {
-        SIZE_ALIAS_CALLS.store(0, Ordering::Relaxed);
-        assert_eq!(concurrent_size_alias(10), 20);
-        assert_eq!(concurrent_size_alias(10), 20); // cached — no second call
-        assert_eq!(concurrent_size_alias(11), 22); // different key
-        assert_eq!(SIZE_ALIAS_CALLS.load(Ordering::Relaxed), 2);
-    }
 }
 
 // The sync `Cached` trait exposes `remove_entry` / `delete` short aliases, matching
@@ -2193,36 +2144,36 @@ mod sharded_ttl_tests {
     }
 
     #[test]
-    fn sharded_ttl_stores_implement_cache_evict_trait() {
+    fn sharded_ttl_stores_implement_concurrent_cache_evict_trait() {
         use cached::time::Duration;
-        use cached::{CacheEvict, ShardedLruTtlCache, ShardedTtlCache};
+        use cached::{ConcurrentCacheEvict, ShardedLruTtlCache, ShardedTtlCache};
 
-        fn assert_cache_evict<C: CacheEvict>(cache: &mut C) -> usize {
+        fn assert_cache_evict<C: ConcurrentCacheEvict>(cache: &C) -> usize {
             cache.evict()
         }
 
-        let mut ttl: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+        let ttl: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
             .ttl(Duration::from_secs(60))
             .build()
             .expect("valid config");
-        let mut lru_ttl: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+        let lru_ttl: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
             .max_size(16)
             .ttl(Duration::from_secs(60))
             .build()
             .expect("valid config");
 
-        assert_eq!(assert_cache_evict(&mut ttl), 0);
-        assert_eq!(assert_cache_evict(&mut lru_ttl), 0);
+        assert_eq!(assert_cache_evict(&ttl), 0);
+        assert_eq!(assert_cache_evict(&lru_ttl), 0);
     }
 
     #[test]
-    fn sharded_ttl_builders_accept_refresh_alias() {
+    fn sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
         use cached::{ShardedLruTtlCache, ShardedTtlCache};
 
         let ttl = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
-            .refresh(true)
+            .refresh_on_hit(true)
             .build()
             .expect("valid config");
         assert!(ttl.refresh_on_hit());
@@ -2230,16 +2181,75 @@ mod sharded_ttl_tests {
         let lru_ttl = ShardedLruTtlCache::<u32, u32>::builder()
             .max_size(64)
             .ttl(Duration::from_secs(60))
-            .refresh(true)
+            .refresh_on_hit(true)
             .build()
             .expect("valid config");
         assert!(lru_ttl.refresh_on_hit());
     }
 
-    // The non-sharded TTL builders now expose `refresh_on_hit(..)` as the primary
-    // setter (matching the sharded builders) with `refresh(..)` retained as an alias.
+    // Covers `ConcurrentCached::cache_reset` / `cache_reset_metrics` on the TTL/expiring
+    // sharded stores, whose `cache_reset_metrics` must zero a *split* eviction count
+    // (the per-shard inner `LruCache`'s capacity-eviction counter plus the store's own
+    // counter). The non-TTL test exercises only `ShardedCache`/`ShardedLruCache`.
     #[test]
-    fn non_sharded_ttl_builders_accept_refresh_on_hit_and_refresh_alias() {
+    fn reset_metrics_zeros_split_eviction_counter_on_ttl_expiring_sharded_stores() {
+        use cached::time::Duration;
+        use cached::{ConcurrentCached, ShardedExpiringLruCache, ShardedLruTtlCache};
+
+        // ShardedLruTtlCache: a single shard with capacity 1 forces an LRU eviction.
+        let lru_ttl = ShardedLruTtlCache::<u32, u32>::builder()
+            .per_shard_max_size(1)
+            .shards(1)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        ConcurrentCached::cache_set(&lru_ttl, 1, 10).expect("infallible");
+        ConcurrentCached::cache_set(&lru_ttl, 2, 20).expect("infallible"); // evicts key 1
+        let _ = ConcurrentCached::cache_get(&lru_ttl, &2).expect("infallible");
+        assert_eq!(lru_ttl.metrics().evictions, Some(1));
+        assert!(lru_ttl.metrics().hits.unwrap() >= 1);
+
+        ConcurrentCached::cache_reset(&lru_ttl).expect("infallible");
+        assert_eq!(lru_ttl.len(), 0, "cache_reset must remove all entries");
+        assert_eq!(lru_ttl.metrics().hits, Some(0));
+        assert_eq!(lru_ttl.metrics().misses, Some(0));
+        assert_eq!(
+            lru_ttl.metrics().evictions,
+            Some(0),
+            "cache_reset must zero the split eviction counter"
+        );
+
+        // ShardedExpiringLruCache: same split-counter path for the expiring variant.
+        #[derive(Clone)]
+        struct NeverExpires;
+        impl cached::Expires for NeverExpires {
+            fn is_expired(&self) -> bool {
+                false
+            }
+        }
+        let exp_lru = ShardedExpiringLruCache::<u32, NeverExpires>::builder()
+            .per_shard_max_size(1)
+            .shards(1)
+            .build()
+            .unwrap();
+        ConcurrentCached::cache_set(&exp_lru, 1, NeverExpires).expect("infallible");
+        ConcurrentCached::cache_set(&exp_lru, 2, NeverExpires).expect("infallible"); // evicts key 1
+        let _ = ConcurrentCached::cache_get(&exp_lru, &2).expect("infallible");
+        assert_eq!(exp_lru.metrics().evictions, Some(1));
+
+        ConcurrentCached::cache_reset_metrics(&exp_lru).expect("infallible");
+        assert_eq!(
+            exp_lru.metrics().evictions,
+            Some(0),
+            "cache_reset_metrics must zero the split eviction counter"
+        );
+        assert_eq!(exp_lru.metrics().hits, Some(0));
+    }
+
+    // The non-sharded TTL builders expose `refresh_on_hit(..)` as the setter
+    // (matching the sharded builders).
+    #[test]
+    fn non_sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
         use cached::{LruTtlCache, TtlCache};
 
@@ -2258,22 +2268,6 @@ mod sharded_ttl_tests {
             .build()
             .expect("valid config");
         assert!(lru_ttl.refresh_on_hit());
-
-        // `.refresh(true)` alias sets the same flag.
-        let ttl_alias = TtlCache::<u32, u32>::builder()
-            .ttl(Duration::from_secs(60))
-            .refresh(true)
-            .build()
-            .expect("valid config");
-        assert!(ttl_alias.refresh_on_hit());
-
-        let lru_ttl_alias = LruTtlCache::<u32, u32>::builder()
-            .max_size(64)
-            .ttl(Duration::from_secs(60))
-            .refresh(true)
-            .build()
-            .expect("valid config");
-        assert!(lru_ttl_alias.refresh_on_hit());
 
         // Both setters default to / can clear the flag.
         let ttl_off = TtlCache::<u32, u32>::builder()
@@ -2434,7 +2428,7 @@ mod async_tests {
 #[cfg(all(feature = "disk_store", feature = "proc_macro"))]
 mod disk_tests {
     use super::*;
-    use cached::DiskCache;
+    use cached::RedbCache;
     use cached::macros::concurrent_cached;
     use thiserror::Error;
 
@@ -2491,8 +2485,8 @@ mod disk_tests {
 
     #[concurrent_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
-        ty = "cached::DiskCache<u32, u32>",
-        create = r##" { DiskCache::new("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh(true).build().expect("error building disk cache") } "##
+        ty = "cached::RedbCache<u32, u32>",
+        create = r##" { RedbCache::new("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -2510,30 +2504,14 @@ mod disk_tests {
         assert_eq!(cached_disk_cache_create(6), Err(TestError::Count(6)));
     }
 
-    /// Just calling the macro with connection_config to test it doesn't break with an expected string
-    /// for connection_config.
+    /// Just calling the macro with durable to test it doesn't break with an expected value
     /// There are no simple tests to test this here
     #[concurrent_cached(
         disk = true,
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
-        connection_config = r##"sled::Config::new().flush_every_ms(None)"##
+        durable = true
     )]
-    fn cached_disk_connection_config(n: u32) -> Result<u32, TestError> {
-        if n < 5 {
-            Ok(n)
-        } else {
-            Err(TestError::Count(n))
-        }
-    }
-
-    /// Just calling the macro with sync_to_disk_on_cache_change to test it doesn't break with an expected value
-    /// There are no simple tests to test this here
-    #[concurrent_cached(
-        disk = true,
-        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
-        sync_to_disk_on_cache_change = true
-    )]
-    fn cached_disk_sync_to_disk_on_cache_change(n: u32) -> Result<u32, TestError> {
+    fn cached_disk_durable(n: u32) -> Result<u32, TestError> {
         if n < 5 {
             Ok(n)
         } else {
@@ -2567,7 +2545,7 @@ mod disk_tests {
 
         // Regression: a value that is `Send` + `Serialize` + `Clone` but **not
         // `Sync`** (it contains a `Cell`) must be usable with async disk
-        // caching. Before relaxing the async `DiskCache` impl (fn-pointer
+        // caching. Before relaxing the async `RedbCache` impl (fn-pointer
         // phantom + dropping the `V: Sync` bound) this failed to compile with
         // "future cannot be sent between threads safely".
         #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -2927,7 +2905,7 @@ mod concurrent_cached_default_with_both_traits_in_scope {
     }
 }
 
-// `size = N` selects `ShardedLruCache`.
+// `max_size = N` selects `ShardedLruCache`.
 #[cfg(feature = "proc_macro")]
 mod concurrent_cached_default_with_max_size {
     use cached::macros::concurrent_cached;
@@ -2987,7 +2965,7 @@ mod concurrent_cached_default_with_ttl {
     }
 }
 
-// `size = N, ttl = T` selects `ShardedLruTtlCache`.
+// `max_size = N, ttl = T` selects `ShardedLruTtlCache`.
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod concurrent_cached_default_with_max_size_and_ttl {
     use cached::macros::concurrent_cached;
@@ -3081,7 +3059,7 @@ mod concurrent_cached_default_with_ttl_and_shards {
     }
 }
 
-// `size = N, ttl = T, shards = S` selects `ShardedLruTtlCache::with_max_size_and_ttl_and_shards`.
+// `max_size = N, ttl = T, shards = S` selects `ShardedLruTtlCache::with_max_size_and_ttl_and_shards`.
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod concurrent_cached_default_with_max_size_and_ttl_and_shards {
     use cached::macros::concurrent_cached;
@@ -3791,11 +3769,118 @@ fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
     assert_eq!(lru.len(), 0);
 }
 
+// `ConcurrentCached::cache_clear` / `cache_reset` / `cache_reset_metrics` are trait methods
+// (default no-op) overridden by the sharded stores to actually clear entries and zero metrics.
+#[test]
+fn concurrent_cached_trait_clear_and_reset_metrics_on_sharded_stores() {
+    use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+
+    // --- Unbound ShardedCache: cache_clear empties the store via the trait method ---
+    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible");
+    ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible");
+    assert_eq!(cache.len(), 2);
+    // Record a hit and a miss so metrics are non-zero.
+    let _ = ConcurrentCached::cache_get(&cache, &1).expect("infallible");
+    let _ = ConcurrentCached::cache_get(&cache, &99).expect("infallible");
+    assert_eq!(cache.metrics().hits, Some(1));
+    assert_eq!(cache.metrics().misses, Some(1));
+
+    ConcurrentCached::cache_clear(&cache).expect("infallible");
+    assert_eq!(cache.len(), 0, "cache_clear must remove all entries");
+    // cache_clear preserves metrics.
+    assert_eq!(cache.metrics().hits, Some(1));
+    assert_eq!(cache.metrics().misses, Some(1));
+
+    ConcurrentCached::cache_reset_metrics(&cache).expect("infallible");
+    assert_eq!(
+        cache.metrics().hits,
+        Some(0),
+        "cache_reset_metrics must zero hits"
+    );
+    assert_eq!(
+        cache.metrics().misses,
+        Some(0),
+        "cache_reset_metrics must zero misses"
+    );
+
+    // --- ShardedLruCache: cache_reset_metrics also zeros the eviction counter ---
+    let lru = ShardedLruCache::<u32, u32>::builder()
+        .per_shard_max_size(1)
+        .shards(1)
+        .build()
+        .unwrap();
+    // Two inserts into a single shard with capacity 1 forces one LRU eviction.
+    ConcurrentCached::cache_set(&lru, 1, 10).expect("infallible");
+    ConcurrentCached::cache_set(&lru, 2, 20).expect("infallible");
+    let _ = ConcurrentCached::cache_get(&lru, &2).expect("infallible");
+    assert_eq!(lru.metrics().evictions, Some(1));
+    assert!(lru.metrics().hits.unwrap() >= 1);
+
+    // cache_reset removes entries AND zeros every counter in one call.
+    ConcurrentCached::cache_reset(&lru).expect("infallible");
+    assert_eq!(lru.len(), 0, "cache_reset must remove all entries");
+    assert_eq!(lru.metrics().hits, Some(0));
+    assert_eq!(lru.metrics().misses, Some(0));
+    assert_eq!(
+        lru.metrics().evictions,
+        Some(0),
+        "cache_reset must zero the eviction counter too"
+    );
+}
+
+// `ConcurrentCachedAsync::async_cache_clear` / `async_cache_reset_metrics` are the async
+// counterparts of the `ConcurrentCached` trait methods, overridden by the sharded stores to
+// actually clear entries and zero metrics (mirrors the sync test above).
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn concurrent_cached_async_trait_clear_and_reset_metrics_on_sharded_stores() {
+    use cached::{ConcurrentCachedAsync, ShardedCache};
+
+    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
+        .await
+        .expect("infallible");
+    ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
+        .await
+        .expect("infallible");
+    assert_eq!(cache.len(), 2);
+
+    // Record a hit so the metrics are non-zero.
+    let _ = ConcurrentCachedAsync::async_cache_get(&cache, &1)
+        .await
+        .expect("infallible");
+    assert_eq!(cache.metrics().hits, Some(1));
+
+    // async_cache_clear empties the store but preserves metrics.
+    ConcurrentCachedAsync::async_cache_clear(&cache)
+        .await
+        .expect("infallible");
+    assert_eq!(cache.len(), 0, "async_cache_clear must remove all entries");
+    assert_eq!(cache.metrics().hits, Some(1));
+
+    // async_cache_reset_metrics zeros the counters.
+    ConcurrentCachedAsync::async_cache_reset_metrics(&cache)
+        .await
+        .expect("infallible");
+    assert_eq!(
+        cache.metrics().hits,
+        Some(0),
+        "async_cache_reset_metrics must zero hits"
+    );
+    assert_eq!(
+        cache.metrics().misses,
+        Some(0),
+        "async_cache_reset_metrics must zero misses"
+    );
+}
+
 mod sharded_expiring_tests {
     #[cfg(feature = "proc_macro")]
     use cached::macros::concurrent_cached;
     use cached::{
-        CacheEvict, ConcurrentCached, Expires, ShardedExpiringCache, ShardedExpiringLruCache,
+        ConcurrentCacheEvict, ConcurrentCached, Expires, ShardedExpiringCache,
+        ShardedExpiringLruCache,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3892,7 +3977,7 @@ mod sharded_expiring_tests {
     #[test]
     fn sharded_expiring_cache_evict() {
         let flag = Arc::new(AtomicBool::new(true));
-        let mut cache = ShardedExpiringCache::<u32, ExpiringItem>::builder()
+        let cache = ShardedExpiringCache::<u32, ExpiringItem>::builder()
             .build()
             .unwrap();
         let _ = ConcurrentCached::cache_set(
@@ -3913,11 +3998,11 @@ mod sharded_expiring_tests {
         );
 
         assert_eq!(cache.len(), 2);
-        let evicted = CacheEvict::evict(&mut cache);
+        let evicted = ConcurrentCacheEvict::evict(&cache);
         assert_eq!(evicted, 2);
         assert_eq!(cache.len(), 0);
 
-        let mut lru = ShardedExpiringLruCache::<u32, ExpiringItem>::builder()
+        let lru = ShardedExpiringLruCache::<u32, ExpiringItem>::builder()
             .max_size(64)
             .build()
             .unwrap();
@@ -3939,7 +4024,7 @@ mod sharded_expiring_tests {
         );
 
         assert_eq!(lru.len(), 2);
-        let evicted_lru = CacheEvict::evict(&mut lru);
+        let evicted_lru = ConcurrentCacheEvict::evict(&lru);
         assert_eq!(evicted_lru, 2);
         assert_eq!(lru.len(), 0);
     }
@@ -4307,7 +4392,7 @@ mod redis_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
         ty = "cached::RedisCache<u32, u32>",
-        create = r##" { RedisCache::new("cache_redis_test_cache_create", Duration::from_secs(1)).refresh(true).build().expect("error building redis cache") } "##
+        create = r##" { RedisCache::new("cache_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4377,7 +4462,7 @@ mod redis_tests {
         #[concurrent_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
             ty = "cached::AsyncRedisCache<u32, u32>",
-            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", Duration::from_secs(1)).refresh(true).build().await.expect("error building async redis cache") } "##
+            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
             if n < 5 {
@@ -4854,6 +4939,17 @@ fn test_fallible_builders_return_build_error() {
 #[cfg(feature = "disk_store")]
 #[test]
 fn disk_cache_builder_aliases_and_zero_ttl_validation() {
+    // Canonical `RedbCache` name.
+    let result = cached::RedbCache::<String, String>::builder("zero-ttl")
+        .ttl(cached::time::Duration::ZERO)
+        .build();
+    assert!(matches!(
+        result,
+        Err(cached::RedbCacheBuildError::InvalidTtl(..))
+    ));
+
+    // The kept `DiskCache` alias (and its `DiskCacheBuildError` alias) still
+    // compile and behave identically.
     let result = cached::DiskCache::<String, String>::builder("zero-ttl")
         .ttl(cached::time::Duration::ZERO)
         .build();
@@ -5535,7 +5631,7 @@ fn test_lru_ttl_cache_builder_build() {
     let mut cache = LruTtlCache::<u32, u32>::builder()
         .max_size(4)
         .ttl(Duration::from_secs(60))
-        .refresh(true)
+        .refresh_on_hit(true)
         .build()
         .unwrap();
     cache.cache_set(1, 10);
@@ -6100,7 +6196,7 @@ fn test_cache_metrics_and_hit_ratio() {
     let m = cache.metrics();
     assert_eq!(m.hits, Some(0));
     assert_eq!(m.misses, Some(0));
-    assert_eq!(m.size, 0);
+    assert_eq!(m.entry_count, 0);
     assert!(m.capacity.is_none());
     assert!(m.hit_ratio().is_none(), "no lookups yet → None");
 
@@ -6112,7 +6208,7 @@ fn test_cache_metrics_and_hit_ratio() {
     let m = cache.metrics();
     assert_eq!(m.hits, Some(2));
     assert_eq!(m.misses, Some(1));
-    assert_eq!(m.size, 1);
+    assert_eq!(m.entry_count, 1);
     let ratio = m.hit_ratio().expect("should have ratio after lookups");
     assert!((ratio - 2.0 / 3.0).abs() < 1e-9);
 

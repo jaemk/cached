@@ -104,7 +104,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
 | Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
 
-On `#[cached]` and `#[concurrent_cached]`, the preferred attribute is `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The legacy `size = N` is still accepted as a deprecated alias, but emits a deprecation warning nudging you toward `max_size = N`. Either spelling works; setting both on one annotation is a compile error.
+On `#[cached]` and `#[concurrent_cached]`, the LRU bound is set with `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The `size = N` spelling — a deprecated alias in 2.x — has been removed; only `max_size = N` is accepted.
 
 For the default in-memory sharded stores, `#[concurrent_cached]` accepts any return type — plain values, `Option<T>`, or `Result<T, E>`.
 Plain values are always cached as-is. `Option<T>` returns skip caching `None` by default; use `cache_none = true` to also cache `None` values. `Result<T, E>` only caches `Ok` values; `Err` is returned without being stored. Use `cache_err = true` to also cache `Err` values.
@@ -149,9 +149,10 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   managing these stores directly must add their own synchronization when sharing across threads.
   `Sharded*` stores are internally synchronized (per-shard `parking_lot::RwLock`) and implement
   `ConcurrentCached`/`ConcurrentCachedAsync` — no external lock is needed.
-  Direct sharded-store method syntax is synchronous because these stores expose inherent
-  `cache_get` / `cache_set` / `cache_remove` helpers. Use Universal Function Call Syntax (UFCS)
-  for async trait calls (e.g., `cached::ConcurrentCachedAsync::cache_get(&*STORE, &key).await.expect("ShardedCache is infallible")`), where `&*STORE` dereferences a `LazyLock<Store>` or `OnceCell<Store>` static to obtain a `&Store` reference.
+  The synchronous `cache_get` / `cache_set` / `cache_remove` operations come from the
+  `ConcurrentCached` trait (it must be in scope — `use cached::ConcurrentCached;` or
+  `use cached::prelude::*;`), not from inherent methods. The async trait operations are
+  `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedCache is infallible")`).
 - `Cached::get` (and its legacy alias `cache_get`) requires mutable access because some
   stores update recency, expiration timestamps, or metrics during reads.
 - Expired values can remain allocated until a mutating operation, `evict`, or
@@ -233,9 +234,12 @@ For concurrent (multi-thread, no external lock) use, the sharded equivalents [`S
 > expired entries when the same key is accessed again. `CachedIter::iter()` (implemented on the
 > non-sharded `ExpiringCache` / `ExpiringLruCache` only, not on the sharded variants) filters
 > expired entries from the iterator but does not remove them from the map. For high-cardinality workloads,
-> call `evict()` periodically (bring [`CacheEvict`] into scope: `use cached::CacheEvict;`; note
-> that `evict()` on sharded TTL and expiring stores requires `K: Clone`) or
-> prefer `ExpiringLruCache` / `ShardedExpiringLruCache` with a `max_size` bound.
+> call `evict()` periodically — on the single-owner `ExpiringCache` via [`CacheEvict`]
+> (`use cached::CacheEvict;`, `&mut self`), and on the sharded `ShardedExpiringCache` via
+> [`ConcurrentCacheEvict`] (`use cached::ConcurrentCacheEvict;`, `&self`) or its inherent
+> `evict(&self)` method; note that `evict()` on sharded TTL and expiring stores requires
+> `K: Clone`. Alternatively, prefer `ExpiringLruCache` / `ShardedExpiringLruCache` with a
+> `max_size` bound.
 
 ```rust
 use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
@@ -375,7 +379,7 @@ enum ExampleError {
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
         AsyncRedisCache::builder("cached_redis_prefix", Duration::from_secs(1))
-            .refresh(true)
+            .refresh_on_hit(true)
             .build()
             .await
             .expect("error building example redis cache")
@@ -391,7 +395,7 @@ async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
 
 ```rust,no_run,ignore
 use cached::macros::concurrent_cached;
-use cached::DiskCache;
+use cached::RedbCache;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq, Clone)]

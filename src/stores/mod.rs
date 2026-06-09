@@ -76,13 +76,13 @@ fn thread_stripe() -> usize {
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
 
-#[cfg(feature = "disk_store")]
-mod disk;
 mod expiring;
 mod expiring_lru;
 mod lru;
 #[cfg(feature = "time_stores")]
 mod lru_ttl;
+#[cfg(feature = "disk_store")]
+mod redb;
 #[cfg(feature = "redis_store")]
 mod redis;
 pub mod sharded;
@@ -97,6 +97,7 @@ use crate::time::{Duration, Instant};
 pub(super) type OnEvict<K, V> = std::sync::Arc<dyn Fn(&K, &V) + Send + Sync>;
 
 /// Error returned by cache builder `build()` methods.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum BuildError {
     /// A required field was not supplied to the builder.
@@ -162,7 +163,11 @@ impl<V: Clone> Clone for TimedEntry<V> {
 }
 
 #[cfg(feature = "disk_store")]
-pub use crate::stores::disk::{DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError};
+#[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
+pub use crate::stores::redb::{
+    DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError, RedbCache,
+    RedbCacheBuildError, RedbCacheBuilder, RedbCacheError,
+};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{
@@ -361,7 +366,7 @@ where
 /// invoke the `on_evict` callback (if configured) for each removed entry.
 ///
 /// This trait is for in-memory stores with infallible expiration checks. IO-backed
-/// stores expose their own APIs because sweeping can fail: `DiskCache` uses
+/// stores expose their own APIs because sweeping can fail: `RedbCache` uses
 /// `remove_expired_entries`, while Redis relies on server-side key expiry.
 pub trait CacheEvict {
     /// Remove all expired entries from the cache, returning the number removed.
@@ -370,10 +375,22 @@ pub trait CacheEvict {
     /// Hit/miss metrics are not affected; call [`cache_reset_metrics`](crate::Cached::cache_reset_metrics)
     /// separately if needed.
     ///
-    /// **Note for sharded in-memory stores**: the concrete types expose an inherent `evict(&self)`
-    /// method that does not require `&mut self`. When you hold only a shared reference (e.g., via
-    /// `Arc`), call the inherent method directly instead of going through this trait.
+    /// **Note for sharded in-memory stores**: these are internally synchronized and normally held
+    /// behind an `Arc`/`static`, so they cannot offer `&mut self`. They implement
+    /// [`ConcurrentCacheEvict`] (a `&self` counterpart of this trait) instead, and also expose an
+    /// inherent `evict(&self)` method.
     fn evict(&mut self) -> usize;
+}
+
+/// Concurrent counterpart of [`CacheEvict`] for internally-synchronized stores.
+///
+/// Sharded in-memory stores are normally held behind an `Arc`/`static`, so they
+/// cannot offer the `&mut self` [`CacheEvict::evict`]. This trait provides the same
+/// operation through a shared reference.
+pub trait ConcurrentCacheEvict {
+    /// Remove all expired entries, returning the number removed. Fires `on_evict`
+    /// and increments `cache_evictions()` for each removed entry.
+    fn evict(&self) -> usize;
 }
 
 #[cfg(test)]

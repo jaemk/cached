@@ -12,7 +12,8 @@ use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
 };
 use crate::Cached;
-use crate::stores::{BuildError, CacheEvict, LruCache};
+use crate::ConcurrentCacheEvict;
+use crate::stores::{BuildError, LruCache};
 
 type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
@@ -29,7 +30,7 @@ struct ExpiringLruInner<K, V, H> {
 /// A fully-concurrent, partitioned, LRU size-bounded in-memory cache with per-value expiry.
 ///
 /// Each value controls its own expiration by implementing [`Expires`]. Expired entries
-/// are checked on lookup and evicted on access or during explicit [`evict`](CacheEvict::evict) sweeps.
+/// are checked on lookup and evicted on access or during explicit [`evict`](ConcurrentCacheEvict::evict) sweeps.
 /// Eviction is also enforced independently per shard when capacity limits are hit.
 ///
 /// Wraps an `Arc` — `clone()` is an Arc-share (shared state), not a deep copy.
@@ -169,7 +170,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed)),
-            size,
+            entry_count: size,
             capacity: Some(self.inner.total_capacity),
         }
     }
@@ -355,6 +356,27 @@ where
         Ok(Some(self.len()))
     }
 
+    fn cache_clear(&self) -> Result<(), Self::Error> {
+        self.clear();
+        Ok(())
+    }
+
+    fn cache_reset(&self) -> Result<(), Self::Error> {
+        self.clear();
+        ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    fn cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        for shard in self.inner.shards.iter() {
+            shard.hits.store(0, Ordering::Relaxed);
+            shard.misses.store(0, Ordering::Relaxed);
+            // Zero the per-shard inner store's metrics, including its LRU capacity-eviction counter.
+            shard.lock.write().cache_reset_metrics();
+        }
+        self.inner.evictions.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// No-op: this store uses value-defined expiry, not a refreshable TTL. Always returns `false`.
     fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
         false
@@ -370,20 +392,32 @@ where
 {
     type Error = std::convert::Infallible;
 
-    async fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
 
-    async fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_set(self, k, v)
     }
 
-    async fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+    async fn async_cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_remove(self, k)
     }
 
-    async fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+    async fn async_cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         ConcurrentCached::cache_remove_entry(self, k)
+    }
+
+    async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_clear(self)
+    }
+
+    async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset(self)
+    }
+
+    async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
+        ConcurrentCached::cache_reset_metrics(self)
     }
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
@@ -439,13 +473,13 @@ where
     }
 }
 
-impl<K, V, H> CacheEvict for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedExpiringLruCacheBase<K, V, H>
 where
     K: Clone + Hash + Eq,
     V: Expires,
     H: ShardHasher<K>,
 {
-    fn evict(&mut self) -> usize {
+    fn evict(&self) -> usize {
         ShardedExpiringLruCacheBase::evict(self)
     }
 }
@@ -489,6 +523,16 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// `ceil(size / shards)` entries, with a minimum of 16 per shard when
     /// `shards > 1` (see the **Capacity Fragmentation Warning** on
     /// [`ShardedExpiringLruCacheBuilder::max_size`]).
+    ///
+    /// # Minimum capacity
+    ///
+    /// Because each shard reserves a minimum of **16** entries when `shards > 1`, the effective
+    /// total capacity is at least `shards * 16` and may **exceed** the requested `max_size` for
+    /// small values (e.g. `max_size = 10` with 8 shards yields an effective capacity of 128).
+    /// [`metrics()`](ShardedExpiringLruCacheBase::metrics)'s `capacity` and `entry_count` reflect
+    /// the actual (possibly larger) amount. Use [`per_shard_max_size`](Self::per_shard_max_size)
+    /// or `shards = 1` if you need a strict small cap.
+    ///
     /// Use [`per_shard_max_size`](Self::per_shard_max_size) for an exact per-shard cap instead.
     #[doc(alias = "size")]
     #[doc(alias = "capacity")]

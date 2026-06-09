@@ -70,7 +70,7 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     ty = "cached::RedisCache<u64, String>",
     create = r##" {
         RedisCache::new("cache_redis_example_cached_sleep_secs_config", Duration::from_secs(1))
-            .refresh(true)
+            .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)
             .build()
             .expect("error building example redis cache")

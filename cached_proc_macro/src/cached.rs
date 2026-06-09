@@ -32,9 +32,7 @@ struct CachedMacroArgs {
     name: Option<String>,
     #[darling(default)]
     unbound: bool,
-    #[darling(default)]
-    size: Option<usize>,
-    /// Alias for `size` — sets the maximum number of cached entries (the LRU bound).
+    /// Sets the maximum number of cached entries (the LRU bound).
     /// Mirrors the `max_size` builder/constructor naming on the cache stores.
     #[darling(default)]
     max_size: Option<usize>,
@@ -46,6 +44,9 @@ struct CachedMacroArgs {
     time: Option<u64>,
     #[darling(default)]
     time_refresh: Option<bool>,
+    /// Removed alias for `max_size`; kept only to emit a helpful rename error.
+    #[darling(default)]
+    size: Option<usize>,
     #[darling(default)]
     key: Option<String>,
     #[darling(default)]
@@ -90,25 +91,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
-    let mut args = match CachedMacroArgs::from_list(&attr_args) {
+    let args = match CachedMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
             return TokenStream::from(e.write_errors());
         }
     };
-    // `max_size` is an alias for `size`; reconcile them into `size` so the rest
-    // of the macro only has to consult one field. Specifying both is ambiguous.
-    if args.size.is_some() && args.max_size.is_some() {
-        return TokenStream::from(
-            darling::Error::custom(
-                "cannot specify both `size` and `max_size` — they are aliases; use one",
-            )
-            .write_errors(),
-        );
-    }
-    args.size = args.size.or(args.max_size);
-    // Nudge `size = N` users toward `max_size = N` (empty unless the deprecated spelling was used).
-    let size_deprecation = size_attr_deprecation_notice(&attr_args);
     let input = parse_macro_input!(input as ItemFn);
 
     // pull out the parts of the input
@@ -137,7 +125,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // Reject zero `max_size`/`ttl` at expansion time (matching `#[concurrent_cached]`),
     // rather than letting the generated builder `build()` panic at first call.
-    if matches!(args.size, Some(0)) {
+    if matches!(args.max_size, Some(0)) {
         return syn::Error::new(fn_ident.span(), "`max_size` must be >= 1")
             .to_compile_error()
             .into();
@@ -161,6 +149,15 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         return syn::Error::new(
             fn_ident.span(),
             "`time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if args.size.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`size` was renamed to `max_size`; use `max_size = ...`",
         )
         .to_compile_error()
         .into();
@@ -366,7 +363,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make the cache type and create statement
     let (cache_ty, cache_create) = if args.expires {
-        if let Some(size) = args.size {
+        if let Some(size) = args.max_size {
             (
                 quote! { cached::ExpiringLruCache<#cache_key_ty, #cache_value_ty> },
                 quote! { cached::ExpiringLruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("ExpiringLruCache build failed in #[cached]: {e}")) },
@@ -380,7 +377,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         match (
             &args.unbound,
-            &args.size,
+            &args.max_size,
             &args.ttl,
             &args.ty,
             &args.create,
@@ -451,7 +448,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             _ => {
                 return syn::Error::new(
                 fn_ident.span(),
-                "cache types (`unbound`, `size` and/or `ttl`, or `ty` and `create`) are mutually exclusive",
+                "cache types (`unbound`, `max_size` and/or `ttl`, or `ty` and `create`) are mutually exclusive",
             )
             .to_compile_error()
             .into();
@@ -542,7 +539,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    if args.unsync_reads && args.ty.is_none() && (args.size.is_some() || args.ttl.is_some()) {
+    if args.unsync_reads && args.ty.is_none() && (args.max_size.is_some() || args.ttl.is_some()) {
         return syn::Error::new(
             fn_ident.span(),
             "`unsync_reads` requires a store that implements `CachedRead` (no mutation on reads). \
@@ -813,7 +810,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // put it all together
     let expanded = quote! {
-        #size_deprecation
         // Cached static
         #[doc = #cache_ident_doc]
         #ty

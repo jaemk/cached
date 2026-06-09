@@ -66,6 +66,7 @@ impl<T> Borrow<T> for CacheArc<T> {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
     /// Calculating expiration `Instant`s resulted in a
@@ -608,19 +609,19 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
             true,
         );
 
-        if let Some(size_limit) = self.size_limit {
-            if self.map.len() > size_limit {
-                // Temporarily unlink the just-inserted entry from the expiry index so
-                // `retain_latest` cannot select it for eviction. Other entries are
-                // dropped in TTL order until the map is back within `size_limit`.
-                // The stamp is restored afterward so the index stays consistent.
-                let protected = self.map[&key].as_stamped();
-                self.keys.remove(&protected);
-                self.retain_latest(size_limit, false);
-                // If the TTL overflowed (SaturateNow), protected.expiry == now —
-                // the entry is immediately stale but the caller holds a live &mut V.
-                self.keys.insert(protected);
-            }
+        if let Some(size_limit) = self.size_limit
+            && self.map.len() > size_limit
+        {
+            // Temporarily unlink the just-inserted entry from the expiry index so
+            // `retain_latest` cannot select it for eviction. Other entries are
+            // dropped in TTL order until the map is back within `size_limit`.
+            // The stamp is restored afterward so the index stays consistent.
+            let protected = self.map[&key].as_stamped();
+            self.keys.remove(&protected);
+            self.retain_latest(size_limit, false);
+            // If the TTL overflowed (SaturateNow), protected.expiry == now —
+            // the entry is immediately stale but the caller holds a live &mut V.
+            self.keys.insert(protected);
         }
 
         &mut self

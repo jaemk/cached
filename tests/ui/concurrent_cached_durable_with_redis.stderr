@@ -1,0 +1,5 @@
+error: `durable` can only be used with `disk = true` (the redb store), not the redis path
+  --> tests/ui/concurrent_cached_durable_with_redis.rs:11:4
+   |
+11 | fn my_fn(k: i32) -> Result<i32, String> {
+   |    ^^^^^

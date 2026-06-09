@@ -17,7 +17,7 @@ use cached::time::Duration;
 use cached::macros::cached;
 
 /// Use an lru cache with size 100 and a `(String, String)` cache key
-#[cached(size=100)]
+#[cached(max_size=100)]
 fn keyed(a: String, b: String) -> usize {
     let size = a.len() + b.len();
     sleep(Duration::new(size as u64, 0));
@@ -36,7 +36,7 @@ use cached::macros::cached;
 /// Use a timed-lru cache with size 1, a TTL of 60s,
 /// and a `(usize, usize)` cache key
 # #[cfg(feature = "time_stores")]
-#[cached(size=1, ttl =60)]
+#[cached(max_size=1, ttl =60)]
 fn keyed(a: usize, b: usize) -> usize {
     let total = a + b;
     sleep(Duration::new(total as u64, 0));
@@ -97,7 +97,7 @@ use cached::macros::cached;
 # }
 
 /// Cache a fallible function. Only `Ok` results are cached.
-#[cached(size=1)]
+#[cached(max_size=1)]
 fn keyed(a: String) -> Result<usize, ()> {
     do_something_fallible()?;
     Ok(a.len())
@@ -111,7 +111,7 @@ fn keyed(a: String) -> Result<usize, ()> {
 use cached::macros::cached;
 
 /// Cache an optional function. Only `Some` results are cached.
-#[cached(size=1)]
+#[cached(max_size=1)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -131,7 +131,7 @@ use cached::macros::cached;
 /// When called concurrently, duplicate argument-calls will be
 /// synchronized so as to only run once - the remaining concurrent
 /// calls return a cached value.
-#[cached(size=1, sync_writes = true)]
+#[cached(max_size=1, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -152,7 +152,7 @@ use cached::Return;
 /// whether the value returned came from the cache:
 /// `cached::Return.was_cached`.
 /// Use an LRU cache and a `String` cache key.
-#[cached(size=1, with_cached_flag = true)]
+#[cached(max_size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Return<String> {
     Return::new(a)
 }
@@ -177,7 +177,7 @@ use cached::Return;
 # }
 
 /// Same as the previous, but returning a Result
-#[cached(size=1, with_cached_flag = true)]
+#[cached(max_size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Result<Return<usize>, ()> {
     do_something_fallible()?;
     Ok(Return::new(a.len()))
@@ -200,7 +200,7 @@ use cached::macros::cached;
 use cached::Return;
 
 /// Same as the previous, but returning an Option
-#[cached(size=1, with_cached_flag = true)]
+#[cached(max_size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Option<Return<usize>> {
     if a == "a" {
         Some(Return::new(a.len()))
