@@ -1,4 +1,4 @@
-error: `map_error` is not applicable to the default in-memory sharded stores — their error type is `Infallible` and cache operations cannot fail. Remove `map_error`, or add `redis = true`, `disk = true`, or a custom `ty`/`create` to use a store with a fallible error type.
+error: `map_error` is not applicable to the default in-memory sharded stores - their error type is `Infallible` and cache operations cannot fail. Remove `map_error`, or add `redis = true`, `disk = true`, or a custom `ty`/`create` to use a store with a fallible error type.
  --> tests/ui/concurrent_cached_map_error_on_infallible.rs:5:4
   |
 5 | fn simple(n: u64) -> u64 {

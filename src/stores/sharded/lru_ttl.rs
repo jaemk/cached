@@ -43,8 +43,9 @@ struct LruTtlInner<K, V, H> {
 /// return owned values cloned from under the shard lock).
 ///
 /// This is a type alias for `ShardedLruTtlCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, construct a [`ShardedLruTtlCacheBase`] directly via
-/// [`ShardedLruTtlCacheBase::builder()`].
+/// To use a custom shard hasher, call [`ShardedLruTtlCache::builder()`] and then
+/// [`hasher`](ShardedLruTtlCacheBuilder::hasher), which yields a
+/// `ShardedLruTtlCacheBase<K, V, H>` over your hasher.
 ///
 /// **Note**: LRU promotion requires mutable access to the per-shard store, so
 /// `cache_get` acquires a **write** lock (unlike `ShardedTtlCache` which only needs a read lock
@@ -89,19 +90,50 @@ impl<K, V, H> std::fmt::Debug for ShardedLruTtlCacheBase<K, V, H> {
     }
 }
 
+impl<K, V> ShardedLruTtlCacheBase<K, V, DefaultShardHasher>
+where
+    K: Hash + Eq + Clone,
+{
+    /// Construct a ready-to-use [`ShardedLruTtlCache`] holding up to roughly `max_size`
+    /// entries total with the given `ttl`, the [`DefaultShardHasher`], and a default shard
+    /// count.
+    ///
+    /// Note that the effective total capacity can exceed `max_size` for small values
+    /// because each shard reserves a minimum capacity (see
+    /// [`max_size`](ShardedLruTtlCacheBuilder::max_size)). For a custom hasher, shard count,
+    /// per-shard cap, `refresh_on_hit`, or `on_evict`, use [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is `0`, if `ttl` is zero, or if the effective sharded capacity
+    /// overflows `usize` / a per-shard allocation fails. Use [`builder`](Self::builder) with
+    /// [`build`](ShardedLruTtlCacheBuilder::build) to handle those cases without panicking.
+    #[must_use]
+    pub fn new(max_size: usize, ttl: Duration) -> ShardedLruTtlCache<K, V> {
+        Self::builder()
+            .max_size(max_size)
+            .ttl(ttl)
+            .build()
+            .expect("ShardedLruTtlCache::new requires a non-zero max_size and non-zero ttl")
+    }
+
+    /// Return a builder for constructing a [`ShardedLruTtlCache`].
+    ///
+    /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
+    /// [`hasher`](ShardedLruTtlCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedLruTtlCacheBase` over that
+    /// hasher. `new` and `builder` exist only on the default-hasher alias, so a custom hasher
+    /// is always introduced via `hasher`, never a `ShardedLruTtlCacheBase::<_, _, H>` turbofish.
+    pub fn builder() -> ShardedLruTtlCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedLruTtlCacheBuilder::default()
+    }
+}
+
 impl<K, V, H> ShardedLruTtlCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
     H: ShardHasher<K>,
 {
-    /// Return a builder for constructing a [`ShardedLruTtlCacheBase`].
-    ///
-    /// Always returns a builder with the [`DefaultShardHasher`], regardless of the `H` type
-    /// parameter on `Self`. Call `.hasher(h)` on the builder to use a custom hasher.
-    pub fn builder() -> ShardedLruTtlCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedLruTtlCacheBuilder::default()
-    }
-
     #[inline]
     fn shard_of(&self, k: &K) -> &CachePadded<Shard<LruCache<K, TimedEntry<V>>>> {
         let h = self.inner.hasher.shard_hash(k);
@@ -674,10 +706,30 @@ impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     }
 
     /// Set the TTL for cache entries. Required.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    /// Set the TTL for cache entries in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Set the TTL for cache entries in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Set the number of shards (rounded up to the next power of two).
@@ -1069,6 +1121,23 @@ where
             None => (None, false),
         }
     }
+
+    /// Non-renewing read: takes only a read lock, does not promote LRU recency, does not update
+    /// the TTL timestamp, does not touch the hits/misses counters, and does not remove the entry.
+    /// Returns `(Some(v), expired)` for a present entry (expired or not) or `(None, false)` when
+    /// absent.
+    fn cache_peek_with_expiry_status(&self, k: &K) -> (Option<V>, bool) {
+        let shard = self.shard_of(k);
+        let ttl = self.ttl_duration();
+        let guard = shard.lock.read();
+        match guard.cache_peek(k) {
+            None => (None, false),
+            Some(entry) => {
+                let expired = ttl.is_some_and(|t| entry.instant.elapsed() >= t);
+                (Some(entry.value.clone()), expired)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1076,6 +1145,94 @@ mod tests {
     use super::*;
     use crate::ConcurrentCached as SyncConcurrentCached;
     use crate::ConcurrentCloneCached;
+
+    #[test]
+    fn new_returns_ready_cache_respecting_max_size_and_ttl() {
+        // shards(1) gives an exact eviction bound.
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(2)
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_millis(50)));
+        SyncConcurrentCached::set(&c, 1, 10).unwrap();
+        SyncConcurrentCached::set(&c, 2, 20).unwrap();
+        SyncConcurrentCached::set(&c, 3, 30).unwrap(); // evicts LRU (1)
+        assert_eq!(c.len(), 2);
+        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), None);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            SyncConcurrentCached::get(&c, &2).unwrap(),
+            None,
+            "entry must expire after ttl"
+        );
+
+        // Inherent `new` returns a ready cache too.
+        let c2 = ShardedLruTtlCache::<u32, u32>::new(64, Duration::from_secs(60));
+        assert_eq!(SyncConcurrentCached::set(&c2, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::get(&c2, &1).unwrap(), Some(100));
+
+        // `new(N, ttl)` must forward N to the builder — capacity must equal the builder path.
+        let ttl = Duration::from_secs(60);
+        assert_eq!(
+            ShardedLruTtlCache::<u32, u32>::new(1024, ttl).capacity(),
+            ShardedLruTtlCache::<u32, u32>::builder()
+                .max_size(1024)
+                .ttl(ttl)
+                .build()
+                .unwrap()
+                .capacity()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size and non-zero ttl")]
+    fn new_zero_max_size_panics() {
+        let _c = ShardedLruTtlCache::<u32, u32>::new(0, Duration::from_secs(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size and non-zero ttl")]
+    fn new_zero_ttl_panics() {
+        let _c = ShardedLruTtlCache::<u32, u32>::new(2, Duration::ZERO);
+    }
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl_secs(7)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_secs(7)));
+
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl_millis(250)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(10))
+            .ttl_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_secs(5)));
+
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl_secs(10)
+            .ttl_millis(500)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_millis(500)));
+    }
 
     #[test]
     fn basic_get_set_remove() {
@@ -1678,6 +1835,177 @@ mod tests {
             SyncConcurrentCached::cache_get(&c, &2u32).expect("cache_get must succeed"),
             None,
             "key 2 must be evicted as the least-recently-used entry"
+        );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_no_side_effects() {
+        // shards(1) makes counter captures exact (no cross-shard aggregation noise).
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(&c, 1u32, 42u32).expect("insert must succeed");
+
+        // Capture counters before any peek.
+        let before = c.metrics();
+
+        // Live key: expect (Some(42), false).
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(42), "live peek must return the value");
+        assert!(!expired, "live peek must report expired=false");
+
+        // Absent key: expect (None, false).
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &999u32);
+        assert!(val2.is_none(), "absent peek must return None");
+        assert!(!expired2, "absent peek must report expired=false");
+
+        // Counters must be unchanged.
+        let after = c.metrics();
+        assert_eq!(after.hits, before.hits, "peek must not increment hits");
+        assert_eq!(
+            after.misses, before.misses,
+            "peek must not increment misses"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "peek must not increment evictions"
+        );
+
+        // Entry must still be present.
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1u32).expect("cache_get must succeed"),
+            Some(42),
+            "entry must still be present after peek"
+        );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_does_not_promote_lru() {
+        // max_size(2) + shards(1): with only 2 slots, inserting a third entry
+        // evicts the LRU entry. If peek promoted recency, it would change which
+        // entry survives; if it does not promote, the pre-peek LRU order holds.
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .max_size(2)
+            .ttl(Duration::from_secs(60))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        // Insert order: key 1, then key 2.  LRU is key 1 (oldest access).
+        SyncConcurrentCached::cache_set(&c, 1u32, 10u32).expect("insert must succeed");
+        SyncConcurrentCached::cache_set(&c, 2u32, 20u32).expect("insert must succeed");
+
+        // Peek key 1 — must NOT promote it to MRU.
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(10), "peek must return the value");
+        assert!(!expired, "peek must report expired=false for a live entry");
+
+        // Counters unchanged: no hits, no misses.
+        let m = c.metrics();
+        assert_eq!(m.hits, Some(0), "peek must not increment hits");
+        assert_eq!(m.misses, Some(0), "peek must not increment misses");
+
+        // Inserting key 3 must evict key 1 (still LRU because peek did not
+        // promote it), not key 2.
+        SyncConcurrentCached::cache_set(&c, 3u32, 30u32).expect("insert must succeed");
+
+        // key 1 evicted (LRU), key 2 and key 3 survive.
+        assert!(
+            SyncConcurrentCached::cache_get(&c, &1u32)
+                .expect("cache_get must succeed")
+                .is_none(),
+            "key 1 must be evicted as LRU (peek must not have promoted it)"
+        );
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &2u32).expect("cache_get must succeed"),
+            Some(20),
+            "key 2 must survive"
+        );
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &3u32).expect("cache_get must succeed"),
+            Some(30),
+            "key 3 must survive"
+        );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_stale_entry_no_side_effects() {
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_millis(50))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(&c, 1u32, 77u32).expect("insert must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let before = c.metrics();
+
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(77), "expired peek must return the stale value");
+        assert!(expired, "expired peek must report expired=true");
+
+        // Counters must be unchanged.
+        let after = c.metrics();
+        assert_eq!(
+            after.hits, before.hits,
+            "expired peek must not increment hits"
+        );
+        assert_eq!(
+            after.misses, before.misses,
+            "expired peek must not increment misses"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "expired peek must not increment evictions"
+        );
+
+        // Entry must NOT have been removed by the peek.
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val2,
+            Some(77),
+            "entry must still be present after expired peek"
+        );
+        assert!(expired2, "entry must still be expired after peek");
+    }
+
+    #[test]
+    fn peek_with_expiry_status_does_not_renew_ttl_under_refresh_on_hit() {
+        // peek must not extend the TTL even when refresh_on_hit is enabled.
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .refresh_on_hit(true)
+            .max_size(64)
+            .ttl(Duration::from_millis(50))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(&c, 1u32, 42u32).expect("insert must succeed");
+
+        // Entry is live; peek must return the value and report not-expired.
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(42), "live peek must return the value");
+        assert!(!expired, "live peek must report expired=false");
+
+        // Wait past the original TTL.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // If peek had renewed the TTL the entry would still be live; it must not have.
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val2,
+            Some(42),
+            "post-sleep peek must still return the value"
+        );
+        assert!(
+            expired2,
+            "peek must not renew TTL; entry must now be expired"
         );
     }
 }

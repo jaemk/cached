@@ -24,7 +24,7 @@ enum ExampleError {
 // $system_cache_dir/<exe>_cached_disk_cache/).
 #[concurrent_cached(
     disk = true,
-    ttl = 30,
+    ttl_secs = 30,
     name = "ASYNC_DISK_SLEEP_SECS",
     map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##
 )]

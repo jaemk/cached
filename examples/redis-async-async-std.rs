@@ -41,7 +41,7 @@ enum ExampleError {
 // will be pulled from the env var: `CACHED_REDIS_CONNECTION_STRING`.
 #[concurrent_cached(
     redis = true,
-    ttl = 30,
+    ttl_secs = 30,
     cache_prefix_block = r##"{ "cache-redis-async-std-example-1" }"##,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
@@ -54,7 +54,7 @@ async fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::new("cache_redis_async_std_example_cached_sleep_secs", Duration::from_secs(1))
+        AsyncRedisCache::builder("cache_redis_async_std_example_cached_sleep_secs", Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()
             .await
@@ -83,7 +83,7 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::new("cache_redis_async_std_example_cached_sleep_secs_config", Duration::from_secs(1))
+        AsyncRedisCache::builder("cache_redis_async_std_example_cached_sleep_secs_config", Duration::from_secs(1))
             .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)
             .build()

@@ -1,0 +1,5 @@
+error: `ttl` now takes a Duration expression (e.g. `ttl = "Duration::from_secs(60)"`); for whole seconds use `ttl_secs = 60`, for milliseconds use `ttl_millis = 500`.
+ --> tests/ui/once_ttl_integer_migration.rs:3:14
+  |
+3 | #[once(ttl = 60)]
+  |              ^^

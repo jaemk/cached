@@ -81,10 +81,30 @@ pub struct TtlCacheBuilder<K, V> {
 impl<K, V> TtlCacheBuilder<K, V> {
     /// Set the TTL for cache entries. Required — `build()` returns
     /// `Err(BuildError::MissingRequired("ttl"))` if not set.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    /// Set the TTL for cache entries in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Set the TTL for cache entries in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Set the initial allocation capacity (optional).
@@ -143,6 +163,23 @@ impl<K, V> TtlCacheBuilder<K, V> {
 }
 
 impl<K: Hash + Eq, V> TtlCache<K, V> {
+    /// Construct a ready-to-use [`TtlCache`] with the given `ttl`.
+    ///
+    /// For optional settings (initial capacity, `refresh_on_hit`, `on_evict`) use
+    /// [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` is zero. Use [`builder`](Self::builder) with
+    /// [`build`](TtlCacheBuilder::build) to handle a zero TTL without panicking.
+    #[must_use]
+    pub fn new(ttl: Duration) -> Self {
+        Self::builder()
+            .ttl(ttl)
+            .build()
+            .expect("TtlCache::new requires a non-zero ttl")
+    }
+
     /// Return a builder for constructing a [`TtlCache`].
     #[must_use]
     pub fn builder() -> TtlCacheBuilder<K, V> {
@@ -282,7 +319,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         None
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
                 if occupied.get().instant.elapsed() < self.ttl {
@@ -317,7 +354,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         }
     }
 
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -518,7 +555,7 @@ impl<K, V> CachedAsync<K, V> for TtlCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -563,7 +600,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -623,6 +660,70 @@ mod tests {
     use crate::stores::Cached;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn new_returns_ready_cache_respecting_ttl() {
+        use crate::CacheTtl;
+        let mut c: TtlCache<u32, u32> = TtlCache::new(crate::time::Duration::from_millis(50));
+        assert_eq!(
+            CacheTtl::ttl(&c),
+            Some(crate::time::Duration::from_millis(50))
+        );
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero ttl")]
+    fn new_zero_ttl_panics() {
+        let _c: TtlCache<u32, u32> = TtlCache::new(crate::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        use crate::CacheTtl;
+        let c: TtlCache<u32, u32> = TtlCache::builder().ttl_secs(7).build().unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(crate::time::Duration::from_secs(7)));
+
+        let c: TtlCache<u32, u32> = TtlCache::builder().ttl_millis(250).build().unwrap();
+        assert_eq!(
+            CacheTtl::ttl(&c),
+            Some(crate::time::Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        use crate::CacheTtl;
+        // ttl(secs=10) then ttl_secs(5) -> 5s
+        let c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(10))
+            .ttl_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(crate::time::Duration::from_secs(5)));
+
+        // ttl_secs then ttl_millis -> the millis value
+        let c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl_secs(10)
+            .ttl_millis(500)
+            .build()
+            .unwrap();
+        assert_eq!(
+            CacheTtl::ttl(&c),
+            Some(crate::time::Duration::from_millis(500))
+        );
+
+        // ttl_millis then ttl -> the ttl value
+        let c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl_millis(500)
+            .ttl(crate::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(crate::time::Duration::from_secs(3)));
+    }
 
     #[test]
     fn cache_clear_with_on_evict_fires_for_all_entries() {

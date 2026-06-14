@@ -23,8 +23,20 @@ struct ConcurrentCachedArgs {
     cache_prefix_block: Option<String>,
     #[darling(default)]
     name: Option<String>,
+    /// A TTL expressed as a `Duration` expression in a string literal (same
+    /// convention as `create`/`convert`), e.g.
+    /// `ttl = "core::time::Duration::from_secs(60)"`. Mutually exclusive with
+    /// `ttl_secs`, `ttl_millis`, and `expires`.
     #[darling(default)]
-    ttl: Option<u64>,
+    ttl: Option<TtlExpr>,
+    /// TTL in whole seconds. Convenience alternative to `ttl`. Mutually
+    /// exclusive with `ttl`, `ttl_millis`, and `expires`.
+    #[darling(default)]
+    ttl_secs: Option<u64>,
+    /// TTL in milliseconds. A finer-grained alternative to `ttl_secs`;
+    /// mutually exclusive with `ttl`, `ttl_secs`, and `expires` (#149).
+    #[darling(default)]
+    ttl_millis: Option<u64>,
     #[darling(default)]
     time: Option<u64>,
     #[darling(default)]
@@ -45,7 +57,7 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     cache_none: bool,
     /// When `true`, an `Err` return serves the last cached `Ok` value for that key.
-    /// Requires `ttl`. The stale value is read from the primary TTL cache slot via
+    /// Requires `ttl` or `ttl_millis`. The stale value is read from the primary TTL cache slot via
     /// `ConcurrentCloneCached::cache_get_with_expiry_status` (no separate store is
     /// created) and re-cached with a fresh TTL window on `Err`.
     #[darling(default)]
@@ -67,12 +79,22 @@ struct ConcurrentCachedArgs {
     shards: Option<usize>,
     #[darling(default)]
     expires: bool,
+    /// A boolean expression over the function arguments; when `true`, the cached
+    /// value is bypassed and the body is re-run and re-cached. Orthogonal to
+    /// `refresh`. Parsed like `key`/`convert` (#146).
+    #[darling(default)]
+    force_refresh: Option<String>,
+    /// Allow the macro on a method that takes `self` inside an `impl` block.
+    /// The cache static is emitted inside the generated fn body and the receiver
+    /// is preserved/forwarded (#16/#140).
+    #[darling(default)]
+    in_impl: bool,
 }
 
 /// When a `create` block is supplied the user fully constructs the store, so
 /// every store-builder attribute the macro would otherwise apply is dropped.
 /// Reject those attributes with a precise message instead of silently ignoring
-/// them — otherwise `disk_dir` / `durable` (and `ttl` /
+/// them - otherwise `disk_dir` / `durable` (and `ttl` /
 /// `refresh` / `cache_prefix_block`) look applied but are not.
 fn check_create_conflicts(
     args: &ConcurrentCachedArgs,
@@ -81,6 +103,12 @@ fn check_create_conflicts(
     let mut conflicting = Vec::new();
     if args.ttl.is_some() {
         conflicting.push("ttl");
+    }
+    if args.ttl_secs.is_some() {
+        conflicting.push("ttl_secs");
+    }
+    if args.ttl_millis.is_some() {
+        conflicting.push("ttl_millis");
     }
     if args.refresh.is_some() {
         conflicting.push("refresh");
@@ -111,7 +139,7 @@ fn check_create_conflicts(
     Err(syn::Error::new(
         span,
         format!(
-            "cannot specify {list} when passing a `create` block — `create` fully \
+            "cannot specify {list} when passing a `create` block - `create` fully \
              constructs the store, so these store-builder attributes would be \
              silently ignored"
         ),
@@ -177,19 +205,63 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let signature = input.sig;
     let body = input.block;
 
+    // Resolve the path to the `cached` crate (renamed-dependency support, #157).
+    let krate = crate_path();
+
     // pull out the parts of the function signature
     let fn_ident = signature.ident.clone();
     let inputs = signature.inputs.clone();
     let output = signature.output.clone();
     let asyncness = signature.asyncness;
-
-    if inputs
+    let has_receiver = inputs
         .iter()
-        .any(|input| matches!(input, syn::FnArg::Receiver(_)))
-    {
+        .any(|input| matches!(input, syn::FnArg::Receiver(_)));
+
+    // Reject `self` methods unless `in_impl = true`. A `self` receiver only
+    // exists inside an `impl`/trait, and off the `in_impl` path the cache static
+    // is emitted at that same scope, where a `static` is not a valid item - so a
+    // `convert` block alone cannot rescue a `self` method (it would still fail
+    // later with an opaque error). `in_impl` is the only fix (#16/#140).
+    if has_receiver && !args.in_impl {
         return syn::Error::new(
             fn_ident.span(),
-            "#[concurrent_cached] cannot be applied to methods that take `self`",
+            "#[concurrent_cached] cannot be applied to methods that take `self`. \
+             Set `in_impl = true` to cache the method inside its `impl` block \
+             (a `convert` block alone is not sufficient: the generated cache \
+             static cannot live at `impl` scope).",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // The inverse: `in_impl = true` on a function with no `self` receiver
+    // mis-compiles, because the generated `{fn}_no_cache(args)` call inside the
+    // impl cannot resolve without a `Self::` qualifier (a confusing "cannot find
+    // function" error downstream). Reject it here with a clear message.
+    if args.in_impl && !has_receiver {
+        return syn::Error::new(
+            fn_ident.span(),
+            "in_impl = true requires a method with a `self` receiver; \
+             for a free function or an associated function without `self`, \
+             remove in_impl.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Generic functions need the cache key pinned to a concrete type via
+    // `key` + `convert` (and a concrete store `ty`/`create`): the cache is a
+    // single monomorphic static and cannot name the function's type parameters.
+    // Without `convert` the default-key path embeds the type parameters in the
+    // key type and cannot compile - reject it with a clear diagnostic (#80).
+    if signature.generics.type_params().next().is_some() && args.convert.is_none() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "#[concurrent_cached] on a generic function requires `key` + `convert` to pin the cache \
+             key to a concrete type: the cache is a single monomorphic static shared across all \
+             instantiations and cannot name the function's type parameters. \
+             Provide `key`/`convert` (and a concrete `ty`/`create`), or wrap the generic function \
+             in a non-generic `#[concurrent_cached]` function per concrete type.",
         )
         .to_compile_error()
         .into();
@@ -198,7 +270,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if args.time.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`time` was renamed to `ttl` in cached 1.0; use `ttl = ...`",
+            "`time` (whole seconds) was renamed in cached 1.0; use `ttl_secs = ...` \
+             (or `ttl = \"Duration::from_secs(...)\"` / `ttl_millis = ...`)",
         )
         .to_compile_error()
         .into();
@@ -222,11 +295,45 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    // Resolve the TTL `Duration` token from whichever of `ttl` (expr), `ttl_secs`,
+    // or `ttl_millis` is set. This performs the 3-way mutual-exclusion check, the
+    // `ttl_secs`/`ttl_millis` >= 1 validation, and parses the `ttl` expression.
+    // (A zero `ttl_secs`/`ttl_millis` is rejected here, before any store path runs.)
+    let (has_ttl, ttl_duration) = match resolve_ttl_duration(
+        &krate,
+        &args.ttl,
+        args.ttl_secs,
+        args.ttl_millis,
+        fn_ident.span(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    if args.expires && args.ttl_secs.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ttl_secs` are mutually exclusive - \
+             `expires` delegates expiry to the value via the `Expires` trait",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.expires && args.ttl_millis.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ttl_millis` are mutually exclusive - \
+             `expires` delegates expiry to the value via the `Expires` trait; \
+             `ttl_millis` applies a uniform millisecond TTL to all entries",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     if args.expires {
         if args.ttl.is_some() {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires` and `ttl` are mutually exclusive — `expires` delegates expiry to the value via the `Expires` trait",
+                "`expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait",
             )
             .to_compile_error()
             .into();
@@ -234,7 +341,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.redis {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires` and `redis` are mutually exclusive — `expires` selects sharded in-memory expiring stores",
+                "`expires` and `redis` are mutually exclusive - `expires` selects sharded in-memory expiring stores",
             )
             .to_compile_error()
             .into();
@@ -242,7 +349,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.disk {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires` and `disk` are mutually exclusive — `expires` selects sharded in-memory expiring stores",
+                "`expires` and `disk` are mutually exclusive - `expires` selects sharded in-memory expiring stores",
             )
             .to_compile_error()
             .into();
@@ -250,7 +357,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.ty.is_some() {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires` and `ty` are mutually exclusive — `expires` generates the store type automatically",
+                "`expires` and `ty` are mutually exclusive - `expires` generates the store type automatically",
             )
             .to_compile_error()
             .into();
@@ -258,7 +365,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.create.is_some() {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires` and `create` are mutually exclusive — `expires` generates the store constructor automatically",
+                "`expires` and `create` are mutually exclusive - `expires` generates the store constructor automatically",
             )
             .to_compile_error()
             .into();
@@ -266,7 +373,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.refresh.is_some() {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires` and `refresh` are mutually exclusive — `expires` delegates expiry to the value via `Expires::is_expired`",
+                "`expires` and `refresh` are mutually exclusive - `expires` delegates expiry to the value via `Expires::is_expired`",
             )
             .to_compile_error()
             .into();
@@ -274,7 +381,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.cache_none {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires = true` and `cache_none = true` are incompatible — `expires` requires \
+                "`expires = true` and `cache_none = true` are incompatible - `expires` requires \
                  the cache value type to implement `Expires`, but `cache_none = true` stores \
                  `Option<V>` as the value, which does not implement `Expires`. \
                  Remove `cache_none = true` (None values are not cached by default with `expires = true`).",
@@ -285,11 +392,11 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.result_fallback {
             return syn::Error::new(
                 fn_ident.span(),
-                "`result_fallback = true` and `expires = true` are mutually exclusive — \
+                "`result_fallback = true` and `expires = true` are mutually exclusive - \
                  `expires` selects a per-value expiry store; `result_fallback` requires \
                  a fixed-TTL store whose entry expiry can be detected and refreshed by \
                  the cache layer, which per-value expiry does not support. \
-                 Note: `ttl` and `expires` serve different purposes — `ttl` applies a fixed \
+                 Note: `ttl` and `expires` serve different purposes - `ttl` applies a fixed \
                  TTL to all entries, while `expires` delegates expiry to each value. \
                  If you need time-based expiry together with `result_fallback`, use `ttl` \
                  (not `expires`).",
@@ -300,7 +407,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.cache_err {
             return syn::Error::new(
                 fn_ident.span(),
-                "`expires = true` and `cache_err = true` are mutually exclusive — `expires` \
+                "`expires = true` and `cache_err = true` are mutually exclusive - `expires` \
                  requires the cached value to implement `Expires`, but `cache_err = true` \
                  stores `Result<T, E>` as the value type, which does not implement `Expires`. \
                  Remove `cache_err = true`.",
@@ -328,9 +435,9 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let is_option_return = is_option_return_type(&output);
     let is_result_return = is_result_return_type(&output);
 
-    // `is_smart_option`: skip None, cache Some(T) — default for Option<T> returns.
+    // `is_smart_option`: skip None, cache Some(T) - default for Option<T> returns.
     // Opt out with `cache_none = true` to force caching None as well.
-    // `is_smart_result`: cache only Ok(T), skip Err — always true for Result returns here;
+    // `is_smart_result`: cache only Ok(T), skip Err - always true for Result returns here;
     // opt out with `cache_err = true` to force caching Err values (in-memory default only).
     let is_smart_option = is_option_return && !args.cache_none;
     let is_smart_result = is_result_return && !args.cache_err;
@@ -372,7 +479,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             fn_ident.span(),
             "`result_fallback` and `with_cached_flag` are mutually exclusive: \
              `result_fallback` stores the inner `Ok(T)` value directly, but \
-             `with_cached_flag` wraps the `Ok` value in `Return<T>` — the generated \
+             `with_cached_flag` wraps the `Ok` value in `Return<T>` - the generated \
              code cannot simultaneously store `T` and expose `Return<T>` through \
              the cached function. Use `with_cached_flag = true` alone (without \
              `result_fallback`) or `result_fallback = true` alone.",
@@ -453,14 +560,14 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     // `Option<Return<T>>` without smart-option mode would fall into the plain-Return<T>
-    // branch and generate `result.value.clone()` on an `Option<Return<T>>` — a confusing
+    // branch and generate `result.value.clone()` on an `Option<Return<T>>` - a confusing
     // compile error with a bad span. Catch it here with a clear diagnostic.
     if args.with_cached_flag && !is_smart_option && is_option_return {
         return syn::Error::new(
             output_span,
             "`with_cached_flag = true` and `cache_none = true` are structurally incompatible \
              on `Option<T>` returns: `with_cached_flag` unwraps `Return<T>` and stores `T`, \
-             while `cache_none = true` stores `Option<T>` as the cached value — the same \
+             while `cache_none = true` stores `Option<T>` as the cached value - the same \
              store cannot satisfy both. Remove one: use `with_cached_flag = true` alone to \
              receive a `Return<T>` that signals cache hits, or use `cache_none = true` alone \
              (without `with_cached_flag`) to cache `None` values.",
@@ -482,7 +589,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             unreachable!("is_smart_result=true implies ReturnType::Type")
         };
 
-        // The `Ok` type of the function's `Result<…, E>`.
+        // The `Ok` type of the function's `Result<..., E>`.
         let ok_ty = match first_type_arg(
             &ty,
             output_span,
@@ -496,7 +603,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         if args.with_cached_flag {
             // Descend one more level into `cached::Return<T>` to recover `T`.
             // `check_with_cache_flag` above already verified the `Ok` type is
-            // structurally `Return<…>`; gating on `with_cached_flag` (rather
+            // structurally `Return<...>`; gating on `with_cached_flag` (rather
             // than a bare-name token scan) avoids misclassifying an unrelated
             // type merely named `Return` (e.g. `Result<i32, Return>`).
             let GenericArgument::Type(return_ty) = ok_ty else {
@@ -570,8 +677,13 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             Err(error) => return error.to_compile_error().into(),
         };
 
+    // `has_ttl` / `ttl_duration` were resolved above (from `ttl` expr, `ttl_secs`,
+    // or `ttl_millis`). `has_ttl` drives store selection and the `result_fallback`
+    // TTL-presence check (#149). `ttl_duration` is passed into the store-selector
+    // helpers so every backend (redis/disk/sharded) honors whichever unit was used.
+
     // Track whether the cache uses Infallible errors (the in-memory sharded default).
-    // When true, `map_error` is a compile error and cache ops use `.expect(…)`.
+    // When true, `map_error` is a compile error and cache ops use `.expect(...)`.
     let mut infallible_default = false;
 
     // make the cache type and create statement
@@ -595,6 +707,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             match get_redis_cache_type_and_create(
                 &args,
+                &krate,
+                ttl_duration.as_ref(),
                 &cache_ident,
                 &cache_key_ty,
                 &cache_value_ty,
@@ -623,6 +737,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             match get_disk_cache_type_and_create(
                 &args,
+                &krate,
+                ttl_duration.as_ref(),
                 &cache_name,
                 &cache_key_ty,
                 &cache_value_ty,
@@ -652,6 +768,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             } else {
                 match get_sharded_cache_type_and_create(
                     &args,
+                    &krate,
+                    ttl_duration.as_ref(),
                     &cache_key_ty,
                     &cache_value_ty,
                     &fn_ident,
@@ -717,13 +835,13 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    if args.result_fallback && args.ttl.is_none() {
+    if args.result_fallback && !has_ttl {
         return syn::Error::new(
             fn_ident.span(),
-            "`result_fallback` requires `ttl` to be set (e.g. `ttl = 60`). It serves the last \
+            "`result_fallback` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set (e.g. `ttl_secs = 60`). It serves the last \
              cached `Ok` value when a refresh returns `Err`, but a refresh only happens after an \
              entry expires. Without a TTL entries never expire, so the function body is never \
-             re-run for a cached key and the fallback can never fire — making the option a no-op. \
+             re-run for a cached key and the fallback can never fire - making the option a no-op. \
              Set a TTL so cached entries expire and `result_fallback` has something to fall back to.",
         )
         .to_compile_error()
@@ -732,16 +850,16 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // Resolve the cache-error handling strategy.  For the default sharded
     // in-memory stores the error type is `Infallible`, so cache operations can
-    // never fail and `.expect(…)` is always correct.  `map_error` is rejected on
-    // this path — there are no errors to map.
+    // never fail and `.expect(...)` is always correct.  `map_error` is rejected on
+    // this path - there are no errors to map.
     //
     // For the fallible redis / disk / custom paths the user must supply
-    // `map_error = "…"` and we keep the original `.map_err(#map_error)?` pattern.
+    // `map_error = "..."` and we keep the original `.map_err(#map_error)?` pattern.
     let map_error_opt: Option<ExprClosure> = match (&args.map_error, infallible_default) {
         (Some(_), true) => {
             return syn::Error::new(
                 fn_ident.span(),
-                "`map_error` is not applicable to the default in-memory sharded stores — \
+                "`map_error` is not applicable to the default in-memory sharded stores - \
                  their error type is `Infallible` and cache operations cannot fail. \
                  Remove `map_error`, or add `redis = true`, `disk = true`, or a custom \
                  `ty`/`create` to use a store with a fallible error type.",
@@ -760,11 +878,11 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 .into();
             }
         },
-        (None, true) => None, // infallible: use .expect(…) in generated code
+        (None, true) => None, // infallible: use .expect(...) in generated code
         (None, false) => {
             return syn::Error::new(
                 fn_ident.span(),
-                "#[concurrent_cached] requires `map_error = \"…\"` when the cache type \
+                "#[concurrent_cached] requires `map_error = \"...\"` when the cache type \
                  has a fallible error (redis/disk/custom)",
             )
             .to_compile_error()
@@ -772,11 +890,11 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    // Emit either `.map_err(closure)?` for fallible stores or `.expect(…)` for
+    // Emit either `.map_err(closure)?` for fallible stores or `.expect(...)` for
     // infallible stores.  The macro helpers below use these token-stream fragments.
     //
     // `infallible_default` is true for the default in-memory sharded stores; their error
-    // type is `Infallible`, so the ops always succeed and `.expect(…)` is correct.
+    // type is `Infallible`, so the ops always succeed and `.expect(...)` is correct.
     // `map_error` on this path is rejected above as a compile error.
     let (cache_get_unwrap, cache_set_unwrap): (proc_macro2::TokenStream, proc_macro2::TokenStream) =
         if infallible_default {
@@ -793,176 +911,239 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let cache_get_unwrap_async = cache_get_unwrap.clone();
     let cache_set_unwrap_async = cache_set_unwrap.clone();
 
+    // Emit a cache-set call. `value_ref` is an expression that already evaluates to
+    // a `&V`. The set goes through the `__set_dispatch` autoref shim: when the
+    // concrete store implements `SerializeCached`/`SerializeCachedAsync` (redis, disk,
+    // or any custom `ty`/`create` store that does) the borrowed setter is used and the
+    // value is serialized from the reference with no pre-set clone (#196); otherwise
+    // the shim clones the value and calls the owned `cache_set`. The key is moved in
+    // either way (no key clone), matching the previous owned path. The `use ... as _;`
+    // brings the fallback trait into scope so method resolution can reach it; the
+    // inherent (serialize) method is always preferred when it applies.
+    let set_call = |value_ref: proc_macro2::TokenStream| {
+        if asyncness.is_some() {
+            quote! {
+                {
+                    use #krate::__set_dispatch_async::SetDispatchAsyncFallback as _;
+                    #krate::__set_dispatch_async::SetDispatchAsync::new(__cached_cache)
+                        .cache_set_dispatch(__cached_key, #value_ref).await #cache_set_unwrap_async;
+                }
+            }
+        } else {
+            quote! {
+                {
+                    use #krate::__set_dispatch::SetDispatchFallback as _;
+                    #krate::__set_dispatch::SetDispatch::new(__cached_cache)
+                        .cache_set_dispatch(__cached_key, #value_ref) #cache_set_unwrap;
+                }
+            }
+        }
+    };
+
     // make the set cache and return cache blocks
     let (set_cache_block, return_cache_block) = if with_cached_flag_result {
         // Result<Return<T>, E>: cache the inner T from Ok(Return<T>).
+        let set = set_call(quote! { &__cached_inner.value });
         (
-            if asyncness.is_some() {
-                quote! {
-                    if let Ok(result) = &result {
-                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
-                    }
-                }
-            } else {
-                quote! {
-                    if let Ok(result) = &result {
-                        ::cached::ConcurrentCached::cache_set(cache, key, result.value.clone()) #cache_set_unwrap;
-                    }
+            quote! {
+                if let Ok(__cached_inner) = &__cached_result {
+                    #set
                 }
             },
-            quote! { let mut r = ::cached::Return::new(result); r.was_cached = true; return Ok(r) },
+            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.was_cached = true; return Ok(__cached_r) },
         )
     } else if with_cached_flag_option {
         // Option<Return<T>>: cache the inner T from Some(Return<T>), skip None.
+        let set = set_call(quote! { &__cached_inner.value });
         (
-            if asyncness.is_some() {
-                quote! {
-                    if let Some(result) = &result {
-                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
-                    }
-                }
-            } else {
-                quote! {
-                    if let Some(result) = &result {
-                        ::cached::ConcurrentCached::cache_set(cache, key, result.value.clone()) #cache_set_unwrap;
-                    }
+            quote! {
+                if let Some(__cached_inner) = &__cached_result {
+                    #set
                 }
             },
-            quote! { let mut r = ::cached::Return::new(result); r.was_cached = true; return Some(r) },
+            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.was_cached = true; return Some(__cached_r) },
         )
     } else if args.with_cached_flag {
         // Plain Return<T>: cache the inner T directly.
+        let set = set_call(quote! { &__cached_result.value });
         (
-            if asyncness.is_some() {
-                quote! {
-                    ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.value.clone()).await #cache_set_unwrap_async;
-                }
-            } else {
-                quote! {
-                    ::cached::ConcurrentCached::cache_set(cache, key, result.value.clone()) #cache_set_unwrap;
-                }
-            },
-            quote! { let mut r = ::cached::Return::new(result); r.was_cached = true; return r },
+            set,
+            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.was_cached = true; return __cached_r },
         )
     } else if is_smart_result {
         // Result<T, E> return type: cache only Ok(T), skip Err
+        let set = set_call(quote! { __cached_inner });
         (
-            if asyncness.is_some() {
-                quote! {
-                    if let Ok(result) = &result {
-                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
-                    }
-                }
-            } else {
-                quote! {
-                    if let Ok(result) = &result {
-                        ::cached::ConcurrentCached::cache_set(cache, key, result.clone()) #cache_set_unwrap;
-                    }
+            quote! {
+                if let Ok(__cached_inner) = &__cached_result {
+                    #set
                 }
             },
-            quote! { return Ok(result) },
+            quote! { return Ok(__cached_result) },
         )
     } else if is_smart_option {
         // Option<T>: cache Some(T), skip None. infallible_default guaranteed.
+        let set = set_call(quote! { __cached_inner });
         (
-            if asyncness.is_some() {
-                quote! {
-                    if let Some(result) = &result {
-                        ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
-                    }
-                }
-            } else {
-                quote! {
-                    if let Some(result) = &result {
-                        ::cached::ConcurrentCached::cache_set(cache, key, result.clone()) #cache_set_unwrap;
-                    }
+            quote! {
+                if let Some(__cached_inner) = &__cached_result {
+                    #set
                 }
             },
-            quote! { return Some(result) },
+            quote! { return Some(__cached_result) },
         )
     } else {
-        // Plain return type — infallible_default is guaranteed true here.
+        // Plain return type - infallible_default is guaranteed true here.
         // No Ok/Err wrapping: the result is the value directly.
-        (
-            if asyncness.is_some() {
-                quote! {
-                    ::cached::ConcurrentCachedAsync::async_cache_set(cache, key, result.clone()).await #cache_set_unwrap_async;
-                }
-            } else {
-                quote! {
-                    ::cached::ConcurrentCached::cache_set(cache, key, result.clone()) #cache_set_unwrap;
-                }
-            },
-            quote! { return result },
-        )
+        let set = set_call(quote! { &__cached_result });
+        (set, quote! { return __cached_result })
     };
 
-    // Clone the full original signature and rename it to `inner`. Quoting the
-    // whole `syn::Signature` preserves the `where` clause (and lifetimes,
-    // const generics, etc.) — `#generics` alone drops the where clause.
+    // Clone the full original signature and rename it to `__cached_inner`. Quoting
+    // the whole `syn::Signature` preserves the `where` clause (and lifetimes,
+    // const generics, etc.) - `#generics` alone drops the where clause.
+    // Unique per-function name so multiple `in_impl` methods on the same impl
+    // block do not collide on a shared `__cached_inner` sibling method.
+    let inner_fn_ident = Ident::new(&format!("{}_no_cache", &fn_ident), fn_ident.span());
     let mut inner_sig = signature.clone();
-    inner_sig.ident = Ident::new("inner", fn_ident.span());
+    inner_sig.ident = inner_fn_ident.clone();
 
-    // `do_set_return_block`: runs `inner`, sets the cache, returns the result.
+    // For `in_impl` methods the body may reference `self`, so `__cached_inner`
+    // must be a sibling impl method (a nested fn cannot capture `self`) invoked
+    // as `self.__cached_inner(...)`. For free functions it stays a nested fn
+    // defined inline in the body (#16/#140).
+    let self_prefix = if has_receiver {
+        quote! { self. }
+    } else {
+        quote! {}
+    };
+    // The `in_impl` origin sibling is a public impl method; hide it from consumers'
+    // rustdoc with `#[doc(hidden)]` (it stays callable as an escape hatch).
+    let (inner_sibling_def, inner_nested_def) = if args.in_impl {
+        (
+            quote! { #[doc(hidden)] #visibility #inner_sig #body },
+            quote! {},
+        )
+    } else {
+        (quote! {}, quote! { #inner_sig #body })
+    };
+
+    // `force_refresh`: opt-in boolean expression block over the fn args, in curly
+    // braces like `convert` (e.g. `force_refresh = "{ id == 0 }"`); when `true`,
+    // skip the cached-hit early return so the body re-runs and re-caches.
+    // Orthogonal to `refresh` (TTL renewal on hit) (#146).
+    // Parse the `force_refresh` predicate once; both the cached-hit guard and the
+    // `result_fallback` bypass token below are built from this single parsed block.
+    let force_refresh_block = match parse_force_refresh_block(&args.force_refresh, fn_ident.span())
+    {
+        Ok(block) => block,
+        Err(error) => return error.to_compile_error().into(),
+    };
+
+    let force_refresh_guard = match &force_refresh_block {
+        Some(block) => quote! { if !(#block) },
+        None => quote! { if true },
+    };
+
+    // `force_refresh_bypass`: the force-refresh predicate as a plain boolean expression
+    // (`(#block)`), or constant `false` when there is no `force_refresh`. Used by the
+    // `result_fallback` path to decide, once, whether a present entry is being bypassed.
+    // When bypassing we read the stale fallback value via the non-renewing
+    // `cache_peek_with_expiry_status` so the bypassed entry sees no read side effects (#146);
+    // when not bypassing we use the renewing `cache_get_with_expiry_status`, which is the
+    // correct read for a genuine hit. With no `force_refresh` this is constant-false, so the
+    // renewing-read + early-return path is always taken — equivalent to the prior behavior.
+    let force_refresh_bypass = match &force_refresh_block {
+        Some(block) => quote! { (#block) },
+        None => quote! { false },
+    };
+
+    // The cache-set used on the `result_fallback` Ok path. `__cached_ok_val` is a
+    // `&V` (bound via `if let Ok(__cached_ok_val) = &__cached_result`). Routing it
+    // through `set_call` keeps every set site on one path and moves the key instead
+    // of cloning it (the owned `cache_set` call cloned both key and value).
+    //
+    // Note: `result_fallback` is gated to the in-memory sharded stores, which do not
+    // implement `SerializeCached`/`SerializeCachedAsync`, so today the shim always
+    // resolves to its owned-fallback arm (clones the value, same as before). The
+    // borrowed clone-eliding arm is therefore currently unreachable here; it would
+    // engage automatically only if a serialize-backed store were ever admitted to
+    // the `result_fallback` path (which also needs `ConcurrentCloneCached`).
+    let fallback_set = set_call(quote! { __cached_ok_val });
+
+    // `do_set_return_block`: runs `__cached_inner`, sets the cache, returns the result.
     // For `result_fallback`, the expiry-aware lookup (via `ConcurrentCloneCached`) is folded
     // into this block; no separate `_FALLBACK` static is needed.
+    //
+    // When `force_refresh` bypasses a present entry, the stale fallback value is captured via
+    // the non-renewing `cache_peek_with_expiry_status` so the bypassed entry has no read side
+    // effects (#146); a genuine (non-bypass) hit still uses the renewing
+    // `cache_get_with_expiry_status` and takes the early `#return_cache_block`.
     let do_set_return_block = if args.result_fallback && asyncness.is_some() {
         quote! {
-            let cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
-            let old_val = {
-                let (val, expired) = ::cached::ConcurrentCloneCached::cache_get_with_expiry_status(cache, &key);
-                match (val, expired) {
-                    (Some(result), false) => { #return_cache_block }
-                    (stale, _) => stale,
+            #inner_nested_def
+            let __cached_cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
+            let __cached_old_val = if #force_refresh_bypass {
+                // Bypassing this entry: peek for the stale fallback without side effects.
+                let (__cached_stale, _) = #krate::ConcurrentCloneCached::cache_peek_with_expiry_status(__cached_cache, &__cached_key);
+                __cached_stale
+            } else {
+                let (__cached_val, __cached_expired) = #krate::ConcurrentCloneCached::cache_get_with_expiry_status(__cached_cache, &__cached_key);
+                match (__cached_val, __cached_expired) {
+                    (Some(__cached_result), false) => { #return_cache_block }
+                    (__cached_stale, _) => __cached_stale,
                 }
             };
-            #inner_sig #body
-            let result = inner(#(#input_names),*).await;
-            let result = match (result.is_err(), old_val) {
-                (true, Some(old_val)) => Ok(old_val),
-                _ => result,
+            let __cached_result = #self_prefix #inner_fn_ident(#(#input_names),*).await;
+            let __cached_result = match (__cached_result.is_err(), __cached_old_val) {
+                (true, Some(__cached_old_val)) => Ok(__cached_old_val),
+                _ => __cached_result,
             };
-            if let Ok(ok_val) = &result {
-                ::cached::ConcurrentCachedAsync::async_cache_set(cache, key.clone(), ok_val.clone()).await #cache_set_unwrap_async;
+            if let Ok(__cached_ok_val) = &__cached_result {
+                #fallback_set
             }
-            result
+            __cached_result
         }
     } else if args.result_fallback {
         quote! {
-            let cache = &*#cache_ident;
-            let old_val = {
-                let (val, expired) = ::cached::ConcurrentCloneCached::cache_get_with_expiry_status(cache, &key);
-                match (val, expired) {
-                    (Some(result), false) => { #return_cache_block }
-                    (stale, _) => stale,
+            #inner_nested_def
+            let __cached_cache = &*#cache_ident;
+            let __cached_old_val = if #force_refresh_bypass {
+                // Bypassing this entry: peek for the stale fallback without side effects.
+                let (__cached_stale, _) = #krate::ConcurrentCloneCached::cache_peek_with_expiry_status(__cached_cache, &__cached_key);
+                __cached_stale
+            } else {
+                let (__cached_val, __cached_expired) = #krate::ConcurrentCloneCached::cache_get_with_expiry_status(__cached_cache, &__cached_key);
+                match (__cached_val, __cached_expired) {
+                    (Some(__cached_result), false) => { #return_cache_block }
+                    (__cached_stale, _) => __cached_stale,
                 }
             };
-            #inner_sig #body
-            let result = inner(#(#input_names),*);
-            let result = match (result.is_err(), old_val) {
-                (true, Some(old_val)) => Ok(old_val),
-                _ => result,
+            let __cached_result = #self_prefix #inner_fn_ident(#(#input_names),*);
+            let __cached_result = match (__cached_result.is_err(), __cached_old_val) {
+                (true, Some(__cached_old_val)) => Ok(__cached_old_val),
+                _ => __cached_result,
             };
-            if let Ok(ok_val) = &result {
-                ::cached::ConcurrentCached::cache_set(cache, key.clone(), ok_val.clone()) #cache_set_unwrap;
+            if let Ok(__cached_ok_val) = &__cached_result {
+                #fallback_set
             }
-            result
+            __cached_result
         }
     } else if asyncness.is_some() {
         quote! {
-            #inner_sig #body
-            let result = inner(#(#input_names),*).await;
-            let cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
+            #inner_nested_def
+            let __cached_result = #self_prefix #inner_fn_ident(#(#input_names),*).await;
+            let __cached_cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
             #set_cache_block
-            result
+            __cached_result
         }
     } else {
         quote! {
-            #inner_sig #body
-            let result = inner(#(#input_names),*);
-            let cache = &*#cache_ident;
+            #inner_nested_def
+            let __cached_result = #self_prefix #inner_fn_ident(#(#input_names),*);
+            let __cached_cache = &*#cache_ident;
             #set_cache_block
-            result
+            __cached_result
         }
     };
 
@@ -983,28 +1164,28 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
     // `prime_do_set_return_block`: used by the priming function. For `result_fallback`,
-    // prime unconditionally reruns the function and stores the result — no old_val fallback,
+    // prime unconditionally reruns the function and stores the result - no old_val fallback,
     // no early-return on fresh hit. For all other paths, prime reuses `do_set_return_block`
     // which already implements "run inner and set cache".
     let prime_do_set_return_block = if args.result_fallback && asyncness.is_some() {
         quote! {
-            #inner_sig #body
-            let result = inner(#(#input_names),*).await;
-            let cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
-            if let Ok(ok_val) = &result {
-                ::cached::ConcurrentCachedAsync::async_cache_set(cache, key.clone(), ok_val.clone()).await #cache_set_unwrap_async;
+            #inner_nested_def
+            let __cached_result = #self_prefix #inner_fn_ident(#(#input_names),*).await;
+            let __cached_cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
+            if let Ok(__cached_ok_val) = &__cached_result {
+                #fallback_set
             }
-            result
+            __cached_result
         }
     } else if args.result_fallback {
         quote! {
-            #inner_sig #body
-            let result = inner(#(#input_names),*);
-            let cache = &*#cache_ident;
-            if let Ok(ok_val) = &result {
-                ::cached::ConcurrentCached::cache_set(cache, key.clone(), ok_val.clone()) #cache_set_unwrap;
+            #inner_nested_def
+            let __cached_result = #self_prefix #inner_fn_ident(#(#input_names),*);
+            let __cached_cache = &*#cache_ident;
+            if let Ok(__cached_ok_val) = &__cached_result {
+                #fallback_set
             }
-            result
+            __cached_result
         }
     } else {
         do_set_return_block.clone()
@@ -1013,15 +1194,21 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // `initial_cache_lookup`: the early-return guard block emitted at the start of the cached
     // function body. For `result_fallback`, the lookup is folded into `do_set_return_block`
     // (via `ConcurrentCloneCached`), so we emit nothing here for that path.
+    // The `#force_refresh_guard` wraps the whole lookup (not just the early
+    // return) so the `cache_get` call is skipped when force-refreshing. On a
+    // `refresh_on_hit` TTL store, `cache_get` renews the entry's TTL as a side
+    // effect, which must not happen for a bypassed entry (#146).
     let initial_cache_lookup_async = if args.result_fallback {
         quote! {}
     } else {
         quote! {
             {
                 // check if the result is cached
-                let cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
-                if let Some(result) = ::cached::ConcurrentCachedAsync::async_cache_get(cache, &key).await #cache_get_unwrap_async {
-                    #return_cache_block
+                let __cached_cache = #cache_ident.get_or_init(|| async { #cache_create }).await;
+                #force_refresh_guard {
+                    if let Some(__cached_result) = #krate::ConcurrentCachedAsync::async_cache_get(__cached_cache, &__cached_key).await #cache_get_unwrap_async {
+                        #return_cache_block
+                    }
                 }
             }
         }
@@ -1032,10 +1219,61 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             {
                 // check if the result is cached
-                let cache = &*#cache_ident;
-                if let Some(result) = ::cached::ConcurrentCached::cache_get(cache, &key) #cache_get_unwrap {
-                    #return_cache_block
+                let __cached_cache = &*#cache_ident;
+                #force_refresh_guard {
+                    if let Some(__cached_result) = #krate::ConcurrentCached::cache_get(__cached_cache, &__cached_key) #cache_get_unwrap {
+                        #return_cache_block
+                    }
                 }
+            }
+        }
+    };
+
+    // The cache static cannot sit at impl scope when `in_impl`; emit it inside
+    // each generated fn body instead (also fixes same-named-method collisions).
+    // Build the static with a caller-supplied leading visibility token: the
+    // module-scope static keeps the method's `#visibility`, but the `in_impl`
+    // function-local static is emitted bare (no visibility): a visibility on a
+    // function-local item is meaningless and trips `unreachable_pub` (#7).
+    let make_static = |vis: &proc_macro2::TokenStream| {
+        if asyncness.is_some() {
+            quote! {
+                #vis static #cache_ident: #krate::async_sync::OnceCell<#cache_ty> = #krate::async_sync::OnceCell::const_new();
+            }
+        } else {
+            quote! {
+                #vis static #cache_ident: ::std::sync::LazyLock<#cache_ty> = ::std::sync::LazyLock::new(|| #cache_create);
+            }
+        }
+    };
+    let (module_static, body_static) = if args.in_impl {
+        // No `#[doc]`: a function-local static is not part of the public API and
+        // rustdoc ignores doc attributes on it, so the doc string would be dead.
+        (quote! {}, make_static(&quote! {}))
+    } else {
+        let static_decl = make_static(&quote! { #visibility });
+        (quote! { #[doc = #cache_ident_doc] #static_decl }, quote! {})
+    };
+
+    // The cache static is function-local when `in_impl = true`, so the cached
+    // method and a `{fn}_prime_cache` sibling would each get a distinct
+    // function-local static - priming would populate a static the cached method
+    // never reads (a silent no-op). A function-local static cannot be shared
+    // between two sibling methods, so a correct prime is impossible under
+    // `in_impl`; do not emit the companion at all. Calling a non-existent prime
+    // fn is then a clear compile error instead of a silent no-op (#16/#140).
+    let prime_fn = if args.in_impl {
+        quote! {}
+    } else {
+        quote! {
+            // Prime cached function. Priming is optional, so suppress
+            // `dead_code` for callers that generate but never call the companion.
+            #[doc = #prime_fn_indent_doc]
+            #[allow(dead_code)]
+            #visibility #prime_sig {
+                #body_static
+                let __cached_key = #key_convert_block;
+                #prime_do_set_return_block
             }
         }
     };
@@ -1043,43 +1281,37 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
-            // Cached static
-            #[doc = #cache_ident_doc]
-            #visibility static #cache_ident: ::cached::async_sync::OnceCell<#cache_ty> = ::cached::async_sync::OnceCell::const_new();
+            // Cached static (module scope unless `in_impl`)
+            #module_static
+            // Inner origin fn as a sibling impl method (only when `in_impl`)
+            #inner_sibling_def
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
-                let key = #key_convert_block;
+                #body_static
+                let __cached_key = #key_convert_block;
                 #initial_cache_lookup_async
                 #do_set_return_block
             }
-            // Prime cached function
-            #[doc = #prime_fn_indent_doc]
-            #[allow(dead_code)]
-            #visibility #prime_sig {
-                let key = #key_convert_block;
-                #prime_do_set_return_block
-            }
+            // Prime cached function (omitted for `in_impl` methods)
+            #prime_fn
         }
     } else {
         quote! {
-            // Cached static
-            #[doc = #cache_ident_doc]
-            #visibility static #cache_ident: ::std::sync::LazyLock<#cache_ty> = ::std::sync::LazyLock::new(|| #cache_create);
+            // Cached static (module scope unless `in_impl`)
+            #module_static
+            // Inner origin fn as a sibling impl method (only when `in_impl`)
+            #inner_sibling_def
             // Cached function
             #(#attributes)*
             #visibility #signature_no_muts {
-                let key = #key_convert_block;
+                #body_static
+                let __cached_key = #key_convert_block;
                 #initial_cache_lookup_sync
                 #do_set_return_block
             }
-            // Prime cached function
-            #[doc = #prime_fn_indent_doc]
-            #[allow(dead_code)]
-            #visibility #prime_sig {
-                let key = #key_convert_block;
-                #prime_do_set_return_block
-            }
+            // Prime cached function (omitted for `in_impl` methods)
+            #prime_fn
         }
     };
 
@@ -1088,6 +1320,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
 fn get_redis_cache_type_and_create(
     args: &ConcurrentCachedArgs,
+    krate: &proc_macro2::TokenStream,
+    ttl_duration: Option<&proc_macro2::TokenStream>,
     cache_ident: &Ident,
     cache_key_ty: &proc_macro2::TokenStream,
     cache_value_ty: &proc_macro2::TokenStream,
@@ -1129,9 +1363,9 @@ fn get_redis_cache_type_and_create(
         }
         None => {
             if is_async {
-                quote! { cached::AsyncRedisCache<#cache_key_ty, #cache_value_ty> }
+                quote! { #krate::AsyncRedisCache<#cache_key_ty, #cache_value_ty> }
             } else {
-                quote! { cached::RedisCache<#cache_key_ty, #cache_value_ty> }
+                quote! { #krate::RedisCache<#cache_key_ty, #cache_value_ty> }
             }
         }
     };
@@ -1147,10 +1381,13 @@ fn get_redis_cache_type_and_create(
             quote! { #cache_create }
         }
         None => {
-            if let Some(ttl) = args.ttl {
+            if let Some(ttl_dur) = ttl_duration {
                 let cache_prefix = if let Some(cp) = &args.cache_prefix_block {
                     cp.to_string()
                 } else {
+                    // Runtime key-prefix string: NOT a path into the `cached`
+                    // crate, so it is intentionally left as the literal
+                    // `cached::macros::...` namespace (do not rewrite to `#krate`).
                     format!(
                         " {{ \"cached::macros::concurrent_cached::{}\" }}",
                         cache_ident
@@ -1165,19 +1402,19 @@ fn get_redis_cache_type_and_create(
                 match args.refresh {
                     Some(refresh) => {
                         if is_async {
-                            quote! { cached::AsyncRedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                            quote! { #krate::AsyncRedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                         } else {
                             quote! {
-                                cached::RedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                                #krate::RedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                             }
                         }
                     }
                     None => {
                         if is_async {
-                            quote! { cached::AsyncRedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                            quote! { #krate::AsyncRedisCache::builder(#cache_prefix, #ttl_dur).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                         } else {
                             quote! {
-                                cached::RedisCache::new(#cache_prefix, ::cached::time::Duration::from_secs(#ttl)).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                                #krate::RedisCache::builder(#cache_prefix, #ttl_dur).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                             }
                         }
                     }
@@ -1185,12 +1422,12 @@ fn get_redis_cache_type_and_create(
             } else if is_async {
                 return Err(syn::Error::new(
                     cache_ident.span(),
-                    "AsyncRedisCache requires a `ttl` when `create` block is not specified",
+                    "AsyncRedisCache requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) when `create` block is not specified",
                 ));
             } else {
                 return Err(syn::Error::new(
                     cache_ident.span(),
-                    "RedisCache requires a `ttl` when `create` block is not specified",
+                    "RedisCache requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) when `create` block is not specified",
                 ));
             }
         }
@@ -1200,6 +1437,8 @@ fn get_redis_cache_type_and_create(
 
 fn get_disk_cache_type_and_create(
     args: &ConcurrentCachedArgs,
+    krate: &proc_macro2::TokenStream,
+    ttl_duration: Option<&proc_macro2::TokenStream>,
     cache_name: &str,
     cache_key_ty: &proc_macro2::TokenStream,
     cache_value_ty: &proc_macro2::TokenStream,
@@ -1213,7 +1452,7 @@ fn get_disk_cache_type_and_create(
             quote! { #ty }
         }
         None => {
-            quote! { cached::RedbCache<#cache_key_ty, #cache_value_ty> }
+            quote! { #krate::RedbCache<#cache_key_ty, #cache_value_ty> }
         }
     };
     let cache_create = match &args.create {
@@ -1229,13 +1468,13 @@ fn get_disk_cache_type_and_create(
         }
         None => {
             let create = quote! {
-                cached::RedbCache::new(#cache_name)
+                #krate::RedbCache::builder(#cache_name)
             };
-            let create = match args.ttl {
+            let create = match ttl_duration {
                 None => create,
-                Some(ttl) => {
+                Some(ttl_dur) => {
                     quote! {
-                        (#create).ttl(::cached::time::Duration::from_secs(#ttl))
+                        (#create).ttl(#ttl_dur)
                     }
                 }
             };
@@ -1278,13 +1517,15 @@ fn get_disk_cache_type_and_create(
 /// | yes  |  no |   no    | `ShardedLruCache` |
 /// |  no  | yes |   no    | `ShardedTtlCache`         (requires `time_stores` feature on `cached`) |
 /// | yes  | yes |   no    | `ShardedLruTtlCache`      (requires `time_stores` feature on `cached`) |
-/// |  no  |  —  |   yes   | `ShardedExpiringCache`    (per-value expiry; `ttl` is rejected with `expires`) |
-/// | yes  |  —  |   yes   | `ShardedExpiringLruCache` (per-value expiry; `ttl` is rejected with `expires`) |
+/// |  no  |  -  |   yes   | `ShardedExpiringCache`    (per-value expiry; `ttl` is rejected with `expires`) |
+/// | yes  |  -  |   yes   | `ShardedExpiringLruCache` (per-value expiry; `ttl` is rejected with `expires`) |
 ///
 /// `shards = N` is honored on every variant and routes through the `_and_shards`
 /// shortcut constructor.
 fn get_sharded_cache_type_and_create(
     args: &ConcurrentCachedArgs,
+    krate: &proc_macro2::TokenStream,
+    ttl_duration: Option<&proc_macro2::TokenStream>,
     cache_key_ty: &proc_macro2::TokenStream,
     cache_value_ty: &proc_macro2::TokenStream,
     fn_ident: &Ident,
@@ -1295,13 +1536,13 @@ fn get_sharded_cache_type_and_create(
     if matches!(args.max_size, Some(0)) {
         return Err(syn::Error::new(fn_ident.span(), "`max_size` must be >= 1"));
     }
-    if matches!(args.ttl, Some(0)) {
-        return Err(syn::Error::new(fn_ident.span(), "`ttl` must be >= 1"));
-    }
-    if args.refresh.is_some_and(|r| r) && args.ttl.is_none() {
+    // No `ttl`/`ttl_secs`/`ttl_millis` zero check here: a zero `ttl_secs`/`ttl_millis`
+    // is rejected at the top level of the macro (shared by every store path) before
+    // this helper runs, and `ttl` (a Duration expression) has no compile-time value.
+    if args.refresh.is_some_and(|r| r) && ttl_duration.is_none() {
         return Err(syn::Error::new(
             fn_ident.span(),
-            "`refresh` requires `ttl` to be set on the default in-memory sharded path",
+            "`refresh` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set on the default in-memory sharded path",
         ));
     }
 
@@ -1334,64 +1575,63 @@ fn get_sharded_cache_type_and_create(
     let (cache_ty, cache_create) = if args.expires {
         match args.max_size {
             Some(size) => {
-                let ty =
-                    quote! { ::cached::ShardedExpiringLruCache<#cache_key_ty, #cache_value_ty> };
+                let ty = quote! { #krate::ShardedExpiringLruCache<#cache_key_ty, #cache_value_ty> };
                 let create = match args.shards {
                     Some(n) => {
-                        quote! { ::cached::ShardedExpiringLruCache::builder().max_size(#size).shards(#n).build().unwrap_or_else(|e| panic!("ShardedExpiringLruCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedExpiringLruCache::builder().max_size(#size).shards(#n).build().unwrap_or_else(|e| panic!("ShardedExpiringLruCache build failed in #[concurrent_cached]: {e}")) }
                     }
                     None => {
-                        quote! { ::cached::ShardedExpiringLruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("ShardedExpiringLruCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedExpiringLruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("ShardedExpiringLruCache build failed in #[concurrent_cached]: {e}")) }
                     }
                 };
                 (ty, create)
             }
             None => {
-                let ty = quote! { ::cached::ShardedExpiringCache<#cache_key_ty, #cache_value_ty> };
+                let ty = quote! { #krate::ShardedExpiringCache<#cache_key_ty, #cache_value_ty> };
                 let create = match args.shards {
                     Some(n) => {
-                        quote! { ::cached::ShardedExpiringCache::builder().shards(#n).build().unwrap_or_else(|e| panic!("ShardedExpiringCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedExpiringCache::builder().shards(#n).build().unwrap_or_else(|e| panic!("ShardedExpiringCache build failed in #[concurrent_cached]: {e}")) }
                     }
                     None => {
-                        quote! { ::cached::ShardedExpiringCache::builder().build().unwrap_or_else(|e| panic!("ShardedExpiringCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedExpiringCache::builder().build().unwrap_or_else(|e| panic!("ShardedExpiringCache build failed in #[concurrent_cached]: {e}")) }
                     }
                 };
                 (ty, create)
             }
         }
     } else {
-        match (args.max_size, args.ttl) {
+        match (args.max_size, ttl_duration) {
             (None, None) => {
-                let ty = quote! { ::cached::ShardedCache<#cache_key_ty, #cache_value_ty> };
+                let ty = quote! { #krate::ShardedCache<#cache_key_ty, #cache_value_ty> };
                 let create = match args.shards {
                     Some(n) => {
-                        quote! { ::cached::ShardedCache::builder().shards(#n).build().unwrap_or_else(|e| panic!("ShardedCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedCache::builder().shards(#n).build().unwrap_or_else(|e| panic!("ShardedCache build failed in #[concurrent_cached]: {e}")) }
                     }
                     None => {
-                        quote! { ::cached::ShardedCache::builder().build().unwrap_or_else(|e| panic!("ShardedCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedCache::builder().build().unwrap_or_else(|e| panic!("ShardedCache build failed in #[concurrent_cached]: {e}")) }
                     }
                 };
                 (ty, create)
             }
             (Some(size), None) => {
-                let ty = quote! { ::cached::ShardedLruCache<#cache_key_ty, #cache_value_ty> };
+                let ty = quote! { #krate::ShardedLruCache<#cache_key_ty, #cache_value_ty> };
                 let create = match args.shards {
                     Some(n) => {
-                        quote! { ::cached::ShardedLruCache::builder().max_size(#size).shards(#n).build().unwrap_or_else(|e| panic!("ShardedLruCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedLruCache::builder().max_size(#size).shards(#n).build().unwrap_or_else(|e| panic!("ShardedLruCache build failed in #[concurrent_cached]: {e}")) }
                     }
                     None => {
-                        quote! { ::cached::ShardedLruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("ShardedLruCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedLruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("ShardedLruCache build failed in #[concurrent_cached]: {e}")) }
                     }
                 };
                 (ty, create)
             }
-            (None, Some(ttl)) => {
-                let ty = quote! { ::cached::ShardedTtlCache<#cache_key_ty, #cache_value_ty> };
+            (None, Some(ttl_dur)) => {
+                let ty = quote! { #krate::ShardedTtlCache<#cache_key_ty, #cache_value_ty> };
                 let refresh = args.refresh.unwrap_or(false);
                 let create = match args.shards {
                     Some(n) => quote! {{
-                        let __c = ::cached::ShardedTtlCache::builder()
-                            .ttl(::cached::time::Duration::from_secs(#ttl))
+                        let __c = #krate::ShardedTtlCache::builder()
+                            .ttl(#ttl_dur)
                             .shards(#n)
                             .refresh_on_hit(#refresh)
                             .build()
@@ -1399,8 +1639,8 @@ fn get_sharded_cache_type_and_create(
                         __c
                     }},
                     None => quote! {{
-                        let __c = ::cached::ShardedTtlCache::builder()
-                            .ttl(::cached::time::Duration::from_secs(#ttl))
+                        let __c = #krate::ShardedTtlCache::builder()
+                            .ttl(#ttl_dur)
                             .refresh_on_hit(#refresh)
                             .build()
                             .unwrap_or_else(|e| panic!("ShardedTtlCache build failed in #[concurrent_cached]: {e}"));
@@ -1409,14 +1649,14 @@ fn get_sharded_cache_type_and_create(
                 };
                 (ty, create)
             }
-            (Some(size), Some(ttl)) => {
-                let ty = quote! { ::cached::ShardedLruTtlCache<#cache_key_ty, #cache_value_ty> };
+            (Some(size), Some(ttl_dur)) => {
+                let ty = quote! { #krate::ShardedLruTtlCache<#cache_key_ty, #cache_value_ty> };
                 let refresh = args.refresh.unwrap_or(false);
                 let create = match args.shards {
                     Some(n) => quote! {{
-                        let __c = ::cached::ShardedLruTtlCache::builder()
+                        let __c = #krate::ShardedLruTtlCache::builder()
                             .max_size(#size)
-                            .ttl(::cached::time::Duration::from_secs(#ttl))
+                            .ttl(#ttl_dur)
                             .shards(#n)
                             .refresh_on_hit(#refresh)
                             .build()
@@ -1424,9 +1664,9 @@ fn get_sharded_cache_type_and_create(
                         __c
                     }},
                     None => quote! {{
-                        let __c = ::cached::ShardedLruTtlCache::builder()
+                        let __c = #krate::ShardedLruTtlCache::builder()
                             .max_size(#size)
-                            .ttl(::cached::time::Duration::from_secs(#ttl))
+                            .ttl(#ttl_dur)
                             .refresh_on_hit(#refresh)
                             .build()
                             .unwrap_or_else(|e| panic!("ShardedLruTtlCache build failed in #[concurrent_cached]: {e}"));

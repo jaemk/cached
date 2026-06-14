@@ -178,6 +178,23 @@ enum TtlOverflow {
 ///  - The cache's size, reported by `.len` is only guaranteed to be accurate immediately
 ///    after a call to either `.evict` or `.retain_latest`
 ///  - Eviction must be explicitly requested, either on its own or while inserting
+///
+/// `cache_get_or_set_with` returns `&V` (a shared reference), not `&mut V`.
+/// Binding it as `&mut V` is a compile error; use
+/// [`cache_get_or_set_with_mut`](crate::Cached::cache_get_or_set_with_mut) when
+/// a mutable reference is needed.
+///
+/// ```compile_fail
+/// use cached::{Cached, stores::TtlSortedCache};
+/// use cached::time::Duration;
+///
+/// let mut cache = TtlSortedCache::<u32, u32>::builder()
+///     .ttl(Duration::from_secs(60))
+///     .build()
+///     .unwrap();
+/// // compile error: cannot bind &mut u32 from cache_get_or_set_with which returns &u32
+/// let _: &mut u32 = cache.cache_get_or_set_with(1, || 2);
+/// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub struct TtlSortedCache<K, V> {
     // a minimum instant to compare ranges against since
@@ -276,10 +293,30 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
     }
 
     /// Set the TTL for cache entries. Required.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    /// Set the TTL for cache entries in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Set the TTL for cache entries in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Set a callback invoked when an entry is evicted. Fires for:
@@ -344,6 +381,23 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
 }
 
 impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
+    /// Construct a ready-to-use [`TtlSortedCache`] with the given `ttl` and no size bound.
+    ///
+    /// For optional settings (`max_size`, `capacity`, `on_evict`) use
+    /// [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` is zero. Use [`builder`](Self::builder) with
+    /// [`build`](TtlSortedCacheBuilder::build) to handle a zero TTL without panicking.
+    #[must_use]
+    pub fn new(ttl: Duration) -> Self {
+        Self::builder()
+            .ttl(ttl)
+            .build()
+            .expect("TtlSortedCache::new requires a non-zero ttl")
+    }
+
     /// Return a builder for constructing an [`TtlSortedCache`].
     #[must_use]
     pub fn builder() -> TtlSortedCacheBuilder<K, V> {
@@ -366,6 +420,15 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     ///
     /// Panics if `max_size` is 0. Use [`TtlSortedCache::try_set_max_size`] to handle invalid
     /// sizes without panicking.
+    ///
+    /// # See also
+    ///
+    /// [`LruCache::set_max_size`](super::LruCache::set_max_size) and
+    /// [`LruTtlCache::set_max_size`](super::LruTtlCache::set_max_size) are parallel methods
+    /// on the other LRU-family stores. Note that this method returns `Option<usize>` (the
+    /// previous bound, which is optional) rather than `usize`, because `TtlSortedCache` does
+    /// not require a size bound at construction. All stores also provide a fallible
+    /// `try_set_max_size` counterpart.
     pub fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
         assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.size_limit;
@@ -382,13 +445,13 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     ///
     /// # Errors
     ///
-    /// Returns an `InvalidInput` error if `max_size` is 0.
-    pub fn try_set_max_size(&mut self, max_size: usize) -> std::io::Result<Option<usize>> {
+    /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
+    pub fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
         if max_size == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "max_size must be greater than zero",
-            ));
+            return Err(super::SetMaxSizeError::ZeroSize);
         }
         Ok(self.set_max_size(max_size))
     }
@@ -512,7 +575,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     }
 
     /// Shared insertion routine for [`insert_ttl_evict`](Self::insert_ttl_evict) and the
-    /// infallible `cache_get_or_set_with` paths.
+    /// infallible `cache_get_or_set_with_mut` paths.
     ///
     /// `on_overflow` selects what happens in the (practically unreachable) case where
     /// `now + ttl` exceeds `Instant`'s representable range — a TTL on the order of
@@ -595,7 +658,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     /// an unrepresentable TTL saturates to an immediately-stale entry rather than
     /// erroring. When a `size_limit` is configured the just-inserted entry is
     /// protected from eviction: other entries are evicted in TTL order to restore
-    /// capacity. Used by the infallible `cache_get_or_set_with` family.
+    /// capacity. Used by the infallible `cache_get_or_set_with_mut` family.
     fn set_and_get_mut(&mut self, key: K, value: V) -> &mut V {
         // `Ok` is guaranteed: `TtlOverflow::SaturateNow` never returns `Err`.
         // `skip_size_eviction = true` defers size enforcement to the block below,
@@ -730,7 +793,7 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
         self.insert(k, v).map_err(|e| Box::new(e) as _)
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         if self.cache_get(&key).is_some() {
             return self
                 .map
@@ -745,7 +808,7 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
         self.set_and_get_mut(key, f())
     }
 
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -940,7 +1003,7 @@ where
     K: Hash + Eq + Ord + Clone + Send + Sync,
     V: Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -966,7 +1029,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -1050,6 +1113,56 @@ mod test {
         fn cmp(&self, other: &Self) -> CmpOrdering {
             self.label.cmp(other.label)
         }
+    }
+
+    #[test]
+    fn new_returns_ready_cache_respecting_ttl() {
+        use crate::CacheTtl;
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::new(Duration::from_millis(50));
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_millis(50)));
+        c.cache_set(1, 100);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
+        // No size bound from new().
+        assert_eq!(c.cache_capacity(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero ttl")]
+    fn new_zero_ttl_panics() {
+        let _c: TtlSortedCache<u32, u32> = TtlSortedCache::new(Duration::ZERO);
+    }
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        use crate::CacheTtl;
+        let c: TtlSortedCache<u32, u32> = TtlSortedCache::builder().ttl_secs(7).build().unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(7)));
+
+        let c: TtlSortedCache<u32, u32> =
+            TtlSortedCache::builder().ttl_millis(250).build().unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        use crate::CacheTtl;
+        // ttl(secs=10) then ttl_secs(5) -> 5s
+        let c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(10))
+            .ttl_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(5)));
+
+        // ttl_secs then ttl_millis -> the millis value
+        let c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl_secs(10)
+            .ttl_millis(500)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_millis(500)));
     }
 
     #[test]
@@ -1324,6 +1437,29 @@ mod test {
     }
 
     #[test]
+    fn try_set_max_size_rejects_zero() {
+        let mut cache = TtlSortedCache::<String, String>::builder()
+            .ttl(Duration::from_millis(1_000))
+            .build()
+            .unwrap();
+        assert_eq!(
+            cache.try_set_max_size(0),
+            Err(super::super::SetMaxSizeError::ZeroSize)
+        );
+        assert_eq!(cache.try_set_max_size(5).unwrap(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_size must be greater than zero")]
+    fn set_max_size_zero_panics() {
+        let mut cache = TtlSortedCache::<String, String>::builder()
+            .ttl(Duration::from_millis(1_000))
+            .build()
+            .unwrap();
+        cache.set_max_size(0);
+    }
+
+    #[test]
     fn explicit_capacity_takes_precedence_over_max_size_preallocation() {
         // Regression for #266: an explicit, smaller `capacity` must not be defeated
         // by `max_size`'s `size + 1` preallocation (HashMap::reserve does not reduce
@@ -1392,11 +1528,35 @@ mod test {
             .insert_ttl("long", 1u32, Duration::from_secs(60))
             .unwrap();
         let v: &mut u32 = cache
-            .cache_try_get_or_set_with("short", || Ok::<u32, ()>(2))
+            .cache_try_get_or_set_with_mut("short", || Ok::<u32, ()>(2))
             .unwrap();
         assert_eq!(*v, 2);
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.cache_get("short"), Some(&2u32));
+    }
+
+    #[test]
+    fn shared_ref_get_or_set_with_wrapper_delegates_to_mut() {
+        // The `&V`-returning `cache_get_or_set_with` / `cache_try_get_or_set_with`
+        // are provided as defaults that delegate to the `_mut` variants. Exercise
+        // them directly (not the `_mut` methods) so the delegation stays covered.
+        let mut cache: TtlSortedCache<&str, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let v: &u32 = cache.cache_get_or_set_with("a", || 1u32);
+        assert_eq!(*v, 1);
+
+        let v: &u32 = cache
+            .cache_try_get_or_set_with("b", || Ok::<u32, ()>(2))
+            .unwrap();
+        assert_eq!(*v, 2);
+
+        // Hit path: the closure must not run, and the stored value is returned by `&V`.
+        let v: &u32 = cache.cache_get_or_set_with("a", || 99u32);
+        assert_eq!(*v, 1);
+        assert_eq!(cache.cache_size(), 2);
     }
 
     #[cfg(feature = "async")]

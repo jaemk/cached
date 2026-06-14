@@ -1,0 +1,15 @@
+error[E0599]: no associated function or constant named `builder` found for struct `ShardedCacheBase<u32, u32, ConstHasher>` in the current scope
+  --> tests/ui/sharded_base_custom_hasher_constructor.rs:16:56
+   |
+16 |     let _ = ShardedCacheBase::<u32, u32, ConstHasher>::builder();
+   |                                                        ^^^^^^^ associated function or constant not found in `ShardedCacheBase<u32, u32, ConstHasher>`
+   |
+   = note: the associated function or constant was found for `ShardedCacheBase<K, V>`
+
+error[E0599]: no associated function or constant named `new` found for struct `ShardedCacheBase<u32, u32, ConstHasher>` in the current scope
+  --> tests/ui/sharded_base_custom_hasher_constructor.rs:17:56
+   |
+17 |     let _ = ShardedCacheBase::<u32, u32, ConstHasher>::new();
+   |                                                        ^^^ associated function or constant not found in `ShardedCacheBase<u32, u32, ConstHasher>`
+   |
+   = note: the associated function or constant was found for `ShardedCacheBase<K, V>`

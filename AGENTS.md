@@ -56,8 +56,8 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ExpiringCache<K,V>` | `cached::stores` | Unbounded HashMap-backed, per-value expiry via `Expires` trait; default store for `#[cached(expires = true)]` |
 | `ShardedCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
 | `ShardedLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU; default for `#[concurrent_cached(max_size = N)]` |
-| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl = T)]`; requires `time_stores` |
-| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl = T)]`; requires `time_stores` |
+| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl_secs = N)]`; requires `time_stores` |
+| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl_secs = N)]`; requires `time_stores` |
 | `ShardedExpiringCache<K,V>` | `cached::stores` | Fully concurrent, sharded per-value expiry (unbounded); default for `#[concurrent_cached(expires = true)]` |
 | `ShardedExpiringLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + per-value expiry; default for `#[concurrent_cached(expires = true, max_size = N)]` |
 
@@ -112,11 +112,11 @@ use cached::macros::concurrent_cached;
 
 **Renamed from pre-1.0**: was `cached::proc_macro`. The Cargo feature flag is still named `proc_macro`.
 
-The macro attributes use `ttl =` (not `time =`) and `refresh =` (not `time_refresh =`). Note: `#[once]` supports `ttl =` but has never had a `refresh =` attribute (single-value cache, refresh-on-hit is not applicable).
+The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseconds), or `ttl = "<Duration expr>"` (not `time =`); and `refresh =` (not `time_refresh =`). Note: `#[once]` supports `ttl_secs`/`ttl_millis`/`ttl` but has never had a `refresh =` attribute (single-value cache, refresh-on-hit is not applicable).
 
 **2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **deprecated alias** for the preferred `max_size = N` (emits a deprecation warning).
 
-**Additional `#[cached]` / `#[once]` attributes** (beyond `name`, `max_size`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`):
+**Additional `#[cached]` / `#[once]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`):
 - `sync_writes`: `false` (default), `true` / `"default"` (whole-cache lock), or `"by_key"` (per-key bucketed locks; `#[cached]` only)
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
@@ -186,10 +186,11 @@ This runs: `make check` (fmt + clippy + readme) -> `make tests` -> `make example
 ---
 
 ## README Sync
-`README.md` is auto-generated from `src/lib.rs` doc comments — **never edit README.md directly**.
+`README.md` is generated from `src/lib.rs` doc comments by `cargo-readme` — **never edit `README.md` directly**. Any change to the README (wording, tables, examples) must be made in the `src/lib.rs` doc comments and then regenerated; a hand-edit to `README.md` is overwritten on the next regeneration and will fail `make check/readme`.
 ```bash
-make docs          # regenerate
-make check/readme  # verify in sync
+cargo install cargo-readme   # one-time, if not already installed
+make docs          # regenerate README.md from src/lib.rs via cargo-readme (cargo readme)
+make check/readme  # verify README.md matches the generated output
 ```
 
 ---
@@ -240,10 +241,14 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `async` | Async support via Tokio (enables `async_core` + `tokio`) |
 | `async_tokio_rt_multi_thread` | Tokio multi-thread runtime (required for `#[tokio::test]`) |
 | `redis_store` | Synchronous Redis backend |
-| `redis_tokio` | Async Redis backend (Tokio) |
-| `redis_smol` | Async Redis backend (smol); implies `redis_store` + `async` |
-| `redis_connection_manager` | Redis connection-manager support |
-| `redis_async_cache` | Redis client-side caching over RESP3 for async caches |
+| `redis_tokio` | Async Redis backend (Tokio, no TLS); implies `redis_store` + `async` |
+| `redis_tokio_native_tls` | `redis_tokio` + TLS via `native-tls` |
+| `redis_tokio_rustls` | `redis_tokio` + TLS via `rustls` |
+| `redis_smol` | Async Redis backend (smol, no TLS); implies `redis_store` + `async` |
+| `redis_smol_native_tls` | `redis_smol` + TLS via `native-tls` |
+| `redis_smol_rustls` | `redis_smol` + TLS via `rustls` |
+| `redis_connection_manager` | Redis connection-manager support (no TLS; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
+| `redis_async_cache` | Redis client-side caching over RESP3 for async caches (uses the Tokio runtime with native-tls) |
 | `disk_store` | Disk-backed cache via `redb` |
 | `wasm` | WASM compatibility |
 

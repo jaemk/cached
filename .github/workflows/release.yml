@@ -10,12 +10,23 @@ jobs:
     environment: release  # Optional: for enhanced security
     permissions:
       id-token: write     # Required for OIDC token exchange
+      contents: write     # Required for pushing tags and creating GitHub releases
     steps:
     - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0    # Full history needed so tag push has full context
     - uses: rust-lang/crates-io-auth-action@v1
       id: auth
     - name: Publish to crates.io
+      id: publish
       run: bash bin/publish.sh
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+    - name: Tag and create GitHub releases
+      # Tags every workspace crate whose version is newly published; idempotent
+      # (skips tags that already exist on the remote).
+      if: steps.publish.outcome == 'success'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: bash bin/tag-release.sh
 

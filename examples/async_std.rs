@@ -1,6 +1,6 @@
 /*
 Async memoization on the async-std runtime: `#[cached]` / `#[once]` on
-`async fn`s (including `ttl` + `result`). Demonstrates the proc macros are
+`async fn`s (including `ttl_secs` + `result`). Demonstrates the proc macros are
 runtime-agnostic (the `async` feature; async-std runs `main`).
 
 Run:
@@ -24,7 +24,7 @@ async fn cached_sleep_secs(secs: u64) {
 
 /// should only cache the result for a second, and only when
 /// the result is `Ok`
-#[cached(ttl = 1, key = "bool", convert = r#"{ true }"#)]
+#[cached(ttl_secs = 1, key = "bool", convert = r#"{ true }"#)]
 async fn only_cached_a_second(
     s: String,
 ) -> std::result::Result<Vec<String>, &'static dyn std::error::Error> {
@@ -41,7 +41,7 @@ async fn only_cached_result_once(s: String, error: bool) -> std::result::Result<
 /// should only cache the _first_ `Ok` returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
-#[once(ttl = 1)]
+#[once(ttl_secs = 1)]
 async fn only_cached_result_once_per_second(
     s: String,
     error: bool,
@@ -59,7 +59,7 @@ async fn only_cached_option_once(s: String, none: bool) -> Option<Vec<String>> {
 /// should only cache the _first_ `Some` returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
-#[once(ttl = 1)]
+#[once(ttl_secs = 1)]
 async fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
     if none { None } else { Some(vec![s]) }
 }
@@ -67,7 +67,7 @@ async fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec
 /// should only cache the _first_ value returned for 1 second.
 /// all arguments are ignored for subsequent calls until the
 /// cache expires after a second.
-#[once(ttl = 1)]
+#[once(ttl_secs = 1)]
 async fn only_cached_once_per_second(s: String) -> Vec<String> {
     vec![s]
 }
@@ -79,7 +79,7 @@ async fn only_cached_once_per_second(s: String) -> Vec<String> {
 /// _one_ call will be "executed" and all others will be synchronized
 /// to return the cached result of the one call instead of all
 /// concurrently un-cached tasks executing and writing concurrently.
-#[once(ttl = 2, sync_writes = true)]
+#[once(ttl_secs = 2, sync_writes = true)]
 async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }

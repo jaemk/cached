@@ -36,7 +36,7 @@ use cached::macros::cached;
 /// Use a timed-lru cache with size 1, a TTL of 60s,
 /// and a `(usize, usize)` cache key
 # #[cfg(feature = "time_stores")]
-#[cached(max_size=1, ttl =60)]
+#[cached(max_size=1, ttl_secs=60)]
 fn keyed(a: usize, b: usize) -> usize {
     let total = a + b;
     sleep(Duration::new(total as u64, 0));
@@ -78,7 +78,7 @@ use cached::macros::cached;
 /// that refreshes the entry TTL on cache hit,
 /// and a `(String, String)` cache key
 # #[cfg(feature = "time_stores")]
-#[cached(ttl =60, refresh =true)]
+#[cached(ttl_secs=60, refresh=true)]
 fn keyed(a: String, b: String) -> usize {
     let size = a.len() + b.len();
     sleep(Duration::new(size as u64, 0));
@@ -246,12 +246,12 @@ use cached::time::Duration;
 
 /// Only cache the initial function call.
 /// Function will be re-executed after the cache
-/// expires (according to `ttl` seconds).
+/// expires (according to `ttl_secs`).
 /// When no (or expired) cache, concurrent calls
 /// will synchronize (`sync_writes`) so the function
 /// is only executed once.
 # #[cfg(feature = "time_stores")]
-#[once(ttl =10, sync_writes = true)]
+#[once(ttl_secs=10, sync_writes = true)]
 fn keyed(a: String) -> Option<usize> {
     if a == "a" {
         Some(a.len())
@@ -272,7 +272,7 @@ use cached::macros::cached;
 /// Use a timed cache with a TTL of 60s.
 /// Run a background thread to continuously refresh a specific key.
 # #[cfg(feature = "time_stores")]
-#[cached(ttl = 60, key = "String", convert = r#"{ String::from(a) }"#)]
+#[cached(ttl_secs = 60, key = "String", convert = r#"{ String::from(a) }"#)]
 fn keyed(a: &str) -> usize {
     a.len()
 }

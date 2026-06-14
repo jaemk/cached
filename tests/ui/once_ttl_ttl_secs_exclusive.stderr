@@ -1,0 +1,5 @@
+error: `ttl`, `ttl_secs`, and `ttl_millis` are mutually exclusive - `ttl` takes a `Duration` expression, `ttl_secs` whole seconds, `ttl_millis` milliseconds; use exactly one
+ --> tests/ui/once_ttl_ttl_secs_exclusive.rs:4:4
+  |
+4 | fn f(x: i32) -> i32 {
+  |    ^

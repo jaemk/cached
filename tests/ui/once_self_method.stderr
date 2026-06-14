@@ -1,4 +1,4 @@
-error: #[once] cannot be applied to methods that take `self`
+error: #[once] cannot be applied to methods that take `self`. Use `in_impl = true` to cache a method inside an `impl` block. Note: `#[once]` stores a single value shared across all instances.
  --> tests/ui/once_self_method.rs:4:4
   |
 4 | fn my_fn(&self, k: i32) -> i32 {

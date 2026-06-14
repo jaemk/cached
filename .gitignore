@@ -7,3 +7,4 @@ _tmp_readme.md
 local/
 !local/.gitkeep
 .antigravitycli/
+.claude/worktrees/

@@ -1,4 +1,4 @@
-error: `result_fallback` and `with_cached_flag` are mutually exclusive: `result_fallback` stores the inner `Ok(T)` value directly, but `with_cached_flag` wraps the `Ok` value in `Return<T>` — the generated code cannot simultaneously store `T` and expose `Return<T>` through the cached function. Use `with_cached_flag = true` alone (without `result_fallback`) or `result_fallback = true` alone.
+error: `result_fallback` and `with_cached_flag` are mutually exclusive: `result_fallback` stores the inner `Ok(T)` value directly, but `with_cached_flag` wraps the `Ok` value in `Return<T>` - the generated code cannot simultaneously store `T` and expose `Return<T>` through the cached function. Use `with_cached_flag = true` alone (without `result_fallback`) or `result_fallback = true` alone.
  --> tests/ui/concurrent_cached_result_fallback_with_cached_flag_exclusive.rs:4:4
   |
 4 | fn my_fn(k: i32) -> Result<cached::Return<i32>, ()> {

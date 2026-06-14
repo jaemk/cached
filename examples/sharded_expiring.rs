@@ -109,9 +109,9 @@ fn main() {
         user_id: 100,
         expired: already_expired.clone(), // starts expired
     };
-    cached::ConcurrentCached::cache_set(&cache, 100, s_manual).expect("infallible");
+    cached::ConcurrentCached::set(&cache, 100, s_manual).expect("infallible");
 
-    let val = cached::ConcurrentCached::cache_get(&cache, &100).expect("infallible");
+    let val = cached::ConcurrentCached::get(&cache, &100).expect("infallible");
     assert!(
         val.is_none(),
         "Expired manual entry should be filtered out on get"
@@ -132,8 +132,8 @@ fn main() {
         expired: Arc::new(AtomicBool::new(false)),
     };
     println!("Caching session for user_id {}", live_manual.user_id);
-    cached::ConcurrentCached::cache_set(&lru, 200, live_manual).expect("infallible");
-    let val_lru = cached::ConcurrentCached::cache_get(&lru, &200).expect("infallible");
+    cached::ConcurrentCached::set(&lru, 200, live_manual).expect("infallible");
+    let val_lru = cached::ConcurrentCached::get(&lru, &200).expect("infallible");
     assert!(val_lru.is_some(), "Live manual entry should be present");
     println!(
         "Manual ShardedExpiringLruCache lookup for live entry: {:?}",

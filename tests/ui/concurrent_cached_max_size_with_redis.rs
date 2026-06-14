@@ -2,7 +2,7 @@ use cached::macros::concurrent_cached;
 
 #[concurrent_cached(
     redis = true,
-    ttl = 60,
+    ttl_secs = 60,
     max_size = 100,
     map_error = r#"|e| format!("{:?}", e)"#
 )]

@@ -128,8 +128,8 @@ help: ## List all supported Make targets
 			tests/redis) desc="Run all Redis-backed test targets" ;; \
 			tests/redis-connection-manager) desc="Check standalone redis_connection_manager feature compilation" ;; \
 			tests/redis-async-cache) desc="Check standalone redis_async_cache feature compilation" ;; \
-			tests/redis-async-cache-tokio) desc="Check redis_async_cache with redis_tokio" ;; \
-			tests/redis-async-cache-smol) desc="Check redis_async_cache with redis_smol" ;; \
+			tests/redis-async-cache-tokio) desc="Check redis_async_cache with redis_tokio_native_tls" ;; \
+			tests/redis-async-cache-smol) desc="Check redis_async_cache with redis_smol_native_tls" ;; \
 			tests/redis-store) desc="Run synchronous Redis store tests" ;; \
 			tests/redis-store-standalone) desc="Check redis_store feature compilation without proc_macro" ;; \
 			tests/redis-tokio) desc="Run async Redis Tokio tests" ;; \
@@ -184,7 +184,7 @@ examples/cargo/wasm:
 # mixing tokio and smol runtimes that --all-features would enable together.
 examples/redis/redis-async-async-std: docker/redis
 	@echo [$@]: Running example redis-async-async-std...
-	$(CARGO_COMMAND) run --example redis-async-async-std --features "redis_smol,proc_macro"
+	$(CARGO_COMMAND) run --example redis-async-async-std --features "redis_smol_native_tls,proc_macro"
 
 examples/redis/%: docker/redis
 	@echo [$@]: Running example $*...
@@ -257,22 +257,22 @@ tests/redis-async-cache:
 	$(CARGO_COMMAND) check --no-default-features --features redis_async_cache
 
 tests/redis-async-cache-tokio:
-	@echo "[$@]: Checking redis_async_cache with redis_tokio..."
-	$(CARGO_COMMAND) check --no-default-features --features "redis_tokio,redis_async_cache"
+	@echo "[$@]: Checking redis_async_cache with redis_tokio_native_tls..."
+	$(CARGO_COMMAND) check --no-default-features --features "redis_tokio_native_tls,redis_async_cache"
 
 tests/redis-async-cache-smol:
-	@echo "[$@]: Checking redis_async_cache with redis_smol..."
-	$(CARGO_COMMAND) check --no-default-features --features "redis_smol,redis_async_cache"
+	@echo "[$@]: Checking redis_async_cache with redis_smol_native_tls..."
+	$(CARGO_COMMAND) check --no-default-features --features "redis_smol_native_tls,redis_async_cache"
 
 # Synchronous Redis store only
 tests/redis-store: | docker/redis
 	@echo "[$@]: Running tests (redis_store + proc_macro)..."
 	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,redis_store" --tests -- --nocapture
 
-# Async Redis via Tokio (implies redis_store + async; rt-multi-thread for #[tokio::test])
+# Async Redis via Tokio with native-tls (rt-multi-thread for #[tokio::test])
 tests/redis-tokio: | docker/redis
-	@echo "[$@]: Running tests (redis_tokio + proc_macro + time_stores + async_tokio_rt_multi_thread)..."
-	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores,redis_tokio,async_tokio_rt_multi_thread" --tests -- --nocapture
+	@echo "[$@]: Running tests (redis_tokio_native_tls + proc_macro + time_stores + async_tokio_rt_multi_thread)..."
+	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores,redis_tokio_native_tls,async_tokio_rt_multi_thread" --tests -- --nocapture
 
 # Full all-features run
 tests/all-features: | docker/redis

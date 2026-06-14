@@ -76,6 +76,47 @@ fn generate_redis_key(namespace: &str, prefix: &str, key: &str) -> String {
     out
 }
 
+/// `SCAN MATCH` glob covering every key a cache with this `namespace`/`prefix`
+/// writes: the [`generate_redis_key`] scope with a trailing `*`. Glob
+/// metacharacters (`*`, `?`, `[`, `]`) and `\` in the namespace/prefix are
+/// escaped so they match literally — otherwise a prefix like `cache[v2]` would
+/// scan (and `cache_clear` would delete) keys outside this cache's scope.
+/// Single source of truth shared by the sync and async stores.
+fn clear_match_pattern(namespace: &str, prefix: &str) -> String {
+    fn escape_glob(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+    generate_redis_key(&escape_glob(namespace), &escape_glob(prefix), "*")
+}
+
+#[cfg(test)]
+mod clear_pattern_tests {
+    // No Redis server needed — pins the `SCAN MATCH` pattern used by `cache_clear`.
+    use super::clear_match_pattern;
+
+    #[test]
+    fn plain_segments_get_scope_and_trailing_star() {
+        assert_eq!(clear_match_pattern("ns", "p"), "ns:p:*");
+        assert_eq!(clear_match_pattern("", "p"), "p:*");
+    }
+
+    #[test]
+    fn glob_metacharacters_in_segments_are_escaped() {
+        // Unescaped, `cache[v2]` would glob-match keys outside this cache's
+        // scope (e.g. `cachev:...`) and `cache_clear` would delete them.
+        assert_eq!(clear_match_pattern("ns", "cache[v2]"), "ns:cache\\[v2\\]:*");
+        assert_eq!(clear_match_pattern("n*s", "p?x"), "n\\*s:p\\?x:*");
+        assert_eq!(clear_match_pattern("back\\slash", "p"), "back\\\\slash:p:*");
+    }
+}
+
 #[cfg(test)]
 mod generate_key_tests {
     // No Redis server needed — pins the data-impacting 1.0 key format (§8).
@@ -166,6 +207,89 @@ mod ttl_seconds_tests {
     }
 }
 
+#[cfg(test)]
+mod builder_ttl_setter_tests {
+    // No Redis server needed -- these only inspect the builder's ttl field set by
+    // the convenience setters, without calling `build()`.
+    use super::RedisCacheBuilder;
+    use crate::time::Duration;
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        let b = RedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1)).ttl_secs(7);
+        assert_eq!(b.ttl, Duration::from_secs(7));
+
+        let b =
+            RedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1)).ttl_millis(250);
+        assert_eq!(b.ttl, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        // ttl(secs=10) then ttl_secs(5) -> 5s
+        let b = RedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+            .ttl(Duration::from_secs(10))
+            .ttl_secs(5);
+        assert_eq!(b.ttl, Duration::from_secs(5));
+
+        // ttl_secs then ttl_millis -> the millis value
+        let b = RedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+            .ttl_secs(10)
+            .ttl_millis(500);
+        assert_eq!(b.ttl, Duration::from_millis(500));
+
+        // ttl_millis then ttl -> the ttl value
+        let b = RedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+            .ttl_millis(500)
+            .ttl(Duration::from_secs(3));
+        assert_eq!(b.ttl, Duration::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod builder_empty_scope_tests {
+    // No Redis server needed -- verifies the empty-scope guard in `build()`.
+    use super::{RedisCacheBuildError, RedisCacheBuilder};
+    use crate::time::Duration;
+
+    #[test]
+    fn empty_namespace_and_prefix_is_rejected() {
+        let result = RedisCacheBuilder::<String, String>::new("", Duration::from_secs(1))
+            .namespace("")
+            .build();
+        assert!(
+            matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+            "expected EmptyScope"
+        );
+    }
+
+    #[test]
+    fn namespace_all_colons_and_empty_prefix_is_rejected() {
+        // ":::" trims to "" so the effective namespace is also empty.
+        let result = RedisCacheBuilder::<String, String>::new("", Duration::from_secs(1))
+            .namespace(":::")
+            .build();
+        assert!(
+            matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+            "expected EmptyScope"
+        );
+    }
+
+    #[test]
+    fn non_empty_prefix_builds_ok() {
+        // Guard must not fire when the prefix is set -- no real Redis needed
+        // because the build error would come before the connection attempt.
+        let result = RedisCacheBuilder::<String, String>::new("my-prefix", Duration::from_secs(1))
+            .namespace("")
+            .build();
+        // The only failure here would be a missing connection string, not EmptyScope.
+        assert!(
+            !matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+            "EmptyScope must not fire when prefix is non-empty"
+        );
+    }
+}
+
 /// A Redis connection URL stored in memory with credentials redacted in `Debug`/`Display`.
 ///
 /// The inner string (accessible via `.as_str()`) is the full URL including any password
@@ -207,6 +331,12 @@ pub enum RedisCacheBuildError {
         env_key: String,
         error: std::env::VarError,
     },
+    #[error(
+        "empty scope: namespace (after trimming trailing colons) and prefix are both empty; \
+        cache_clear would run SCAN MATCH * and delete every key in the Redis DB. \
+        Set a non-empty namespace or prefix."
+    )]
+    EmptyScope,
 }
 
 impl<K, V> RedisCacheBuilder<K, V>
@@ -232,10 +362,31 @@ where
 
     /// Specify the cache TTL as a `Duration`.
     /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
+    }
+
+    /// Specify the cache TTL in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Specify the cache TTL in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Specify whether cache hits refresh the TTL
@@ -264,6 +415,11 @@ where
     ///
     /// **Note:** colons in the prefix are not escaped and can cause key collisions
     /// with differently-split namespace/prefix combinations sharing the same segments.
+    ///
+    /// **Note:** the prefix is what scopes `cache_clear` to this logical cache.
+    /// With an empty prefix, `cache_clear` matches `<namespace>:*` and will delete
+    /// entries belonging to every cache that shares the same namespace. Set a unique
+    /// prefix per logical cache to ensure `cache_clear` is scoped correctly.
     #[must_use]
     pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
         self.prefix = prefix.as_ref().to_string();
@@ -358,9 +514,19 @@ where
     ///
     /// # Errors
     ///
-    /// Will return a `RedisCacheBuildError`, depending on the error
+    /// - `InvalidTtl`: the configured TTL is zero.
+    /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
+    ///   the prefix are empty. `cache_clear` would otherwise issue `SCAN MATCH *`
+    ///   and delete every key in the Redis database.
+    /// - `MissingConnectionString`: no connection string was set and the
+    ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
+    /// - `Connection` / `Pool`: the Redis client or connection pool could not
+    ///   be created.
     pub fn build(self) -> Result<RedisCache<K, V>, RedisCacheBuildError> {
         super::validate_ttl(self.ttl)?;
+        if self.namespace.trim_end_matches(':').is_empty() && self.prefix.is_empty() {
+            return Err(RedisCacheBuildError::EmptyScope);
+        }
         Ok(RedisCache {
             ttl: Mutex::new(self.ttl),
             refresh: AtomicBool::new(self.refresh),
@@ -400,12 +566,6 @@ where
     K: Display,
     V: Serialize + DeserializeOwned,
 {
-    #[allow(clippy::new_ret_no_self)]
-    /// Initialize a `RedisCacheBuilder`.
-    pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
-        RedisCacheBuilder::new(prefix, ttl)
-    }
-
     /// Initialize a `RedisCacheBuilder`.
     pub fn builder<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
         RedisCacheBuilder::new(prefix, ttl)
@@ -416,6 +576,15 @@ where
         // Changed from raw concatenation in 1.0 (migration §8): existing
         // pre-1.0 keys will not be hit after upgrading.
         generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
+    }
+
+    /// `SCAN MATCH` glob covering every key this cache writes: the same
+    /// `{namespace}:{prefix}:` scope as [`generate_key`](Self::generate_key) with a
+    /// trailing `*`, with glob metacharacters in the segments escaped (see
+    /// [`clear_match_pattern`]). Used by `cache_clear` to delete only this
+    /// cache's entries.
+    fn clear_match_pattern(&self) -> String {
+        clear_match_pattern(&self.namespace, &self.prefix)
     }
 
     /// Return the redis connection string used.
@@ -446,11 +615,28 @@ pub enum RedisCacheError {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedRedisValue<V> {
-    pub(crate) value: V,
-    pub(crate) version: Option<u64>,
+    value: V,
+    version: Option<u64>,
 }
 impl<V> CachedRedisValue<V> {
     fn new(value: V) -> Self {
+        Self {
+            value,
+            version: Some(1),
+        }
+    }
+}
+
+/// Borrowed counterpart of [`CachedRedisValue`] used by `cache_set_ref` to
+/// serialize from a `&V` without cloning. Serializes to the same JSON as
+/// `CachedRedisValue::new(value)` (same field names and order).
+#[derive(serde::Serialize)]
+struct CachedRedisValueRef<'a, V> {
+    value: &'a V,
+    version: Option<u64>,
+}
+impl<'a, V> CachedRedisValueRef<'a, V> {
+    fn new(value: &'a V) -> Self {
         Self {
             value,
             version: Some(1),
@@ -563,6 +749,52 @@ where
         Ok(removed > 0)
     }
 
+    /// Remove every entry written by this cache instance.
+    ///
+    /// Scoped to this cache's `{namespace}:{prefix}:*` keyspace via `SCAN` +
+    /// batched `DEL`. It is **not** a server `FLUSHDB`: keys outside this
+    /// namespace/prefix are untouched, and entries written by other caches
+    /// sharing the Redis server are preserved.
+    ///
+    /// Cost is **O(n)** in the number of matching keys (a cursored `SCAN`), so it
+    /// is heavier than the in-memory `cache_clear`. New keys inserted concurrently
+    /// during the scan may or may not be removed (standard `SCAN` semantics).
+    ///
+    /// **Note:** the `prefix` is what scopes a clear to a single logical cache. A
+    /// cache built with an empty prefix but a non-empty namespace will match every
+    /// key under that namespace on `cache_clear` (pattern `<namespace>:*`), which
+    /// includes entries written by every other cache that shares the same namespace.
+    /// Set a unique prefix per logical cache to avoid this.
+    fn cache_clear(&self) -> Result<(), RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let pattern = self.clear_match_pattern();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query(&mut *conn)?;
+            if !keys.is_empty() {
+                redis::cmd("DEL").arg(keys).query::<()>(&mut *conn)?;
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(())
+    }
+
+    /// Delegates to [`cache_clear`](crate::ConcurrentCached::cache_clear): the redis
+    /// store tracks no in-memory metrics, so resetting is exactly clearing the
+    /// entries (matching `RedbCache`, which also overrides both).
+    fn cache_reset(&self) -> Result<(), RedisCacheError> {
+        self.cache_clear()
+    }
+
     fn ttl(&self) -> Option<Duration> {
         Some(*self.ttl.lock())
     }
@@ -586,11 +818,57 @@ where
     }
 }
 
+impl<K, V> crate::SerializeCached<K, V> for RedisCache<K, V>
+where
+    K: Display + Clone,
+    V: Serialize + DeserializeOwned,
+{
+    /// Serializes from the borrowed `val` (no clone) and `SET`s it, returning the
+    /// previous value if any. Equivalent to [`ConcurrentCached::cache_set`] but
+    /// avoids taking ownership of `val`.
+    fn cache_set_ref(&self, key: &K, val: &V) -> Result<Option<V>, RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let mut pipe = redis::pipe();
+        let key = self.generate_key(key);
+
+        let ttl_secs = ttl_seconds(*self.ttl.lock())?;
+
+        let val = CachedRedisValueRef::new(val);
+        pipe.get(&key);
+        pipe.set_ex::<String, String>(
+            key,
+            serde_json::to_string(&val)
+                .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
+            ttl_secs,
+        )
+        .ignore();
+
+        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        match res.0 {
+            None => Ok(None),
+            Some(s) => {
+                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                    RedisCacheError::CacheDeserialization {
+                        cached_value: s,
+                        error: e,
+                    }
+                })?;
+                Ok(Some(v.value))
+            }
+        }
+    }
+}
+
 #[cfg(all(
     feature = "async",
     any(
         feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
         feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+        feature = "redis_async_cache",
         feature = "redis_connection_manager"
     )
 ))]
@@ -600,8 +878,9 @@ mod async_redis {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        CachedRedisValue, ConnectionString, DEFAULT_NAMESPACE, DeserializeOwned, Display, ENV_KEY,
-        PhantomData, RedisCacheBuildError, RedisCacheError, Serialize,
+        CachedRedisValue, CachedRedisValueRef, ConnectionString, DEFAULT_NAMESPACE,
+        DeserializeOwned, Display, ENV_KEY, PhantomData, RedisCacheBuildError, RedisCacheError,
+        Serialize,
     };
     use crate::ConcurrentCachedAsync;
     #[cfg(feature = "redis_async_cache")]
@@ -640,10 +919,31 @@ mod async_redis {
 
         /// Specify the cache TTL as a `Duration`.
         /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
+        ///
+        /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
         #[must_use]
         pub fn ttl(mut self, ttl: Duration) -> Self {
             self.ttl = ttl;
             self
+        }
+
+        /// Specify the cache TTL in whole seconds. Equivalent to
+        /// `ttl(Duration::from_secs(secs))`.
+        ///
+        /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+        #[must_use]
+        pub fn ttl_secs(self, secs: u64) -> Self {
+            self.ttl(Duration::from_secs(secs))
+        }
+
+        /// Specify the cache TTL in milliseconds. Equivalent to
+        /// `ttl(Duration::from_millis(millis))`.
+        /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
+        ///
+        /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+        #[must_use]
+        pub fn ttl_millis(self, millis: u64) -> Self {
+            self.ttl(Duration::from_millis(millis))
         }
 
         /// Specify whether cache hits refresh the TTL
@@ -672,6 +972,12 @@ mod async_redis {
         ///
         /// **Note:** colons in the prefix are not escaped and can cause key collisions
         /// with differently-split namespace/prefix combinations sharing the same segments.
+        ///
+        /// **Note:** the prefix is what scopes `async_cache_clear` to this logical
+        /// cache. With an empty prefix, `async_cache_clear` matches `<namespace>:*`
+        /// and will delete entries belonging to every cache that shares the same
+        /// namespace. Set a unique prefix per logical cache to ensure
+        /// `async_cache_clear` is scoped correctly.
         #[must_use]
         pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
             self.prefix = prefix.as_ref().to_string();
@@ -769,13 +1075,23 @@ mod async_redis {
             Ok(conn)
         }
 
-        /// The last step in building a `RedisCache` is to call `build()`
+        /// The last step in building an `AsyncRedisCache` is to call `build()`
         ///
         /// # Errors
         ///
-        /// Will return a `RedisCacheBuildError`, depending on the error
+        /// - `InvalidTtl`: the configured TTL is zero.
+        /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
+        ///   the prefix are empty. `async_cache_clear` would otherwise issue
+        ///   `SCAN MATCH *` and delete every key in the Redis database.
+        /// - `MissingConnectionString`: no connection string was set and the
+        ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
+        /// - `Connection`: the Redis client or multiplexed connection could not
+        ///   be created.
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
             super::super::validate_ttl(self.ttl)?;
+            if self.namespace.trim_end_matches(':').is_empty() && self.prefix.is_empty() {
+                return Err(RedisCacheBuildError::EmptyScope);
+            }
             Ok(AsyncRedisCache {
                 ttl: Mutex::new(self.ttl),
                 refresh: AtomicBool::new(self.refresh),
@@ -822,12 +1138,6 @@ mod async_redis {
         K: Display + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
-        #[allow(clippy::new_ret_no_self)]
-        /// Initialize an `AsyncRedisCacheBuilder`
-        pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
-            AsyncRedisCacheBuilder::new(prefix, ttl)
-        }
-
         /// Initialize an `AsyncRedisCacheBuilder`.
         pub fn builder<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
             AsyncRedisCacheBuilder::new(prefix, ttl)
@@ -836,6 +1146,15 @@ mod async_redis {
         fn generate_key(&self, key: &K) -> String {
             // Same format as the sync store — see `super::generate_redis_key`.
             super::generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
+        }
+
+        /// `SCAN MATCH` glob covering every key this cache writes — the same
+        /// `{namespace}:{prefix}:` scope with a trailing `*`, with glob
+        /// metacharacters in the segments escaped (see
+        /// [`clear_match_pattern`](super::clear_match_pattern)). Used by
+        /// `async_cache_clear`.
+        fn clear_match_pattern(&self) -> String {
+            super::clear_match_pattern(&self.namespace, &self.prefix)
         }
 
         /// Return the redis connection string used.
@@ -958,6 +1277,54 @@ mod async_redis {
             Ok(removed > 0)
         }
 
+        /// Remove every entry written by this cache instance.
+        ///
+        /// Async counterpart of [`ConcurrentCached::cache_clear`](crate::ConcurrentCached::cache_clear)
+        /// for `RedisCache`. Scoped to this cache's `{namespace}:{prefix}:*` keyspace
+        /// via `SCAN` + batched `DEL`; it is **not** a server `FLUSHDB` and leaves keys
+        /// outside this namespace/prefix untouched. Cost is **O(n)** in the number of
+        /// matching keys (a cursored `SCAN`).
+        ///
+        /// **Note:** the `prefix` is what scopes a clear to a single logical cache. A
+        /// cache built with an empty prefix but a non-empty namespace will match every
+        /// key under that namespace on `async_cache_clear` (pattern `<namespace>:*`),
+        /// which includes entries written by every other cache that shares the same
+        /// namespace. Set a unique prefix per logical cache to avoid this.
+        async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+            let mut conn = self.connection.clone();
+            let pattern = self.clear_match_pattern();
+            let mut cursor: u64 = 0;
+            loop {
+                let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut conn)
+                    .await?;
+                if !keys.is_empty() {
+                    redis::cmd("DEL")
+                        .arg(keys)
+                        .query_async::<()>(&mut conn)
+                        .await?;
+                }
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
+            }
+            Ok(())
+        }
+
+        /// Delegates to
+        /// [`async_cache_clear`](crate::ConcurrentCachedAsync::async_cache_clear): the
+        /// redis store tracks no in-memory metrics, so resetting is exactly clearing
+        /// the entries (matching `RedbCache`, which also overrides both).
+        async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+            self.async_cache_clear().await
+        }
+
         /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
         fn set_refresh_on_hit(&self, refresh: bool) -> bool {
             self.refresh.swap(refresh, Ordering::Relaxed)
@@ -983,6 +1350,53 @@ mod async_redis {
         }
     }
 
+    impl<K, V> crate::SerializeCachedAsync<K, V> for AsyncRedisCache<K, V>
+    where
+        K: Display + Clone + Send + Sync,
+        V: Serialize + DeserializeOwned + Send,
+    {
+        /// Serializes from the borrowed `val` (no clone) and `SET`s it, returning
+        /// the previous value if any. Async counterpart of
+        /// [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref).
+        ///
+        /// Serialization happens eagerly (before the returned future is awaited) so
+        /// the borrowed `&V` is never held across the `.await`, keeping the `V: Send`
+        /// (not `Sync`) bound consistent with `async_cache_set`.
+        fn async_cache_set_ref(
+            &self,
+            key: &K,
+            val: &V,
+        ) -> impl std::future::Future<Output = Result<Option<V>, Self::Error>> + Send {
+            let mut conn = self.connection.clone();
+            let key = self.generate_key(key);
+            let ttl_secs = super::ttl_seconds(*self.ttl.lock());
+            let serialized = serde_json::to_string(&CachedRedisValueRef::new(val))
+                .map_err(|e| RedisCacheError::CacheSerialization { error: e });
+            async move {
+                let mut pipe = redis::pipe();
+                let serialized = serialized?;
+                let ttl_secs = ttl_secs?;
+                pipe.get(&key);
+                pipe.set_ex::<String, String>(key, serialized, ttl_secs)
+                    .ignore();
+
+                let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+                match res.0 {
+                    None => Ok(None),
+                    Some(s) => {
+                        let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
+                            RedisCacheError::CacheDeserialization {
+                                cached_value: s,
+                                error: e,
+                            }
+                        })?;
+                        Ok(Some(v.value))
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -996,9 +1410,22 @@ mod async_redis {
                 .as_millis()
         }
 
+        // No Redis server needed -- verifies the empty-scope guard in async `build()`.
+        #[tokio::test]
+        async fn async_empty_namespace_and_prefix_is_rejected() {
+            let result = AsyncRedisCacheBuilder::<String, String>::new("", Duration::from_secs(1))
+                .namespace("")
+                .build()
+                .await;
+            assert!(
+                matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+                "expected EmptyScope"
+            );
+        }
+
         #[tokio::test]
         async fn test_async_redis_cache() {
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::new(
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(
                 format!("{}:async-redis-cache-test", now_millis()),
                 Duration::from_secs(2),
             )
@@ -1029,13 +1456,52 @@ mod async_redis {
             assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
         }
     }
+
+    #[cfg(test)]
+    mod async_builder_ttl_setter_tests {
+        // No Redis server needed -- these only inspect the builder's ttl field set by
+        // the convenience setters, without calling `build()`.
+        use super::AsyncRedisCacheBuilder;
+        use crate::time::Duration;
+
+        #[test]
+        fn ttl_secs_and_ttl_millis_set_duration() {
+            let b = AsyncRedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+                .ttl_secs(7);
+            assert_eq!(b.ttl, Duration::from_secs(7));
+
+            let b = AsyncRedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+                .ttl_millis(250);
+            assert_eq!(b.ttl, Duration::from_millis(250));
+        }
+
+        #[test]
+        fn ttl_setters_override_last_writer_wins() {
+            // ttl_secs then ttl_millis -> the millis value
+            let b = AsyncRedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+                .ttl_secs(10)
+                .ttl_millis(500);
+            assert_eq!(b.ttl, Duration::from_millis(500));
+
+            // ttl_millis then ttl_secs -> the secs value
+            let b = AsyncRedisCacheBuilder::<String, String>::new("p", Duration::from_secs(1))
+                .ttl_millis(500)
+                .ttl_secs(10);
+            assert_eq!(b.ttl, Duration::from_secs(10));
+        }
+    }
 }
 
 #[cfg(all(
     feature = "async",
     any(
         feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
         feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+        feature = "redis_async_cache",
         feature = "redis_connection_manager"
     )
 ))]
@@ -1045,7 +1511,12 @@ mod async_redis {
         feature = "async",
         any(
             feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
             feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
+            feature = "redis_async_cache",
             feature = "redis_connection_manager"
         )
     )))
@@ -1069,7 +1540,7 @@ mod tests {
 
     #[test]
     fn redis_cache() {
-        let c: RedisCache<u32, u32> = RedisCache::new(
+        let c: RedisCache<u32, u32> = RedisCache::builder(
             format!("{}:redis-cache-test", now_millis()),
             Duration::from_secs(2),
         )
@@ -1102,7 +1573,7 @@ mod tests {
 
     #[test]
     fn remove() {
-        let c: RedisCache<u32, u32> = RedisCache::new(
+        let c: RedisCache<u32, u32> = RedisCache::builder(
             format!("{}:redis-cache-test-remove", now_millis()),
             Duration::from_secs(3600),
         )

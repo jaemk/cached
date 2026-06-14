@@ -1,4 +1,4 @@
-error: `refresh` requires `ttl` to be set on the default in-memory sharded path
+error: `refresh` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set on the default in-memory sharded path
  --> tests/ui/concurrent_cached_refresh_without_ttl.rs:4:4
   |
 4 | fn my_fn(k: i32) -> Result<i32, std::convert::Infallible> {

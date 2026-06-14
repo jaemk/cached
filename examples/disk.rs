@@ -23,7 +23,7 @@ enum ExampleError {
 // under $system_cache_dir/<exe>_cached_disk_cache/
 #[concurrent_cached(
     disk = true,
-    ttl = 30,
+    ttl_secs = 30,
     map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##
 )]
 fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
@@ -42,7 +42,7 @@ fn main() {
     println!("done");
 
     use cached::ConcurrentCached;
-    CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
+    CACHED_SLEEP_SECS.remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();
     cached_sleep_secs(2).unwrap();
@@ -54,12 +54,12 @@ fn main() {
     // for write throughput; call `flush()` at a chosen point (periodically or
     // before shutdown) to force a single durable commit that persists them all.
     use cached::RedbCache;
-    let cache: RedbCache<u64, u64> = RedbCache::new("disk-example-flush")
+    let cache: RedbCache<u64, u64> = RedbCache::builder("disk-example-flush")
         .durable(false)
         .build()
         .unwrap();
     for i in 0..3 {
-        cache.cache_set(i, i * 10).unwrap();
+        cache.set(i, i * 10).unwrap();
     }
     cache.flush().unwrap(); // one durable commit persisting the cheap writes above
     println!("flushed 3 cheap writes to disk in a single durable commit");

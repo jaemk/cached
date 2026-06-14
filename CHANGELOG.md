@@ -5,6 +5,18 @@
 
 ### Breaking Changes
 
+#### Redis TLS features split ([#231](https://github.com/jaemk/cached/issues/231))
+- `redis_tokio` no longer implies native-tls. It now enables the TLS-agnostic `redis/tokio-comp`
+  connection path. Add `redis_tokio_native_tls` (system TLS) or `redis_tokio_rustls` (pure-Rust
+  TLS) alongside to restore TLS.
+- `redis_smol` no longer implies native-tls. Add `redis_smol_native_tls` or `redis_smol_rustls`
+  alongside if TLS is required.
+- `redis_async_cache` is unchanged: it still uses the Tokio runtime with native-tls (it now
+  pulls in `redis_tokio_native_tls` + `redis/cache-aio`, equivalent to the previous behavior).
+- **Migration:** if you were relying on `redis_tokio` or `redis_smol` for TLS connectivity, add
+  `redis_tokio_native_tls` (or `redis_tokio_rustls`) / `redis_smol_native_tls` (or
+  `redis_smol_rustls`) to your `Cargo.toml` features list.
+
 #### Minimum supported Rust version
 - MSRV raised from 1.85 to 1.89 (required by `redb` 4.x).
 
@@ -16,12 +28,24 @@
 - Removed `DiskCache::connection()` / `connection_mut()`, `DiskCacheBuilder::connection_config`, and the `connection_config` macro attribute. The backend handle is no longer exposed.
 - `durable` maps to redb durability and defaults to `true` (durable, fsync per write), so a disk cache persists by default. Set `false` to trade durability for write throughput: writes then use `Durability::None`, which is not persisted until a later durable commit, so they can be lost on process exit or crash; call `RedbCache::flush()` / `async_flush()` to force one.
 
+#### `new()` constructor consistency for stores
+- In-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`, and all six sharded variants) gained `Type::new()` / `Type::new(required_field)` constructors that return a ready-to-use cache. `builder()` is still available for non-default configuration.
+- `RedbCache::new`, `RedisCache::new`, and `AsyncRedisCache::new` are removed. These previously returned a *builder*, conflicting with the convention that `new()` returns a ready store. Replace `::new(` with `::builder(` on these three types; the rest of the builder chain is unchanged.
+
+#### Macro `ttl` attribute replaced by `ttl_secs`, `ttl_millis`, and Duration expression
+- `ttl = <integer>` (bare whole-second integer) is removed from `#[cached]` / `#[once]` / `#[concurrent_cached]`. The macro now accepts three mutually exclusive forms: `ttl_secs = N` (whole seconds, replaces the old integer form), `ttl_millis = N` (milliseconds, was already available), or `ttl = "<Duration expr>"` (a string-literal Duration expression, e.g. `ttl = "Duration::from_secs(60)"`). Using the old bare-integer form produces an error directing you to `ttl_secs`.
+- Builders gained `.ttl_secs(n)` and `.ttl_millis(n)` convenience methods alongside the existing `.ttl(Duration)`. All three target the same underlying field; the last call wins. Builder-level calls do not enforce mutual exclusion.
+
+#### Preferred method names in docs: short aliases over `cache_*` forms
+- Docs and examples now prefer the short aliases (`get`, `set`, `remove`, `clear`, `len`, ...) over the `cache_`-prefixed forms (`cache_get`, `cache_set`, ...). Both names still exist; neither is deprecated. Use `cache_*` when the short name collides with another trait's method of the same name in scope. No code change required.
+
 #### Macro attribute changes
 - Removed the deprecated `size` attribute from `#[cached]` / `#[concurrent_cached]` (deprecated since 2.0). Use `max_size = N`; the macros still detect `size` and emit a compile error directing you to `max_size`.
 
 #### Trait API changes
 - `ConcurrentCachedAsync` cache operations are renamed with an `async_` prefix (`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_remove_entry`, `async_cache_delete`), removing the `E0034` "multiple applicable items" error when both concurrent traits are imported. The sync config methods (`ttl`/`set_ttl`/`unset_ttl`/`set_refresh_on_hit`) are unchanged.
 - `CacheTtl` and `CacheEvict` are now single-owner (`&mut self`) traits only, since `&mut self` was unusable on stores held through `Arc`/`static`. `CacheTtl` was removed from `DiskCache`, `RedisCache`, `AsyncRedisCache`, `ShardedTtlCache`, and `ShardedLruTtlCache`; `CacheEvict` from the four TTL/expiring sharded stores. Set TTL on concurrent stores via `ConcurrentCached::set_ttl` / `ConcurrentCachedAsync::set_ttl` (`&self`), and evict via the new `ConcurrentCacheEvict` trait (`fn evict(&self) -> usize`, implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`). Single-owner in-memory stores are unchanged.
+- `Cached::cache_get_or_set_with` / `cache_try_get_or_set_with` (and their `get_or_set_with` / `try_get_or_set_with` aliases) and `CachedAsync::async_get_or_set_with` / `async_try_get_or_set_with` now return `&V` / `Result<&V, E>` instead of `&mut V` / `Result<&mut V, E>` ([#179](https://github.com/jaemk/cached/issues/179)). New `*_mut` variants (`cache_get_or_set_with_mut`, `cache_try_get_or_set_with_mut`, `get_or_set_with_mut`, `try_get_or_set_with_mut`, `async_get_or_set_with_mut`, `async_try_get_or_set_with_mut`) preserve the mutable-reference behavior. External `impl`s of these traits must update their method signatures and implement the new `*_mut` required methods.
 
 #### Other breaking changes
 - Error enum variants dropped their redundant `Error` suffix: `RedbCacheError::{StorageError, CacheDeserializationError, CacheSerializationError}` became `{Storage, CacheDeserialization, CacheSerialization}`; `RedbCacheBuildError::ConnectionError` became `Connection`; `RedisCacheError::{RedisCacheError, PoolError, CacheDeserializationError, CacheSerializationError}` became `{Redis, Pool, CacheDeserialization, CacheSerialization}`.
@@ -32,10 +56,22 @@
 
 ### Additive / non-breaking
 - `cached::prelude` re-exports the common traits for a single glob import.
-- `ConcurrentCached` gained `cache_clear` / `cache_reset` / `cache_reset_metrics` (`&self`, default no-op). The sharded stores override all three; `DiskCache` overrides `cache_clear` / `cache_reset` but keeps the no-op `cache_reset_metrics` (it tracks no in-memory metrics). `ConcurrentCachedAsync` gained the async counterparts.
+- `ConcurrentCached` gained `cache_clear` / `cache_reset` / `cache_reset_metrics` (`&self`, default no-op). The sharded stores override all three; `DiskCache` and `RedisCache` / `AsyncRedisCache` override `cache_clear` / `cache_reset` (see below for redis) but keep the no-op `cache_reset_metrics` (they track no in-memory metrics). `ConcurrentCachedAsync` gained the async counterparts.
 - `RedbCache::flush` and `RedbCache::async_flush` force a durable (fsync) commit, so you can run with `durable(false)` for cheap writes and flush at chosen points (periodically or before shutdown) to persist them.
 - `RedbCache::disk_path()` returns the path of the on-disk redb database file backing the cache.
-- Doc fixes: corrected the "sharded stores expose inherent helpers" note, added a `Cached::get` mutability note, and documented the sharded-LRU minimum-per-shard capacity.
+- New `SerializeCached` / `SerializeCachedAsync` traits with `cache_set_ref(&self, &K, &V)` / `async_cache_set_ref`, implemented by `RedisCache` / `AsyncRedisCache` / `RedbCache`, let serialize-backed stores set an entry without taking ownership of the key/value. The `#[concurrent_cached]` macro now calls the borrowed setter for any store implementing these traits (the built-in `redis`/`disk` stores and custom `ty`/`create` stores alike), avoiding an extra value clone on the set ([#196](https://github.com/jaemk/cached/issues/196), [#195](https://github.com/jaemk/cached/issues/195)).
+- `RedisCache` / `AsyncRedisCache` now implement `cache_clear` / `async_cache_clear` via a namespace-scoped `SCAN` + batched `DEL` (O(n), scoped to the cache's prefix, not a server flush), and `cache_reset` / `async_cache_reset` delegate to them (redis tracks no in-memory metrics, matching `RedbCache`). Glob metacharacters (`*`, `?`, `[`, `]`, `\`) in the namespace/prefix are escaped in the `SCAN` pattern so they match literally ([#200](https://github.com/jaemk/cached/issues/200)). `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `build()` now returns `RedisCacheBuildError::EmptyScope` when both the namespace (after trimming trailing `:`) and the prefix are empty, since that would make `cache_clear` run `SCAN MATCH *` and delete every key in the database. (This is technically a breaking behavior change for any caller that explicitly set the namespace to empty and left the prefix empty; the default namespace `"cached-redis-store:"` is non-empty so normal usage is unaffected. See the [migration guide](docs/migrations/2.0-to-unreleased.md#9-rediscachebuilderbuildd--asyncrediscachebuilderbuildd-return-emptyscope-when-namespace-and-prefix-are-both-empty) for details.)
+- `LruCache::set_max_size` / `try_set_max_size` resize a live cache, eagerly evicting LRU entries when shrinking (paralleling `TtlSortedCache`'s existing `set_max_size` / `try_set_max_size`, which set the new bound but evict lazily on the next insert rather than eagerly); `LruTtlCache` and `ExpiringLruCache` gained the same two methods (delegating to their inner LRU) for parity ([#180](https://github.com/jaemk/cached/issues/180)). All four `try_set_max_size` methods now return a single dedicated `SetMaxSizeError` (variant `ZeroSize`) instead of the builder `BuildError` (LRU family) or a `std::io::Error` (`TtlSortedCache`), so the runtime-resize error is self-describing and consistent across stores.
+- `RedbCacheBuilder::build()` now validates `cache_name` (used as a filename component) and returns `RedbCacheBuildError::InvalidCacheName` if it is empty, contains a path separator (`/` or `\`), or is a path-traversal component (`.` or `..`), which would otherwise silently create subdirectories, escape the cache directory, or produce a meaningless filename.
+- `#[cached]` / `#[concurrent_cached]` / `#[once]` gained a `ttl_millis = N` attribute for sub-second TTLs (milliseconds); mutually exclusive with `ttl` (seconds) and `expires`, with a compile error if any are combined ([#149](https://github.com/jaemk/cached/issues/149)).
+- `#[cached]` / `#[concurrent_cached]` / `#[once]` gained a `force_refresh = "{ <bool expr> }"` attribute (a curly-brace expression block over the function's arguments, like `convert`) that bypasses the cached value and recomputes when the expression is true. On `#[once]` it overwrites the single shared value (there is no per-call key, so unlike `#[cached]` there is no "exclude the flag from the key" caveat). When combined with `result_fallback = true`, a force-refreshed call that returns `Err` still serves the previously cached `Ok` value (the fallback wins over the bypass), and capturing that fallback value leaves no read side effects on the bypassed entry (no TTL renewal, recency update, or hit-counter change) on both `#[cached]` and `#[concurrent_cached]` ([#146](https://github.com/jaemk/cached/issues/146)).
+- `#[cached]` / `#[concurrent_cached]` / `#[once]` gained an `in_impl = true` attribute, allowing them on methods inside `impl` blocks (the generated cache static lives in the function body); `self`-receiver methods are accepted only under `in_impl` (a `convert` block alone cannot rescue them, since the cache static cannot live at `impl` scope) ([#16](https://github.com/jaemk/cached/issues/16), [#140](https://github.com/jaemk/cached/issues/140)).
+- `#[cached]` / `#[concurrent_cached]` accept reference arguments (`&T`, `Option<&T>`) on the default-key path, deriving an owned key (`<T as ToOwned>::Owned`) without requiring a `convert` ([#202](https://github.com/jaemk/cached/issues/202), [#203](https://github.com/jaemk/cached/issues/203)).
+- The macros resolve the crate root via `proc-macro-crate`, so a renamed or re-exported `cached` dependency works ([#157](https://github.com/jaemk/cached/issues/157)).
+- Macro-introduced bindings are now hygienically named (`__cached_*`), so function arguments named `key`, `cache`, or `result` no longer collide with generated code ([#230](https://github.com/jaemk/cached/issues/230), [#114](https://github.com/jaemk/cached/issues/114)).
+- Applying `#[cached]` / `#[concurrent_cached]` to a generic function without a `key` + `convert` now produces a clear compile error (each monomorphization would need its own static); generics are supported when `key` + `convert` pin a concrete key type ([#80](https://github.com/jaemk/cached/issues/80)).
+- The release workflow now creates a git tag and GitHub release for each workspace crate that is newly published, via `bin/tag-release.sh`. The root crate keeps the bare `vX.Y.Z` tag; subcrates are tagged `<crate-name>-vX.Y.Z` ([#245](https://github.com/jaemk/cached/issues/245)).
+- Doc fixes: corrected the "sharded stores expose inherent helpers" note, added a `Cached::get` mutability note, documented the sharded-LRU minimum-per-shard capacity, named floats as the canonical `convert` case ([#78](https://github.com/jaemk/cached/issues/78)), and added a cache-invalidation example ([#21](https://github.com/jaemk/cached/issues/21)) and a struct-method example ([#236](https://github.com/jaemk/cached/pull/236)).
 - `hashbrown` updated to 0.17 (internal). Dev-only: `criterion` 0.8, `googletest` 0.14.
 
 ## [2.0.2]
@@ -89,7 +125,7 @@
 #### `size` → `max_size` naming (builder setter, macro attribute, runtime setters)
 - Builder setter `.size(n)` → `.max_size(n)` (LRU-family stores and `TtlSortedCache`). The sharded builders' per-shard cap setter is `per_shard_max_size`.
 - The `#[cached]` / `#[concurrent_cached]` **macro attribute `size = N` → `max_size = N`**. The old `size = N` spelling keeps working as a **deprecated alias** that emits a deprecation warning (anchored at the `size` token). Setting both on one annotation is a compile error. See "New macro attributes" under Added below.
-- **`TtlSortedCache` runtime max-size setters**: `size_limit(n)` → `set_max_size(n)` and `try_size_limit(n)` → `try_set_max_size(n)` (matching the `set_ttl` runtime-mutator convention).
+- **`TtlSortedCache` runtime max-size setters**: `size_limit(n)` → `set_max_size(n)` and `try_size_limit(n)` → `try_set_max_size(n)` (matching the `set_ttl` runtime-mutator convention). The error type also changed: `try_set_max_size` now returns `Result<Option<usize>, cached::SetMaxSizeError>` instead of `std::io::Result<Option<usize>>`; if you propagate the error with `?` into an `io::Error` context, update the enclosing function's error type or convert explicitly.
 
 ### Added
 
@@ -228,6 +264,11 @@
   `create` were silently ignored — a real footgun (the user thought their disk
   path / durability was applied when it was not). Move the dropped attrs into
   your `create` block, or remove them.
+- **Breaking:** `#[cached]` likewise rejects its store-builder attributes
+  (`ttl`, `ttl_millis`, `max_size`, `unbound`, `refresh`) when a `create` block
+  is supplied, with the same unified message, mirroring `#[concurrent_cached]`.
+  Previously `refresh` paired with `create` was silently ignored. Move the
+  dropped attrs into your `create` block, or remove them.
 - `CacheEvict::evict` now returns the number of expired entries removed, matching the existing
   `TtlSortedCache` behavior.
 - Fix `DiskCache::cache_get` refreshes to return serialization errors instead of panicking when

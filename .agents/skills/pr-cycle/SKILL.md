@@ -64,8 +64,8 @@ judgment core and push everything else to cheaper models or to no model at all.
 | Tier | What | Steps | Model |
 |------|------|-------|-------|
 | 0 — mechanical | All GitHub API ops, `make ci`, README regen, push preamble | 1, 5, 6, 8(preamble), 9, 10 | script (`pr.py`) |
-| 1 — cheap delegation | Local review via `pr-review` (read-only sub-agents); mechanical/repetitive fix application | 2, 4b, 11 | Sonnet (pinned in agent def; review sub-agents overridable per-run, e.g. to opus — see [Input](#input)) |
-| 2 — judgment core | Classify findings; write explicit fix specs + test assertions; sync audit | 3, 4a, 7 | Opus (session model) |
+| 1 — cheap delegation | Local review via `pr-review` (read-only sub-agents); fix application, fanned out across disjoint sub-agents | 2, 4b, 11 | Sonnet by default; per-group `model` override to Opus for harder groups (see 4b); review sub-agents overridable per-run (see [Input](#input)) |
+| 2 — judgment core | Classify findings; write explicit fix specs + test assertions; partition the fan-out; sync audit | 3, 4a, 7 | Opus (session model) |
 
 A Sonnet session can drive the whole cycle; only Tier-2 actually needs strong
 reasoning, so consider switching the session to a cheaper model once the judgment
@@ -107,8 +107,9 @@ review-agent model override from the Input if one was given. `pr-review` will:
 
 - acquire the diff (`.agents/skills/pr-cycle/pr.py PR_NUMBER diff`, equivalent to
   `git diff origin/master`),
-- spawn `pr-code-reviewer` and `pr-consumer-reviewer` in parallel (read-only, each
-  carrying its own rubric; Sonnet by default, or the overridden model on **both**
+- shard the changed material into appropriately sized, randomized chunks and spawn one
+  `pr-code-reviewer` and one `pr-consumer-reviewer` per shard in parallel (read-only,
+  each carrying its own rubric; Sonnet by default, or the overridden model on **all**
   spawns), and
 - return a consolidated findings report with severity and a per-finding verdict.
 
@@ -157,19 +158,46 @@ Common fix types:
 - Trybuild golden file regeneration: `TRYBUILD=overwrite cargo test --no-default-features --features "proc_macro,time_stores" compile_fail_macro_arg_validation`
 - Macro code changes: `cached_proc_macro/src/`
 
-#### 4b. Apply fixes (route per fix)
+#### 4b. Partition the fixes and fan out across disjoint sub-agents
 
-For each spec, choose the routing:
+Once every valid finding has a spec, apply them by **fanning out across as many
+parallel sub-agents as the specs allow**, rather than applying them serially in the
+orchestrator. Two rules govern the fan-out:
 
-- **Delegate to `pr-fix-implementer` (Sonnet)** when the fix is **mechanical or
-  repetitive across multiple files** (e.g. the same change in all six sharded stores,
-  a doc-string pattern replicated across store modules). State "delegating because:
-  <reason>". Spawn the `pr-fix-implementer` agent with the fix spec as the prompt.
-- **Apply inline** when the fix is **a one-off, subtle, or logic/macro change**.
-  For small one-off edits the spec-writing + verification round-trip costs more than
-  editing directly. State "applying inline because: <reason>".
+**Disjoint partitioning (correctness).** Parallel agents share one working tree, so two
+agents must never write the same file — concurrent edits to one file race and corrupt
+each other. Partition the specs into groups whose **written-file sets do not overlap**:
 
-After all fixes are applied, verify with:
+- For each spec, compute the full set of files it writes — the Target file(s) *and* the
+  test file its Test clause adds to (often `tests/cached.rs`).
+- Any two specs that share a written file MUST land in the same group. A common sink
+  like `tests/cached.rs` therefore pulls every test-adding spec into one group — that is
+  expected; keep that group together rather than risking a race.
+- Otherwise split into as many groups as possible — ideally one spec per group — to
+  maximize parallelism. More disjoint groups means more concurrency.
+
+**Appropriate model per group (cost).** Each group is handled by a `pr-fix-implementer`
+agent spawned with the Agent tool's `model` parameter set to the tier the group's
+*hardest* fix needs:
+
+- `model: sonnet` (the agent's default) — mechanical or repetitive groups: doc/comment
+  updates, a pattern replicated across the sharded stores, golden-file regen, simple
+  test additions.
+- `model: opus` — groups containing a subtle logic change, a macro change in
+  `cached_proc_macro/src/`, or any fix whose application still needs real reasoning. The
+  spec from 4a is already precise enough to hand off (it must be, to be valid); raising
+  the implementer's model buys more careful application, not more decision latitude.
+
+Spawn all groups **in a single message** (multiple Agent calls) so they run concurrently.
+Each agent's prompt is the verbatim fix spec(s) for its group. Before spawning, state the
+partition: list each group, the files it owns, its model, and why that model.
+
+**Inline fallback.** Skip the fan-out and edit directly only in the degenerate case where
+it cannot pay off: a single spec, or a few tiny one-off edits that all touch one
+overlapping region (so they cannot be partitioned anyway). State "applying inline because:
+<reason>".
+
+After all agents report back, verify with:
 
 ```bash
 .agents/skills/pr-cycle/pr.py PR_NUMBER ci

@@ -1,4 +1,4 @@
-error: `expires` and `unsync_reads` are mutually exclusive — `ExpiringCache` and `ExpiringLruCache` do not implement `CachedRead`
+error: `expires` and `unsync_reads` are mutually exclusive - `ExpiringCache` and `ExpiringLruCache` do not implement `CachedRead`
   --> tests/ui/cached_expires_unsync_reads_exclusive.rs:13:4
    |
 13 | fn my_fn(x: u32) -> MyVal {

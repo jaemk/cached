@@ -35,6 +35,15 @@ fn compile_fail_unsync_reads_timed() {
     t.compile_fail("tests/ui/unsync_reads_timed_cache.rs");
 }
 
+// `new`/`builder` on each sharded `*Base` are constrained to the default-hasher
+// specialization, so a `Base::<_, _, CustomHasher>::{new,builder}()` turbofish (which
+// would silently drop the custom hasher) must not compile.
+#[test]
+fn compile_fail_sharded_constructor() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/sharded_base_custom_hasher_constructor.rs");
+}
+
 // One negative trybuild case per *semantic* compile error the macros raise
 // (i.e. errors we define for invalid attribute/signature states). Pure
 // syn-parser pass-through messages for malformed user strings (bad `ty` /
@@ -838,7 +847,7 @@ mod time_store_tests {
         input.len()
     }
 
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn slow_once_timestamp_after_body(input: u32) -> u32 {
         sleep(Duration::from_millis(1100));
         input
@@ -860,7 +869,7 @@ mod time_store_tests {
         assert_eq!(1, slow_once_timestamp_after_body(2));
     }
 
-    #[cached(max_size = 1, ttl = 1)]
+    #[cached(max_size = 1, ttl_secs = 1)]
     fn proc_timed_sized_sleeper(n: u64) -> u64 {
         sleep(Duration::new(1, 0));
         n
@@ -911,7 +920,7 @@ mod time_store_tests {
     /// should only cache the _first_ value returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn only_cached_once_per_second(s: String) -> Vec<String> {
         vec![s]
     }
@@ -929,7 +938,7 @@ mod time_store_tests {
     /// should only cache the _first_ `Ok` returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn only_cached_result_once_per_second(
         s: String,
         error: bool,
@@ -951,7 +960,7 @@ mod time_store_tests {
     /// should only cache the _first_ `Some` returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
         if none { None } else { Some(vec![s]) }
     }
@@ -967,7 +976,7 @@ mod time_store_tests {
         assert_eq!(vec!["b".to_string()], b);
     }
 
-    #[cached(ttl = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
+    #[cached(ttl_secs = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
     fn cached_sync_writes(s: String) -> Vec<String> {
         vec![s]
     }
@@ -985,7 +994,7 @@ mod time_store_tests {
         assert_eq!(a, c);
     }
 
-    #[cached(ttl = 2, sync_writes = true, key = "u32", convert = "{ 2 }")]
+    #[cached(ttl_secs = 2, sync_writes = true, key = "u32", convert = "{ 2 }")]
     fn cached_sync_writes_true(s: String) -> Vec<String> {
         vec![s]
     }
@@ -997,7 +1006,7 @@ mod time_store_tests {
         assert_eq!(a, b);
     }
 
-    #[cached(ttl = 2, sync_writes = false, key = "u32", convert = "{ 3 }")]
+    #[cached(ttl_secs = 2, sync_writes = false, key = "u32", convert = "{ 3 }")]
     fn cached_sync_writes_false(s: String) -> Vec<String> {
         vec![s]
     }
@@ -1010,7 +1019,7 @@ mod time_store_tests {
     }
 
     #[cached(
-        ttl = 2,
+        ttl_secs = 2,
         sync_writes = "by_key",
         sync_writes_buckets = 8,
         key = "u32",
@@ -1034,7 +1043,7 @@ mod time_store_tests {
     }
 
     #[cached(
-        ttl = 1,
+        ttl_secs = 1,
         refresh = true,
         key = "String",
         convert = r#"{ String::from(s) }"#
@@ -1074,7 +1083,7 @@ mod time_store_tests {
 
     #[cached(
         max_size = 2,
-        ttl = 1,
+        ttl_secs = 1,
         refresh = true,
         key = "String",
         convert = r#"{ String::from(s) }"#
@@ -1114,7 +1123,7 @@ mod time_store_tests {
 
     #[cached(
         max_size = 2,
-        ttl = 1,
+        ttl_secs = 1,
         refresh = true,
         key = "String",
         convert = r#"{ String::from(s) }"#
@@ -1156,7 +1165,7 @@ mod time_store_tests {
 
     #[cached(
         max_size = 2,
-        ttl = 1,
+        ttl_secs = 1,
         key = "String",
         convert = r#"{ String::from(s) }"#
     )]
@@ -1199,7 +1208,7 @@ mod time_store_tests {
         }
     }
 
-    #[cached::macros::cached(ttl = 1, result_fallback = true)]
+    #[cached::macros::cached(ttl_secs = 1, result_fallback = true)]
     fn always_failing() -> Result<String, ()> {
         Err(())
     }
@@ -1247,7 +1256,7 @@ mod time_store_tests {
         std::sync::atomic::AtomicBool::new(true);
 
     #[cfg(feature = "proc_macro")]
-    #[cached::macros::concurrent_cached(ttl = 1, result_fallback = true)]
+    #[cached::macros::concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn concurrent_result_fallback_fn() -> Result<u32, &'static str> {
         if CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED.load(std::sync::atomic::Ordering::SeqCst) {
             Ok(42)
@@ -1443,7 +1452,7 @@ mod time_store_tests {
     mod async_tests {
         use super::*;
 
-        #[once(ttl = 1)]
+        #[once(ttl_secs = 1)]
         async fn only_cached_once_per_second_a(s: String) -> Vec<String> {
             vec![s]
         }
@@ -1458,7 +1467,7 @@ mod time_store_tests {
             assert_eq!(vec!["b".to_string()], b);
         }
 
-        #[once(ttl = 1)]
+        #[once(ttl_secs = 1)]
         async fn only_cached_result_once_per_second_a(
             s: String,
             error: bool,
@@ -1487,7 +1496,7 @@ mod time_store_tests {
             assert_eq!(vec!["b".to_string()], b);
         }
 
-        #[once(ttl = 1)]
+        #[once(ttl_secs = 1)]
         async fn only_cached_option_once_per_second_a(
             s: String,
             none: bool,
@@ -1523,7 +1532,7 @@ mod time_store_tests {
         /// _one_ call will be "executed" and all others will be synchronized
         /// to return the cached result of the one call instead of all
         /// concurrently un-cached tasks executing and writing concurrently.
-        #[once(ttl = 2, sync_writes)]
+        #[once(ttl_secs = 2, sync_writes)]
         async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
             vec![s]
         }
@@ -1536,7 +1545,7 @@ mod time_store_tests {
             assert_eq!(a.await.unwrap(), b.await.unwrap());
         }
 
-        #[cached(ttl = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
+        #[cached(ttl_secs = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
         async fn cached_sync_writes_a(s: String) -> Vec<String> {
             vec![s]
         }
@@ -1553,7 +1562,7 @@ mod time_store_tests {
         }
 
         #[cached(
-            ttl = 5,
+            ttl_secs = 5,
             sync_writes = "by_key",
             key = "String",
             convert = r#"{ format!("{}", s) }"#
@@ -2442,7 +2451,7 @@ mod disk_tests {
 
     #[concurrent_cached(
         disk = true,
-        ttl = 1,
+        ttl_secs = 1,
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
     )]
     fn cached_disk(n: u32) -> Result<u32, TestError> {
@@ -2463,7 +2472,7 @@ mod disk_tests {
 
     #[concurrent_cached(
         disk = true,
-        ttl = 1,
+        ttl_secs = 1,
         with_cached_flag = true,
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
     )]
@@ -2486,7 +2495,7 @@ mod disk_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         ty = "cached::RedbCache<u32, u32>",
-        create = r##" { RedbCache::new("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
+        create = r##" { RedbCache::builder("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -2727,13 +2736,13 @@ mod concurrent_cached_plain_return_ttl {
 
     static TTL_PLAIN_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(ttl = 60)]
+    #[concurrent_cached(ttl_secs = 60)]
     fn plain_double_ttl(x: u64) -> u64 {
         TTL_PLAIN_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 2
     }
 
-    #[concurrent_cached(max_size = 50, ttl = 60)]
+    #[concurrent_cached(max_size = 50, ttl_secs = 60)]
     fn plain_double_lru_ttl(x: u64) -> u64 {
         x * 2
     }
@@ -2936,14 +2945,14 @@ mod concurrent_cached_default_with_ttl {
 
     static SLOW_QUAD_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(ttl = 60)]
+    #[concurrent_cached(ttl_secs = 60)]
     fn slow_quad(x: u64) -> u64 {
         SLOW_QUAD_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 4
     }
 
     // Verify `refresh = true` compiles and is wired (store created with refresh enabled).
-    #[concurrent_cached(ttl = 60, refresh = true)]
+    #[concurrent_cached(ttl_secs = 60, refresh = true)]
     fn slow_quad_refresh(x: u64) -> u64 {
         x * 4
     }
@@ -2973,14 +2982,14 @@ mod concurrent_cached_default_with_max_size_and_ttl {
 
     static SLOW_QUINT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(max_size = 50, ttl = 60)]
+    #[concurrent_cached(max_size = 50, ttl_secs = 60)]
     fn slow_quint(x: u64) -> u64 {
         SLOW_QUINT_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 5
     }
 
     // Verify `refresh = true` compiles and is wired for the LRU+TTL variant.
-    #[concurrent_cached(max_size = 50, ttl = 60, refresh = true)]
+    #[concurrent_cached(max_size = 50, ttl_secs = 60, refresh = true)]
     fn slow_quint_refresh(x: u64) -> u64 {
         x * 5
     }
@@ -3044,7 +3053,7 @@ mod concurrent_cached_default_with_ttl_and_shards {
 
     static TTL_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(ttl = 60, shards = 16)]
+    #[concurrent_cached(ttl_secs = 60, shards = 16)]
     fn ttl_shards_double(x: u64) -> u64 {
         TTL_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 2
@@ -3067,7 +3076,7 @@ mod concurrent_cached_default_with_max_size_and_ttl_and_shards {
 
     static SIZE_TTL_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(max_size = 100, ttl = 60, shards = 16)]
+    #[concurrent_cached(max_size = 100, ttl_secs = 60, shards = 16)]
     fn size_ttl_shards_double(x: u64) -> u64 {
         SIZE_TTL_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 2
@@ -3095,7 +3104,7 @@ mod concurrent_cached_result_fallback {
 
     static FAIL: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn maybe_double(x: u32) -> Result<u32, String> {
         if FAIL.load(Ordering::Relaxed) {
             Err("injected failure".to_string())
@@ -3127,7 +3136,7 @@ mod concurrent_cached_result_fallback {
     // Uses a dedicated function so its cache is fresh (not shared with above test).
     static FAIL_METRIC: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn maybe_triple(x: u32) -> Result<u32, String> {
         if FAIL_METRIC.load(Ordering::Relaxed) {
             Err("metric test failure".to_string())
@@ -3169,7 +3178,7 @@ mod concurrent_cached_result_fallback {
     static FAIL_STR: AtomicBool = AtomicBool::new(false);
 
     #[concurrent_cached(
-        ttl = 1,
+        ttl_secs = 1,
         result_fallback = true,
         key = "String",
         convert = r#"{ x.to_string() }"#
@@ -3197,7 +3206,7 @@ mod concurrent_cached_result_fallback {
     // function and returns the raw result without substituting a stale Ok for Err.
     static FAIL_PRIME: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn prime_fallback_fn(x: u32) -> Result<u32, String> {
         if FAIL_PRIME.load(Ordering::Relaxed) {
             Err("prime failure".to_string())
@@ -3239,7 +3248,7 @@ mod concurrent_cached_result_fallback_lru_ttl {
 
     static FAIL_LRU: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, max_size = 100, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, max_size = 100, result_fallback = true)]
     fn lru_ttl_maybe_double(x: u32) -> Result<u32, String> {
         if FAIL_LRU.load(Ordering::Relaxed) {
             Err("lru_ttl failure".to_string())
@@ -3290,7 +3299,7 @@ mod concurrent_cached_result_fallback_async {
 
     static FAIL_ASYNC: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     async fn maybe_double_async(x: u32) -> Result<u32, String> {
         if FAIL_ASYNC.load(Ordering::Relaxed) {
             Err("async failure".to_string())
@@ -3332,7 +3341,7 @@ mod concurrent_cached_result_fallback_async_non_copy_key {
     static FAIL_ASYNC_STR: AtomicBool = AtomicBool::new(false);
 
     #[concurrent_cached(
-        ttl = 1,
+        ttl_secs = 1,
         result_fallback = true,
         key = "String",
         convert = r#"{ x.to_string() }"#
@@ -3377,7 +3386,7 @@ mod concurrent_cached_result_fallback_async_lru_ttl {
 
     static FAIL_ASYNC_LRU: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, max_size = 100, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, max_size = 100, result_fallback = true)]
     async fn lru_ttl_maybe_double_async(x: u32) -> Result<u32, String> {
         if FAIL_ASYNC_LRU.load(Ordering::Relaxed) {
             Err("async lru_ttl failure".to_string())
@@ -3883,7 +3892,9 @@ mod sharded_expiring_tests {
         ShardedExpiringLruCache,
     };
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(feature = "proc_macro")]
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Clone, Debug)]
     struct ExpiringItem {
@@ -4347,7 +4358,7 @@ mod redis_tests {
 
     #[concurrent_cached(
         redis = true,
-        ttl = 1,
+        ttl_secs = 1,
         cache_prefix_block = "{ \"__cached_redis_proc_macro_test_fn_cached_redis\" }",
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
     )]
@@ -4369,7 +4380,7 @@ mod redis_tests {
 
     #[concurrent_cached(
         redis = true,
-        ttl = 1,
+        ttl_secs = 1,
         with_cached_flag = true,
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
     )]
@@ -4392,7 +4403,7 @@ mod redis_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
         ty = "cached::RedisCache<u32, u32>",
-        create = r##" { RedisCache::new("cache_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
+        create = r##" { RedisCache::builder("cache_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4416,7 +4427,7 @@ mod redis_tests {
 
         #[concurrent_cached(
             redis = true,
-            ttl = 1,
+            ttl_secs = 1,
             cache_prefix_block = "{ \"__cached_redis_proc_macro_test_fn_async_cached_redis\" }",
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
         )]
@@ -4438,7 +4449,7 @@ mod redis_tests {
 
         #[concurrent_cached(
             redis = true,
-            ttl = 1,
+            ttl_secs = 1,
             with_cached_flag = true,
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
         )]
@@ -4462,7 +4473,7 @@ mod redis_tests {
         #[concurrent_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
             ty = "cached::AsyncRedisCache<u32, u32>",
-            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
+            create = r##" { AsyncRedisCache::builder("async_cached_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
             if n < 5 {
@@ -4499,6 +4510,112 @@ mod redis_tests {
                 Err(cached::RedisCacheBuildError::InvalidTtl(..))
             ));
         }
+    }
+
+    // Requires a live Redis server (provided by CI).
+    use cached::{ConcurrentCached, SerializeCached};
+
+    #[test]
+    fn test_redis_cache_clear_scoped() {
+        // Build two caches with different prefixes under an empty namespace so
+        // only the SCAN scope (prefix) distinguishes them.
+        let cache_a =
+            RedisCache::<String, String>::builder("test_clear_scope_a", Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .expect("build cache_a");
+
+        let cache_b =
+            RedisCache::<String, String>::builder("test_clear_scope_b", Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .expect("build cache_b");
+
+        // Seed both caches.
+        cache_a
+            .cache_set("k1".to_string(), "v1".to_string())
+            .expect("cache_a set k1");
+        cache_a
+            .cache_set("k2".to_string(), "v2".to_string())
+            .expect("cache_a set k2");
+        cache_b
+            .cache_set("kb".to_string(), "vb".to_string())
+            .expect("cache_b set kb");
+
+        // Clearing cache_a must remove its keys.
+        cache_a.cache_clear().expect("cache_a clear");
+        assert_eq!(
+            cache_a
+                .cache_get(&"k1".to_string())
+                .expect("cache_a get k1"),
+            None,
+            "k1 must be gone after cache_clear"
+        );
+        assert_eq!(
+            cache_a
+                .cache_get(&"k2".to_string())
+                .expect("cache_a get k2"),
+            None,
+            "k2 must be gone after cache_clear"
+        );
+
+        // cache_b's key must still be present.
+        assert_eq!(
+            cache_b
+                .cache_get(&"kb".to_string())
+                .expect("cache_b get kb"),
+            Some("vb".to_string()),
+            "cache_b key must survive cache_a clear"
+        );
+
+        // Clean up.
+        cache_b.cache_clear().expect("cache_b clear");
+    }
+
+    #[test]
+    fn test_redis_cache_set_ref_round_trip() {
+        let cache =
+            RedisCache::<String, String>::builder("test_set_ref_rt", Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .expect("build cache");
+
+        let key = "ref_key".to_string();
+        let val = "ref_val".to_string();
+        let val2 = "ref_val_overwrite".to_string();
+
+        // First insert must return None (no previous entry).
+        let prev = cache
+            .cache_set_ref(&key, &val)
+            .expect("first cache_set_ref");
+        assert_eq!(prev, None, "first cache_set_ref must return None");
+
+        let got = cache.cache_get(&key).expect("cache_get after set_ref");
+        assert_eq!(
+            got,
+            Some(val.clone()),
+            "cache_get must return the value written by cache_set_ref"
+        );
+
+        // Overwrite with a different value; must return the previous value.
+        let prev2 = cache
+            .cache_set_ref(&key, &val2)
+            .expect("second cache_set_ref");
+        assert_eq!(
+            prev2,
+            Some(val),
+            "second cache_set_ref must return the previous value"
+        );
+
+        // Overwrite must be visible via cache_get.
+        let got2 = cache.cache_get(&key).expect("cache_get after overwrite");
+        assert_eq!(
+            got2,
+            Some(val2),
+            "cache_get must return the overwritten value"
+        );
+
+        cache.cache_clear().expect("clean up");
     }
 }
 
@@ -6263,8 +6380,7 @@ fn test_ttl_sorted_cache_try_size_limit() {
 
     // Error: size of zero is invalid
     let err = cache.try_set_max_size(0);
-    assert!(err.is_err(), "zero size limit must fail");
-    assert_eq!(err.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(err, Err(cached::SetMaxSizeError::ZeroSize));
 }
 
 // ── result_fallback async ─────────────────────────────────────────────────────
@@ -6278,7 +6394,7 @@ mod result_fallback_async_tests {
     use super::sleep;
     use cached::time::Duration;
 
-    #[cached::macros::cached(ttl = 1, result_fallback = true)]
+    #[cached::macros::cached(ttl_secs = 1, result_fallback = true)]
     async fn async_always_failing() -> Result<String, ()> {
         Err(())
     }
@@ -6598,7 +6714,7 @@ mod macro_arg_pairwise {
 
     // once + name + ttl (pairwise; the TTL store requires `time_stores`).
     #[cfg(feature = "time_stores")]
-    #[once(name = "PAIRWISE_ONCE_NAMED_TTL", ttl = 100)]
+    #[once(name = "PAIRWISE_ONCE_NAMED_TTL", ttl_secs = 100)]
     fn once_named_ttl(n: u32) -> u32 {
         n + 3
     }

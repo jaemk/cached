@@ -1,4 +1,4 @@
-error: `expires` and `ttl` are mutually exclusive — `expires` delegates expiry to the value via the `Expires` trait; `ttl` applies a uniform time-based TTL
+error: `expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait; `ttl` applies a uniform time-based TTL
  --> tests/ui/once_expires_ttl_exclusive.rs:4:4
   |
 4 | fn my_fn() -> String {

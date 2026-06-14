@@ -1,4 +1,4 @@
-error: cannot specify `disk_dir` when passing a `create` block — `create` fully constructs the store, so these store-builder attributes would be silently ignored
+error: cannot specify `disk_dir` when passing a `create` block - `create` fully constructs the store, so these store-builder attributes would be silently ignored
   --> tests/ui/concurrent_cached_disk_create_ignored_attrs.rs:12:4
    |
 12 | fn my_fn(k: i32) -> Result<i32, String> {

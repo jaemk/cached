@@ -1,4 +1,4 @@
-error: `ttl` must be >= 1
+error: `ttl_secs` must be >= 1
  --> tests/ui/concurrent_cached_ttl_zero.rs:4:4
   |
 4 | fn my_fn(k: i32) -> Result<i32, String> {

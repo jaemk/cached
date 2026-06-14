@@ -114,19 +114,19 @@ fn main() {
         data: "Short-lived LRU response".to_string(),
         expires_at: now + Duration::from_millis(500),
     };
-    lru_cache.cache_set("short", quick_expiry);
+    lru_cache.set("short", quick_expiry);
 
     let long_expiry = MyValue {
         data: "Long-lived LRU response".to_string(),
         expires_at: now + Duration::from_secs(10),
     };
-    lru_cache.cache_set("long", long_expiry);
+    lru_cache.set("long", long_expiry);
 
     println!("Immediately after insertion into ExpiringLruCache:");
-    if let Some(val) = lru_cache.cache_get(&"short") {
+    if let Some(val) = lru_cache.get(&"short") {
         println!("  'short' exists: '{}'", val.data);
     }
-    if let Some(val) = lru_cache.cache_get(&"long") {
+    if let Some(val) = lru_cache.get(&"long") {
         println!("  'long' exists: '{}'", val.data);
     }
 
@@ -134,11 +134,11 @@ fn main() {
     std::thread::sleep(Duration::from_secs(1));
 
     println!("After waiting 1 second:");
-    match lru_cache.cache_get(&"short") {
+    match lru_cache.get(&"short") {
         Some(val) => println!("  'short' exists: '{}'", val.data),
         None => println!("  'short' has expired and was removed!"),
     }
-    match lru_cache.cache_get(&"long") {
+    match lru_cache.get(&"long") {
         Some(val) => println!("  'long' exists: '{}' (still active)", val.data),
         None => println!("  'long' expired!"),
     }
@@ -153,19 +153,19 @@ fn main() {
         data: "Short-lived response".to_string(),
         expires_at: Instant::now() + Duration::from_millis(500),
     };
-    expiring_cache.cache_set("short", quick_expiry);
+    expiring_cache.set("short", quick_expiry);
 
     let long_expiry = MyValue {
         data: "Long-lived response".to_string(),
         expires_at: Instant::now() + Duration::from_secs(10),
     };
-    expiring_cache.cache_set("long", long_expiry);
+    expiring_cache.set("long", long_expiry);
 
     println!("Immediately after insertion into ExpiringCache:");
-    if let Some(val) = expiring_cache.cache_get(&"short") {
+    if let Some(val) = expiring_cache.get(&"short") {
         println!("  'short' exists: '{}'", val.data);
     }
-    if let Some(val) = expiring_cache.cache_get(&"long") {
+    if let Some(val) = expiring_cache.get(&"long") {
         println!("  'long' exists: '{}'", val.data);
     }
 
@@ -173,11 +173,11 @@ fn main() {
     std::thread::sleep(Duration::from_secs(1));
 
     println!("After waiting 1 second:");
-    match expiring_cache.cache_get(&"short") {
+    match expiring_cache.get(&"short") {
         Some(val) => println!("  'short' exists: '{}'", val.data),
         None => println!("  'short' has expired and was removed!"),
     }
-    match expiring_cache.cache_get(&"long") {
+    match expiring_cache.get(&"long") {
         Some(val) => println!("  'long' exists: '{}' (still active)", val.data),
         None => println!("  'long' expired!"),
     }

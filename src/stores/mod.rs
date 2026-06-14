@@ -132,7 +132,30 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+/// Error returned by `try_set_max_size` methods.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetMaxSizeError {
+    /// A max size of zero was supplied; max_size must be greater than zero.
+    ZeroSize,
+}
+
+impl std::fmt::Display for SetMaxSizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetMaxSizeError::ZeroSize => write!(f, "max_size must be greater than zero"),
+        }
+    }
+}
+
+impl std::error::Error for SetMaxSizeError {}
+
 /// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
+#[cfg(any(
+    feature = "time_stores",
+    feature = "disk_store",
+    feature = "redis_store"
+))]
 pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
     if ttl.is_zero() {
         Err(BuildError::InvalidTtl { ttl })
@@ -203,14 +226,32 @@ pub use sharded::{
 #[cfg(all(
     feature = "async_core",
     feature = "redis_store",
-    any(feature = "redis_smol", feature = "redis_tokio")
+    any(
+        feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
+        feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+        feature = "redis_async_cache",
+        feature = "redis_connection_manager"
+    )
 ))]
 #[cfg_attr(
     docsrs,
     doc(cfg(all(
         feature = "async_core",
         feature = "redis_store",
-        any(feature = "redis_smol", feature = "redis_tokio")
+        any(
+            feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
+            feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
+            feature = "redis_async_cache",
+            feature = "redis_connection_manager"
+        )
     )))
 )]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
@@ -237,10 +278,10 @@ where
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         HashMap::insert(self, k, v)
     }
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         self.entry(key).or_insert_with(f)
     }
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -319,7 +360,7 @@ where
     K: Hash + Eq + Clone + Send,
     S: std::hash::BuildHasher + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -338,7 +379,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,

@@ -1,0 +1,5 @@
+error: unable to parse `force_refresh` block: unexpected token, expected `;`; it must be a curly-brace block over the function arguments, e.g. `{ id == 0 }`
+ --> tests/ui/concurrent_cached_force_refresh_unparseable.rs:4:4
+  |
+4 | fn f(x: i32) -> i32 {
+  |    ^

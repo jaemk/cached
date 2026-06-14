@@ -132,7 +132,24 @@ impl<K, V> UnboundCacheBuilder<K, V> {
     }
 }
 
+impl<K: Hash + Eq, V> Default for UnboundCache<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
+    /// Construct a ready-to-use [`UnboundCache`] with default configuration.
+    ///
+    /// `UnboundCache` has no required configuration, so this never fails. For
+    /// optional settings (initial capacity, `on_evict`) use [`builder`](Self::builder).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::builder()
+            .build()
+            .expect("UnboundCache default build is infallible")
+    }
+
     /// Return a builder for constructing an [`UnboundCache`].
     #[must_use]
     pub fn builder() -> UnboundCacheBuilder<K, V> {
@@ -200,7 +217,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         self.store.insert(key, val)
     }
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
                 self.hits.increment();
@@ -213,7 +230,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
             }
         }
     }
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -316,7 +333,7 @@ impl<K, V> CachedAsync<K, V> for UnboundCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         key: K,
         f: F,
@@ -341,7 +358,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         key: K,
         f: F,
@@ -374,6 +391,14 @@ where
 mod tests {
     use super::*;
     use crate::Cached;
+
+    #[test]
+    fn new_returns_ready_cache() {
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+        assert_eq!(c.set(1, 100), None);
+        assert_eq!(c.get(&1), Some(&100));
+        assert_eq!(c.len(), 1);
+    }
 
     #[test]
     fn basic_cache() {
@@ -543,12 +568,12 @@ mod tests {
                 Err("dead".to_string())
             }
         }
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
         assert!(res.is_err());
 
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
         assert_eq!(res.unwrap(), &1);
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
         assert_eq!(res.unwrap(), &1);
     }
 

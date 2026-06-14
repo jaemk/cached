@@ -1,0 +1,5 @@
+error: `expires` and `ttl_millis` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait; `ttl_millis` applies a uniform millisecond TTL to all entries
+ --> tests/ui/cached_expires_and_ttl_millis_exclusive.rs:4:4
+  |
+4 | fn f(x: i32) -> i32 {
+  |    ^

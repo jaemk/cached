@@ -29,8 +29,9 @@ struct LruInner<K, V, H> {
 /// Use [`deep_clone`](ShardedLruCacheBase::deep_clone) to get an independent copy.
 ///
 /// This is a type alias for `ShardedLruCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, construct a [`ShardedLruCacheBase`] directly via
-/// [`ShardedLruCacheBase::builder()`].
+/// To use a custom shard hasher, call [`ShardedLruCache::builder()`] and then
+/// [`hasher`](ShardedLruCacheBuilder::hasher), which yields a `ShardedLruCacheBase<K, V, H>`
+/// over your hasher.
 ///
 /// **Note**: LRU promotion requires mutable access to the per-shard store, so
 /// `cache_get` acquires a **write** lock (unlike `ShardedCache` which only needs a read lock).
@@ -69,19 +70,48 @@ impl<K, V, H> std::fmt::Debug for ShardedLruCacheBase<K, V, H> {
     }
 }
 
+impl<K, V> ShardedLruCacheBase<K, V, DefaultShardHasher>
+where
+    K: Hash + Eq + Clone,
+{
+    /// Construct a ready-to-use [`ShardedLruCache`] holding up to roughly `max_size`
+    /// entries total, with the [`DefaultShardHasher`] and a default shard count.
+    ///
+    /// Note that the effective total capacity can exceed `max_size` for small values
+    /// because each shard reserves a minimum capacity (see
+    /// [`max_size`](ShardedLruCacheBuilder::max_size)). For a custom hasher, shard count,
+    /// per-shard cap, or `on_evict`, use [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is `0`, or if the effective sharded capacity overflows
+    /// `usize` / a per-shard allocation fails. Use [`builder`](Self::builder) with
+    /// [`build`](ShardedLruCacheBuilder::build) to handle those cases without panicking.
+    #[must_use]
+    pub fn new(max_size: usize) -> ShardedLruCache<K, V> {
+        Self::builder()
+            .max_size(max_size)
+            .build()
+            .expect("ShardedLruCache::new requires a non-zero max_size with a valid allocation")
+    }
+
+    /// Return a builder for constructing a [`ShardedLruCache`].
+    ///
+    /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
+    /// [`hasher`](ShardedLruCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedLruCacheBase` over that hasher.
+    /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
+    /// introduced via `hasher`, never a `ShardedLruCacheBase::<_, _, H>` turbofish.
+    pub fn builder() -> ShardedLruCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedLruCacheBuilder::default()
+    }
+}
+
 impl<K, V, H> ShardedLruCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
     H: ShardHasher<K>,
 {
-    /// Return a builder for constructing a [`ShardedLruCacheBase`].
-    ///
-    /// Always returns a builder with the [`DefaultShardHasher`], regardless of the `H` type
-    /// parameter on `Self`. Call `.hasher(h)` on the builder to use a custom hasher.
-    pub fn builder() -> ShardedLruCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedLruCacheBuilder::default()
-    }
-
     #[inline]
     fn shard_of(&self, k: &K) -> &CachePadded<Shard<LruCache<K, V>>> {
         let h = self.inner.hasher.shard_hash(k);
@@ -618,6 +648,43 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
 mod tests {
     use super::*;
     use crate::ConcurrentCached as SyncConcurrentCached;
+
+    #[test]
+    fn new_returns_ready_cache_respecting_max_size() {
+        // shards(1) gives an exact cap so the eviction bound is deterministic.
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(2)
+            .build()
+            .unwrap();
+        assert_eq!(SyncConcurrentCached::set(&c, 1, 10).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(10));
+        SyncConcurrentCached::set(&c, 2, 20).unwrap();
+        SyncConcurrentCached::set(&c, 3, 30).unwrap(); // evicts LRU (1)
+        assert_eq!(c.len(), 2);
+        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), None);
+
+        // The inherent `new` constructor returns a ready cache too.
+        let c2 = ShardedLruCache::<u32, u32>::new(64);
+        assert_eq!(SyncConcurrentCached::set(&c2, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::get(&c2, &1).unwrap(), Some(100));
+
+        // `new(N)` must forward N to the builder — capacity must equal the builder path.
+        assert_eq!(
+            ShardedLruCache::<u32, u32>::new(1024).capacity(),
+            ShardedLruCache::<u32, u32>::builder()
+                .max_size(1024)
+                .build()
+                .unwrap()
+                .capacity()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size")]
+    fn new_zero_max_size_panics() {
+        let _c = ShardedLruCache::<u32, u32>::new(0);
+    }
 
     #[test]
     fn basic_get_set_remove() {

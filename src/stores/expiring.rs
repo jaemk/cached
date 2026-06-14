@@ -38,11 +38,11 @@ use {super::CachedAsync, std::collections::hash_map::Entry, std::future::Future}
 ///     fn is_expired(&self) -> bool { self.expired }
 /// }
 ///
-/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::builder().build().unwrap();
-/// cache.cache_set(1, Token { value: "live".into(), expired: false });
-/// assert!(cache.cache_get(&1).is_some());
-/// cache.cache_set(2, Token { value: "stale".into(), expired: true });
-/// assert!(cache.cache_get(&2).is_none()); // expired → not returned
+/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::new();
+/// cache.set(1, Token { value: "live".into(), expired: false });
+/// assert!(cache.get(&1).is_some());
+/// cache.set(2, Token { value: "stale".into(), expired: true });
+/// assert!(cache.get(&2).is_none()); // expired -> not returned
 /// ```
 ///
 /// Note: This cache is in-memory only.
@@ -113,7 +113,9 @@ impl<K, V: Expires> ExpiringCacheBuilder<K, V> {
     /// Set a callback to be invoked when an entry is removed from the cache.
     ///
     /// The callback fires when an expired value is encountered during `cache_get`,
-    /// `cache_get_mut`, `cache_get_or_set_with`, `cache_try_get_or_set_with`,
+    /// `cache_get_mut`, `cache_get_or_set_with_mut`, `cache_try_get_or_set_with_mut`
+    /// (the primary implementations), `cache_get_or_set_with`, `cache_try_get_or_set_with`
+    /// (default-impl wrappers that delegate to the `_mut` variants),
     /// their async equivalents, an explicit `evict()` sweep, or an explicit
     /// `cache_remove` (including when the removed entry was already expired).
     /// It does **not** fire on `cache_clear` or `cache_reset` (consistent with
@@ -156,6 +158,17 @@ impl<K, V: Expires> ExpiringCacheBuilder<K, V> {
 }
 
 impl<K: Hash + Eq, V: Expires> ExpiringCache<K, V> {
+    /// Construct a ready-to-use [`ExpiringCache`] with default configuration.
+    ///
+    /// `ExpiringCache` has no required configuration, so this never fails. For
+    /// optional settings (initial capacity, `on_evict`) use [`builder`](Self::builder).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::builder()
+            .build()
+            .expect("ExpiringCache default build is infallible")
+    }
+
     /// Return a builder for constructing an [`ExpiringCache`].
     #[must_use]
     pub fn builder() -> ExpiringCacheBuilder<K, V> {
@@ -277,7 +290,7 @@ impl<K: Hash + Eq, V: Expires> Cached<K, V> for ExpiringCache<K, V> {
         }
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
         match self.store.store.entry(k) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 if !occupied.get().is_expired() {
@@ -300,7 +313,7 @@ impl<K: Hash + Eq, V: Expires> Cached<K, V> for ExpiringCache<K, V> {
         }
     }
 
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         k: K,
         f: F,
@@ -429,7 +442,7 @@ where
     K: Hash + Eq + Send,
     V: Expires + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -464,7 +477,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -547,6 +560,16 @@ mod tests {
         fn is_expired(&self) -> bool {
             self.0 > 10
         }
+    }
+
+    #[test]
+    fn new_returns_ready_cache() {
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::new();
+        assert_eq!(c.set(1, ExpiredU8(2)), None);
+        assert_eq!(c.get(&1), Some(&ExpiredU8(2)));
+        // Expired values are not returned.
+        c.set(2, ExpiredU8(15));
+        assert_eq!(c.get(&2), None);
     }
 
     #[test]
@@ -705,7 +728,7 @@ mod tests {
     fn expiring_cache_try_get_or_set_with_err_keeps_expired() {
         let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
         c.set(1, ExpiredU8(15)); // expired
-        let result: Result<&mut ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Err("fail"));
+        let result: Result<&ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Err("fail"));
         assert!(result.is_err());
         assert_eq!(c.cache_size(), 1, "expired entry must remain after Err");
         assert_eq!(c.cache_evictions(), Some(0));
@@ -725,8 +748,7 @@ mod tests {
             .build()
             .unwrap();
         c.set(1, ExpiredU8(15)); // expired
-        let result: Result<&mut ExpiredU8, &str> =
-            c.cache_try_get_or_set_with(1, || Ok(ExpiredU8(3)));
+        let result: Result<&ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Ok(ExpiredU8(3)));
         assert_eq!(*result.unwrap(), ExpiredU8(3));
         assert_eq!(c.cache_evictions(), Some(1));
         assert_eq!(c.cache_misses(), Some(1));

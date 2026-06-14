@@ -1,0 +1,5 @@
+error: cannot specify `ttl_millis` when passing a `create` block - `create` fully constructs the store, so these store-builder attributes would be silently ignored
+  --> tests/ui/cached_ttl_millis_create_conflict.rs:13:4
+   |
+13 | fn my_fn(k: i32) -> i32 {
+   |    ^^^^^

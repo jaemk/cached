@@ -37,8 +37,9 @@ struct UnboundInner<K, V, H> {
 /// implement `Clone`.
 ///
 /// This is a type alias for `ShardedCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, construct a [`ShardedCacheBase`] directly via
-/// [`ShardedCacheBase::builder()`].
+/// To use a custom shard hasher, call [`ShardedCache::builder()`] and then
+/// [`hasher`](ShardedCacheBuilder::hasher), which yields a `ShardedCacheBase<K, V, H>`
+/// over your hasher.
 pub type ShardedCache<K, V> = ShardedCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedCache`] with a generic shard hasher `H`.
@@ -68,19 +69,39 @@ impl<K, V, H> std::fmt::Debug for ShardedCacheBase<K, V, H> {
     }
 }
 
+impl<K, V> ShardedCacheBase<K, V, DefaultShardHasher>
+where
+    K: Hash + Eq,
+{
+    /// Construct a ready-to-use [`ShardedCache`] with the [`DefaultShardHasher`] and a
+    /// default shard count.
+    ///
+    /// `ShardedCache` has no required configuration, so this never fails. For a custom
+    /// hasher, shard count, or `on_evict`, use [`builder`](Self::builder).
+    #[must_use]
+    pub fn new() -> ShardedCache<K, V> {
+        Self::builder()
+            .build()
+            .expect("ShardedCache default build is infallible")
+    }
+
+    /// Return a builder for constructing a [`ShardedCache`].
+    ///
+    /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
+    /// [`hasher`](ShardedCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedCacheBase` over that hasher.
+    /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
+    /// introduced via `hasher`, never a `ShardedCacheBase::<_, _, H>` turbofish.
+    pub fn builder() -> ShardedCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedCacheBuilder::default()
+    }
+}
+
 impl<K, V, H> ShardedCacheBase<K, V, H>
 where
     K: Hash + Eq,
     H: ShardHasher<K>,
 {
-    /// Return a builder for constructing a [`ShardedCacheBase`].
-    ///
-    /// Always returns a builder with the [`DefaultShardHasher`], regardless of the `H` type
-    /// parameter on `Self`. Call `.hasher(h)` on the builder to use a custom hasher.
-    pub fn builder() -> ShardedCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedCacheBuilder::default()
-    }
-
     #[inline]
     fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, RandomState>>> {
         let h = self.inner.hasher.shard_hash(k);
@@ -107,15 +128,15 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedCacheBase
     /// ```rust
     /// use cached::{ConcurrentCached, ShardedCache};
     ///
-    /// let cache: ShardedCache<String, u32> = ShardedCache::builder().build().unwrap();
-    /// cache.cache_set("k".to_string(), 1).expect("ShardedCache operations are infallible");
+    /// let cache: ShardedCache<String, u32> = ShardedCache::new();
+    /// cache.set("k".to_string(), 1).expect("ShardedCache operations are infallible");
     ///
     /// let shared = cache.clone();     // Arc clone — same backing store
     /// let deep   = cache.deep_clone(); // independent snapshot
     ///
-    /// cache.cache_set("k".to_string(), 2).expect("ShardedCache operations are infallible");
-    /// assert_eq!(shared.cache_get(&"k".to_string()).expect("ShardedCache operations are infallible"), Some(2)); // sees update
-    /// assert_eq!(deep.cache_get(&"k".to_string()).expect("ShardedCache operations are infallible"),   Some(1)); // snapshot unchanged
+    /// cache.set("k".to_string(), 2).expect("ShardedCache operations are infallible");
+    /// assert_eq!(shared.get(&"k".to_string()).expect("ShardedCache operations are infallible"), Some(2)); // sees update
+    /// assert_eq!(deep.get(&"k".to_string()).expect("ShardedCache operations are infallible"),   Some(1)); // snapshot unchanged
     /// ```
     #[must_use]
     pub fn deep_clone(&self) -> Self {
@@ -493,6 +514,14 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
 mod tests {
     use super::*;
     use crate::ConcurrentCached as SyncConcurrentCached;
+
+    #[test]
+    fn new_returns_ready_cache() {
+        let c = ShardedCache::<u32, u32>::new();
+        assert_eq!(SyncConcurrentCached::set(&c, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(100));
+        assert_eq!(c.len(), 1);
+    }
 
     #[test]
     fn basic_get_set_remove() {

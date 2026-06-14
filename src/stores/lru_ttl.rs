@@ -107,10 +107,30 @@ impl<K, V, E> LruTtlCacheBuilder<K, V, E> {
     }
 
     /// Set the TTL for cache entries. Required.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    /// Set the TTL for cache entries in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Set the TTL for cache entries in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Set whether cache hits refresh the TTL of the accessed entry.
@@ -193,6 +213,25 @@ impl<K, V> LruTtlCacheBuilder<K, V, HasEvict> {
 }
 
 impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
+    /// Construct a ready-to-use [`LruTtlCache`] holding up to `max_size` entries with
+    /// the given `ttl`.
+    ///
+    /// For optional settings (`refresh_on_hit`, `on_evict`) use [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is `0`, if `ttl` is zero, or if pre-allocating the backing
+    /// store for `max_size` entries fails (e.g. `usize::MAX`). Use [`builder`](Self::builder)
+    /// with [`build`](LruTtlCacheBuilder::build) to handle those cases without panicking.
+    #[must_use]
+    pub fn new(max_size: usize, ttl: Duration) -> Self {
+        Self::builder()
+            .max_size(max_size)
+            .ttl(ttl)
+            .build()
+            .expect("LruTtlCache::new requires a non-zero max_size with a valid allocation and a non-zero ttl")
+    }
+
     /// Return a builder for constructing a [`LruTtlCache`].
     #[must_use]
     pub fn builder() -> LruTtlCacheBuilder<K, V> {
@@ -318,6 +357,48 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     /// Sets whether the ttl is refreshed when the value is retrieved.
     pub fn set_refresh_on_hit(&mut self, refresh: bool) {
         self.refresh = refresh;
+    }
+
+    /// Change the maximum number of entries, returning the previous capacity;
+    /// shrinking below the current entry count immediately evicts least-recently-used
+    /// entries.
+    ///
+    /// Eviction on shrink fires `on_evict` and counts evictions until the cache
+    /// fits. Growing the capacity does not pre-allocate; the backing stores grow
+    /// on demand as entries are inserted.
+    ///
+    /// This is useful for sizing a `#[cached(create = "{ ... }")]` cache from a value
+    /// loaded at startup (e.g. config), then adjusting it later as load changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0. Use [`try_set_max_size`](LruTtlCache::try_set_max_size)
+    /// to validate first and avoid the panic.
+    ///
+    /// # See also
+    ///
+    /// [`LruCache::set_max_size`](super::LruCache::set_max_size) and
+    /// [`TtlSortedCache::set_max_size`](super::TtlSortedCache::set_max_size) are
+    /// parallel methods on the other LRU-family stores. All stores also provide a
+    /// fallible `try_set_max_size` counterpart.
+    pub fn set_max_size(&mut self, max_size: usize) -> usize {
+        let prev = self.store.set_max_size(max_size);
+        self.size = self.store.capacity;
+        prev
+    }
+
+    /// Fallible counterpart of [`set_max_size`](LruTtlCache::set_max_size): validates
+    /// that `max_size` is non-zero and then delegates to `set_max_size`.
+    /// Returns the previous capacity on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
+    pub fn try_set_max_size(&mut self, max_size: usize) -> Result<usize, super::SetMaxSizeError> {
+        if max_size == 0 {
+            return Err(super::SetMaxSizeError::ZeroSize);
+        }
+        Ok(self.set_max_size(max_size))
     }
 
     /// Returns a reference to the cache's `store`
@@ -463,7 +544,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         }
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         let key_for_evict = key.clone();
         let setter = || TimedEntry {
             instant: Instant::now(),
@@ -490,7 +571,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         &mut entry.value
     }
 
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -700,7 +781,7 @@ impl<K, V> CachedAsync<K, V> for LruTtlCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         key: K,
         f: F,
@@ -742,7 +823,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         key: K,
         f: F,
@@ -800,6 +881,74 @@ mod tests {
     use super::*;
     use crate::Cached;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn new_returns_ready_cache_respecting_max_size_and_ttl() {
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::new(2, Duration::from_millis(50));
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_millis(50)));
+        assert_eq!(c.cache_set(1, 10), None);
+        assert_eq!(c.cache_get(&1), Some(&10));
+        // max_size respected.
+        c.cache_set(2, 20);
+        c.cache_set(3, 30); // evicts LRU (1)
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.cache_get(&1), None);
+        // ttl respected.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(c.cache_get(&2), None, "entry must expire after ttl");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size with a valid allocation and a non-zero ttl")]
+    fn new_zero_max_size_panics() {
+        let _c: LruTtlCache<u32, u32> = LruTtlCache::new(0, Duration::from_secs(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size with a valid allocation and a non-zero ttl")]
+    fn new_zero_ttl_panics() {
+        let _c: LruTtlCache<u32, u32> = LruTtlCache::new(2, Duration::ZERO);
+    }
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        use crate::CacheTtl;
+        let c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl_secs(7)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(7)));
+
+        let c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl_millis(250)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        use crate::CacheTtl;
+        let c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(10))
+            .ttl_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(5)));
+
+        let c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl_secs(10)
+            .ttl_millis(500)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_millis(500)));
+    }
 
     #[test]
     fn status_does_not_inflate_inner_store_hits() {
@@ -981,6 +1130,105 @@ mod tests {
         let mut cache = build_with_borrowed("key", "val");
         cache.cache_set("key", "val");
         assert_eq!(cache.cache_get(&"key"), Some(&"val"));
+    }
+
+    #[test]
+    fn set_max_size_changes_capacity_and_evicts() {
+        let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+        assert_eq!(cache.capacity(), 3);
+
+        // Shrink to 2: LRU entry (1) should be evicted.
+        let prev = cache.set_max_size(2);
+        assert_eq!(prev, 3);
+        assert_eq!(cache.capacity(), 2);
+        assert_eq!(cache.cache_size(), 2);
+
+        // Insert beyond new cap triggers eviction.
+        cache.cache_set(4, 40);
+        assert_eq!(cache.cache_size(), 2);
+    }
+
+    #[test]
+    fn set_max_size_shrink_fires_on_evict_and_counts_evictions() {
+        use std::sync::Mutex;
+        let evicted_keys: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_keys2 = evicted_keys.clone();
+        let mut cache = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |k: &u32, _v: &u32| {
+                evicted_keys2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+        cache.cache_set(4, 40);
+        // Touch 1 and 2 so 3 and 4 become least-recently-used.
+        assert_eq!(cache.cache_get(&1), Some(&10));
+        assert_eq!(cache.cache_get(&2), Some(&20));
+
+        let evictions_before = cache.cache_evictions().expect("evictions tracked");
+        let prev = cache.set_max_size(2);
+        assert_eq!(prev, 4);
+        assert_eq!(cache.capacity(), 2);
+        assert_eq!(cache.cache_size(), 2);
+
+        // Two entries were dropped; eviction counter must reflect that.
+        assert_eq!(
+            cache.cache_evictions().expect("evictions tracked") - evictions_before,
+            2,
+            "set_max_size shrink must increment cache_evictions by the number of dropped entries"
+        );
+
+        // on_evict must have fired for exactly the two LRU keys (3 and 4).
+        let mut fired: Vec<u32> = evicted_keys.lock().unwrap().clone();
+        fired.sort();
+        assert_eq!(
+            fired,
+            vec![3, 4],
+            "on_evict must fire for the evicted (least-recently-used) keys"
+        );
+
+        // The two most-recently-used entries must survive.
+        assert_eq!(cache.cache_get(&1), Some(&10));
+        assert_eq!(cache.cache_get(&2), Some(&20));
+        assert_eq!(cache.cache_get(&3), None);
+        assert_eq!(cache.cache_get(&4), None);
+    }
+
+    #[test]
+    fn try_set_max_size_rejects_zero() {
+        let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(
+            cache.try_set_max_size(0),
+            Err(super::super::SetMaxSizeError::ZeroSize)
+        );
+        assert_eq!(cache.try_set_max_size(5).unwrap(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_size must be greater than zero")]
+    fn set_max_size_zero_panics() {
+        let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        cache.set_max_size(0);
     }
 
     #[cfg(feature = "async")]

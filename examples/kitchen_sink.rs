@@ -87,10 +87,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     {
         self.store.get_mut(k)
     }
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
         self.store.entry(k).or_insert_with(f)
     }
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         k: K,
         f: F,
@@ -144,22 +144,22 @@ fn custom(n: u32) {
     custom(n - 1);
 }
 
-#[cached(ttl = 1)]
+#[cached(ttl_secs = 1)]
 fn expires(a: i32) -> i32 {
     a
 }
 
-#[cached(ttl = 1)]
+#[cached(ttl_secs = 1)]
 fn expires_result(a: i32) -> Result<i32, ()> {
     Ok(a)
 }
 
-#[cached(ttl = 1)]
+#[cached(ttl_secs = 1)]
 fn expires_option(a: i32) -> Option<i32> {
     Some(a)
 }
 
-#[cached(ttl = 1, name = "EXPIRES_FOR_PRIMING")]
+#[cached(ttl_secs = 1, name = "EXPIRES_FOR_PRIMING")]
 fn expires_for_priming(a: i32) -> i32 {
     a
 }
@@ -170,8 +170,8 @@ pub fn main() {
     fib(3);
     {
         let cache = FIB.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
     }
     fib(10);
@@ -182,8 +182,8 @@ pub fn main() {
     fib_specific(20);
     {
         let cache = FIB_SPECIFIC.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
     }
     fib_specific(20);
@@ -193,8 +193,8 @@ pub fn main() {
     custom(25);
     {
         let cache = CUSTOM.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
     }
 
@@ -205,8 +205,8 @@ pub fn main() {
     slow(10, 10);
     {
         let cache = SLOW.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure the cache-lock is dropped
     }
 
@@ -218,8 +218,8 @@ pub fn main() {
     expires(1);
     {
         let cache = EXPIRES.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
     }
 
     println!("\n ** expires_result **");
@@ -230,8 +230,8 @@ pub fn main() {
     let _ = expires_result(1);
     {
         let cache = EXPIRES_RESULT.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
     }
 
     println!("\n ** expires_option **");
@@ -242,8 +242,8 @@ pub fn main() {
     expires_option(1);
     {
         let cache = EXPIRES_OPTION.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
     }
 
     println!("\n ** expires_for_priming **");
@@ -257,8 +257,8 @@ pub fn main() {
     {
         let c = EXPIRES_FOR_PRIMING.read();
         // Only the two explicit function calls above count toward metrics
-        assert_eq!(c.cache_hits(), Some(1)); // second call was a hit
-        assert_eq!(c.cache_misses(), Some(1)); // first call was a miss
+        assert_eq!(c.hits(), Some(1)); // second call was a hit
+        assert_eq!(c.misses(), Some(1)); // first call was a miss
     }
     // Sleep longer than the 1-second TTL so the cached values expire
     sleep(Duration::new(2, 0));
@@ -268,8 +268,8 @@ pub fn main() {
     assert_eq!(expires_for_priming(1), 1);
     {
         let c = EXPIRES_FOR_PRIMING.read();
-        assert_eq!(c.cache_hits(), Some(2)); // this last call was also a hit
-        assert_eq!(c.cache_misses(), Some(1)); // still only 1 miss
+        assert_eq!(c.hits(), Some(2)); // this last call was also a hit
+        assert_eq!(c.misses(), Some(1)); // still only 1 miss
     }
 
     println!("done!");
