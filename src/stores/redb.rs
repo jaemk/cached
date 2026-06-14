@@ -59,7 +59,7 @@ pub enum RedbCacheBuildError {
     /// meaningless filename when used as a filename component.
     #[error(
         "invalid cache_name: must not be empty, must not contain a path separator ('/' or '\\\\'), \
-        and must not be '.' or '..'; cache_name is used as a filename component"
+        must not contain a NUL byte, and must not be '.' or '..'; cache_name is used as a filename component"
     )]
     InvalidCacheName,
 }
@@ -203,7 +203,7 @@ where
     /// # Errors
     ///
     /// - `InvalidCacheName`: `cache_name` is empty, contains a path separator
-    ///   (`/` or `\`), or is the path-traversal component `.` or `..`.
+    ///   (`/` or `\`), contains a NUL byte, or is the path-traversal component `.` or `..`.
     /// - `InvalidTtl`: the configured TTL is zero.
     /// - `Io`: the cache directory could not be created.
     /// - `Connection`: the redb database file could not be opened or initialized.
@@ -216,7 +216,13 @@ where
         // module-path-derived names.)
         {
             let n = &self.cache_name;
-            if n.is_empty() || n.contains('/') || n.contains('\\') || n == "." || n == ".." {
+            if n.is_empty()
+                || n.contains('/')
+                || n.contains('\\')
+                || n.contains('\0')
+                || n == "."
+                || n == ".."
+            {
                 return Err(RedbCacheBuildError::InvalidCacheName);
             }
         }
@@ -1926,6 +1932,21 @@ mod tests {
                 .build()
                 .is_ok(),
             "a valid cache_name must build successfully"
+        );
+    }
+
+    #[test]
+    fn build_rejects_cache_name_with_nul_byte() {
+        let tmp_dir = temp_dir!();
+
+        assert!(
+            matches!(
+                RedbCache::<u32, u32>::builder("bad\0name")
+                    .disk_directory(tmp_dir.path())
+                    .build(),
+                Err(RedbCacheBuildError::InvalidCacheName)
+            ),
+            "cache_name containing a NUL byte must return InvalidCacheName"
         );
     }
 

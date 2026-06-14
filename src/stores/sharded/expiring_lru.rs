@@ -106,6 +106,7 @@ where
     /// that hasher. `new` and `builder` exist only on the default-hasher alias, so a custom
     /// hasher is always introduced via `hasher`, never a
     /// `ShardedExpiringLruCacheBase::<_, _, H>` turbofish.
+    #[must_use]
     pub fn builder() -> ShardedExpiringLruCacheBuilder<K, V, DefaultShardHasher> {
         ShardedExpiringLruCacheBuilder::default()
     }

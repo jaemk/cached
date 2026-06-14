@@ -11,10 +11,15 @@ use proc_macro::TokenStream;
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
 /// - `max_size`: (optional, usize) specify an LRU max size, implies the cache type is a `LruCache` or `LruTtlCache`.
-/// - `ttl`: (optional, u64) specify a cache TTL in seconds, implies the cache type is a `TtlCache` or `LruTtlCache` (requires the `time_stores` feature).
+/// - `ttl`: (optional, Duration string) specify a cache TTL as a Duration-expression string literal,
+///   e.g. `ttl = "Duration::from_secs(60)"`. Implies the cache type is a `TtlCache` or `LruTtlCache`
+///   (requires the `time_stores` feature). Mutually exclusive with `ttl_secs`, `ttl_millis`, and `expires`.
+/// - `ttl_secs`: (optional, u64) specify a cache TTL as a whole number of seconds. Equivalent to
+///   `ttl = "Duration::from_secs(N)"` but accepts a bare integer. Mutually exclusive with `ttl`,
+///   `ttl_millis`, and `expires`.
 /// - `ttl_millis`: (optional, u64) specify a cache TTL in milliseconds. A finer-grained alternative
-///   to `ttl` with the same store selection (so it likewise requires the `time_stores` feature);
-///   mutually exclusive with `ttl` and `expires`. On `#[cached]`'s default store selection this is an
+///   to `ttl_secs` with the same store selection (so it likewise requires the `time_stores` feature);
+///   mutually exclusive with `ttl`, `ttl_secs`, and `expires`. On `#[cached]`'s default store selection this is an
 ///   in-memory store, so sub-second TTLs are honored exactly; a custom `ty`/`create` store honors them
 ///   only if that store itself supports sub-second granularity.
 /// - `refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
@@ -141,11 +146,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
-/// - `ttl`: (optional, u64) specify an expiry in seconds, after which the single cached value is
-///   recomputed on the next call. `#[once]` always stores one value in an `Option` (timestamped
-///   when `ttl` is set) - it is not a `TtlCache`/`LruTtlCache`.
+/// - `ttl`: (optional, Duration string) specify an expiry as a Duration-expression string literal,
+///   e.g. `ttl = "Duration::from_secs(60)"`, after which the single cached value is recomputed on
+///   the next call. `#[once]` always stores one value in an `Option` (timestamped when `ttl` is
+///   set) - it is not a `TtlCache`/`LruTtlCache`. Mutually exclusive with `ttl_secs`, `ttl_millis`,
+///   and `expires`.
+/// - `ttl_secs`: (optional, u64) specify an expiry as a whole number of seconds. Equivalent to
+///   `ttl = "Duration::from_secs(N)"` but accepts a bare integer. Mutually exclusive with `ttl`,
+///   `ttl_millis`, and `expires`.
 /// - `ttl_millis`: (optional, u64) the same expiry expressed in milliseconds; mutually exclusive
-///   with `ttl` and `expires`.
+///   with `ttl`, `ttl_secs`, and `expires`.
 /// - `force_refresh`: (optional, expression block) a boolean expression over the function arguments,
 ///   in curly braces like `convert` (it is evaluated, not a magic flag), e.g.
 ///   `force_refresh = "{ stale }"`. When it evaluates to `true`, the single cached value is bypassed
@@ -268,11 +278,16 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   **Note:** effective capacity may exceed `N` - shards enforce a 16-entry minimum floor, so
 ///   `max_size = 4` on an 8-shard build silently gives 128 effective slots. For a strict cap use
 ///   `shards = 1` or the builder's `per_shard_max_size`.
-/// - `ttl`: (optional, u64) TTL in seconds. For the default in-memory path, selects
-///   `ShardedTtlCache` or `ShardedLruTtlCache` (requires the `time_stores` feature). For `redis`
-///   and `disk` stores, sets the key/entry TTL on those backends.
+/// - `ttl`: (optional, Duration string) TTL as a Duration-expression string literal, e.g.
+///   `ttl = "Duration::from_secs(60)"`. For the default in-memory path, selects `ShardedTtlCache`
+///   or `ShardedLruTtlCache` (requires the `time_stores` feature). For `redis` and `disk` stores,
+///   sets the key/entry TTL on those backends. Mutually exclusive with `ttl_secs`, `ttl_millis`,
+///   and `expires`.
+/// - `ttl_secs`: (optional, u64) TTL as a whole number of seconds. Equivalent to
+///   `ttl = "Duration::from_secs(N)"` but accepts a bare integer. Selects the same stores as `ttl`.
+///   Mutually exclusive with `ttl`, `ttl_millis`, and `expires`.
 /// - `ttl_millis`: (optional, u64) the same TTL expressed in milliseconds; mutually exclusive with
-///   `ttl` and `expires`. On the default in-memory path it selects the same sharded TTL stores as `ttl`
+///   `ttl`, `ttl_secs`, and `expires`. On the default in-memory path it selects the same sharded TTL stores as `ttl`
 ///   (so it likewise requires the `time_stores` feature). Honored on every backend (in-memory sharded,
 ///   redis, and disk). The in-memory sharded and disk (redb) stores honor true sub-second expiry; only
 ///   the redis backend applies TTL at

@@ -27,6 +27,12 @@ fn cache_try_get_or_set_with_mut_returns_mutable_ref() {
     let mut cache: UnboundCache<u32, u32> =
         UnboundCache::builder().build().expect("build UnboundCache");
 
+    // Err: propagated, nothing cached.
+    let result: Result<&mut u32, ()> = cache.cache_try_get_or_set_with_mut(1, || Err(()));
+    assert!(result.is_err());
+    assert_eq!(cache.cache_get(&1), None);
+
+    // Ok miss: value inserted; mutate through the returned `&mut V`.
     let v: &mut u32 = cache
         .cache_try_get_or_set_with_mut(1, || Ok::<u32, ()>(10))
         .unwrap();

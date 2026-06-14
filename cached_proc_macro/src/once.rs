@@ -430,18 +430,18 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         __cached_result
     };
 
-    // Clone the full original signature and rename it to `__cached_inner`. Quoting
+    // Clone the full original signature and rename it to `<fn>_no_cache`. Quoting
     // the whole `syn::Signature` preserves the `where` clause (and lifetimes,
     // const generics, etc.) - `#generics` alone drops the where clause.
     // Unique per-function name so multiple `in_impl` methods on the same impl
-    // block do not collide on a shared `__cached_inner` sibling method.
+    // block do not collide on a shared `<fn>_no_cache` sibling method.
     let inner_fn_ident = Ident::new(&format!("{}_no_cache", &fn_ident), fn_ident.span());
     let mut inner_sig = signature.clone();
     inner_sig.ident = inner_fn_ident.clone();
 
-    // For `in_impl` methods the body may reference `self`, so `__cached_inner`
+    // For `in_impl` methods the body may reference `self`, so `<fn>_no_cache`
     // must be a sibling impl method (a nested fn cannot capture `self`); it is
-    // invoked as `self.__cached_inner(...)`. For free functions it stays a nested
+    // invoked as `self.<fn>_no_cache(...)`. For free functions it stays a nested
     // fn defined inline in the body (#16/#140).
     let self_prefix = if has_receiver {
         quote! { self. }

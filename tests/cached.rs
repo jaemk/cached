@@ -4580,6 +4580,8 @@ mod redis_tests {
                 .build()
                 .expect("build cache");
 
+        cache.cache_clear().unwrap();
+
         let key = "ref_key".to_string();
         let val = "ref_val".to_string();
         let val2 = "ref_val_overwrite".to_string();

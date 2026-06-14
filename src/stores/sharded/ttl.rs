@@ -109,6 +109,7 @@ where
     /// builder's hasher type and `build` then yields a `ShardedTtlCacheBase` over that hasher.
     /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
     /// introduced via `hasher`, never a `ShardedTtlCacheBase::<_, _, H>` turbofish.
+    #[must_use]
     pub fn builder() -> ShardedTtlCacheBuilder<K, V, DefaultShardHasher> {
         ShardedTtlCacheBuilder::default()
     }

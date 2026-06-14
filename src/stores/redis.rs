@@ -105,6 +105,7 @@ mod clear_pattern_tests {
     fn plain_segments_get_scope_and_trailing_star() {
         assert_eq!(clear_match_pattern("ns", "p"), "ns:p:*");
         assert_eq!(clear_match_pattern("", "p"), "p:*");
+        assert_eq!(clear_match_pattern("ns", ""), "ns:*");
     }
 
     #[test]
@@ -903,7 +904,7 @@ mod async_redis {
         K: Display,
         V: Serialize + DeserializeOwned,
     {
-        /// Initialize a `RedisCacheBuilder`
+        /// Initialize a `AsyncRedisCacheBuilder`
         pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
             Self {
                 ttl,

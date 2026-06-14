@@ -79,7 +79,7 @@ methods, so no alias is needed.
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
   runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_smol_native_tls`, `redis_smol_rustls`, `redis_tokio`, `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_connection_manager`, `redis_async_cache`, `redis_ahash`)
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
-  Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, or `#[concurrent_cached(ttl_millis = ...)]` on the default in-memory path.
+  Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, `#[concurrent_cached(ttl_millis = ...)]`, `#[once(ttl_secs = ...)]`, `#[once(ttl = ...)]`, or `#[once(ttl_millis = ...)]` on the default in-memory path.
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
 
 The procedural macros (`#[cached]`, `#[once]`, `#[concurrent_cached]`) offer a number of features, including async support.
@@ -481,7 +481,7 @@ use cached::macros::concurrent_cached;
 /// `#[concurrent_cached]` does **not** support `sync_writes`.
 /// For `Option<T>` returns, `None` is skipped by default (use `cache_none = true` to cache it).
 /// For `Result<T, E>` returns, only `Ok` values are cached by default (use `cache_err = true`
-/// to also cache `Err`). `result_fallback = true` is supported (requires `ttl`): on an `Err`
+/// to also cache `Err`). `result_fallback = true` is supported (requires `ttl_secs`, `ttl_millis`, or `ttl = "<Duration expr>"`): on an `Err`
 /// return, the last cached `Ok` value for the same key is returned instead. The stale value
 /// is held in the primary cache slot and re-cached with a fresh TTL window on `Err`; no
 /// secondary store is created.

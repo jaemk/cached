@@ -382,6 +382,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     /// parallel methods on the other LRU-family stores. All stores also provide a
     /// fallible `try_set_max_size` counterpart.
     pub fn set_max_size(&mut self, max_size: usize) -> usize {
+        assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.store.set_max_size(max_size);
         self.size = self.store.capacity;
         prev

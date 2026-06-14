@@ -56,8 +56,8 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ExpiringCache<K,V>` | `cached::stores` | Unbounded HashMap-backed, per-value expiry via `Expires` trait; default store for `#[cached(expires = true)]` |
 | `ShardedCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
 | `ShardedLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU; default for `#[concurrent_cached(max_size = N)]` |
-| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl_secs = N)]`; requires `time_stores` |
-| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl_secs = N)]`; requires `time_stores` |
+| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl_secs = N)]` (also selected by `ttl_millis` and `ttl = "<expr>"`); requires `time_stores` |
+| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl_secs = N)]` (also selected by `ttl_millis` and `ttl = "<expr>"`); requires `time_stores` |
 | `ShardedExpiringCache<K,V>` | `cached::stores` | Fully concurrent, sharded per-value expiry (unbounded); default for `#[concurrent_cached(expires = true)]` |
 | `ShardedExpiringLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + per-value expiry; default for `#[concurrent_cached(expires = true, max_size = N)]` |
 
@@ -97,7 +97,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache |
 | `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on timed stores |
 
-**`CacheMetrics`**: Snapshot struct returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `size: usize`, `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
+**`CacheMetrics`**: Snapshot struct returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `entry_count: usize`, `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
 
 ---
 
@@ -122,8 +122,10 @@ The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseco
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
 - `unsync_reads`: `bool` — use a shared read lock for cache hits; only works for stores implementing `CachedRead` (e.g. `UnboundCache`, `TtlSortedCache`, `HashMap`)
 - `result_fallback`: `bool` — on `Err`, return the last cached `Ok` value instead; requires a `Result<T, E>` return type
+- `force_refresh`: `{ <bool expr> }` block over the function args — when true, bypasses the cache and recomputes the value unconditionally
+- `in_impl`: `bool` — generates a `<fn>_no_cache` sibling and a function-local cache static; suppresses the `_prime_cache` companion (the cache static is function-local and cannot be shared with a sibling)
 
-**`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution). `#[once]` functions emit `foo_prime_cache()` with no arguments.
+**`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution), except `in_impl` methods, for which the `_prime_cache` companion is not generated (the cache static is function-local). `#[once]` functions emit `foo_prime_cache()` with no arguments.
 
 **Generics**: generic functions with `where` clauses are supported. The macros clone the original `syn::Signature` (preserving the `where` clause, lifetimes, const generics) for the generated origin/`inner` helper — quoting `#generics` alone would drop the `where` clause. Because `#[cached]`/`#[concurrent_cached]` store the cache in a `static`, a generic parameter that would land in the derived key/value type must be pinned via `key` + `convert` (and `ty`); `#[once]`'s static only holds the concrete value type, so it is unconstrained.
 
