@@ -377,7 +377,7 @@ pub(super) fn make_cache_key_type(
             // (#202/#203). The owned type is `<T as ToOwned>::Owned` (so `&str`
             // keys on `String`, `&[u8]` on `Vec<u8>`, `&Foo: Clone` on `Foo`):
             //   `&T` / `&mut T`                 -> key type `<T as ToOwned>::Owned`,         expr `name.to_owned()`
-            //   `Option<&T>` / `Option<&mut T>` -> key type `Option<<T as ToOwned>::Owned>`, expr `name.map(|__cached_v| __cached_v.to_owned())`
+            //   `Option<&T>` / `Option<&mut T>` -> key type `Option<<T as ToOwned>::Owned>`, expr `name.as_deref().map(|__cached_v| __cached_v.to_owned())`
             //   otherwise                       -> key type `T`,                             expr `name.clone()`
             let mut key_tys: Vec<TokenStream2> = Vec::with_capacity(input_tys.len());
             let mut key_exprs: Vec<TokenStream2> = Vec::with_capacity(input_tys.len());
@@ -387,7 +387,13 @@ pub(super) fn make_cache_key_type(
                     key_exprs.push(quote! { #name.to_owned() });
                 } else if let Some(inner) = option_ref_inner(ty) {
                     key_tys.push(quote! { Option<<#inner as ::std::borrow::ToOwned>::Owned> });
-                    key_exprs.push(quote! { #name.map(|__cached_v| __cached_v.to_owned()) });
+                    // Use `as_deref()` to avoid moving `name` (Option<&mut T> is not
+                    // Copy, and `.map()` would move it, causing a use-after-move error
+                    // when `name` is reused in the `_no_cache` call). `as_deref` takes
+                    // `&self` and yields `Option<&T>` for both `Option<&T>` and
+                    // `Option<&mut T>` without consuming the Option (#FIX-C).
+                    key_exprs
+                        .push(quote! { #name.as_deref().map(|__cached_v| __cached_v.to_owned()) });
                 } else {
                     key_tys.push(quote! { #ty });
                     key_exprs.push(quote! { #name.clone() });

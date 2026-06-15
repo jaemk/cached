@@ -971,14 +971,19 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     // run (#146): a bypassed entry must have no read side effects.
                     // `#force_refresh_guard` is `if !(block)` (taken when NOT
                     // bypassing); on the bypass path capture the fallback value with a
-                    // non-renewing `cache_peek` (no promote/hit-count/TTL-renew),
-                    // cloning the fresh `&V`. With no `force_refresh` the guard is
-                    // `if true`, so the peek arm is dead and behavior is unchanged.
+                    // non-renewing `cache_peek_with_expiry_status` (no promote/hit-count/
+                    // TTL-renew), which also returns expired entries (unlike `cache_peek`
+                    // which returns `None` for expired entries, losing the stale fallback).
+                    // With no `force_refresh` the guard is `if true`, so the peek arm is
+                    // dead and behavior is unchanged.
                     let capture_old_val = if args.force_refresh.is_some() {
                         quote! {
                             if __cached_force_refreshing {
                                 // Bypassed: peek without renewing/promoting/hit-counting.
-                                __cached_old_val = #krate::CachedPeek::cache_peek(&*__cached_cache, &__cached_key).cloned();
+                                // Also captures expired entries so an Err recompute over
+                                // an expired entry still returns the stale Ok fallback.
+                                let (__cached_peek_val, _) = #krate::CloneCached::cache_peek_with_expiry_status(&*__cached_cache, &__cached_key);
+                                __cached_old_val = __cached_peek_val;
                             } else {
                                 let (__cached_result, __cached_has_expired) = __cached_cache.cache_get_with_expiry_status(&__cached_key);
                                 if let (Some(__cached_result), false) = (&__cached_result, __cached_has_expired) {

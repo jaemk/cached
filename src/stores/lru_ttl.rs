@@ -775,6 +775,26 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for LruTtlCache<K, V> {
             (None, false)
         }
     }
+
+    /// Peek at the entry (including expired entries) without any read side effects.
+    ///
+    /// Returns `(Some(v), true)` for an expired entry, `(Some(v), false)` for a live
+    /// entry, and `(None, false)` when the key is absent. Does not update hit/miss
+    /// counters, does not promote in LRU order, and does not renew the TTL.
+    fn cache_peek_with_expiry_status<Q>(&self, k: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        // Use the inner LruCache's `cache_peek` to avoid LRU promotion.
+        if let Some(entry) = self.store.cache_peek(k) {
+            let expired = entry.instant.elapsed() >= self.ttl;
+            (Some(entry.value.clone()), expired)
+        } else {
+            (None, false)
+        }
+    }
 }
 
 #[cfg(feature = "async_core")]

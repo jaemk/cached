@@ -110,7 +110,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
 | Deduplicate concurrent first calls for same key | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
 | Recompute when an expression over the args is true | `#[cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data` |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the `refresh` arg is consumed by the generated guard so the body never sees it; add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the compiler warning |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Async | `#[cached(max_size = 100)] async fn remote(id: u64) -> Data` |
 | **`#[once]`** | |
@@ -132,7 +132,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Don't cache `None` returns (implicit for `Option<T>`) | `#[concurrent_cached] fn find(id: u64) -> Option<Row>` |
 | Serve stale value when function returns `Err` | `#[concurrent_cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
 | Recompute when an expression over the args is true | `#[concurrent_cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data` |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — see note above about the unused `refresh` variable |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[concurrent_cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
 | Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
@@ -1186,6 +1186,34 @@ pub trait CloneCached<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         self.cache_get_with_expiry_status(key)
+    }
+
+    /// Non-renewing peek that also reports whether the found entry is expired.
+    ///
+    /// Returns the same `(value, expired)` shape as
+    /// [`cache_get_with_expiry_status`](Self::cache_get_with_expiry_status) — including
+    /// `(Some(v), true)` for a present-but-expired entry — but must not produce any
+    /// observable read side effects: no LRU promotion, no hit/miss counter increment,
+    /// no TTL renewal.
+    ///
+    /// This is used on the `force_refresh` bypass path of `#[cached(result_fallback = true)]`
+    /// to capture the stale fallback value without touching recency or metrics.
+    ///
+    /// The provided default returns `(None, false)` for every key. It exists only so that
+    /// adding this method to the trait is non-breaking for external implementors. The built-in
+    /// TTL and expiring stores override it with a correct, side-effect-free read that also
+    /// surfaces expired entries.
+    ///
+    /// External implementors that combine `result_fallback` + `force_refresh` with a custom
+    /// `CloneCached` store should override this method; leaving the default means a bypassed
+    /// refresh that returns `Err` will never recover the stale fallback value.
+    fn cache_peek_with_expiry_status<Q>(&self, _key: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        (None, false)
     }
 }
 

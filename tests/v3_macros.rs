@@ -1675,6 +1675,124 @@ mod ttl_spelling_tests {
     }
 }
 
+// ── FIX B: #[once(sync_writes, force_refresh)] predicate evaluated once ──────
+// Before the fix, `do_set_return_block` in the `SyncWriteMode::Default` arm
+// expanded the force_refresh predicate TWICE: once inside the read-lock block
+// and again in the write-lock re-check. A side-effecting predicate therefore
+// ran twice on every write path (cache miss or bypass call).
+//
+// After the fix, the predicate is hoisted into a single `__cached_force_refreshing`
+// binding before both checks, so it is evaluated AT MOST ONCE per call.
+//
+// This test uses a predicate that always returns `false` (never force-refresh)
+// and increments a counter as a side effect. On a cache miss (first call), the
+// write path is taken; pre-fix the counter reaches 2, post-fix it stays at 1.
+
+static ONCE_SW_FR_PRED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ONCE_SW_FR_BODY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// NOTE: must be call-exclusive to `once_sync_writes_force_refresh_predicate_eval_count`.
+// The cache static is module-global (not in_impl) and cannot be reset, so no
+// other test may call this function.
+#[once(
+    sync_writes,
+    force_refresh = "{ ONCE_SW_FR_PRED_COUNT.fetch_add(1, Ordering::SeqCst); false }"
+)]
+fn once_sync_writes_fr(x: usize) -> usize {
+    ONCE_SW_FR_BODY_COUNT.fetch_add(1, Ordering::SeqCst);
+    x
+}
+
+#[test]
+fn once_sync_writes_force_refresh_predicate_eval_count() {
+    ONCE_SW_FR_PRED_COUNT.store(0, Ordering::SeqCst);
+    ONCE_SW_FR_BODY_COUNT.store(0, Ordering::SeqCst);
+
+    // First call: cache miss. The write path is taken.
+    // Pre-fix: predicate runs in the read-lock block AND in the write-lock
+    // re-check => ONCE_SW_FR_PRED_COUNT would be 2.
+    // Post-fix: predicate is hoisted into a single binding => count == 1.
+    let _ = once_sync_writes_fr(42);
+    assert_eq!(
+        ONCE_SW_FR_BODY_COUNT.load(Ordering::SeqCst),
+        1,
+        "body must run exactly once on a cache miss"
+    );
+    assert_eq!(
+        ONCE_SW_FR_PRED_COUNT.load(Ordering::SeqCst),
+        1,
+        "force_refresh predicate must be evaluated EXACTLY ONCE per call, not twice (#FIX-B)"
+    );
+
+    // Second call: cache warm, force_refresh returns false => served from cache.
+    // The predicate runs once more (from the read-lock path).
+    let _ = once_sync_writes_fr(42);
+    assert_eq!(
+        ONCE_SW_FR_BODY_COUNT.load(Ordering::SeqCst),
+        1,
+        "body must not run again on a cache hit"
+    );
+    assert_eq!(
+        ONCE_SW_FR_PRED_COUNT.load(Ordering::SeqCst),
+        2,
+        "predicate evaluated once per call (2 calls total)"
+    );
+}
+
+// ── FIX C: default-key Option<&mut T> does not move the argument ─────────────
+// Before the fix, the default-key path for `Option<&mut T>` emitted
+// `name.map(|__cached_v| __cached_v.to_owned())`, which MOVES `name`. The
+// generated `_no_cache` call then tried to reuse `name` after the move, causing
+// a compile error.
+//
+// After the fix, `name.as_deref().map(|__cached_v| __cached_v.to_owned())` is
+// emitted. `as_deref()` takes `&self` without consuming the Option, so `name`
+// remains usable.
+
+static OPT_MUT_REF_BODY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cached]
+fn opt_mut_ref_cached(s: Option<&mut String>) -> usize {
+    OPT_MUT_REF_BODY_COUNT.fetch_add(1, Ordering::SeqCst);
+    s.as_deref().map_or(0, |v| v.len())
+}
+
+#[test]
+fn opt_mut_ref_default_key_compiles_and_caches() {
+    OPT_MUT_REF_BODY_COUNT.store(0, Ordering::SeqCst);
+
+    // Two calls with equal keys (same string content) must hit the cache on the
+    // second call: the body should run exactly once.
+    let mut a = String::from("hello");
+    let mut b = String::from("hello");
+    let r1 = opt_mut_ref_cached(Some(&mut a));
+    let r2 = opt_mut_ref_cached(Some(&mut b));
+    assert_eq!(r1, 5);
+    assert_eq!(r2, 5);
+    assert_eq!(
+        OPT_MUT_REF_BODY_COUNT.load(Ordering::SeqCst),
+        1,
+        "Option<&mut String> with equal keys: body must run exactly once (cache hit on second call)"
+    );
+
+    // A call with a different key must miss.
+    let mut c = String::from("world!");
+    let r3 = opt_mut_ref_cached(Some(&mut c));
+    assert_eq!(r3, 6);
+    assert_eq!(OPT_MUT_REF_BODY_COUNT.load(Ordering::SeqCst), 2);
+
+    // None key must also be cacheable.
+    let r4 = opt_mut_ref_cached(None);
+    let r5 = opt_mut_ref_cached(None);
+    assert_eq!(r4, 0);
+    assert_eq!(r5, 0);
+    assert_eq!(
+        OPT_MUT_REF_BODY_COUNT.load(Ordering::SeqCst),
+        3,
+        "None key: body runs once, second call is a cache hit"
+    );
+}
+
 // ── async in_impl: #[once(in_impl = true)] on an async self-method ─────────
 // `#[once]` stores one shared value for all callers. On an async in_impl method
 // the body must run exactly once across repeated awaits with the same receiver.

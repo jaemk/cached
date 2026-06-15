@@ -556,17 +556,46 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let do_set_return_block = match args.sync_writes {
-        SyncWriteMode::Default => quote! {
-            #r_lock_return_cache_block
-            #w_lock
-            #force_refresh_guard {
-                if let Some(__cached_result) = &*__cached_cached {
-                    #return_cache_block
+        SyncWriteMode::Default => {
+            // Hoist the force_refresh predicate into a single boolean so it is
+            // evaluated ONCE per call. Without this the predicate would be
+            // expanded both inside the optimistic read-lock block and again in
+            // the write-lock re-check below, double-evaluating any side-effects
+            // in the user's predicate block (#FIX-B).
+            //
+            // Pattern from cached.rs:924-925:
+            //   `#force_refresh_guard { false } else { true }` evaluates to:
+            //   - `false` when force_refresh is absent (`if true { false } else { true }`)
+            //   - the user's block expression when force_refresh is present
+            //     (`if !(block) { false } else { true }` == `block`)
+            let force_refreshing_flag = quote! {
+                let __cached_force_refreshing = #force_refresh_guard { false } else { true };
+            };
+            // Inline read-lock block using the already-computed boolean so the
+            // predicate is not re-evaluated here.
+            let r_lock_return_cache_block_hoisted = quote! {
+                {
+                    #r_lock
+                    if !__cached_force_refreshing {
+                        if let Some(__cached_result) = &*__cached_cached {
+                            #return_cache_block
+                        }
+                    }
                 }
+            };
+            quote! {
+                #force_refreshing_flag
+                #r_lock_return_cache_block_hoisted
+                #w_lock
+                if !__cached_force_refreshing {
+                    if let Some(__cached_result) = &*__cached_cached {
+                        #return_cache_block
+                    }
+                }
+                #function_call
+                #set_cache_and_return
             }
-            #function_call
-            #set_cache_and_return
-        },
+        }
         SyncWriteMode::ByKey => unreachable!("ByKey rejected above"),
         SyncWriteMode::Disabled => quote! {
             #r_lock_return_cache_block

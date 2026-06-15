@@ -540,6 +540,25 @@ impl<K: Hash + Eq, V: Expires + Clone> CloneCached<K, V> for ExpiringCache<K, V>
             (None, false)
         }
     }
+
+    /// Peek at the entry (including expired entries) without any read side effects.
+    ///
+    /// Returns `(Some(v), true)` for an expired entry, `(Some(v), false)` for a live
+    /// entry, and `(None, false)` when the key is absent. Does not update hit/miss
+    /// counters or remove the entry.
+    fn cache_peek_with_expiry_status<Q>(&self, k: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        if let Some(value) = self.store.store.get(k) {
+            let expired = value.is_expired();
+            (Some(value.clone()), expired)
+        } else {
+            (None, false)
+        }
+    }
 }
 
 impl<K: std::hash::Hash + Eq, V: Expires> CacheEvict for ExpiringCache<K, V> {

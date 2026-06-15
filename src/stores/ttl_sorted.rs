@@ -995,6 +995,24 @@ impl<K: Hash + Eq + Ord + Clone, V: Clone> CloneCached<K, V> for TtlSortedCache<
             }
         }
     }
+
+    /// Peek at the entry (including expired entries) without any read side effects.
+    ///
+    /// Returns `(Some(v), true)` for an expired entry, `(Some(v), false)` for a live
+    /// entry, and `(None, false)` when the key is absent. Does not update hit/miss
+    /// counters or renew the TTL.
+    fn cache_peek_with_expiry_status<Q>(&self, k: &Q) -> (Option<V>, bool)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        match self.map.get(k) {
+            None => (None, false),
+            Some(entry) if entry.is_expired() => (Some(entry.value.clone()), true),
+            Some(entry) => (Some(entry.value.clone()), false),
+        }
+    }
 }
 
 #[cfg(feature = "async_core")]

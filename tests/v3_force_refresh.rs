@@ -391,3 +391,512 @@ fn by_key_unsync_reads_force_refresh_single_eval_per_call() {
         "total predicate evals must equal total calls (1 eval per call on by_key path)"
     );
 }
+
+// ── force_refresh + result_fallback: stale fallback preserved for LIVE entry ─────
+//
+// Baseline: with a LIVE (not yet expired) entry, force-refresh + Err still returns
+// the stale Ok fallback. This was already correct before the fix; we pin it to
+// ensure the fix does not break the live-entry case.
+//
+// The function uses SyncWriteMode::Disabled (the default, no sync_writes attribute)
+// and ttl_secs = 60 so the entry stays live throughout the test.
+
+#[cfg(feature = "time_stores")]
+mod result_fallback_live_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use cached::macros::cached;
+
+    static RF_LIVE_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_LIVE_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        ttl_secs = 60,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_live_fn(x: i32, bypass: bool) -> Result<i32, String> {
+        let _ = bypass; // consumed by the generated force_refresh guard
+        RF_LIVE_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_LIVE_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(x * 10)
+        }
+    }
+
+    #[test]
+    fn result_fallback_force_refresh_live_entry_returns_stale_ok() {
+        RF_LIVE_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_LIVE_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        // Seed an Ok value into the cache (bypass = false).
+        let first = rf_live_fn(100, false);
+        assert_eq!(first, Ok(1000), "seed call must return Ok(1000)");
+        assert_eq!(RF_LIVE_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        // Now the body will return Err.
+        RF_LIVE_RETURN_ERR.store(true, Ordering::SeqCst);
+
+        // Force-refresh (bypass = true) with Err recompute over a LIVE entry.
+        // result_fallback must return the stale Ok(1000), not the Err.
+        let second = rf_live_fn(100, true);
+        assert_eq!(
+            second,
+            Ok(1000),
+            "force-refresh Err over a LIVE entry must return stale Ok fallback"
+        );
+        assert_eq!(RF_LIVE_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+}
+
+// ── force_refresh + result_fallback: stale fallback preserved for EXPIRED entry ──
+//
+// Regression guard for the bug where `cache_peek` (used on the bypass branch) returns
+// `None` for an expired TTL entry, causing the stale `Ok` fallback to be lost when a
+// bypassed recompute returns `Err` over an entry that has expired.
+//
+// Before the fix: the bypass branch called `CachedPeek::cache_peek`, which returns `None`
+// for expired entries. An Err recompute over an expired key therefore had no fallback.
+// After the fix: the bypass branch calls `CloneCached::cache_peek_with_expiry_status`,
+// which returns `(Some(stale_value), true)` for an expired entry, preserving the fallback.
+//
+// This test FAILS on the pre-fix code path (the Err propagates instead of the stale Ok)
+// and PASSES after the fix.
+//
+// The function uses SyncWriteMode::Disabled (the default, no sync_writes attribute)
+// and ttl_secs = 1 so the entry expires quickly.
+
+#[cfg(feature = "time_stores")]
+mod result_fallback_expired_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use cached::macros::cached;
+
+    static RF_EXPIRED_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_EXPIRED_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    // Separate function from the live-entry test above so the cache static is independent
+    // (each #[cached] fn has its own static) and the two tests do not share state.
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        ttl_secs = 1,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_expired_fn(x: i32, bypass: bool) -> Result<i32, String> {
+        let _ = bypass; // consumed by the generated force_refresh guard
+        RF_EXPIRED_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_EXPIRED_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(x * 10)
+        }
+    }
+
+    #[test]
+    fn result_fallback_force_refresh_expired_entry_returns_stale_ok() {
+        RF_EXPIRED_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_EXPIRED_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        // Seed an Ok value into the cache (bypass = false).
+        let first = rf_expired_fn(200, false);
+        assert_eq!(first, Ok(2000), "seed call must return Ok(2000)");
+        assert_eq!(RF_EXPIRED_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        // Wait for the TTL to expire (ttl_secs = 1 -> sleep at least 1100ms).
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        // Now the body will return Err.
+        RF_EXPIRED_RETURN_ERR.store(true, Ordering::SeqCst);
+
+        // Force-refresh (bypass = true) with Err recompute over an EXPIRED entry.
+        // Pre-fix: cache_peek returns None for expired -> fallback lost -> Err propagated.
+        // Post-fix: cache_peek_with_expiry_status returns (Some(2000), true) -> Ok(2000) returned.
+        let second = rf_expired_fn(200, true);
+        assert_eq!(
+            second,
+            Ok(2000),
+            "force-refresh Err over an EXPIRED entry must return stale Ok fallback (regression)"
+        );
+        assert_eq!(RF_EXPIRED_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+}
+
+// ── store diversity: expired-entry Err-fallback across every macro-reachable store ─
+//
+// The author's expired-fallback test exercises only the default `TtlCache`
+// (`ttl_secs` alone). The same bug — the bypass branch losing the stale `Ok` over
+// an EXPIRED entry — lives in the bypass path regardless of which single-owner TTL
+// store the macro selects. These tests drive the OTHER store overrides reachable
+// through `#[cached]` attribute combinations:
+//
+//   ttl_secs + max_size       -> LruTtlCache
+//   expires                   -> ExpiringCache  (per-value expiry)
+//   expires + max_size        -> ExpiringLruCache
+//
+// `TtlSortedCache` is not selectable through any `#[cached]` attribute; its override
+// is certified directly in `v3_cache_peek_with_expiry_status.rs`.
+
+// LruTtlCache: ttl_secs + max_size.
+//
+// Each subtest uses its OWN `#[cached]` function so its cache slot and body-call
+// counter are fully isolated. The test binary runs tests in parallel by default;
+// two tests sharing one cached fn + one global counter would race on the count.
+#[cfg(feature = "time_stores")]
+mod result_fallback_lru_ttl_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use cached::macros::cached;
+
+    static RF_LRUTTL_EXP_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_LRUTTL_EXP_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        ttl_secs = 1,
+        max_size = 16,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_lru_ttl_expired_fn(x: i32, bypass: bool) -> Result<i32, String> {
+        let _ = bypass;
+        RF_LRUTTL_EXP_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_LRUTTL_EXP_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(x * 10)
+        }
+    }
+
+    #[test]
+    fn lru_ttl_force_refresh_expired_entry_returns_stale_ok() {
+        RF_LRUTTL_EXP_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_LRUTTL_EXP_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        assert_eq!(rf_lru_ttl_expired_fn(300, false), Ok(3000), "seed call");
+        assert_eq!(RF_LRUTTL_EXP_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        RF_LRUTTL_EXP_RETURN_ERR.store(true, Ordering::SeqCst);
+
+        // Bypassed Err recompute over an EXPIRED LruTtlCache entry must recover the
+        // stale Ok via the store's `cache_peek_with_expiry_status` override.
+        assert_eq!(
+            rf_lru_ttl_expired_fn(300, true),
+            Ok(3000),
+            "LruTtlCache: force-refresh Err over expired entry must return stale Ok"
+        );
+        assert_eq!(RF_LRUTTL_EXP_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    static RF_LRUTTL_LIVE_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_LRUTTL_LIVE_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        ttl_secs = 60,
+        max_size = 16,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_lru_ttl_live_fn(x: i32, bypass: bool) -> Result<i32, String> {
+        let _ = bypass;
+        RF_LRUTTL_LIVE_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_LRUTTL_LIVE_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(x * 10)
+        }
+    }
+
+    #[test]
+    fn lru_ttl_force_refresh_live_entry_returns_stale_ok() {
+        // Boundary companion: with a LIVE entry the fallback must still hold.
+        RF_LRUTTL_LIVE_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_LRUTTL_LIVE_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        assert_eq!(rf_lru_ttl_live_fn(301, false), Ok(3010), "seed call");
+        assert_eq!(RF_LRUTTL_LIVE_BODY_CALLS.load(Ordering::SeqCst), 1);
+        RF_LRUTTL_LIVE_RETURN_ERR.store(true, Ordering::SeqCst);
+        assert_eq!(
+            rf_lru_ttl_live_fn(301, true),
+            Ok(3010),
+            "LruTtlCache: force-refresh Err over live entry must return stale Ok"
+        );
+        assert_eq!(RF_LRUTTL_LIVE_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+}
+
+// ExpiringCache: `expires` (per-value expiry, deterministic, no sleeps).
+#[cfg(feature = "time_stores")]
+mod result_fallback_expiring_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use cached::Expires;
+    use cached::macros::cached;
+
+    #[derive(Clone)]
+    struct Val {
+        n: i32,
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    static RF_EXP_E_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_EXP_E_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        expires = true,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_expiring_expired_fn(x: i32, bypass: bool) -> Result<Val, String> {
+        let _ = bypass;
+        RF_EXP_E_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_EXP_E_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            // Seed value is ALREADY expired-by-value, so the bypass peek must
+            // surface it as (Some, true) rather than dropping it.
+            Ok(Val {
+                n: x * 10,
+                expired: true,
+            })
+        }
+    }
+
+    #[test]
+    fn expiring_force_refresh_expired_entry_returns_stale_ok() {
+        RF_EXP_E_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_EXP_E_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        let first = rf_expiring_expired_fn(400, false).expect("seed Ok");
+        assert_eq!(first.n, 4000);
+        assert_eq!(RF_EXP_E_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        RF_EXP_E_RETURN_ERR.store(true, Ordering::SeqCst);
+
+        // Bypassed Err over the per-value-expired ExpiringCache entry must recover
+        // the stale Ok (pre-fix: cache_peek returned None for expired -> Err leaked).
+        let second =
+            rf_expiring_expired_fn(400, true).expect("expired-entry fallback must yield Ok");
+        assert_eq!(
+            second.n, 4000,
+            "ExpiringCache: force-refresh Err over expired entry must return stale Ok"
+        );
+        assert_eq!(RF_EXP_E_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    static RF_EXP_L_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_EXP_L_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        expires = true,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_expiring_live_fn(x: i32, bypass: bool) -> Result<Val, String> {
+        let _ = bypass;
+        RF_EXP_L_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_EXP_L_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(Val {
+                n: x * 10,
+                expired: false,
+            }) // live entry
+        }
+    }
+
+    #[test]
+    fn expiring_force_refresh_live_entry_returns_stale_ok() {
+        RF_EXP_L_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_EXP_L_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        let first = rf_expiring_live_fn(401, false).expect("seed Ok");
+        assert_eq!(first.n, 4010);
+        assert_eq!(RF_EXP_L_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        RF_EXP_L_RETURN_ERR.store(true, Ordering::SeqCst);
+        let second = rf_expiring_live_fn(401, true).expect("live-entry fallback must yield Ok");
+        assert_eq!(
+            second.n, 4010,
+            "ExpiringCache: force-refresh Err over live entry must return stale Ok"
+        );
+        assert_eq!(RF_EXP_L_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+}
+
+// ExpiringLruCache: `expires` + `max_size`.
+#[cfg(feature = "time_stores")]
+mod result_fallback_expiring_lru_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use cached::Expires;
+    use cached::macros::cached;
+
+    static RF_EXPLRU_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_EXPLRU_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+    static RF_EXPLRU_MAKE_STALE: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Clone)]
+    struct Val {
+        n: i32,
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        expires = true,
+        max_size = 16,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    fn rf_expiring_lru_fn(x: i32, bypass: bool) -> Result<Val, String> {
+        let _ = bypass;
+        RF_EXPLRU_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_EXPLRU_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(Val {
+                n: x * 10,
+                expired: RF_EXPLRU_MAKE_STALE.load(Ordering::SeqCst),
+            })
+        }
+    }
+
+    #[test]
+    fn expiring_lru_force_refresh_expired_entry_returns_stale_ok() {
+        RF_EXPLRU_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_EXPLRU_RETURN_ERR.store(false, Ordering::SeqCst);
+        RF_EXPLRU_MAKE_STALE.store(true, Ordering::SeqCst);
+
+        let first = rf_expiring_lru_fn(500, false).expect("seed Ok");
+        assert_eq!(first.n, 5000);
+        assert_eq!(RF_EXPLRU_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        RF_EXPLRU_RETURN_ERR.store(true, Ordering::SeqCst);
+
+        let second = rf_expiring_lru_fn(500, true).expect("expired-entry fallback must yield Ok");
+        assert_eq!(
+            second.n, 5000,
+            "ExpiringLruCache: force-refresh Err over expired entry must return stale Ok"
+        );
+        assert_eq!(RF_EXPLRU_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+}
+
+// ── force_refresh predicate FALSE: normal early-return path is unaffected ──────
+//
+// Boundary: when the force_refresh predicate is false, the bypass arm is NOT taken,
+// the renewing read serves the early-return on a fresh hit, and the body must not
+// re-run. This pins that the rewired capture did not disturb the non-bypass branch.
+
+#[cfg(feature = "time_stores")]
+mod result_fallback_predicate_false_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use cached::macros::cached;
+
+    static RF_FALSE_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        ttl_secs = 60,
+        result_fallback = true,
+        force_refresh = "{ false }"
+    )]
+    fn rf_false_fn(x: i32) -> Result<i32, String> {
+        RF_FALSE_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(x * 10)
+    }
+
+    #[test]
+    fn predicate_false_serves_cache_without_rerunning_body() {
+        RF_FALSE_BODY_CALLS.store(0, Ordering::SeqCst);
+
+        assert_eq!(rf_false_fn(600), Ok(6000), "miss seeds the cache");
+        assert_eq!(RF_FALSE_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        // Fresh hit, predicate false -> early return, body must NOT re-run.
+        assert_eq!(rf_false_fn(600), Ok(6000));
+        assert_eq!(
+            RF_FALSE_BODY_CALLS.load(Ordering::SeqCst),
+            1,
+            "predicate-false fresh hit must serve cache, not re-run body"
+        );
+    }
+}
+
+// ── async path: result_fallback + force_refresh expired-entry fallback ─────────
+//
+// The async `#[cached]` expansion routes the bypass capture through the same
+// `cache_peek_with_expiry_status` call. This pins that an async bypassed Err over
+// an EXPIRED TtlCache entry still recovers the stale Ok fallback.
+
+#[cfg(all(feature = "async", feature = "time_stores"))]
+mod result_fallback_async_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use cached::macros::cached;
+
+    static RF_ASYNC_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RF_ASYNC_RETURN_ERR: AtomicBool = AtomicBool::new(false);
+
+    #[cached(
+        key = "i32",
+        convert = "{ x }",
+        ttl_secs = 1,
+        result_fallback = true,
+        force_refresh = "{ bypass }"
+    )]
+    async fn rf_async_fn(x: i32, bypass: bool) -> Result<i32, String> {
+        let _ = bypass;
+        RF_ASYNC_BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if RF_ASYNC_RETURN_ERR.load(Ordering::SeqCst) {
+            Err(format!("error for {x}"))
+        } else {
+            Ok(x * 10)
+        }
+    }
+
+    #[tokio::test]
+    async fn async_force_refresh_expired_entry_returns_stale_ok() {
+        RF_ASYNC_BODY_CALLS.store(0, Ordering::SeqCst);
+        RF_ASYNC_RETURN_ERR.store(false, Ordering::SeqCst);
+
+        assert_eq!(rf_async_fn(700, false).await, Ok(7000), "seed call");
+        assert_eq!(RF_ASYNC_BODY_CALLS.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        RF_ASYNC_RETURN_ERR.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            rf_async_fn(700, true).await,
+            Ok(7000),
+            "async: force-refresh Err over expired entry must return stale Ok"
+        );
+        assert_eq!(RF_ASYNC_BODY_CALLS.load(Ordering::SeqCst), 2);
+    }
+}

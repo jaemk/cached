@@ -111,7 +111,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
 | Deduplicate concurrent first calls for same key | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
 | Recompute when an expression over the args is true | `#[cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data` |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the `refresh` arg is consumed by the generated guard so the body never sees it; add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the compiler warning |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Async | `#[cached(max_size = 100)] async fn remote(id: u64) -> Data` |
 | **`#[once]`** | |
@@ -133,7 +133,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Don't cache `None` returns (implicit for `Option<T>`) | `#[concurrent_cached] fn find(id: u64) -> Option<Row>` |
 | Serve stale value when function returns `Err` | `#[concurrent_cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
 | Recompute when an expression over the args is true | `#[concurrent_cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data` |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — see note above about the unused `refresh` variable |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[concurrent_cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
 | Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |

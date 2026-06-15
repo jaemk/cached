@@ -54,9 +54,10 @@ pub enum RedbCacheBuildError {
     #[error("I/O error preparing the disk cache directory")]
     Io(#[from] std::io::Error),
     /// The `cache_name` passed to [`RedbCacheBuilder`] is invalid: it must not be empty,
-    /// must not contain a path separator (`/` or `\`), and must not be `.` or `..`.
-    /// These characters would allow the name to escape the cache directory or produce a
-    /// meaningless filename when used as a filename component.
+    /// must not contain a path separator (`/` or `\`), must not contain a NUL byte (`\0`),
+    /// and must not be `.` or `..`.
+    /// These characters would allow the name to escape the cache directory, embed a NUL
+    /// in the filename, or produce a meaningless filename when used as a filename component.
     #[error(
         "invalid cache_name: must not be empty, must not contain a path separator ('/' or '\\\\'), \
         must not contain a NUL byte, and must not be '.' or '..'; cache_name is used as a filename component"
