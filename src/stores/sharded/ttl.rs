@@ -893,11 +893,11 @@ mod tests {
 
     #[test]
     fn new_returns_ready_cache_respecting_ttl() {
-        let c = ShardedTtlCache::<u32, u32>::new(Duration::from_millis(50));
-        assert_eq!(c.ttl(), Some(Duration::from_millis(50)));
+        let c = ShardedTtlCache::<u32, u32>::new(Duration::from_millis(10));
+        assert_eq!(c.ttl(), Some(Duration::from_millis(10)));
         assert_eq!(SyncConcurrentCached::set(&c, 1, 100).unwrap(), None);
         assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(100));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(
             SyncConcurrentCached::get(&c, &1).unwrap(),
             None,
@@ -1385,13 +1385,13 @@ mod tests {
     fn peek_with_expiry_status_stale_entry_no_side_effects() {
         // Insert an entry with a very short TTL, let it expire, then peek it.
         let c = ShardedTtlCacheBase::<u32, u32>::builder()
-            .ttl(Duration::from_millis(50))
+            .ttl(Duration::from_millis(10))
             .shards(1)
             .build()
             .unwrap();
 
         SyncConcurrentCached::cache_set(&c, 1u32, 77u32).expect("insert must succeed");
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         let before = c.metrics();
 
@@ -1429,7 +1429,7 @@ mod tests {
         // peek must not extend the TTL even when refresh_on_hit is enabled.
         let c = ShardedTtlCacheBase::<u32, u32>::builder()
             .refresh_on_hit(true)
-            .ttl(Duration::from_millis(50))
+            .ttl(Duration::from_millis(10))
             .shards(1)
             .build()
             .unwrap();
@@ -1442,7 +1442,7 @@ mod tests {
         assert!(!expired, "live peek must report expired=false");
 
         // Wait past the original TTL.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         // If peek had renewed the TTL the entry would still be live; it must not have.
         let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);

@@ -1153,16 +1153,16 @@ mod tests {
         let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(2)
-            .ttl(Duration::from_millis(50))
+            .ttl(Duration::from_millis(10))
             .build()
             .unwrap();
-        assert_eq!(c.ttl(), Some(Duration::from_millis(50)));
+        assert_eq!(c.ttl(), Some(Duration::from_millis(10)));
         SyncConcurrentCached::set(&c, 1, 10).unwrap();
         SyncConcurrentCached::set(&c, 2, 20).unwrap();
         SyncConcurrentCached::set(&c, 3, 30).unwrap(); // evicts LRU (1)
         assert_eq!(c.len(), 2);
         assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), None);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(
             SyncConcurrentCached::get(&c, &2).unwrap(),
             None,

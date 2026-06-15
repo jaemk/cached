@@ -1,4 +1,4 @@
-//! Integration tests for the next-major trait additions:
+//! Integration tests for the 3.0 trait additions:
 //! - `*_mut` get-or-set variants (#179)
 //! - `SerializeCached`/`SerializeCachedAsync` borrowed set (#196)
 

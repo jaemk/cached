@@ -227,7 +227,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // and generics work (see the generic-where tests). Without `convert` the
     // default-key path would embed the type parameters in the key type, which
     // cannot compile - reject it with a clear diagnostic and workaround (#80).
-    if signature.generics.type_params().next().is_some() && args.convert.is_none() {
+    if (signature.generics.type_params().next().is_some()
+        || signature.generics.const_params().next().is_some())
+        && args.convert.is_none()
+    {
         return syn::Error::new(
             fn_ident.span(),
             "#[cached] on a generic function requires `key` + `convert` to pin the cache key to a \
@@ -867,17 +870,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         };
 
-        let default_unsync_cache_get_return_block = quote! {
-            let __cached_cache = #cache_ident.#read_lock_method()#await_if_async;
-            #force_refresh_guard {
-                if #krate::CachedPeek::cache_peek(&*__cached_cache, &__cached_key).is_some() {
-                    if let Some(__cached_result) = #krate::CachedRead::cache_get_read(&*__cached_cache, &__cached_key) {
-                        #return_cache_block
-                    }
-                }
-            }
-        };
-
         let by_key_cache_get_return_block = if args.unsync_reads {
             quote! {
                 let __cached_cache = __cached_cache_mutex.#read_lock_method()#await_if_async;
@@ -919,12 +911,36 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             SyncWriteMode::Default => {
                 if args.unsync_reads {
+                    // Hoist the force_refresh predicate into a single boolean binding so
+                    // it is evaluated AT MOST ONCE per call. Without this, the predicate
+                    // would be expanded inside the optimistic read-lock block AND again
+                    // in the write-lock re-check below, double-evaluating any side-effects
+                    // in the user's predicate block.
+                    //
+                    // `#force_refresh_guard { false } else { true }` evaluates to:
+                    //   - `false` when force_refresh is absent (`if true { false } else { true }`)
+                    //   - the user's block expression when force_refresh is present
+                    //     (`if !(block) { false } else { true }` == `block`)
+                    let force_refreshing_flag = quote! {
+                        let __cached_force_refreshing = #force_refresh_guard { false } else { true };
+                    };
+                    let unsync_read_block = quote! {
+                        let __cached_cache = #cache_ident.#read_lock_method()#await_if_async;
+                        if !__cached_force_refreshing {
+                            if #krate::CachedPeek::cache_peek(&*__cached_cache, &__cached_key).is_some() {
+                                if let Some(__cached_result) = #krate::CachedRead::cache_get_read(&*__cached_cache, &__cached_key) {
+                                    #return_cache_block
+                                }
+                            }
+                        }
+                    };
                     quote! {
+                        #force_refreshing_flag
                         {
-                            #default_unsync_cache_get_return_block
+                            #unsync_read_block
                         }
                         let mut __cached_cache = #cache_ident.#lock_method()#await_if_async;
-                        #force_refresh_guard {
+                        if !__cached_force_refreshing {
                             if let Some(__cached_result) = __cached_cache.cache_get(&__cached_key) {
                                 #return_cache_block
                             }

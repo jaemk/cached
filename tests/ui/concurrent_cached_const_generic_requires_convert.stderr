@@ -1,0 +1,5 @@
+error: #[concurrent_cached] on a generic function requires `key` + `convert` to pin the cache key to a concrete type: the cache is a single monomorphic static shared across all instantiations and cannot name the function's type parameters. Provide `key`/`convert` (and a concrete `ty`/`create`), or wrap the generic function in a non-generic `#[concurrent_cached]` function per concrete type.
+ --> tests/ui/concurrent_cached_const_generic_requires_convert.rs:7:4
+  |
+7 | fn f<const N: usize>(x: i32) -> i32 {
+  |    ^

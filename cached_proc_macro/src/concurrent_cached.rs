@@ -254,7 +254,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // single monomorphic static and cannot name the function's type parameters.
     // Without `convert` the default-key path embeds the type parameters in the
     // key type and cannot compile - reject it with a clear diagnostic (#80).
-    if signature.generics.type_params().next().is_some() && args.convert.is_none() {
+    if (signature.generics.type_params().next().is_some()
+        || signature.generics.const_params().next().is_some())
+        && args.convert.is_none()
+    {
         return syn::Error::new(
             fn_ident.span(),
             "#[concurrent_cached] on a generic function requires `key` + `convert` to pin the cache \

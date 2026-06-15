@@ -1,5 +1,5 @@
 /*!
-Integration tests for the next-major macro changes:
+Integration tests for the 3.0 macro changes:
 
 - (#230/#114): macro-introduced bindings no longer collide with user args
   named `key`/`cache`/`result` (the confirmed repro) under all three macros.
@@ -23,6 +23,7 @@ use cached::macros::{cached, concurrent_cached, once};
 // `result` shadowed the macro-introduced locals and failed to compile.
 
 static COLLIDE_CACHED_CALLS: AtomicUsize = AtomicUsize::new(0);
+static COLLIDE_ONCE_CALLS: AtomicUsize = AtomicUsize::new(0);
 static COLLIDE_CONCURRENT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[cached]
@@ -33,6 +34,7 @@ fn collide_cached(key: i32, cache: i32, result: i32) -> i32 {
 
 #[once]
 fn collide_once(key: i32, cache: i32, result: i32) -> i32 {
+    COLLIDE_ONCE_CALLS.fetch_add(1, Ordering::SeqCst);
     key + cache + result
 }
 
@@ -46,6 +48,7 @@ fn collide_concurrent(key: i32, cache: i32, result: i32) -> i32 {
 fn arg_name_collisions_compile_and_cache() {
     // Reset counters so the test does not depend on execution order.
     COLLIDE_CACHED_CALLS.store(0, Ordering::SeqCst);
+    COLLIDE_ONCE_CALLS.store(0, Ordering::SeqCst);
     COLLIDE_CONCURRENT_CALLS.store(0, Ordering::SeqCst);
 
     // #[cached]: two calls with the same args hit the cache; body runs once.
@@ -60,7 +63,12 @@ fn arg_name_collisions_compile_and_cache() {
 
     // `#[once]` caches the first produced value for all later calls.
     assert_eq!(collide_once(1, 2, 3), 6);
-    assert_eq!(collide_once(4, 5, 6), 6);
+    assert_eq!(collide_once(4, 5, 6), 6); // once: single value, second call is a cache hit
+    assert_eq!(
+        COLLIDE_ONCE_CALLS.load(Ordering::SeqCst),
+        1,
+        "#[once]: second call with different args must be a cache hit (body runs once)"
+    );
 
     // #[concurrent_cached]: two calls with the same args hit the cache; body runs once.
     assert_eq!(collide_concurrent(1, 2, 3), 6);
@@ -105,11 +113,17 @@ fn ref_string_len(s: &String) -> usize {
 }
 
 // Note: `STR_CALLS`/`OPT_CALLS`/`STRING_CALLS` and their cache statics are owned
-// exclusively by this test, so no other test can perturb them; the assertions
-// depend on a fresh (empty) cache, which cannot be reset from here, so the test is
-// left as-is rather than partially reset.
+// exclusively by this test. The counters are reset below; the underlying caches
+// cannot be reset from here (function-local or module-static), so the assertions
+// remain valid only on first call per entry (which holds since this test is the
+// sole caller of these functions).
 #[test]
 fn reference_inputs_default_key() {
+    // Reset counters so the assertions are independent of execution order.
+    STR_CALLS.store(0, Ordering::SeqCst);
+    OPT_CALLS.store(0, Ordering::SeqCst);
+    STRING_CALLS.store(0, Ordering::SeqCst);
+
     assert_eq!(ref_str_len("hello"), 5);
     assert_eq!(ref_str_len("hello"), 5);
     assert_eq!(
@@ -279,26 +293,33 @@ fn force_refresh_default_key_does_not_update_normal_slot() {
 // is no "(x, true)" slot footgun: the refreshed value is what every later call sees.
 
 static ONCE_FR_CALLS: AtomicUsize = AtomicUsize::new(0);
+// Separate source so the cached return value is independent of the call counter;
+// this lets us reset ONCE_FR_CALLS without coupling the counter to the cached value.
+static ONCE_FR_SOURCE: AtomicUsize = AtomicUsize::new(10);
 
-// NOTE: this fn must remain call-exclusive to `once_force_refresh_recomputes_shared_value`;
-// that test's assertions assume the shared value starts unset and it cannot be reset.
+// NOTE: this fn must remain call-exclusive to `once_force_refresh_recomputes_shared_value`.
 #[once(force_refresh = "{ bypass }")]
 fn once_force_refresh(bypass: bool) -> usize {
     let _ = bypass; // used by the generated force_refresh guard, not the body
     ONCE_FR_CALLS.fetch_add(1, Ordering::SeqCst);
-    ONCE_FR_CALLS.load(Ordering::SeqCst)
+    ONCE_FR_SOURCE.load(Ordering::SeqCst)
 }
 
-// Note: `ONCE_FR_CALLS` and the `#[once]` cache static are owned exclusively by
-// this test; the assertions depend on the shared value being initially unset,
-// which cannot be reset from here, so the test is left as-is.
+// Note: `ONCE_FR_CALLS` is reset below; the underlying `#[once]` cache static
+// cannot be reset from here (function-local), so the test is the sole caller of
+// `once_force_refresh`.
 #[test]
 fn once_force_refresh_recomputes_shared_value() {
+    ONCE_FR_CALLS.store(0, Ordering::SeqCst);
+    ONCE_FR_SOURCE.store(10, Ordering::SeqCst);
+
     // First call computes and caches the single shared value.
     let first = once_force_refresh(false);
+    assert_eq!(first, 10);
     assert_eq!(ONCE_FR_CALLS.load(Ordering::SeqCst), 1);
 
     // Non-bypass hit: cached value returned, body not re-run.
+    ONCE_FR_SOURCE.store(99, Ordering::SeqCst); // would change value if body ran
     let hit = once_force_refresh(false);
     assert_eq!(hit, first, "cached hit, body not re-run");
     assert_eq!(ONCE_FR_CALLS.load(Ordering::SeqCst), 1);
@@ -306,7 +327,11 @@ fn once_force_refresh_recomputes_shared_value() {
     // Bypass: recompute and overwrite the single shared value.
     let refreshed = once_force_refresh(true);
     assert_eq!(ONCE_FR_CALLS.load(Ordering::SeqCst), 2);
-    assert_ne!(refreshed, first, "force_refresh recomputed a new value");
+    assert_eq!(
+        refreshed, 99,
+        "force_refresh recomputed against the new source"
+    );
+    assert_ne!(refreshed, first, "force_refresh produced a new value");
 
     // Subsequent non-bypass call serves the refreshed (overwritten) value — no
     // separate keyed slot, unlike the `#[cached]` default-key footgun above.
@@ -837,8 +862,15 @@ impl Svc {
     }
 }
 
+// Note: `CONC_METHOD_CALLS`/`ONCE_METHOD_CALLS` are reset below; the underlying
+// in_impl cache statics are function-local and cannot be reset from here, so this
+// test must remain the sole caller of `conc_method`/`once_method`.
 #[test]
 fn in_impl_concurrent_and_once_methods() {
+    // Reset counters so the assertions do not depend on execution order.
+    CONC_METHOD_CALLS.store(0, Ordering::SeqCst);
+    ONCE_METHOD_CALLS.store(0, Ordering::SeqCst);
+
     let s = Svc;
     assert_eq!(s.conc_method(5), 6);
     assert_eq!(s.conc_method(5), 6);
@@ -874,8 +906,14 @@ impl Refresher {
     }
 }
 
+// Note: `IN_IMPL_FR_CALLS` is reset below; the in_impl cache is function-local
+// and cannot be reset from here, so this test must remain the sole caller of `load`.
 #[test]
 fn force_refresh_composes_with_in_impl() {
+    // Reset the call counter (and source) so assertions are order-independent.
+    IN_IMPL_FR_CALLS.store(0, Ordering::SeqCst);
+    IN_IMPL_FR_SOURCE.store(1, Ordering::SeqCst);
+
     let r = Refresher;
     // miss → 1 + 1 = 2, cached under key 1
     assert_eq!(r.load(1, false), 2);
@@ -921,6 +959,43 @@ fn in_impl_pub_method_caches() {
     );
     assert_eq!(s.pub_cached_method(5), 15); // different key, miss
     assert_eq!(PUB_IMPL_CALLS.load(Ordering::SeqCst), 2);
+}
+
+// The `in_impl` macro generates a `{fn}_no_cache` sibling that bypasses the cache
+// and always runs the body. Calling it after the cache is warm must increment the
+// counter again, proving the body ran rather than returning the cached value.
+//
+// Uses its own struct/counter so it shares neither the function-local cache nor the
+// call counter with `in_impl_pub_method_caches` (the two would otherwise race when
+// the test harness runs them in parallel).
+struct NoCacheSiblingStruct;
+
+static NO_CACHE_SIBLING_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+impl NoCacheSiblingStruct {
+    #[cached(in_impl = true)]
+    pub fn cached_method(&self, x: i32) -> i32 {
+        NO_CACHE_SIBLING_CALLS.fetch_add(1, Ordering::SeqCst);
+        x * 3
+    }
+}
+
+#[test]
+fn in_impl_no_cache_sibling_bypasses_cache() {
+    let s = NoCacheSiblingStruct;
+    // Warm the cache for x=7 via the normal (cached) path.
+    assert_eq!(s.cached_method(7), 21);
+    assert_eq!(NO_CACHE_SIBLING_CALLS.load(Ordering::SeqCst), 1);
+    // A second cached call is a hit; body does not run.
+    assert_eq!(s.cached_method(7), 21);
+    assert_eq!(NO_CACHE_SIBLING_CALLS.load(Ordering::SeqCst), 1);
+    // The _no_cache sibling bypasses the cache; the body runs again.
+    assert_eq!(s.cached_method_no_cache(7), 21);
+    assert_eq!(
+        NO_CACHE_SIBLING_CALLS.load(Ordering::SeqCst),
+        2,
+        "_no_cache sibling must bypass the cache and run the body"
+    );
 }
 
 // ── FIX 2d: #[concurrent_cached(in_impl = true, force_refresh = "{ ... }")] ──
@@ -993,7 +1068,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: cache hit"
         );
-        sleep(Duration::from_millis(60));
+        sleep(Duration::from_millis(70));
         assert_eq!(millis_fn(7), 7);
         assert_eq!(
             MILLIS_CALLS.load(Ordering::SeqCst),
@@ -1022,7 +1097,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: cache hit"
         );
-        sleep(Duration::from_millis(60));
+        sleep(Duration::from_millis(70));
         assert_eq!(conc_millis_fn(7), 7);
         assert_eq!(
             CONC_MILLIS_CALLS.load(Ordering::SeqCst),
@@ -1051,7 +1126,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: cache hit"
         );
-        sleep(Duration::from_millis(60));
+        sleep(Duration::from_millis(70));
         // After the sub-second TTL expires the body re-runs, yielding the next value.
         assert_eq!(once_millis_fn(), 2);
         assert_eq!(
@@ -1088,7 +1163,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: in_impl method must serve from cache"
         );
-        sleep(Duration::from_millis(60));
+        sleep(Duration::from_millis(70));
         assert_eq!(s.ttl_method(9), 9);
         assert_eq!(
             TTL_IMPL_CALLS.load(Ordering::SeqCst),
@@ -1208,7 +1283,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: cache hit"
         );
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(70));
         assert_eq!(lru_millis_fn(7), 7);
         assert_eq!(
             LRU_MILLIS_CALLS.load(Ordering::SeqCst),
@@ -1244,7 +1319,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: in_impl method must serve from cache"
         );
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(70));
         assert_eq!(s.ttl_method(9), 9);
         assert_eq!(
             CONC_TTL_IMPL_CALLS.load(Ordering::SeqCst),
@@ -1280,7 +1355,7 @@ mod ttl_millis_tests {
             1,
             "within TTL: in_impl once method must serve the cached value"
         );
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(70));
         // After the sub-second TTL expires the body re-runs, yielding the next value.
         assert_eq!(s.ttl_method(), 2);
         assert_eq!(
@@ -1638,5 +1713,79 @@ mod async_in_impl_tests {
             1,
             "async in_impl once: body runs exactly once"
         );
+    }
+
+    // ── async in_impl: #[cached(in_impl = true)] on an async method ─────────
+    // The keyed cache stores a separate entry per argument. The body runs once per
+    // unique key and subsequent awaits with the same arg serve from the cache.
+
+    struct AsyncCachedSvc;
+
+    static ASYNC_CACHED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    impl AsyncCachedSvc {
+        #[cached(in_impl = true)]
+        async fn compute(&self, x: i32) -> i32 {
+            ASYNC_CACHED_CALLS.fetch_add(1, Ordering::SeqCst);
+            x * 3
+        }
+    }
+
+    // Note: `ASYNC_CACHED_CALLS` is reset below; the in_impl cache is function-local
+    // and cannot be reset from here, so this test must remain the sole caller of `compute`.
+    #[tokio::test]
+    async fn async_in_impl_cached_caches_per_key() {
+        ASYNC_CACHED_CALLS.store(0, Ordering::SeqCst);
+        let s = AsyncCachedSvc;
+        // First await for x=4: miss, body runs, result cached.
+        assert_eq!(s.compute(4).await, 12);
+        assert_eq!(ASYNC_CACHED_CALLS.load(Ordering::SeqCst), 1);
+        // Second await with the same arg: cache hit, body not re-run.
+        assert_eq!(s.compute(4).await, 12);
+        assert_eq!(
+            ASYNC_CACHED_CALLS.load(Ordering::SeqCst),
+            1,
+            "async in_impl cached: second await with same arg must be a cache hit"
+        );
+        // Different arg: new key, body runs again.
+        assert_eq!(s.compute(5).await, 15);
+        assert_eq!(ASYNC_CACHED_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    // ── async in_impl: #[concurrent_cached(in_impl = true)] on an async method ──
+    // The concurrent sharded cache stores a separate entry per argument. The body
+    // runs once per unique key and subsequent awaits serve from the cache.
+
+    struct AsyncConcSvc;
+
+    static ASYNC_CONC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    impl AsyncConcSvc {
+        #[concurrent_cached(in_impl = true)]
+        async fn fetch(&self, x: i32) -> i32 {
+            ASYNC_CONC_CALLS.fetch_add(1, Ordering::SeqCst);
+            x + 10
+        }
+    }
+
+    // Note: `ASYNC_CONC_CALLS` is reset below; the in_impl cache is function-local
+    // and cannot be reset from here, so this test must remain the sole caller of `fetch`.
+    #[tokio::test]
+    async fn async_in_impl_concurrent_caches_per_key() {
+        ASYNC_CONC_CALLS.store(0, Ordering::SeqCst);
+        let s = AsyncConcSvc;
+        // First await for x=7: miss, body runs, result cached.
+        assert_eq!(s.fetch(7).await, 17);
+        assert_eq!(ASYNC_CONC_CALLS.load(Ordering::SeqCst), 1);
+        // Second await with the same arg: cache hit, body not re-run.
+        assert_eq!(s.fetch(7).await, 17);
+        assert_eq!(
+            ASYNC_CONC_CALLS.load(Ordering::SeqCst),
+            1,
+            "async in_impl concurrent_cached: second await with same arg must be a cache hit"
+        );
+        // Different arg: new key, body runs again.
+        assert_eq!(s.fetch(3).await, 13);
+        assert_eq!(ASYNC_CONC_CALLS.load(Ordering::SeqCst), 2);
     }
 }
