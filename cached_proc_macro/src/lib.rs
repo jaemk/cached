@@ -100,7 +100,7 @@ use proc_macro::TokenStream;
 ///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
 ///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
 ///   *Note*, this option requires the cache type to implement `CloneCached`. The compatible built-in options are:
-///   `ttl` or `ttl_millis` (uses `TtlCache`), `max_size` + `ttl`/`ttl_millis` (uses `LruTtlCache`), and
+///   `ttl`, `ttl_secs`, or `ttl_millis` (uses `TtlCache`), `max_size` + `ttl`/`ttl_secs`/`ttl_millis` (uses `LruTtlCache`), and
 ///   `expires` (uses `ExpiringCache`/`ExpiringLruCache`).
 ///   A custom `ty` that implements `CloneCached` is also accepted.
 ///   Requires a `Result<T, E>` return type. Mutually exclusive with `cache_err` and `sync_writes`.
@@ -238,7 +238,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// to also cache `None`. `Result<T, E>` caches only successful `Ok(T)` values and returns
 /// `Err(E)` without storing it; use `cache_err = true` to also cache `Err` values.
 /// `result_fallback = true` is supported: on an `Err` return, the last cached `Ok` value
-/// for the same key is returned instead (requires `ttl` or `ttl_millis`).
+/// for the same key is returned instead (requires `ttl`, `ttl_secs`, or `ttl_millis`).
 ///
 /// Result detection is exact: the macro matches only the bare identifier `Result` (including
 /// qualified forms like `std::result::Result<T, E>`). Type aliases are never resolved, so any
@@ -367,9 +367,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   bounds staleness under normal (transient) failure; it does not bound it under permanent
 ///   failure. This is useful for keeping the last successful result available during transient
 ///   failures, e.g. network disconnects.
-///   **Requires `ttl` or `ttl_millis`** - only implemented on the expiry-capable sharded stores
-///   (`ShardedTtlCache` and `ShardedLruTtlCache`). Setting `ttl`/`ttl_millis` without `max_size` selects
-///   `ShardedTtlCache`; with `max_size` selects `ShardedLruTtlCache`. Omitting both is a compile error.
+///   **Requires `ttl`, `ttl_secs`, or `ttl_millis`** - only implemented on the expiry-capable sharded stores
+///   (`ShardedTtlCache` and `ShardedLruTtlCache`). Setting `ttl`/`ttl_secs`/`ttl_millis` without `max_size` selects
+///   `ShardedTtlCache`; with `max_size` selects `ShardedLruTtlCache`. Omitting all three is a compile error.
 ///   Mutually exclusive with `cache_err`, `with_cached_flag`, `expires = true`, `redis = true`,
 ///   `disk = true`, and custom `ty`/`create`.
 ///   Requires the cache key type to implement `Clone` (the fallback path re-caches the key). The

@@ -57,7 +57,7 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     cache_none: bool,
     /// When `true`, an `Err` return serves the last cached `Ok` value for that key.
-    /// Requires `ttl` or `ttl_millis`. The stale value is read from the primary TTL cache slot via
+    /// Requires `ttl`, `ttl_secs`, or `ttl_millis`. The stale value is read from the primary TTL cache slot via
     /// `ConcurrentCloneCached::cache_get_with_expiry_status` (no separate store is
     /// created) and re-cached with a fresh TTL window on `Err`.
     #[darling(default)]

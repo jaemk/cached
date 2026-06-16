@@ -50,9 +50,11 @@ Every synchronous cache operation has a short alias (`get`/`set`/`remove`/`clear
 The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short alias
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
-The async trait operations (`CachedAsync` / `ConcurrentCachedAsync`) keep their `async_cache_*`
-spelling and have no short alias; the `async_` prefix already prevents collisions with the sync
-methods, so no alias is needed.
+`ConcurrentCachedAsync` keeps the `async_cache_*` spelling (`async_cache_get`, `async_cache_set`,
+`async_cache_remove`, …). `CachedAsync` uses the `async_`-prefixed `get_or_set_with` family
+(`async_get_or_set_with`, `async_try_get_or_set_with`, and their `_mut` variants); it has no
+`async_cache_*` methods. Neither trait has a short alias; the `async_` prefix already prevents
+collisions with the sync methods.
 
 **Features**
 
@@ -110,7 +112,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
 | Deduplicate concurrent first calls for same key | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
 | Recompute when an expression over the args is true | `#[cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the `refresh` arg is consumed by the generated guard so the body never sees it; add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the compiler warning |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the function body still receives `refresh` as a normal parameter, so if your body does not otherwise use it, add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the unused-variable warning |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Async | `#[cached(max_size = 100)] async fn remote(id: u64) -> Data` |
 | **`#[once]`** | |
@@ -132,7 +134,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Don't cache `None` returns (implicit for `Option<T>`) | `#[concurrent_cached] fn find(id: u64) -> Option<Row>` |
 | Serve stale value when function returns `Err` | `#[concurrent_cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
 | Recompute when an expression over the args is true | `#[concurrent_cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — see note above about the unused `refresh` variable |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the body still receives it as a normal parameter, so add `let _ = refresh;` (or `#[allow(unused_variables)]`) if your body does not otherwise use it |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[concurrent_cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
 | Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
@@ -687,9 +689,11 @@ pub mod prelude {
 /// The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short
 /// alias would collide with another in-scope trait's method of the same name (for example, your
 /// type also implements a trait with its own `get`).
-/// The async trait operations (`CachedAsync` / `ConcurrentCachedAsync`) keep their `async_cache_*`
-/// spelling and have no short alias; the `async_` prefix already prevents collisions with the sync
-/// methods, so no alias is needed.
+/// `ConcurrentCachedAsync` keeps the `async_cache_*` spelling (`async_cache_get`,
+/// `async_cache_set`, `async_cache_remove`, …). `CachedAsync` uses the `async_`-prefixed
+/// `get_or_set_with` family (`async_get_or_set_with`, `async_try_get_or_set_with`, and their
+/// `_mut` variants); it has no `async_cache_*` methods. Neither trait has a short alias; the
+/// `async_` prefix already prevents collisions with the sync methods.
 ///
 /// ```rust
 /// use cached::{Cached, UnboundCache};

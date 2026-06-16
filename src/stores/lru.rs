@@ -128,8 +128,8 @@ impl<K, V> LruCacheBuilder<K, V> {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::MissingRequired`](super::BuildError) if `max_size` was not set,
-    /// or [`BuildError::InvalidValue`](super::BuildError) if `max_size` is `0` or capacity
+    /// Returns [`BuildError::MissingRequired`](super::BuildError::MissingRequired) if `max_size` was not set,
+    /// or [`BuildError::InvalidValue`](super::BuildError::InvalidValue) if `max_size` is `0` or capacity
     /// pre-allocation fails.
     pub fn build(self) -> Result<LruCache<K, V>, super::BuildError>
     where

@@ -1,15 +1,15 @@
 /*
 Async Redis cache (`AsyncRedisCache`, async-std runtime): `#[concurrent_cached]`
-with a custom `create` block and cache priming. Uses `redis_smol` for the Redis
+with a custom `create` block and cache priming. Uses `redis_smol_native_tls` for the Redis
 connection (smol is the async executor that async-std is built on). The
 connection string is read from `CACHED_REDIS_CONNECTION_STRING`.
 
 See also `redis-async-tokio` for the same example on the Tokio runtime.
 
-Note: `redis_smol` enables TLS via native-tls. If you need plain-text connections
+Note: `redis_smol_native_tls` enables TLS via native-tls. If you need plain-text connections
 only, you can enable `redis/smol-comp` directly instead.
 
-Note: `redis_smol` transitively enables `tokio` (through cached's `async`
+Note: `redis_smol_native_tls` transitively enables `tokio` (through cached's `async`
 feature) so that cached's internal sync primitives compile, but the Tokio
 runtime is never started — all async execution is driven by async-std.
 
@@ -17,7 +17,7 @@ Start redis if you don't already have one:
     docker run --rm --name async-cached-redis-example -p 6379:6379 -d redis
 Run:
     CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
-        cargo run --example redis-async-async-std --features "redis_smol,proc_macro"
+        cargo run --example redis-async-async-std --features "redis_smol_native_tls,proc_macro"
 Cleanup:
     docker rm -f async-cached-redis-example
 */

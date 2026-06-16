@@ -274,6 +274,9 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         })
     }
 
+    /// Return an iterator of key-value pairs with their insertion timestamps
+    /// in the current order from most to least recently used.
+    /// Items passed their expiration seconds will be excluded.
     pub fn iter_order(&self) -> Vec<(K, (Instant, V))>
     where
         K: Clone,

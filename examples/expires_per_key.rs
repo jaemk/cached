@@ -41,7 +41,7 @@ impl Expires for MyValue {
     }
 }
 
-// A keyed cache using the #[cached] macro — each user_id key independently expires
+// A keyed cache using the #[cached] macro - each user_id key independently expires
 // when its stored value reports `is_expired() == true`.
 //
 // `expires = true` alone gives an unbounded ExpiringCache.
@@ -188,7 +188,7 @@ fn main() {
     println!("\n--- 3. #[cached(expires = true)] Macro (keyed) ---");
     // Each cache key (user_id) has its own independent expiry.
 
-    // First calls for each user — both are cache misses.
+    // First calls for each user - both are cache misses.
     println!("First call for user 1 (expires in 500ms):");
     let u1_t1 = fetch_token(1, 500);
     println!("  Returned: '{}'", u1_t1.data);
@@ -197,7 +197,7 @@ fn main() {
     let u2_t1 = fetch_token(2, 10_000);
     println!("  Returned: '{}'", u2_t1.data);
 
-    // Same arguments → cache hits, function not re-executed.
+    // Same arguments -> cache hits, function not re-executed.
     println!("\nSecond call for user 1 (cache hit):");
     let u1_t2 = fetch_token(1, 500);
     println!("  Returned: '{}' (same token)", u1_t2.data);
@@ -205,7 +205,7 @@ fn main() {
     println!("\nWaiting 1 second...");
     std::thread::sleep(Duration::from_secs(1));
 
-    // User 1's token has expired → re-evaluated. User 2's is still live.
+    // User 1's token has expired -> re-evaluated. User 2's is still live.
     println!("\nAfter 1 second:");
     let u1_t3 = fetch_token(1, 500);
     println!("  user 1: '{}' (re-evaluated — was expired)", u1_t3.data);

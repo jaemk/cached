@@ -1,14 +1,14 @@
 /*
 In-memory concurrent memoization with zero boilerplate.
 
-`#[concurrent_cached]` defaults to a sharded in-memory store — no Redis,
+`#[concurrent_cached]` defaults to a sharded in-memory store - no Redis,
 no disk, no `map_error`, no `ty`/`create`. The right variant is selected
 automatically based on `max_size` and `ttl_secs` attributes:
 
-  (no attrs)                       → ShardedCache        (unbounded, no TTL)
-  max_size = N                     → ShardedLruCache     (LRU, no TTL)
-  ttl_secs = T                     → ShardedTtlCache     (unbounded, with TTL)
-  max_size = N, ttl_secs = T       → ShardedLruTtlCache  (LRU, with TTL)
+  (no attrs)                       -> ShardedCache        (unbounded, no TTL)
+  max_size = N                     -> ShardedLruCache     (LRU, no TTL)
+  ttl_secs = T                     -> ShardedTtlCache     (unbounded, with TTL)
+  max_size = N, ttl_secs = T       -> ShardedLruTtlCache  (LRU, with TTL)
 
 For per-value expiry (`expires = true`), see `examples/sharded_expiring.rs`.
 
@@ -37,7 +37,7 @@ fn compute(x: u64) -> u64 {
 }
 
 // LRU: ShardedLruCache (max_size = 128 requested; actual capacity is ≥ 128 because each shard
-// gets ceiling(max_size/shards) slots with a minimum of 16 — so max_size=128 with 8 shards is
+// gets ceiling(max_size/shards) slots with a minimum of 16 - so max_size=128 with 8 shards is
 // exactly 128, but max_size=10 with 8 shards would yield 128 slots (8 × 16 minimum).
 // See the `max_size` attribute docs for details.)
 #[concurrent_cached(max_size = 128)]
@@ -63,14 +63,14 @@ fn compute_shards(x: u64) -> u64 {
     x * x
 }
 
-// Only cache successful lookups — Err is returned but not stored, so the
+// Only cache successful lookups - Err is returned but not stored, so the
 // function is retried on the next call.
 #[concurrent_cached]
 fn load_record(id: u64) -> Result<String, std::io::Error> {
     Ok(format!("record_{id}"))
 }
 
-// Cache Option — only Some values are stored; None is returned without being
+// Cache Option - only Some values are stored; None is returned without being
 // cached, so find_record(0) will re-execute on every call.
 #[concurrent_cached]
 fn find_record(id: u64) -> Option<String> {
@@ -135,7 +135,7 @@ fn main() {
 
     // Inspect the cache directly via the short alias `get`. The `ConcurrentCached`
     // trait must be in scope. The async trait's operations are `async_`-prefixed:
-    // `COMPUTE.async_cache_get(&7).await` — the async trait provides no short alias,
+    // `COMPUTE.async_cache_get(&7).await` - the async trait provides no short alias,
     // so `async_cache_get` is the only spelling available there.
     {
         let val = COMPUTE.get(&7).expect("infallible");

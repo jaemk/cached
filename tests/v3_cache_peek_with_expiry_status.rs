@@ -125,7 +125,9 @@ fn ttl_peek_does_not_renew_ttl_on_refresh_store() {
 
     // Peek sees it expired and must not renew.
     assert_eq!(c.cache_peek_with_expiry_status(&1), (Some(11), true));
-    // Still expired immediately after: a renewing read would have reset the clock.
+    // A second peek must still report expired: if peek had treated the entry as
+    // live and triggered refresh_on_hit, the entry would now be unexpired and
+    // the assertion below would fail.
     assert!(
         c.cache_peek_with_expiry_status(&1).1,
         "peek must not renew TTL"

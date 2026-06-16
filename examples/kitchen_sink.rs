@@ -251,7 +251,7 @@ pub fn main() {
     expires_for_priming(1);
     // Second call: cache hit (key 1 is still within its TTL)
     expires_for_priming(1);
-    // Prime key 1 and key 2 — refreshes the cache directly without affecting hit/miss counters
+    // Prime key 1 and key 2 - refreshes the cache directly without affecting hit/miss counters
     expires_for_priming_prime_cache(1);
     expires_for_priming_prime_cache(2);
     {
@@ -264,7 +264,7 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     // Re-prime key 1 so it's fresh in the cache again
     expires_for_priming_prime_cache(1);
-    // Now calling the function finds the freshly-primed value — it's a hit
+    // Now calling the function finds the freshly-primed value - it's a hit
     assert_eq!(expires_for_priming(1), 1);
     {
         let c = EXPIRES_FOR_PRIMING.read();

@@ -211,9 +211,13 @@ where
     pub fn build(self) -> Result<RedbCache<K, V>, RedbCacheBuildError> {
         // Validate cache_name before using it as a filename component.
         // An empty name yields a meaningless filename. A name containing a path
-        // separator ('/' or '\\') can silently escape the cache directory or
-        // create nested subdirectories, and '.' / '..' are path-traversal
-        // components. (':' is allowed: it is established usage in
+        // separator ('/' or '\\') or a NUL byte can silently escape the cache
+        // directory or create nested subdirectories; those are the checks that
+        // actually prevent traversal. The '.' and '..' checks are
+        // belt-and-suspenders: because the name is always suffixed with
+        // `_v<VERSION>.redb`, a bare '.' or '..' can never reach the filesystem
+        // as a traversal component, but they are rejected anyway as nonsensical
+        // names. (':' is allowed: it is established usage in
         // module-path-derived names.)
         {
             let n = &self.cache_name;
