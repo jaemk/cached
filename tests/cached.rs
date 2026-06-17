@@ -68,6 +68,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_result_fallback_sync_writes.rs");
     t.compile_fail("tests/ui/cached_sync_lock_unknown.rs");
     t.compile_fail("tests/ui/cached_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_malformed_ttl.rs");
     t.compile_fail("tests/ui/cached_expires_type_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_create_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_with_cached_flag_exclusive.rs");
@@ -90,6 +91,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/once_time_attr_renamed.rs");
     t.compile_fail("tests/ui/once_with_cached_flag_foreign.rs");
     t.compile_fail("tests/ui/once_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/once_expires_malformed_ttl.rs");
     t.compile_fail("tests/ui/once_expires_non_expires_type.rs");
     t.compile_fail("tests/ui/once_expires_cache_none_exclusive.rs");
     t.compile_fail("tests/ui/once_expires_cache_err_exclusive.rs");
@@ -112,6 +114,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_async_redis_no_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_redis_no_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_create_conflict.rs");
+    t.compile_fail("tests/ui/concurrent_cached_refresh_create_conflict.rs");
     t.compile_fail("tests/ui/concurrent_cached_max_size_create_conflict.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_create_ignored_attrs.rs");
     t.compile_fail("tests/ui/concurrent_cached_option_return.rs");
@@ -133,6 +136,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_key_without_convert.rs");
     t.compile_fail("tests/ui/concurrent_cached_refresh_without_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_malformed_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_redis_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_disk_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_ty_exclusive.rs");

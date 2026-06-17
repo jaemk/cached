@@ -75,7 +75,7 @@ collisions with the sync methods.
   will use a connection manager instead of a `MultiplexedConnection`. Implies `async` (Tokio runtime) and `redis_store`,
   but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_async_cache`: Enable Redis client-side caching over RESP3 for async Redis caches.
-  Uses the Tokio async Redis path with `native-tls` (it pulls in `redis_tokio_native_tls`).
+  Implies `redis_tokio`, `async`, and `redis_store`, but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_ahash`: Enable the optional `ahash` feature of `redis`
 - `disk_store`: Include disk cache store
 - `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread

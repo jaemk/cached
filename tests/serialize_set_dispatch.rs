@@ -594,5 +594,18 @@ mod async_serialize_store {
             1,
             "Owned async fallback path must clone the value exactly once at the set site"
         );
+
+        // Second call: cache hit; the set-site shim is not invoked. ASYNC_CLONES is
+        // reset to 0 here, so the assertion below measures only the one clone from
+        // AsyncOwnedStore::async_cache_get (which calls `.cloned()` to return an owned
+        // value from the locked map).
+        ASYNC_CLONES.store(0, Ordering::SeqCst);
+        let hit = async_via_owned(7).await.unwrap();
+        assert_eq!(hit, AsyncVal(7));
+        assert_eq!(
+            ASYNC_CLONES.load(Ordering::SeqCst),
+            1,
+            "Cache hit: set-site shim not called; the one clone comes from async_cache_get returning an owned value"
+        );
     }
 }

@@ -44,7 +44,7 @@ redis_tokio = [
 ]
 redis_tokio_native_tls = ["redis_tokio", "redis/tokio-native-tls-comp"]
 redis_tokio_rustls = ["redis_tokio", "redis/tokio-rustls-comp"]
-redis_async_cache = ["redis_store", "async", "redis_tokio_native_tls", "redis/cache-aio"]
+redis_async_cache = ["redis_store", "async", "redis_tokio", "redis/cache-aio"]
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["redb", "serde", "rmp-serde", "directories"]
 wasm = []
@@ -186,7 +186,7 @@ required-features = ["disk_store", "async_tokio_rt_multi_thread", "proc_macro"]
 
 [[example]]
 name = "redis-client-side-cache-tokio"
-required-features = ["redis_async_cache", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_async_cache", "redis_tokio_native_tls", "async_tokio_rt_multi_thread", "proc_macro"]
 
 [[example]]
 name = "sharded"

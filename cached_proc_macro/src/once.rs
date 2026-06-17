@@ -138,19 +138,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Resolve the TTL `Duration` token from whichever of `ttl` (expr), `ttl_secs`,
-    // or `ttl_millis` is set. This performs the 3-way mutual-exclusion check, the
-    // `ttl_secs`/`ttl_millis` >= 1 validation, and parses the `ttl` expression.
-    let (has_ttl, ttl_duration) = match resolve_ttl_duration(
-        &krate,
-        &args.ttl,
-        args.ttl_secs,
-        args.ttl_millis,
-        fn_ident.span(),
-    ) {
-        Ok(v) => v,
-        Err(e) => return e.to_compile_error().into(),
-    };
+    // Run the `expires`-vs-ttl mutual-exclusion checks BEFORE resolving the TTL
+    // `Duration`. These need only presence (`is_some()`), not a parsed value, and
+    // surfacing "mutually exclusive" is more relevant than a `ttl` parse error
+    // when `expires` is also set.
     if args.expires && args.ttl_secs.is_some() {
         return syn::Error::new(
             fn_ident.span(),
@@ -171,6 +162,29 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+    if args.expires && args.ttl.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ttl` are mutually exclusive - \
+             `expires` delegates expiry to the value via the `Expires` trait; \
+             `ttl` applies a uniform time-based TTL",
+        )
+        .to_compile_error()
+        .into();
+    }
+    // Resolve the TTL `Duration` token from whichever of `ttl` (expr), `ttl_secs`,
+    // or `ttl_millis` is set. This performs the 3-way mutual-exclusion check, the
+    // `ttl_secs`/`ttl_millis` >= 1 validation, and parses the `ttl` expression.
+    let (has_ttl, ttl_duration) = match resolve_ttl_duration(
+        &krate,
+        &args.ttl,
+        args.ttl_secs,
+        args.ttl_millis,
+        fn_ident.span(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
     if args.result.is_some() {
         return syn::Error::new(
@@ -189,17 +203,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             "the `option` attribute has been removed. `Option<T>` returns now skip caching \
              `None` by default. Remove `option = true` (or `option = false`), or use \
              `cache_none = true` to force-cache `None` values.",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    if args.expires && args.ttl.is_some() {
-        return syn::Error::new(
-            fn_ident.span(),
-            "`expires` and `ttl` are mutually exclusive - \
-             `expires` delegates expiry to the value via the `Expires` trait; \
-             `ttl` applies a uniform time-based TTL",
         )
         .to_compile_error()
         .into();
@@ -557,26 +560,38 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let do_set_return_block = match args.sync_writes {
         SyncWriteMode::Default => {
-            // Hoist the force_refresh predicate into a single boolean so it is
-            // evaluated ONCE per call. Without this the predicate would be
-            // expanded both inside the optimistic read-lock block and again in
-            // the write-lock re-check below, double-evaluating any side-effects
-            // in the user's predicate block (#FIX-B).
+            // When `force_refresh` IS set, hoist its predicate into a single
+            // boolean so it is evaluated ONCE per call. Without this the
+            // predicate would be expanded both inside the optimistic read-lock
+            // block and again in the write-lock re-check below, double-evaluating
+            // any side-effects in the user's predicate block (#FIX-B).
             //
-            // Pattern from cached.rs:924-925:
-            //   `#force_refresh_guard { false } else { true }` evaluates to:
-            //   - `false` when force_refresh is absent (`if true { false } else { true }`)
-            //   - the user's block expression when force_refresh is present
-            //     (`if !(block) { false } else { true }` == `block`)
-            let force_refreshing_flag = quote! {
-                let __cached_force_refreshing = #force_refresh_guard { false } else { true };
+            // `#force_refresh_guard { false } else { true }` is
+            // `if !(block) { false } else { true }` == `block`, so the binding
+            // holds the user's predicate value.
+            //
+            // When `force_refresh` is absent, emit NEITHER the binding nor a read
+            // of it: the two read sites below fall back to `#force_refresh_guard`,
+            // which is `if true` with no `force_refresh`, so the cached value is
+            // always taken (equivalent to `if !__cached_force_refreshing` when the
+            // flag would be `false`). This avoids emitting a constant
+            // `if true { false } else { true }` binding (a needless-bool smell).
+            let (force_refreshing_flag, read_guard) = if args.force_refresh.is_some() {
+                (
+                    quote! {
+                        let __cached_force_refreshing = #force_refresh_guard { false } else { true };
+                    },
+                    quote! { if !__cached_force_refreshing },
+                )
+            } else {
+                (quote! {}, force_refresh_guard.clone())
             };
-            // Inline read-lock block using the already-computed boolean so the
+            // Inline read-lock block using the already-computed guard so the
             // predicate is not re-evaluated here.
             let r_lock_return_cache_block_hoisted = quote! {
                 {
                     #r_lock
-                    if !__cached_force_refreshing {
+                    #read_guard {
                         if let Some(__cached_result) = &*__cached_cached {
                             #return_cache_block
                         }
@@ -587,7 +602,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 #force_refreshing_flag
                 #r_lock_return_cache_block_hoisted
                 #w_lock
-                if !__cached_force_refreshing {
+                #read_guard {
                     if let Some(__cached_result) = &*__cached_cached {
                         #return_cache_block
                     }

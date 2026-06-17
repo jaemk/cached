@@ -54,7 +54,7 @@ TEST_TARGETS = tests \
                tests/redis-connection-manager \
                tests/redis-async-cache \
                tests/redis-async-cache-tokio \
-               tests/redis-async-cache-smol \
+               tests/redis-async-cache-rustls \
                tests/redis-store \
                tests/redis-store-standalone \
                tests/redis-tokio \
@@ -129,7 +129,7 @@ help: ## List all supported Make targets
 			tests/redis-connection-manager) desc="Check standalone redis_connection_manager feature compilation" ;; \
 			tests/redis-async-cache) desc="Check standalone redis_async_cache feature compilation" ;; \
 			tests/redis-async-cache-tokio) desc="Check redis_async_cache with redis_tokio_native_tls" ;; \
-			tests/redis-async-cache-smol) desc="Check redis_async_cache with redis_smol_native_tls" ;; \
+			tests/redis-async-cache-rustls) desc="Check redis_async_cache with redis_tokio_rustls" ;; \
 			tests/redis-store) desc="Run synchronous Redis store tests" ;; \
 			tests/redis-store-standalone) desc="Check redis_store feature compilation without proc_macro" ;; \
 			tests/redis-tokio) desc="Run async Redis Tokio tests" ;; \
@@ -242,7 +242,7 @@ tests/disk-store-sync:
 # ordering on the aggregate below is not honored under parallel make. The
 # standalone `*-async-cache*`/`connection-manager` targets are compile-only
 # `cargo check`s and need no container.
-tests/redis: tests/redis-connection-manager tests/redis-async-cache tests/redis-async-cache-tokio tests/redis-async-cache-smol tests/redis-store-standalone tests/redis-store tests/redis-tokio tests/all-features
+tests/redis: tests/redis-connection-manager tests/redis-async-cache tests/redis-async-cache-tokio tests/redis-async-cache-rustls tests/redis-store-standalone tests/redis-store tests/redis-tokio tests/all-features
 
 tests/redis-store-standalone:
 	@echo "[$@]: Checking standalone redis_store feature compilation..."
@@ -260,9 +260,9 @@ tests/redis-async-cache-tokio:
 	@echo "[$@]: Checking redis_async_cache with redis_tokio_native_tls..."
 	$(CARGO_COMMAND) check --no-default-features --features "redis_tokio_native_tls,redis_async_cache"
 
-tests/redis-async-cache-smol:
-	@echo "[$@]: Checking redis_async_cache with redis_smol_native_tls..."
-	$(CARGO_COMMAND) check --no-default-features --features "redis_smol_native_tls,redis_async_cache"
+tests/redis-async-cache-rustls:
+	@echo "[$@]: Checking redis_async_cache with redis_tokio_rustls..."
+	$(CARGO_COMMAND) check --no-default-features --features "redis_tokio_rustls,redis_async_cache"
 
 # Synchronous Redis store only
 tests/redis-store: | docker/redis

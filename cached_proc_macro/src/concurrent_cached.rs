@@ -298,20 +298,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Resolve the TTL `Duration` token from whichever of `ttl` (expr), `ttl_secs`,
-    // or `ttl_millis` is set. This performs the 3-way mutual-exclusion check, the
-    // `ttl_secs`/`ttl_millis` >= 1 validation, and parses the `ttl` expression.
-    // (A zero `ttl_secs`/`ttl_millis` is rejected here, before any store path runs.)
-    let (has_ttl, ttl_duration) = match resolve_ttl_duration(
-        &krate,
-        &args.ttl,
-        args.ttl_secs,
-        args.ttl_millis,
-        fn_ident.span(),
-    ) {
-        Ok(v) => v,
-        Err(e) => return e.to_compile_error().into(),
-    };
+    // Run the `expires`-vs-ttl mutual-exclusion checks BEFORE resolving the TTL
+    // `Duration`. These need only presence (`is_some()`), not a parsed value, and
+    // surfacing "mutually exclusive" is more relevant than a `ttl` parse error
+    // when `expires` is also set.
     if args.expires && args.ttl_secs.is_some() {
         return syn::Error::new(
             fn_ident.span(),
@@ -331,16 +321,30 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+    if args.expires && args.ttl.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait",
+        )
+        .to_compile_error()
+        .into();
+    }
+    // Resolve the TTL `Duration` token from whichever of `ttl` (expr), `ttl_secs`,
+    // or `ttl_millis` is set. This performs the 3-way mutual-exclusion check, the
+    // `ttl_secs`/`ttl_millis` >= 1 validation, and parses the `ttl` expression.
+    // (A zero `ttl_secs`/`ttl_millis` is rejected here, before any store path runs.)
+    let (has_ttl, ttl_duration) = match resolve_ttl_duration(
+        &krate,
+        &args.ttl,
+        args.ttl_secs,
+        args.ttl_millis,
+        fn_ident.span(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
     if args.expires {
-        if args.ttl.is_some() {
-            return syn::Error::new(
-                fn_ident.span(),
-                "`expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait",
-            )
-            .to_compile_error()
-            .into();
-        }
         if args.redis {
             return syn::Error::new(
                 fn_ident.span(),

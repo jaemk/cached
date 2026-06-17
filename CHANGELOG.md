@@ -11,11 +11,12 @@
   TLS) alongside to restore TLS.
 - `redis_smol` no longer implies native-tls. Add `redis_smol_native_tls` or `redis_smol_rustls`
   alongside if TLS is required.
-- `redis_async_cache` is unchanged: it still uses the Tokio runtime with native-tls (it now
-  pulls in `redis_tokio_native_tls` + `redis/cache-aio`, equivalent to the previous behavior).
-- **Migration:** if you were relying on `redis_tokio` or `redis_smol` for TLS connectivity, add
-  `redis_tokio_native_tls` (or `redis_tokio_rustls`) / `redis_smol_native_tls` (or
-  `redis_smol_rustls`) to your `Cargo.toml` features list.
+- `redis_async_cache` is now also TLS-agnostic: it pulls `redis_tokio` + `redis/cache-aio`.
+  Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+- **Migration:** if you were relying on `redis_tokio`, `redis_smol`, or `redis_async_cache`
+  for TLS connectivity, add the appropriate TLS backend feature (`redis_tokio_native_tls` /
+  `redis_tokio_rustls` for Tokio; `redis_smol_native_tls` / `redis_smol_rustls` for smol)
+  to your `Cargo.toml` features list.
 
 #### Minimum supported Rust version
 - MSRV raised from 1.85 to 1.89 (required by `redb` 4.x).
