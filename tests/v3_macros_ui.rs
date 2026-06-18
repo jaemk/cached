@@ -66,4 +66,21 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/cached_in_impl_requires_self.rs");
     t.compile_fail("tests/ui/once_in_impl_requires_self.rs");
     t.compile_fail("tests/ui/concurrent_cached_in_impl_requires_self.rs");
+    // Item 2: `name` must be a valid Rust identifier
+    t.compile_fail("tests/ui/cached_name_invalid_ident.rs");
+    t.compile_fail("tests/ui/once_name_invalid_ident.rs");
+    t.compile_fail("tests/ui/concurrent_cached_name_invalid_ident.rs");
+    // Item 2 edge cases: leading digit and reserved keyword are also rejected
+    // (same spanned message) and must not reach `Ident::new` (which panics on
+    // a keyword).
+    t.compile_fail("tests/ui/cached_name_leading_digit.rs");
+    t.compile_fail("tests/ui/cached_name_keyword.rs");
+    // Item 11: `ShardHasher: Clone` supertrait - a non-Clone custom hasher is rejected.
+    t.compile_fail("tests/ui/sharded_non_clone_shard_hasher.rs");
+    // Item 9: `#[cached]`-only attributes rejected on other macros
+    t.compile_fail("tests/ui/once_sync_lock_unsupported.rs");
+    t.compile_fail("tests/ui/once_unsync_reads_unsupported.rs");
+    t.compile_fail("tests/ui/concurrent_cached_sync_writes_buckets_unsupported.rs");
+    t.compile_fail("tests/ui/concurrent_cached_sync_lock_unsupported.rs");
+    t.compile_fail("tests/ui/concurrent_cached_unsync_reads_unsupported.rs");
 }

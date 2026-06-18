@@ -152,7 +152,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedLruTtlCacheBase<K, V, H> {
+impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedLruTtlCacheBase<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.

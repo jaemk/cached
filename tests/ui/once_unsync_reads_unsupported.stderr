@@ -1,0 +1,5 @@
+error: `unsync_reads` is not supported on `#[once]`
+ --> tests/ui/once_unsync_reads_unsupported.rs:4:4
+  |
+4 | fn f() -> i32 {
+  |    ^

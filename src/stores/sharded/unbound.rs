@@ -121,7 +121,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedUnboundCacheBase<K, V, H> {
+impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedUnboundCacheBase<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn custom_hasher() {
-        #[derive(Default)]
+        #[derive(Clone, Default)]
         struct ConstHasher;
         impl ShardHasher<u32> for ConstHasher {
             fn shard_hash(&self, _key: &u32) -> u64 {

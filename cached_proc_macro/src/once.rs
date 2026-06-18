@@ -57,6 +57,12 @@ struct OnceMacroArgs {
     result: Option<bool>,
     #[darling(default)]
     option: Option<bool>,
+    // `#[cached]`-only attributes - intercepted to provide a clear error instead
+    // of darling's generic "unknown field" message.
+    #[darling(default)]
+    sync_lock: Option<String>,
+    #[darling(default)]
+    unsync_reads: Option<bool>,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -208,6 +214,21 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    if args.sync_lock.is_some() {
+        return syn::Error::new(fn_ident.span(), "`sync_lock` is not supported on `#[once]`")
+            .to_compile_error()
+            .into();
+    }
+
+    if args.unsync_reads.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`unsync_reads` is not supported on `#[once]`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     if args.expires && args.with_cached_flag {
         return syn::Error::new(
             fn_ident.span(),
@@ -303,7 +324,14 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make the cache identifier
     let cache_ident = match args.name {
-        Some(name) => Ident::new(&name, fn_ident.span()),
+        Some(ref name) => {
+            if syn::parse_str::<syn::Ident>(name).is_err() {
+                return syn::Error::new(fn_ident.span(), "`name` must be a valid Rust identifier")
+                    .to_compile_error()
+                    .into();
+            }
+            Ident::new(name, fn_ident.span())
+        }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 

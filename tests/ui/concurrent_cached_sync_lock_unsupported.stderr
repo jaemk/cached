@@ -1,0 +1,5 @@
+error: `sync_lock` is not supported on `#[concurrent_cached]`
+ --> tests/ui/concurrent_cached_sync_lock_unsupported.rs:3:21
+  |
+3 | #[concurrent_cached(sync_lock = "mutex")]
+  |                     ^^^^^^^^^

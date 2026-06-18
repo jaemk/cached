@@ -129,7 +129,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K> + Clone>
+impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
     ShardedExpiringCacheBase<K, V, H>
 {
     /// Return an independent deep copy of this cache — entries and metrics are

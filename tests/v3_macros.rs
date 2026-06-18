@@ -2051,3 +2051,100 @@ mod refresh_false_no_conflict_tests {
         );
     }
 }
+
+// ── Item 2 positive guard: a VALID `name` still compiles and caches ──────────
+// The `name` validation rejects non-identifier strings (see the
+// `*_name_invalid_ident` trybuild fixtures). This guard proves the validation
+// did not over-reject: a legal Rust identifier in `name` produces a working
+// cache static under that exact name and memoizes across calls.
+
+static VALID_NAME_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cached(name = "MY_CACHE")]
+fn valid_name_caches(x: u32) -> u32 {
+    VALID_NAME_CALLS.fetch_add(1, Ordering::SeqCst);
+    x + 1
+}
+
+#[test]
+fn valid_name_compiles_and_caches() {
+    VALID_NAME_CALLS.store(0, Ordering::SeqCst);
+
+    // First call for key 5: cache miss, body runs.
+    assert_eq!(valid_name_caches(5), 6);
+    assert_eq!(VALID_NAME_CALLS.load(Ordering::SeqCst), 1);
+
+    // Repeat of key 5: cache hit, body must not run.
+    assert_eq!(valid_name_caches(5), 6);
+    assert_eq!(
+        VALID_NAME_CALLS.load(Ordering::SeqCst),
+        1,
+        "a valid `name` must produce a working memoizing cache"
+    );
+
+    // A different key is a distinct entry: body runs once more.
+    assert_eq!(valid_name_caches(10), 11);
+    assert_eq!(VALID_NAME_CALLS.load(Ordering::SeqCst), 2);
+
+    // The cache static is named exactly `MY_CACHE` (proves `name` took effect).
+    // If the identifier were not honored this reference would not resolve.
+    use cached::Cached;
+    assert!(MY_CACHE.read().cache_size() >= 2);
+}
+
+// ── Item 9 positive guard: `sync_writes` is STILL valid on `#[once]` ─────────
+// Item 9 rejects `sync_lock`/`unsync_reads` on `#[once]`, but `sync_writes`
+// (and `sync_writes = "default"`/`= true`) must remain accepted because they
+// drive `#[once]` codegen. These guards prove the rejection did not over-reach.
+// Each function's cache static is module-global and cannot be reset, so each is
+// call-exclusive to its own test.
+
+static ONCE_SW_DEFAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[once(sync_writes = "default")]
+fn once_sync_writes_default(x: usize) -> usize {
+    ONCE_SW_DEFAULT_CALLS.fetch_add(1, Ordering::SeqCst);
+    x * 2
+}
+
+#[test]
+fn once_sync_writes_default_compiles_and_caches() {
+    ONCE_SW_DEFAULT_CALLS.store(0, Ordering::SeqCst);
+
+    // First call: cache miss, body runs.
+    assert_eq!(once_sync_writes_default(21), 42);
+    assert_eq!(ONCE_SW_DEFAULT_CALLS.load(Ordering::SeqCst), 1);
+
+    // `#[once]` stores a single value for ALL arguments: a different argument
+    // still returns the first cached value and does not re-run the body.
+    assert_eq!(once_sync_writes_default(100), 42);
+    assert_eq!(
+        ONCE_SW_DEFAULT_CALLS.load(Ordering::SeqCst),
+        1,
+        "`sync_writes = \"default\"` on `#[once]` must still compile and cache the one value"
+    );
+}
+
+static ONCE_SW_TRUE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[once(sync_writes = true)]
+fn once_sync_writes_true(x: usize) -> usize {
+    ONCE_SW_TRUE_CALLS.fetch_add(1, Ordering::SeqCst);
+    x + 7
+}
+
+#[test]
+fn once_sync_writes_true_compiles_and_caches() {
+    ONCE_SW_TRUE_CALLS.store(0, Ordering::SeqCst);
+
+    assert_eq!(once_sync_writes_true(1), 8);
+    assert_eq!(ONCE_SW_TRUE_CALLS.load(Ordering::SeqCst), 1);
+
+    // Single shared value: a hit on any later call.
+    assert_eq!(once_sync_writes_true(999), 8);
+    assert_eq!(
+        ONCE_SW_TRUE_CALLS.load(Ordering::SeqCst),
+        1,
+        "`sync_writes = true` on `#[once]` must still compile and cache"
+    );
+}

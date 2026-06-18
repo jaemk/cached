@@ -1,0 +1,5 @@
+error: `name` must be a valid Rust identifier
+ --> tests/ui/cached_name_leading_digit.rs:7:4
+  |
+7 | fn f(x: i32) -> i32 {
+  |    ^

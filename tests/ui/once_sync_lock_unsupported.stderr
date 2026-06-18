@@ -1,0 +1,5 @@
+error: `sync_lock` is not supported on `#[once]`
+ --> tests/ui/once_sync_lock_unsupported.rs:4:4
+  |
+4 | fn f() -> i32 {
+  |    ^

@@ -169,9 +169,14 @@ fn reject_cached_only_attrs(attr_args: &[NestedMeta]) -> Result<(), syn::Error> 
                  Use `cache_none = true` to force caching `None` values.",
             ),
             "sync_writes" => Some(
-                "`sync_writes` is not supported by #[concurrent_cached]; concurrent stores \
+                "`sync_writes` is not supported on `#[concurrent_cached]`; concurrent stores \
                  synchronize cache access internally but do not deduplicate first-call execution",
             ),
+            "sync_writes_buckets" => {
+                Some("`sync_writes_buckets` is not supported on `#[concurrent_cached]`")
+            }
+            "sync_lock" => Some("`sync_lock` is not supported on `#[concurrent_cached]`"),
+            "unsync_reads" => Some("`unsync_reads` is not supported on `#[concurrent_cached]`"),
             _ => None,
         };
         if let Some(message) = message {
@@ -673,7 +678,14 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make the cache identifier
     let cache_ident = match args.name {
-        Some(ref name) => Ident::new(name, fn_ident.span()),
+        Some(ref name) => {
+            if syn::parse_str::<syn::Ident>(name).is_err() {
+                return syn::Error::new(fn_ident.span(), "`name` must be a valid Rust identifier")
+                    .to_compile_error()
+                    .into();
+            }
+            Ident::new(name, fn_ident.span())
+        }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
     let cache_name = cache_ident.to_string();

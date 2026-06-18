@@ -4,7 +4,7 @@
 // `ShardedUnboundCache::builder().hasher(h)` instead, which switches the builder's hasher type.
 use cached::{ShardHasher, ShardedUnboundCacheBase};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ConstHasher;
 impl ShardHasher<u32> for ConstHasher {
     fn shard_hash(&self, _key: &u32) -> u64 {

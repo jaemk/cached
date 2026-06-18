@@ -500,7 +500,14 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // make the cache identifier
     let cache_ident = match args.name {
-        Some(ref name) => Ident::new(name, fn_ident.span()),
+        Some(ref name) => {
+            if syn::parse_str::<syn::Ident>(name).is_err() {
+                return syn::Error::new(fn_ident.span(), "`name` must be a valid Rust identifier")
+                    .to_compile_error()
+                    .into();
+            }
+            Ident::new(name, fn_ident.span())
+        }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 

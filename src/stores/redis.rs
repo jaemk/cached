@@ -327,9 +327,10 @@ pub enum RedisCacheBuildError {
     Pool(#[from] r2d2::Error),
     #[error(transparent)]
     InvalidTtl(#[from] super::BuildError),
-    #[error("Connection string not specified or invalid in env var {env_key:?}: {error:?}")]
+    #[error("Connection string not specified or invalid in env var {env_key:?}: {error}")]
     MissingConnectionString {
         env_key: String,
+        #[source]
         error: std::env::VarError,
     },
     #[error(
@@ -573,6 +574,23 @@ impl<K, V> std::fmt::Debug for RedisCache<K, V> {
     }
 }
 
+impl<K, V> Clone for RedisCache<K, V> {
+    /// Shallow clone - both handles share the same r2d2 connection pool
+    /// (`r2d2::Pool` is `Arc`-backed). The `ttl` is snapshot into a fresh
+    /// `Mutex` so the two handles can independently update their TTL view.
+    fn clone(&self) -> Self {
+        Self {
+            ttl: Mutex::new(*self.ttl.lock()),
+            refresh: AtomicBool::new(self.refresh.load(Ordering::Relaxed)),
+            namespace: self.namespace.clone(),
+            prefix: self.prefix.clone(),
+            connection_string: self.connection_string.clone(),
+            pool: self.pool.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<K, V> RedisCache<K, V>
 where
     K: Display,
@@ -616,13 +634,17 @@ pub enum RedisCacheError {
     Redis(#[from] redis::RedisError),
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
-    #[error("Error deserializing cached value {cached_value:?}: {error:?}")]
+    #[error("Error deserializing cached value {cached_value:?}: {error}")]
     CacheDeserialization {
         cached_value: String,
+        #[source]
         error: serde_json::Error,
     },
-    #[error("Error serializing cached value: {error:?}")]
-    CacheSerialization { error: serde_json::Error },
+    #[error("Error serializing cached value: {error}")]
+    CacheSerialization {
+        #[source]
+        error: serde_json::Error,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1153,6 +1175,24 @@ mod async_redis {
         }
     }
 
+    impl<K, V> Clone for AsyncRedisCache<K, V> {
+        /// Shallow clone - the underlying multiplexed connection or connection
+        /// manager is `Clone` (internally `Arc`-backed). The `ttl` is snapshot
+        /// into a fresh `Mutex` so the two handles can independently update
+        /// their TTL view.
+        fn clone(&self) -> Self {
+            Self {
+                ttl: Mutex::new(*self.ttl.lock()),
+                refresh: AtomicBool::new(self.refresh.load(Ordering::Relaxed)),
+                namespace: self.namespace.clone(),
+                prefix: self.prefix.clone(),
+                connection_string: self.connection_string.clone(),
+                connection: self.connection.clone(),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
     impl<K, V> AsyncRedisCache<K, V>
     where
         // `V: Sync` is intentionally absent: `V` is sent across the async
@@ -1545,6 +1585,161 @@ mod async_redis {
     )))
 )]
 pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
+
+#[cfg(test)]
+mod error_source_tests {
+    use std::error::Error;
+
+    use super::{RedisCacheBuildError, RedisCacheError};
+
+    /// `RedisCacheBuildError::MissingConnectionString` must expose its inner
+    /// `VarError` via `Error::source()` (item 10).
+    #[test]
+    fn missing_connection_string_has_source() {
+        let inner = std::env::VarError::NotPresent;
+        let err = RedisCacheBuildError::MissingConnectionString {
+            env_key: "TEST_KEY".to_string(),
+            error: inner,
+        };
+        let source = err
+            .source()
+            .expect("MissingConnectionString must expose its inner VarError as source()");
+        // Non-tautological: the source must be the actual inner VarError, whose
+        // Display is the std message - not some other wrapped error.
+        assert_eq!(
+            source.to_string(),
+            std::env::VarError::NotPresent.to_string(),
+            "source() must be the inner VarError"
+        );
+        // The source must downcast to VarError, proving the #[source] wiring
+        // points at the real inner field and not a re-stringified copy.
+        assert!(
+            source.downcast_ref::<std::env::VarError>().is_some(),
+            "source() must downcast to std::env::VarError"
+        );
+    }
+
+    /// Item 10: `MissingConnectionString`'s Display switched from `{error:?}`
+    /// to `{error}`. The rendered message must read cleanly - the env key and
+    /// the VarError's human message - with no `VarError { .. }` / `NotPresent`
+    /// debug noise leaking into the user-facing string.
+    #[test]
+    fn missing_connection_string_display_is_clean() {
+        let err = RedisCacheBuildError::MissingConnectionString {
+            env_key: "CACHED_REDIS_CONNECTION_STRING".to_string(),
+            error: std::env::VarError::NotPresent,
+        };
+        let rendered = err.to_string();
+
+        // The env key is surfaced (it is formatted with {env_key:?}, so quoted).
+        assert!(
+            rendered.contains("CACHED_REDIS_CONNECTION_STRING"),
+            "Display must name the env var; got: {rendered}"
+        );
+        // The inner error's *Display* message is present (the {error} switch).
+        assert!(
+            rendered.contains(&std::env::VarError::NotPresent.to_string()),
+            "Display must include the VarError's human message; got: {rendered}"
+        );
+        // No Debug-form noise: the old `{error:?}` would have rendered the
+        // variant name `NotPresent`. The Display form must not.
+        assert!(
+            !rendered.contains("NotPresent"),
+            "Display must not leak the Debug variant name `NotPresent`; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("VarError"),
+            "Display must not leak the `VarError` type name; got: {rendered}"
+        );
+    }
+
+    /// `RedisCacheError::CacheDeserialization` must expose its inner
+    /// `serde_json::Error` via `Error::source()` (item 10).
+    #[test]
+    fn cache_deserialization_has_source() {
+        let inner: serde_json::Error = serde_json::from_str::<u32>("not-json").unwrap_err();
+        let inner_display = inner.to_string();
+        let err = RedisCacheError::CacheDeserialization {
+            cached_value: "not-json".to_string(),
+            error: inner,
+        };
+        let source = err
+            .source()
+            .expect("CacheDeserialization must expose its inner serde_json::Error as source()");
+        assert!(
+            source.downcast_ref::<serde_json::Error>().is_some(),
+            "source() must downcast to serde_json::Error"
+        );
+        // Item 10 Display switch to `{error}`: the rendered message embeds the
+        // inner serde error's human Display text, and names the bad value.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&inner_display),
+            "Display must include the inner serde error message; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("not-json"),
+            "Display must include the offending cached value; got: {rendered}"
+        );
+    }
+
+    /// `RedisCacheError::CacheSerialization` must expose its inner
+    /// `serde_json::Error` via `Error::source()` (item 10).
+    #[test]
+    fn cache_serialization_has_source() {
+        // Construct a serde_json serialization error via a type that fails to serialize.
+        #[derive(Debug)]
+        struct Unserializable;
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+        let inner: serde_json::Error = serde_json::to_string(&Unserializable).unwrap_err();
+        let inner_display = inner.to_string();
+        let err = RedisCacheError::CacheSerialization { error: inner };
+        let source = err
+            .source()
+            .expect("CacheSerialization must expose its inner serde_json::Error as source()");
+        assert!(
+            source.downcast_ref::<serde_json::Error>().is_some(),
+            "source() must downcast to serde_json::Error"
+        );
+        // Item 10 Display switch to `{error}`: the inner serde error message is
+        // embedded in the user-facing Display string.
+        assert!(
+            err.to_string().contains(&inner_display),
+            "Display must include the inner serde error message; got: {}",
+            err
+        );
+    }
+
+    /// `RedisCache` is `Clone` (item 11) - compile-time bound check.
+    #[allow(dead_code)]
+    fn assert_clone<T: Clone>() {}
+    #[allow(dead_code)]
+    fn check_redis_cache_is_clone() {
+        assert_clone::<super::RedisCache<String, String>>();
+    }
+    /// `AsyncRedisCache` is `Clone` (item 11) - compile-time bound check.
+    #[cfg(all(
+        feature = "async",
+        any(
+            feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
+            feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
+            feature = "redis_async_cache",
+            feature = "redis_connection_manager"
+        )
+    ))]
+    #[allow(dead_code)]
+    fn check_async_redis_cache_is_clone() {
+        assert_clone::<super::AsyncRedisCache<String, String>>();
+    }
+}
 
 #[cfg(test)]
 /// Cache store tests
