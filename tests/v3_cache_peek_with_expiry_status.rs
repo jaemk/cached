@@ -331,21 +331,20 @@ fn expiring_lru_peek_has_no_counter_side_effects() {
     assert_eq!(c.cache_misses(), misses0);
 }
 
-// ───────────────────────── default trait method (#3) ─────────────────────────
+// ────────────────── required method on a plain non-TTL store (#3) ─────────────
 //
-// Pins the documented non-breaking default: an external `CloneCached` implementor
-// that does NOT override `cache_peek_with_expiry_status` gets `(None, false)` for
-// every key. This is exactly the path an external store hits before adopting the
-// override, and the macro's bypass branch must not panic or misbehave against it.
+// `cache_peek_with_expiry_status` is now a required method. A plain (non-TTL)
+// external `CloneCached` implementor with no expiry should implement it to return
+// `(Some(v), false)` for present keys and `(None, false)` for absent keys -- the
+// same side-effect-free shape as the built-in stores, just with entries that are
+// never expired.
 
 #[derive(Default)]
-struct NonOverridingStore {
-    // A real backing map so `cache_get*` works, proving the default is `(None,
-    // false)` even when the key is actually present.
+struct PlainPeekStore {
     map: std::collections::HashMap<i32, i32>,
 }
 
-impl Cached<i32, i32> for NonOverridingStore {
+impl Cached<i32, i32> for PlainPeekStore {
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&i32>
     where
         i32: std::borrow::Borrow<Q>,
@@ -403,7 +402,7 @@ impl Cached<i32, i32> for NonOverridingStore {
     }
 }
 
-impl CloneCached<i32, i32> for NonOverridingStore {
+impl CloneCached<i32, i32> for PlainPeekStore {
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<i32>, bool)
     where
         i32: std::borrow::Borrow<Q>,
@@ -411,21 +410,27 @@ impl CloneCached<i32, i32> for NonOverridingStore {
     {
         (self.map.get(k).copied(), false)
     }
-    // Deliberately does NOT override `cache_peek_with_expiry_status`.
+
+    // Required: side-effect-free read; plain store has no expiry so never returns true.
+    fn cache_peek_with_expiry_status<Q>(&self, k: &Q) -> (Option<i32>, bool)
+    where
+        i32: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        i32: Clone,
+    {
+        (self.map.get(k).copied(), false)
+    }
 }
 
 #[test]
-fn default_cache_peek_with_expiry_status_returns_none_false() {
-    let mut store = NonOverridingStore::default();
+fn required_cache_peek_with_expiry_status_on_plain_store() {
+    let mut store = PlainPeekStore::default();
     store.cache_set(1, 11);
 
-    // Even though key 1 IS present, the un-overridden default returns (None, false).
-    // This is the documented (intentionally inert) non-breaking default; an
-    // external store that wants fallback recovery must override the method.
-    assert_eq!(store.cache_peek_with_expiry_status(&1), (None, false));
+    // Present key: returns (Some(v), false) -- plain store, entries never expire.
+    assert_eq!(store.cache_peek_with_expiry_status(&1), (Some(11), false));
+    // Absent key: returns (None, false).
     assert_eq!(store.cache_peek_with_expiry_status(&999), (None, false));
-
-    // The renewing read still sees the value, confirming the store really holds it
-    // and the `(None, false)` above is purely the default's inertness.
+    // The renewing read agrees on the same value.
     assert_eq!(store.cache_get_with_expiry_status(&1), (Some(11), false));
 }

@@ -4324,6 +4324,13 @@ mod concurrent_cached_return_named_error {
         fn set_refresh_on_hit(&self, _r: bool) -> bool {
             false
         }
+        fn cache_clear(&self) -> Result<(), Self::Error> {
+            self.0.lock().unwrap().clear();
+            Ok(())
+        }
+        fn cache_reset(&self) -> Result<(), Self::Error> {
+            self.cache_clear()
+        }
     }
 
     #[concurrent_cached(
@@ -6263,6 +6270,13 @@ mod generic_where_tests {
         }
         fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
             false
+        }
+        fn cache_clear(&self) -> Result<(), Self::Error> {
+            self.inner.lock().unwrap().clear();
+            Ok(())
+        }
+        fn cache_reset(&self) -> Result<(), Self::Error> {
+            self.cache_clear()
         }
     }
 

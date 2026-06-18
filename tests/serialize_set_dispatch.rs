@@ -92,6 +92,10 @@ mod stores {
             Ok(())
         }
 
+        fn cache_reset(&self) -> Result<(), Infallible> {
+            self.cache_clear()
+        }
+
         fn ttl(&self) -> Option<Duration> {
             None
         }
@@ -157,6 +161,10 @@ mod stores {
         fn cache_clear(&self) -> Result<(), Infallible> {
             self.map.lock().unwrap().clear();
             Ok(())
+        }
+
+        fn cache_reset(&self) -> Result<(), Infallible> {
+            self.cache_clear()
         }
 
         fn ttl(&self) -> Option<Duration> {
@@ -395,6 +403,16 @@ mod async_serialize_store {
             async move { Ok(()) }
         }
 
+        fn async_cache_reset(
+            &self,
+        ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
+        where
+            Self: Sync,
+        {
+            self.map.lock().unwrap().clear();
+            async move { Ok(()) }
+        }
+
         fn ttl(&self) -> Option<Duration> {
             None
         }
@@ -493,6 +511,16 @@ mod async_serialize_store {
         }
 
         fn async_cache_clear(
+            &self,
+        ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
+        where
+            Self: Sync,
+        {
+            self.map.lock().unwrap().clear();
+            async move { Ok(()) }
+        }
+
+        fn async_cache_reset(
             &self,
         ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
         where

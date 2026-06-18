@@ -150,6 +150,24 @@ impl std::fmt::Display for SetMaxSizeError {
 
 impl std::error::Error for SetMaxSizeError {}
 
+/// Error returned by [`CacheTtl::try_set_ttl`](crate::CacheTtl::try_set_ttl).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetTtlError {
+    /// A TTL of zero was supplied; ttl must be greater than zero.
+    ZeroTtl,
+}
+
+impl std::fmt::Display for SetTtlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetTtlError::ZeroTtl => write!(f, "ttl must be greater than zero"),
+        }
+    }
+}
+
+impl std::error::Error for SetTtlError {}
+
 /// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
 #[cfg(any(
     feature = "time_stores",
