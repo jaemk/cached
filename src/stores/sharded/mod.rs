@@ -192,7 +192,7 @@ pub use expiring_lru::{
     ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
 };
 pub use lru::{ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder};
-pub use unbound::{ShardedCache, ShardedCacheBase, ShardedCacheBuilder};
+pub use unbound::{ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder};
 
 #[cfg(feature = "time_stores")]
 pub use ttl::{ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder};

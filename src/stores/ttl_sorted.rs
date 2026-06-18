@@ -66,38 +66,25 @@ impl<T> Borrow<T> for CacheArc<T> {
     }
 }
 
+/// Error type returned by [`TtlSortedCache`] operations
+/// (e.g. [`Cached::cache_try_set`](crate::Cached::cache_try_set)).
 #[non_exhaustive]
 #[derive(Debug)]
-pub enum Error {
+pub enum TtlSortedCacheError {
     /// Calculating expiration `Instant`s resulted in a
     /// value outside of `Instant`s internal bounds
     TimeBounds,
 }
 
-/// Public alias for the internal error type — use this name when matching on errors returned by
-/// [`TtlSortedCache`] operations (e.g. [`Cached::cache_try_set`](crate::Cached::cache_try_set)).
-pub type TtlSortedCacheError = Error;
-
-impl std::fmt::Display for Error {
+impl std::fmt::Display for TtlSortedCacheError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::TimeBounds => f.write_str("ttl is outside Instant bounds"),
+            TtlSortedCacheError::TimeBounds => f.write_str("ttl is outside Instant bounds"),
         }
     }
 }
 
-impl std::error::Error for Error {}
-
-impl From<Error> for std::io::Error {
-    fn from(error: Error) -> Self {
-        match error {
-            Error::TimeBounds => std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "ttl is outside Instant bounds",
-            ),
-        }
-    }
-}
+impl std::error::Error for TtlSortedCacheError {}
 
 /// A timestamped key to allow identifying key ranges
 #[derive(Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -160,7 +147,7 @@ impl<K, V: Clone> Clone for Entry<K, V> {
 /// Policy for [`TtlSortedCache::insert_inner`] when `now + ttl` overflows `Instant`.
 #[derive(Clone, Copy)]
 enum TtlOverflow {
-    /// Return [`Error::TimeBounds`] without mutating the cache.
+    /// Return [`TtlSortedCacheError::TimeBounds`] without mutating the cache.
     Error,
     /// Saturate the expiry to "now" (immediately stale) and still store the entry.
     SaturateNow,
@@ -546,17 +533,17 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     }
 
     /// Insert k/v pair without running eviction logic. See `.insert_ttl_evict`
-    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, Error> {
+    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, TtlSortedCacheError> {
         self.insert_ttl_evict(key, value, None, false)
     }
 
     /// Insert k/v pair with explicit ttl. See `.insert_ttl_evict`
-    pub fn insert_ttl(&mut self, key: K, value: V, ttl: Duration) -> Result<Option<V>, Error> {
+    pub fn insert_ttl(&mut self, key: K, value: V, ttl: Duration) -> Result<Option<V>, TtlSortedCacheError> {
         self.insert_ttl_evict(key, value, Some(ttl), false)
     }
 
     /// Insert k/v pair and run eviction logic. See `.insert_ttl_evict`
-    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, Error> {
+    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, TtlSortedCacheError> {
         self.insert_ttl_evict(key, value, None, evict)
     }
 
@@ -570,7 +557,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
         value: V,
         ttl: Option<Duration>,
         evict: bool,
-    ) -> Result<Option<V>, Error> {
+    ) -> Result<Option<V>, TtlSortedCacheError> {
         self.insert_inner(key, value, ttl, evict, TtlOverflow::Error, false)
     }
 
@@ -580,7 +567,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     /// `on_overflow` selects what happens in the (practically unreachable) case where
     /// `now + ttl` exceeds `Instant`'s representable range — a TTL on the order of
     /// hundreds of years:
-    /// - [`TtlOverflow::Error`]: return [`Error::TimeBounds`] before any mutation
+    /// - [`TtlOverflow::Error`]: return [`TtlSortedCacheError::TimeBounds`] before any mutation
     ///   (used by the fallible public API).
     /// - [`TtlOverflow::SaturateNow`]: store the entry with an already-elapsed expiry
     ///   so the value is still retained (and returnable by reference) but is treated as
@@ -595,13 +582,13 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
         evict: bool,
         on_overflow: TtlOverflow,
         skip_size_eviction: bool,
-    ) -> Result<Option<V>, Error> {
+    ) -> Result<Option<V>, TtlSortedCacheError> {
         let arc_key = CacheArc::new(key.clone());
         let now = Instant::now();
         let (expiry, overflowed) = match now.checked_add(ttl.unwrap_or(self.ttl)) {
             Some(expiry) => (expiry, false),
             None => match on_overflow {
-                TtlOverflow::Error => return Err(Error::TimeBounds),
+                TtlOverflow::Error => return Err(TtlSortedCacheError::TimeBounds),
                 TtlOverflow::SaturateNow => (now, true),
             },
         };

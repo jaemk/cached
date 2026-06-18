@@ -1,7 +1,7 @@
 use cached::time::Duration;
 use cached::{
     Cached, CachedRead, ConcurrentCached, Expires, ExpiringCache, ExpiringLruCache, LruCache,
-    LruTtlCache, ShardedCache, ShardedLruCache, ShardedLruTtlCache, TtlCache, TtlSortedCache,
+    LruTtlCache, ShardedUnboundCache, ShardedLruCache, ShardedLruTtlCache, TtlCache, TtlSortedCache,
     UnboundCache,
 };
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -325,7 +325,7 @@ macro_rules! run_concurrent {
 // ---- Group 1: unbounded cache -------------------------------------------------
 
 fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Concurrent Reads: ShardedCache vs single-lock");
+    let mut group = c.benchmark_group("Concurrent Reads: ShardedUnboundCache vs single-lock");
     group.throughput(Throughput::Elements(N_THREADS as u64));
 
     // Baseline A: Mutex<HashMap> — every read takes an exclusive lock.
@@ -355,7 +355,7 @@ fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
     // Baseline C: RwLock<UnboundCache> using CachedRead (shared read lock).
     // UnboundCache uses StripedCounter (16-slot padded atomics) for hits/misses
     // to reduce false sharing on the counter words, but the global RwLock still
-    // serializes all writers.  ShardedCache avoids the single global lock entirely
+    // serializes all writers.  ShardedUnboundCache avoids the single global lock entirely
     // by keeping both the lock and the counters per-shard.
     let rw_unbound = Arc::new(RwLock::new({
         let mut c = UnboundCache::builder().build().unwrap();
@@ -373,12 +373,12 @@ fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
         })
     });
 
-    // ShardedCache: per-shard RwLocks eliminate inter-thread read contention.
-    let sharded = ShardedCache::<usize, usize>::builder().build().unwrap();
+    // ShardedUnboundCache: per-shard RwLocks eliminate inter-thread read contention.
+    let sharded = ShardedUnboundCache::<usize, usize>::builder().build().unwrap();
     for i in 0..N_KEYS {
         sharded.cache_set(i, i * 2).expect("infallible");
     }
-    group.bench_function("ShardedCache", |b| {
+    group.bench_function("ShardedUnboundCache", |b| {
         b.iter_custom(|iters| {
             let cache = sharded.clone(); // Arc clone
             run_concurrent!(cache, iters, t, i, {
@@ -390,7 +390,7 @@ fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
     group.finish();
 
     // ---- Write benchmark (distinct keys, measures lock contention on inserts) ----
-    let mut group = c.benchmark_group("Concurrent Writes: ShardedCache vs single-lock");
+    let mut group = c.benchmark_group("Concurrent Writes: ShardedUnboundCache vs single-lock");
     group.throughput(Throughput::Elements(N_THREADS as u64));
 
     let mutex_map_w: Arc<Mutex<HashMap<usize, usize>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -403,8 +403,8 @@ fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
         })
     });
 
-    let sharded_w = ShardedCache::<usize, usize>::builder().build().unwrap();
-    group.bench_function("ShardedCache", |b| {
+    let sharded_w = ShardedUnboundCache::<usize, usize>::builder().build().unwrap();
+    group.bench_function("ShardedUnboundCache", |b| {
         b.iter_custom(|iters| {
             let cache = sharded_w.clone();
             run_concurrent!(cache, iters, t, i, {

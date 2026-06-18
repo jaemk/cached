@@ -1520,7 +1520,7 @@ fn get_disk_cache_type_and_create(
 ///
 /// | max_size | ttl | expires | store |
 /// |----------|-----|---------|-------|
-/// |  no  |  no |   no    | `ShardedCache` |
+/// |  no  |  no |   no    | `ShardedUnboundCache` |
 /// | yes  |  no |   no    | `ShardedLruCache` |
 /// |  no  | yes |   no    | `ShardedTtlCache`         (requires `time_stores` feature on `cached`) |
 /// | yes  | yes |   no    | `ShardedLruTtlCache`      (requires `time_stores` feature on `cached`) |
@@ -1609,13 +1609,13 @@ fn get_sharded_cache_type_and_create(
     } else {
         match (args.max_size, ttl_duration) {
             (None, None) => {
-                let ty = quote! { #krate::ShardedCache<#cache_key_ty, #cache_value_ty> };
+                let ty = quote! { #krate::ShardedUnboundCache<#cache_key_ty, #cache_value_ty> };
                 let create = match args.shards {
                     Some(n) => {
-                        quote! { #krate::ShardedCache::builder().shards(#n).build().unwrap_or_else(|e| panic!("ShardedCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedUnboundCache::builder().shards(#n).build().unwrap_or_else(|e| panic!("ShardedUnboundCache build failed in #[concurrent_cached]: {e}")) }
                     }
                     None => {
-                        quote! { #krate::ShardedCache::builder().build().unwrap_or_else(|e| panic!("ShardedCache build failed in #[concurrent_cached]: {e}")) }
+                        quote! { #krate::ShardedUnboundCache::builder().build().unwrap_or_else(|e| panic!("ShardedUnboundCache build failed in #[concurrent_cached]: {e}")) }
                     }
                 };
                 (ty, create)

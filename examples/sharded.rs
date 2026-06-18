@@ -5,7 +5,7 @@ In-memory concurrent memoization with zero boilerplate.
 no disk, no `map_error`, no `ty`/`create`. The right variant is selected
 automatically based on `max_size` and `ttl_secs` attributes:
 
-  (no attrs)                       -> ShardedCache        (unbounded, no TTL)
+  (no attrs)                       -> ShardedUnboundCache  (unbounded, no TTL)
   max_size = N                     -> ShardedLruCache     (LRU, no TTL)
   ttl_secs = T                     -> ShardedTtlCache     (unbounded, with TTL)
   max_size = N, ttl_secs = T       -> ShardedLruTtlCache  (LRU, with TTL)
@@ -27,10 +27,10 @@ Run:
 */
 
 use cached::macros::concurrent_cached;
-use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+use cached::{ConcurrentCached, ShardedUnboundCache, ShardedLruCache};
 use std::thread;
 
-// Bare default: ShardedCache (unbounded, no TTL)
+// Bare default: ShardedUnboundCache (unbounded, no TTL)
 #[concurrent_cached]
 fn compute(x: u64) -> u64 {
     x * x
@@ -143,13 +143,13 @@ fn main() {
         println!("get(7) = {val:?}");
     }
 
-    // Build a ShardedCache manually and use it without a macro
-    let cache: ShardedCache<u32, String> = ShardedCache::builder().build().unwrap();
+    // Build a ShardedUnboundCache manually and use it without a macro
+    let cache: ShardedUnboundCache<u32, String> = ShardedUnboundCache::builder().build().unwrap();
     cache.set(1, "hello".to_string()).expect("infallible");
     cache.set(2, "world".to_string()).expect("infallible");
     assert_eq!(cache.get(&1).expect("infallible").as_deref(), Some("hello"));
     println!(
-        "manual ShardedCache: {:?}",
+        "manual ShardedUnboundCache: {:?}",
         cache.get(&1).expect("infallible")
     );
 

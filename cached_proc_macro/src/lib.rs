@@ -220,7 +220,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// | Attributes | Store selected |
 /// |---|---|
-/// | (none) | `ShardedCache` - unbounded, no TTL |
+/// | (none) | `ShardedUnboundCache` - unbounded, no TTL |
 /// | `max_size = N` | `ShardedLruCache` - LRU-bounded |
 /// | `ttl = T` | `ShardedTtlCache` - TTL-expiring, unbounded (`time_stores` feature) |
 /// | `max_size = N, ttl = T` | `ShardedLruTtlCache` - LRU + TTL (`time_stores` feature) |

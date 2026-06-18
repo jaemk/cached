@@ -31,28 +31,28 @@ struct UnboundInner<K, V, H> {
 /// A fully-concurrent, partitioned, unbounded in-memory cache.
 ///
 /// Wraps an `Arc` — `clone()` is an Arc-share (shared state), not a deep copy.
-/// Use [`deep_clone`](ShardedCacheBase::deep_clone) to get an independent copy.
+/// Use [`deep_clone`](ShardedUnboundCacheBase::deep_clone) to get an independent copy.
 ///
 /// **Note**: reads return owned values cloned from under the shard lock, so `V` must
 /// implement `Clone`.
 ///
-/// This is a type alias for `ShardedCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, call [`ShardedCache::builder()`] and then
-/// [`hasher`](ShardedCacheBuilder::hasher), which yields a `ShardedCacheBase<K, V, H>`
+/// This is a type alias for `ShardedUnboundCacheBase<K, V, DefaultShardHasher>`.
+/// To use a custom shard hasher, call [`ShardedUnboundCache::builder()`] and then
+/// [`hasher`](ShardedUnboundCacheBuilder::hasher), which yields a `ShardedUnboundCacheBase<K, V, H>`
 /// over your hasher.
-pub type ShardedCache<K, V> = ShardedCacheBase<K, V, DefaultShardHasher>;
+pub type ShardedUnboundCache<K, V> = ShardedUnboundCacheBase<K, V, DefaultShardHasher>;
 
-/// Backing type for [`ShardedCache`] with a generic shard hasher `H`.
+/// Backing type for [`ShardedUnboundCache`] with a generic shard hasher `H`.
 ///
-/// In most cases prefer the [`ShardedCache`] alias which uses the default
+/// In most cases prefer the [`ShardedUnboundCache`] alias which uses the default
 /// shard hasher (ahash-backed when the `ahash` feature is enabled, otherwise
 /// `std::collections::hash_map::RandomState`). Use this type directly only
 /// when you need a custom [`ShardHasher`] implementation.
-pub struct ShardedCacheBase<K, V, H = DefaultShardHasher> {
+pub struct ShardedUnboundCacheBase<K, V, H = DefaultShardHasher> {
     inner: Arc<UnboundInner<K, V, H>>,
 }
 
-impl<K, V, H> Clone for ShardedCacheBase<K, V, H> {
+impl<K, V, H> Clone for ShardedUnboundCacheBase<K, V, H> {
     /// Arc-share clone — both handles point to the same underlying cache.
     fn clone(&self) -> Self {
         Self {
@@ -61,43 +61,43 @@ impl<K, V, H> Clone for ShardedCacheBase<K, V, H> {
     }
 }
 
-impl<K, V, H> std::fmt::Debug for ShardedCacheBase<K, V, H> {
+impl<K, V, H> std::fmt::Debug for ShardedUnboundCacheBase<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShardedCache")
+        f.debug_struct("ShardedUnboundCache")
             .field("shards", &self.inner.shards.len())
             .finish_non_exhaustive()
     }
 }
 
-impl<K, V> ShardedCacheBase<K, V, DefaultShardHasher>
+impl<K, V> ShardedUnboundCacheBase<K, V, DefaultShardHasher>
 where
     K: Hash + Eq,
 {
-    /// Construct a ready-to-use [`ShardedCache`] with the [`DefaultShardHasher`] and a
+    /// Construct a ready-to-use [`ShardedUnboundCache`] with the [`DefaultShardHasher`] and a
     /// default shard count.
     ///
-    /// `ShardedCache` has no required configuration, so this never fails. For a custom
+    /// `ShardedUnboundCache` has no required configuration, so this never fails. For a custom
     /// hasher, shard count, or `on_evict`, use [`builder`](Self::builder).
     #[must_use]
-    pub fn new() -> ShardedCache<K, V> {
+    pub fn new() -> ShardedUnboundCache<K, V> {
         Self::builder()
             .build()
-            .expect("ShardedCache default build is infallible")
+            .expect("ShardedUnboundCache default build is infallible")
     }
 
-    /// Return a builder for constructing a [`ShardedCache`].
+    /// Return a builder for constructing a [`ShardedUnboundCache`].
     ///
     /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
-    /// [`hasher`](ShardedCacheBuilder::hasher) on the returned builder; it switches the
-    /// builder's hasher type and `build` then yields a `ShardedCacheBase` over that hasher.
+    /// [`hasher`](ShardedUnboundCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedUnboundCacheBase` over that hasher.
     /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
-    /// introduced via `hasher`, never a `ShardedCacheBase::<_, _, H>` turbofish.
-    pub fn builder() -> ShardedCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedCacheBuilder::default()
+    /// introduced via `hasher`, never a `ShardedUnboundCacheBase::<_, _, H>` turbofish.
+    pub fn builder() -> ShardedUnboundCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedUnboundCacheBuilder::default()
     }
 }
 
-impl<K, V, H> ShardedCacheBase<K, V, H>
+impl<K, V, H> ShardedUnboundCacheBase<K, V, H>
 where
     K: Hash + Eq,
     H: ShardHasher<K>,
@@ -109,34 +109,34 @@ where
     }
 }
 
-impl<K, V> Default for ShardedCache<K, V>
+impl<K, V> Default for ShardedUnboundCache<K, V>
 where
     K: Hash + Eq,
 {
     fn default() -> Self {
-        ShardedCacheBuilder::default()
+        ShardedUnboundCacheBuilder::default()
             .build()
-            .unwrap_or_else(|e| panic!("ShardedCache build failed: {e}"))
+            .unwrap_or_else(|e| panic!("ShardedUnboundCache build failed: {e}"))
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedCacheBase<K, V, H> {
+impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedUnboundCacheBase<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
     ///
     /// ```rust
-    /// use cached::{ConcurrentCached, ShardedCache};
+    /// use cached::{ConcurrentCached, ShardedUnboundCache};
     ///
-    /// let cache: ShardedCache<String, u32> = ShardedCache::new();
-    /// cache.set("k".to_string(), 1).expect("ShardedCache operations are infallible");
+    /// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::new();
+    /// cache.set("k".to_string(), 1).expect("ShardedUnboundCache operations are infallible");
     ///
     /// let shared = cache.clone();     // Arc clone — same backing store
     /// let deep   = cache.deep_clone(); // independent snapshot
     ///
-    /// cache.set("k".to_string(), 2).expect("ShardedCache operations are infallible");
-    /// assert_eq!(shared.get(&"k".to_string()).expect("ShardedCache operations are infallible"), Some(2)); // sees update
-    /// assert_eq!(deep.get(&"k".to_string()).expect("ShardedCache operations are infallible"),   Some(1)); // snapshot unchanged
+    /// cache.set("k".to_string(), 2).expect("ShardedUnboundCache operations are infallible");
+    /// assert_eq!(shared.get(&"k".to_string()).expect("ShardedUnboundCache operations are infallible"), Some(2)); // sees update
+    /// assert_eq!(deep.get(&"k".to_string()).expect("ShardedUnboundCache operations are infallible"),   Some(1)); // snapshot unchanged
     /// ```
     #[must_use]
     pub fn deep_clone(&self) -> Self {
@@ -168,7 +168,7 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedCacheBase
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedUnboundCacheBase<K, V, H>
 where
     K: Hash + Eq,
 {
@@ -233,7 +233,7 @@ where
     ///
     /// If no `on_evict` callback is configured, this is equivalent to [`clear`](Self::clear).
     ///
-    /// **Note:** `ShardedCache` does not track eviction counts — `metrics().evictions` always
+    /// **Note:** `ShardedUnboundCache` does not track eviction counts — `metrics().evictions` always
     /// returns `None` regardless of whether `on_evict` fires.
     pub fn cache_clear_with_on_evict(&self) {
         if self.inner.on_evict.is_none() {
@@ -250,7 +250,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCached<K, V> for ShardedUnboundCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -321,7 +321,7 @@ where
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedUnboundCacheBase<K, V, H>
 where
     K: Hash + Eq + Send + Sync,
     V: Clone + Send + Sync,
@@ -366,8 +366,8 @@ where
     }
 }
 
-/// Builder for [`ShardedCacheBase`].
-pub struct ShardedCacheBuilder<K, V, H = DefaultShardHasher> {
+/// Builder for [`ShardedUnboundCacheBase`].
+pub struct ShardedUnboundCacheBuilder<K, V, H = DefaultShardHasher> {
     shards: Option<usize>,
     hasher: Option<H>,
     on_evict: Option<OnEvict<K, V>>,
@@ -375,7 +375,7 @@ pub struct ShardedCacheBuilder<K, V, H = DefaultShardHasher> {
     _v: std::marker::PhantomData<V>,
 }
 
-impl<K, V> Default for ShardedCacheBuilder<K, V, DefaultShardHasher> {
+impl<K, V> Default for ShardedUnboundCacheBuilder<K, V, DefaultShardHasher> {
     fn default() -> Self {
         Self {
             shards: None,
@@ -387,7 +387,7 @@ impl<K, V> Default for ShardedCacheBuilder<K, V, DefaultShardHasher> {
     }
 }
 
-impl<K, V, H> ShardedCacheBuilder<K, V, H> {
+impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
     /// Set the number of shards (rounded up to the next power of two).
     #[must_use]
     pub fn shards(mut self, shards: usize) -> Self {
@@ -405,8 +405,8 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
     #[doc(alias = "with_hasher")]
     #[must_use]
-    pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedCacheBuilder<K, V, H2> {
-        ShardedCacheBuilder {
+    pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedUnboundCacheBuilder<K, V, H2> {
+        ShardedUnboundCacheBuilder {
             shards: self.shards,
             hasher: Some(hasher),
             on_evict: self.on_evict,
@@ -418,10 +418,10 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
     /// Set a callback invoked when an entry is explicitly removed via
     /// [`cache_remove`](ConcurrentCached::cache_remove) or
     /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
-    /// Does **not** fire on [`clear`](ShardedCacheBase::clear);
-    /// use [`cache_clear_with_on_evict`](ShardedCacheBase::cache_clear_with_on_evict) to opt in.
+    /// Does **not** fire on [`clear`](ShardedUnboundCacheBase::clear);
+    /// use [`cache_clear_with_on_evict`](ShardedUnboundCacheBase::cache_clear_with_on_evict) to opt in.
     ///
-    /// **Note**: `ShardedCache` does not track eviction counts — `metrics().evictions` always
+    /// **Note**: `ShardedUnboundCache` does not track eviction counts — `metrics().evictions` always
     /// returns `None` even when `on_evict` is configured. Use the callback itself to count
     /// evictions if needed.
     ///
@@ -435,7 +435,7 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
 
     /// Build the cache.
     ///
-    /// Use [`ShardedCache::builder()`] (or [`ShardedCacheBase::builder()`]) to obtain a builder,
+    /// Use [`ShardedUnboundCache::builder()`] (or [`ShardedUnboundCacheBase::builder()`]) to obtain a builder,
     /// configure it, then call `.build()`.
     ///
     /// This builder never fails for valid inputs. The only error case is an
@@ -446,7 +446,7 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
     ///
     /// Returns [`BuildError::InvalidValue`] if the `shards` count overflows
     /// when rounded up to the next power of two.
-    pub fn build(self) -> Result<ShardedCacheBase<K, V, H>, BuildError>
+    pub fn build(self) -> Result<ShardedUnboundCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq,
         H: ShardHasher<K>,
@@ -457,7 +457,7 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
             .map(|_| CachePadded(Shard::new(HashMap::with_hasher(RandomState::new()))))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Ok(ShardedCacheBase {
+        Ok(ShardedUnboundCacheBase {
             inner: Arc::new(UnboundInner {
                 shards,
                 shard_mask: mask,
@@ -487,8 +487,8 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
     #[must_use]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
-        existing: &ShardedCacheBase<K, V, H2>,
-    ) -> ShardedCacheBase<K, V, H>
+        existing: &ShardedUnboundCacheBase<K, V, H2>,
+    ) -> ShardedUnboundCacheBase<K, V, H>
     where
         K: Clone + Hash + Eq,
         V: Clone,
@@ -496,7 +496,7 @@ impl<K, V, H> ShardedCacheBuilder<K, V, H> {
     {
         let new_cache = self
             .build()
-            .unwrap_or_else(|e| panic!("ShardedCache build failed: {e}"));
+            .unwrap_or_else(|e| panic!("ShardedUnboundCache build failed: {e}"));
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, V)> = {
                 let guard = shard.lock.read();
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn new_returns_ready_cache() {
-        let c = ShardedCache::<u32, u32>::new();
+        let c = ShardedUnboundCache::<u32, u32>::new();
         assert_eq!(SyncConcurrentCached::set(&c, 1, 100).unwrap(), None);
         assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(100));
         assert_eq!(c.len(), 1);
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn basic_get_set_remove() {
-        let c = ShardedCache::<u32, u32>::builder().build().unwrap();
+        let c = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
         assert_eq!(
             SyncConcurrentCached::cache_get(&c, &1).expect("cache_get must succeed"),
             None
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn clone_shares_state() {
-        let c1 = ShardedCache::<u32, u32>::builder().build().unwrap();
+        let c1 = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
         let c2 = c1.clone();
         SyncConcurrentCached::cache_set(&c1, 1, 10).expect("insert must succeed");
         assert_eq!(
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn metrics_sum() {
-        let c = ShardedCache::<u32, u32>::builder().build().unwrap();
+        let c = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
         SyncConcurrentCached::cache_set(&c, 1, 1).expect("insert must succeed");
         SyncConcurrentCached::cache_get(&c, &1).expect("key was just inserted");
         SyncConcurrentCached::cache_get(&c, &2).expect("cache_get must succeed");
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn len_and_clear() {
-        let c = ShardedCache::<u32, u32>::builder().build().unwrap();
+        let c = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
         for i in 0..10u32 {
             SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
         }
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn shard_sizes() {
-        let c = ShardedCache::<u32, u32>::builder()
+        let c = ShardedUnboundCache::<u32, u32>::builder()
             .shards(8)
             .build()
             .unwrap();
@@ -610,7 +610,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let count = Arc::new(AtomicUsize::new(0));
         let count2 = count.clone();
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
             })
@@ -630,7 +630,7 @@ mod tests {
                 0
             }
         }
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(8)
             .hasher(ConstHasher)
             .build()
@@ -646,11 +646,11 @@ mod tests {
 
     #[test]
     fn copy_from_preserves_entries() {
-        let old = ShardedCache::<u32, u32>::builder().build().unwrap();
+        let old = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
         for i in 0..50u32 {
             SyncConcurrentCached::cache_set(&old, i, i * 10).expect("insert must succeed");
         }
-        let new_cache = ShardedCacheBase::<u32, u32>::builder()
+        let new_cache = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(4)
             .copy_from(&old);
         for i in 0..50u32 {
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn deep_clone_is_independent() {
-        let c1 = ShardedCache::<u32, u32>::builder().build().unwrap();
+        let c1 = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
         SyncConcurrentCached::cache_set(&c1, 1, 1).expect("insert must succeed");
         let c2 = c1.deep_clone();
         SyncConcurrentCached::cache_set(&c1, 2, 2).expect("insert must succeed");
@@ -684,12 +684,12 @@ mod tests {
     #[test]
     fn send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<ShardedCache<u32, u32>>();
+        assert_send_sync::<ShardedUnboundCache<u32, u32>>();
     }
 
     #[test]
     fn build_error_on_overflow() {
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(usize::MAX)
             .build();
         assert!(c.is_err());
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn build_error_on_zero_shards() {
-        let c = ShardedCacheBase::<u32, u32>::builder().shards(0).build();
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder().shards(0).build();
         assert!(c.is_err(), "zero shards should return Err");
         match c.expect_err("zero shards should fail") {
             BuildError::InvalidValue { field, .. } => {
@@ -719,7 +719,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let count = Arc::new(AtomicUsize::new(0));
         let count2 = count.clone();
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
             })
@@ -746,7 +746,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let count = Arc::new(AtomicUsize::new(0));
         let count2 = count.clone();
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
             })
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn cache_remove_entry_basic() {
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(1)
             .build()
             .unwrap();
@@ -791,7 +791,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let count = Arc::new(AtomicUsize::new(0));
         let count2 = count.clone();
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(1)
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn cache_delete_returns_true_for_present_entry() {
-        let c = ShardedCacheBase::<u32, u32>::builder()
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(1)
             .build()
             .unwrap();

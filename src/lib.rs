@@ -161,7 +161,7 @@ For `disk` and `redis` stores, `Result<T, E>` is required and `map_error` must c
 | [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html) | TTL (expiry-ordered) | Optional | Global | No | Yes | No | Yes |
 | [`ExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | No | Yes |
 | [`ExpiringCache`](https://docs.rs/cached/latest/cached/struct.ExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | No | Yes |
-| [`ShardedCache`](https://docs.rs/cached/latest/cached/type.ShardedCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
+| [`ShardedUnboundCache`](https://docs.rs/cached/latest/cached/type.ShardedUnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
 | [`ShardedLruCache`](https://docs.rs/cached/latest/cached/type.ShardedLruCache.html) | LRU | Yes | No | N/A | Yes | Yes (`Arc`) | Yes |
 | [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes (`Arc`) | Yes |
 | [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes (†) | Yes (`Arc`) | Yes |
@@ -173,11 +173,11 @@ For `disk` and `redis` stores, `Result<T, E>` is required and `map_error` must c
 
 `TtlCache`/`LruTtlCache`/`TtlSortedCache`/`ShardedTtlCache`/`ShardedLruTtlCache` require the `time_stores` feature.
 
-`ShardedCache` and its variants are partitioned across power-of-two shards (default: `available_parallelism() × 4`, clamped to 8–1024; the 8–1024 clamp applies only to this computed default — an explicit `shards = N` is rounded up to a power of two but never clamped) each protected by a `parking_lot::RwLock`. Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
+`ShardedUnboundCache` and its variants are partitioned across power-of-two shards (default: `available_parallelism() × 4`, clamped to 8–1024; the 8–1024 clamp applies only to this computed default — an explicit `shards = N` is rounded up to a power of two but never clamped) each protected by a `parking_lot::RwLock`. Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
-Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled — enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes.
+Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled — enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes.
 
-> **`*Base` types:** Each sharded store has a corresponding `*Base` generic (`ShardedCacheBase<K, V, H>`, `ShardedLruCacheBase<K, V, H>`, etc.) parameterized on a custom [`ShardHasher`]. The named aliases (`ShardedCache`, `ShardedLruCache`, …) use the default hasher and are what most users should reach for. Use the `*Base` types only when implementing a custom `ShardHasher` for non-standard shard routing. Construct a custom-hasher cache through the alias builder and its `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `*Base<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher alias, so a custom hasher is always introduced through `hasher`, never a `*Base::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
+> **`*Base` types:** Each sharded store has a corresponding `*Base` generic (`ShardedUnboundCacheBase<K, V, H>`, `ShardedLruCacheBase<K, V, H>`, etc.) parameterized on a custom [`ShardHasher`]. The named aliases (`ShardedUnboundCache`, `ShardedLruCache`, …) use the default hasher and are what most users should reach for. Use the `*Base` types only when implementing a custom `ShardHasher` for non-standard shard routing. Construct a custom-hasher cache through the alias builder and its `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `*Base<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher alias, so a custom hasher is always introduced through `hasher`, never a `*Base::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
 
 **Behavioral guarantees**
 
@@ -189,14 +189,14 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   The synchronous `get` / `set` / `remove` (and their `cache_get` / `cache_set` / `cache_remove`
   aliases) come from the `ConcurrentCached` trait (it must be in scope — `use cached::ConcurrentCached;` or
   `use cached::prelude::*;`), not from inherent methods. The async trait operations are
-  `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedCache is infallible")`).
+  `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedUnboundCache is infallible")`).
 - `Cached::get` (and its `cache_get` alias) requires mutable access because some
   stores update recency, expiration timestamps, or metrics during reads.
 - Expired values can remain allocated until a mutating operation, `evict`, or
   store-specific cleanup removes them. Methods such as `len` may include expired values
   unless a store documents otherwise.
 - `cache_remove` fires the `on_evict` callback (if set) and counts as an eviction for
-  every successful removal, across all stores that track evictions. `ShardedCache` is the
+  every successful removal, across all stores that track evictions. `ShardedUnboundCache` is the
   exception: it has no evictions counter and always returns `None` from
   `metrics().evictions`, though its `on_evict` callback still fires. The `on_evict` column
   above marks the unbounded stores where explicit removal is the *only* eviction trigger. For stores with
@@ -607,11 +607,11 @@ pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
     BuildError, CacheEvict, ConcurrentCacheEvict, DefaultShardHasher, Expires, ExpiringCache,
     ExpiringCacheBuilder, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache, LruCacheBuilder,
-    SetMaxSizeError, ShardHasher, ShardedCache, ShardedCacheBase, ShardedCacheBuilder,
-    ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
-    ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
-    ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder, UnboundCache,
-    UnboundCacheBuilder,
+    SetMaxSizeError, ShardHasher, ShardedUnboundCache, ShardedUnboundCacheBase,
+    ShardedUnboundCacheBuilder, ShardedExpiringCache, ShardedExpiringCacheBase,
+    ShardedExpiringCacheBuilder, ShardedExpiringLruCache, ShardedExpiringLruCacheBase,
+    ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder,
+    UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
@@ -666,7 +666,7 @@ pub mod sync_sync {
 /// `cache_set`, …) are trait methods and require the trait to be in scope to call.
 ///
 /// Only traits are re-exported here; concrete store types are intentionally omitted to
-/// avoid name clashes. Import those directly (e.g. `use cached::ShardedCache;`).
+/// avoid name clashes. Import those directly (e.g. `use cached::ShardedUnboundCache;`).
 pub mod prelude {
     pub use crate::{
         CacheEvict, Cached, CachedIter, CachedPeek, CachedRead, CloneCached, ConcurrentCacheEvict,
@@ -1232,7 +1232,7 @@ pub trait CloneCached<K, V> {
 /// Implemented by the four expiry-capable sharded stores:
 /// [`ShardedTtlCache`], [`ShardedLruTtlCache`], [`ShardedExpiringCache`], and
 /// [`ShardedExpiringLruCache`].
-/// Non-expiry stores ([`ShardedCache`], [`ShardedLruCache`]) do not implement this trait,
+/// Non-expiry stores ([`ShardedUnboundCache`], [`ShardedLruCache`]) do not implement this trait,
 /// mirroring how [`CloneCached`] is absent on [`UnboundCache`] and [`LruCache`].
 ///
 /// **Why `&K` instead of `&Q` (`Borrow<Q>`)**: same reason as [`ConcurrentCached`] — the
@@ -1603,17 +1603,17 @@ pub trait ConcurrentCached<K, V> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::{ConcurrentCached, ShardedCache};
+    /// use cached::{ConcurrentCached, ShardedUnboundCache};
     ///
-    /// let cache: ShardedCache<String, u32> = ShardedCache::builder().build().unwrap();
-    /// cache.set("key".to_string(), 42).expect("ShardedCache is infallible");
+    /// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::builder().build().unwrap();
+    /// cache.set("key".to_string(), 42).expect("ShardedUnboundCache is infallible");
     ///
     /// // remove_entry always returns Some when the key was present.
-    /// let entry = cache.remove_entry(&"key".to_string()).expect("ShardedCache is infallible");
+    /// let entry = cache.remove_entry(&"key".to_string()).expect("ShardedUnboundCache is infallible");
     /// assert_eq!(entry, Some(("key".to_string(), 42)));
     ///
     /// // Returns None only when the key was never present.
-    /// assert_eq!(cache.remove_entry(&"missing".to_string()).expect("ShardedCache is infallible"), None);
+    /// assert_eq!(cache.remove_entry(&"missing".to_string()).expect("ShardedUnboundCache is infallible"), None);
     /// ```
     fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error>;
 

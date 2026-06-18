@@ -34,11 +34,11 @@ struct LruInner<K, V, H> {
 /// over your hasher.
 ///
 /// **Note**: LRU promotion requires mutable access to the per-shard store, so
-/// `cache_get` acquires a **write** lock (unlike `ShardedCache` which only needs a read lock).
-/// Under many concurrent readers this can be a bottleneck; consider `ShardedCache` if you do
+/// `cache_get` acquires a **write** lock (unlike `ShardedUnboundCache` which only needs a read lock).
+/// Under many concurrent readers this can be a bottleneck; consider `ShardedUnboundCache` if you do
 /// not need capacity bounding.
 ///
-/// **Note**: `K` must implement `Clone` (needed for LRU key tracking). `ShardedCache<K, V>`
+/// **Note**: `K` must implement `Clone` (needed for LRU key tracking). `ShardedUnboundCache<K, V>`
 /// requires only `K: Hash + Eq`. `V` must also implement `Clone`, because reads return owned
 /// values cloned from under the shard lock.
 ///

@@ -2203,7 +2203,7 @@ mod sharded_ttl_tests {
     // Covers `ConcurrentCached::cache_reset` / `cache_reset_metrics` on the TTL/expiring
     // sharded stores, whose `cache_reset_metrics` must zero a *split* eviction count
     // (the per-shard inner `LruCache`'s capacity-eviction counter plus the store's own
-    // counter). The non-TTL test exercises only `ShardedCache`/`ShardedLruCache`.
+    // counter). The non-TTL test exercises only `ShardedUnboundCache`/`ShardedLruCache`.
     #[test]
     fn reset_metrics_zeros_split_eviction_counter_on_ttl_expiring_sharded_stores() {
         use cached::time::Duration;
@@ -2767,7 +2767,7 @@ mod concurrent_cached_plain_return_ttl {
 }
 
 // Sharded in-memory default for `#[concurrent_cached]`. No `ty`, `create`,
-// `map_error`, `redis`, or `disk` — the macro defaults to `ShardedCache`.
+// `map_error`, `redis`, or `disk` — the macro defaults to `ShardedUnboundCache`.
 #[cfg(feature = "proc_macro")]
 mod concurrent_cached_default_in_memory {
     use cached::macros::concurrent_cached;
@@ -3463,7 +3463,7 @@ mod concurrent_cached_cache_err {
     }
 }
 
-// Async path uses `OnceCell<ShardedCache>`.
+// Async path uses `OnceCell<ShardedUnboundCache>`.
 #[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
 mod concurrent_cached_default_async {
     use cached::macros::concurrent_cached;
@@ -3722,8 +3722,8 @@ mod sharded_send_sync_typecheck {
     fn _typecheck_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        assert_send::<cached::ShardedCache<String, u32>>();
-        assert_sync::<cached::ShardedCache<String, u32>>();
+        assert_send::<cached::ShardedUnboundCache<String, u32>>();
+        assert_sync::<cached::ShardedUnboundCache<String, u32>>();
         assert_send::<cached::ShardedLruCache<String, u32>>();
         assert_sync::<cached::ShardedLruCache<String, u32>>();
     }
@@ -3741,9 +3741,9 @@ mod sharded_send_sync_typecheck {
 
 #[test]
 fn concurrent_cached_trait_short_aliases_work() {
-    use cached::{ConcurrentCached, ShardedCache};
+    use cached::{ConcurrentCached, ShardedUnboundCache};
 
-    let cache = ShardedCache::<String, u32>::builder().build().unwrap();
+    let cache = ShardedUnboundCache::<String, u32>::builder().build().unwrap();
     assert_eq!(cache.set("a".to_string(), 1).unwrap(), None);
     assert_eq!(cache.get(&"a".to_string()).unwrap(), Some(1));
     assert_eq!(cache.remove(&"a".to_string()).unwrap(), Some(1));
@@ -3755,15 +3755,15 @@ fn concurrent_cached_trait_short_aliases_work() {
 // increment gets moved before the early-return.
 #[test]
 fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
-    use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+    use cached::{ConcurrentCached, ShardedUnboundCache, ShardedLruCache};
 
-    // ShardedCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
-    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
-    ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible ShardedCache set");
-    ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible ShardedCache set");
+    // ShardedUnboundCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
+    let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
+    ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible ShardedUnboundCache set");
+    ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible ShardedUnboundCache set");
     cache.cache_clear_with_on_evict();
     assert_eq!(cache.len(), 0, "cache should be empty after clear");
-    // ShardedCache does not track evictions — None is expected, not Some(0)
+    // ShardedUnboundCache does not track evictions — None is expected, not Some(0)
     assert_eq!(cache.metrics().evictions, None);
 
     // ShardedLruCache tracks evictions; no on_evict means the counter stays at zero
@@ -3786,10 +3786,10 @@ fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
 // (default no-op) overridden by the sharded stores to actually clear entries and zero metrics.
 #[test]
 fn concurrent_cached_trait_clear_and_reset_metrics_on_sharded_stores() {
-    use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+    use cached::{ConcurrentCached, ShardedUnboundCache, ShardedLruCache};
 
-    // --- Unbound ShardedCache: cache_clear empties the store via the trait method ---
-    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    // --- Unbound ShardedUnboundCache: cache_clear empties the store via the trait method ---
+    let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
     ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible");
     ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible");
     assert_eq!(cache.len(), 2);
@@ -3848,9 +3848,9 @@ fn concurrent_cached_trait_clear_and_reset_metrics_on_sharded_stores() {
 #[cfg(feature = "async")]
 #[tokio::test]
 async fn concurrent_cached_async_trait_clear_and_reset_metrics_on_sharded_stores() {
-    use cached::{ConcurrentCachedAsync, ShardedCache};
+    use cached::{ConcurrentCachedAsync, ShardedUnboundCache};
 
-    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
     ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
         .await
         .expect("infallible");
@@ -5044,7 +5044,7 @@ fn test_fallible_builders_return_build_error() {
         );
     }
 
-    let sharded_unbound = cached::ShardedCache::<i32, i32>::builder()
+    let sharded_unbound = cached::ShardedUnboundCache::<i32, i32>::builder()
         .shards(0)
         .build();
     assert!(
