@@ -358,14 +358,41 @@ pub(super) fn make_cache_key_type(
 ) -> Result<(TokenStream2, TokenStream2), syn::Error> {
     match (key, convert, ty) {
         (Some(key_str), Some(convert_str), _) => {
-            let cache_key_ty = parse_str::<Type>(key_str)?;
+            let cache_key_ty = parse_str::<Type>(key_str).map_err(|error| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "unable to parse `key` as a type: {error}; \
+                         `key` must be a Rust type, e.g. `key = \"String\"` or \
+                         `key = \"(u32, String)\"`"
+                    ),
+                )
+            })?;
 
-            let key_convert_block = parse_str::<Block>(convert_str)?;
+            let key_convert_block = parse_str::<Block>(convert_str).map_err(|error| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "unable to parse `convert` as a block: {error}; \
+                         `convert` must be a brace-delimited block, e.g. \
+                         `convert = \"{{ format!(\\\"{{}}\\\", id) }}\"`"
+                    ),
+                )
+            })?;
 
             Ok((quote! {#cache_key_ty}, quote! {#key_convert_block}))
         }
         (None, Some(convert_str), Some(_)) => {
-            let key_convert_block = parse_str::<Block>(convert_str)?;
+            let key_convert_block = parse_str::<Block>(convert_str).map_err(|error| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "unable to parse `convert` as a block: {error}; \
+                         `convert` must be a brace-delimited block, e.g. \
+                         `convert = \"{{ format!(\\\"{{}}\\\", id) }}\"`"
+                    ),
+                )
+            })?;
 
             Ok((quote! {}, quote! {#key_convert_block}))
         }

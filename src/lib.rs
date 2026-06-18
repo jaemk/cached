@@ -607,11 +607,11 @@ pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
     BuildError, CacheEvict, ConcurrentCacheEvict, DefaultShardHasher, Expires, ExpiringCache,
     ExpiringCacheBuilder, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache, LruCacheBuilder,
-    SetMaxSizeError, SetTtlError, ShardHasher, ShardedUnboundCache, ShardedUnboundCacheBase,
-    ShardedUnboundCacheBuilder, ShardedExpiringCache, ShardedExpiringCacheBase,
+    SetMaxSizeError, SetTtlError, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBase,
     ShardedExpiringCacheBuilder, ShardedExpiringLruCache, ShardedExpiringLruCacheBase,
     ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder,
-    UnboundCache, UnboundCacheBuilder,
+    ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder, UnboundCache,
+    UnboundCacheBuilder,
 };
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]

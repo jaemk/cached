@@ -27,7 +27,7 @@ Run:
 */
 
 use cached::macros::concurrent_cached;
-use cached::{ConcurrentCached, ShardedUnboundCache, ShardedLruCache};
+use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 use std::thread;
 
 // Bare default: ShardedUnboundCache (unbounded, no TTL)

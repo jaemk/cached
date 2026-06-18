@@ -704,7 +704,9 @@ mod tests {
 
     #[test]
     fn build_error_on_zero_shards() {
-        let c = ShardedUnboundCacheBase::<u32, u32>::builder().shards(0).build();
+        let c = ShardedUnboundCacheBase::<u32, u32>::builder()
+            .shards(0)
+            .build();
         assert!(c.is_err(), "zero shards should return Err");
         match c.expect_err("zero shards should fail") {
             BuildError::InvalidValue { field, .. } => {

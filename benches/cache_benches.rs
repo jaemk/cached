@@ -1,8 +1,8 @@
 use cached::time::Duration;
 use cached::{
     Cached, CachedRead, ConcurrentCached, Expires, ExpiringCache, ExpiringLruCache, LruCache,
-    LruTtlCache, ShardedUnboundCache, ShardedLruCache, ShardedLruTtlCache, TtlCache, TtlSortedCache,
-    UnboundCache,
+    LruTtlCache, ShardedLruCache, ShardedLruTtlCache, ShardedUnboundCache, TtlCache,
+    TtlSortedCache, UnboundCache,
 };
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use parking_lot::{Mutex, RwLock};
@@ -374,7 +374,9 @@ fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
     });
 
     // ShardedUnboundCache: per-shard RwLocks eliminate inter-thread read contention.
-    let sharded = ShardedUnboundCache::<usize, usize>::builder().build().unwrap();
+    let sharded = ShardedUnboundCache::<usize, usize>::builder()
+        .build()
+        .unwrap();
     for i in 0..N_KEYS {
         sharded.cache_set(i, i * 2).expect("infallible");
     }
@@ -403,7 +405,9 @@ fn bench_sharded_unbound_concurrent(c: &mut Criterion) {
         })
     });
 
-    let sharded_w = ShardedUnboundCache::<usize, usize>::builder().build().unwrap();
+    let sharded_w = ShardedUnboundCache::<usize, usize>::builder()
+        .build()
+        .unwrap();
     group.bench_function("ShardedUnboundCache", |b| {
         b.iter_custom(|iters| {
             let cache = sharded_w.clone();

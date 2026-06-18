@@ -229,10 +229,10 @@ pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder, TtlSortedCacheError}
 pub use unbound::{UnboundCache, UnboundCacheBuilder};
 
 pub use sharded::{
-    DefaultShardHasher, ShardHasher, ShardedUnboundCache, ShardedUnboundCacheBase,
-    ShardedUnboundCacheBuilder, ShardedExpiringCache, ShardedExpiringCacheBase,
+    DefaultShardHasher, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBase,
     ShardedExpiringCacheBuilder, ShardedExpiringLruCache, ShardedExpiringLruCacheBase,
     ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder,
+    ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder,
 };
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]

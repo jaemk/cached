@@ -134,9 +134,6 @@ fn check_create_conflicts(
     if args.max_size.is_some() {
         conflicting.push("max_size");
     }
-    if args.unbound {
-        conflicting.push("unbound");
-    }
     if conflicting.is_empty() {
         return Ok(());
     }
@@ -317,6 +314,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    if args.unbound {
+        return syn::Error::new(
+            fn_ident.span(),
+            "the `unbound` attribute has been removed. The default store (no `max_size`, \
+             `ttl`, or `expires`) is already an `UnboundCache`, so use `#[cached]` without `unbound`.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     if args.size.is_some() {
         return syn::Error::new(
             fn_ident.span(),
@@ -399,16 +406,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    if args.expires && args.unbound {
-        return syn::Error::new(
-            fn_ident.span(),
-            "`expires` and `unbound` are mutually exclusive - \
-             `ExpiringCache` (the default store for `expires`) is already unbounded; \
-             use `expires = true` alone for an unbounded expiring cache",
-        )
-        .to_compile_error()
-        .into();
-    }
     if args.expires && args.cache_none {
         return syn::Error::new(
             fn_ident.span(),
@@ -542,41 +539,35 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         match (
-            &args.unbound,
             &args.max_size,
             has_ttl,
             &args.ty,
             &args.create,
             &args.refresh,
         ) {
-            (true, None, false, None, None, _) => {
-                let cache_ty = quote! {#krate::UnboundCache<#cache_key_ty, #cache_value_ty>};
-                let cache_create = quote! {#krate::UnboundCache::builder().build().unwrap_or_else(|e| panic!("UnboundCache build failed in #[cached]: {e}"))};
-                (cache_ty, cache_create)
-            }
-            (false, Some(size), false, None, None, _) => {
+            (Some(size), false, None, None, _) => {
                 let cache_ty = quote! {#krate::LruCache<#cache_key_ty, #cache_value_ty>};
                 let cache_create = quote! {#krate::LruCache::builder().max_size(#size).build().unwrap_or_else(|e| panic!("LruCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
-            (false, None, true, None, None, refresh) => {
+            (None, true, None, None, refresh) => {
                 let ttl_dur = ttl_duration.as_ref().expect("has_ttl implies ttl_duration");
                 let cache_ty = quote! {#krate::TtlCache<#cache_key_ty, #cache_value_ty>};
                 let cache_create = quote! {#krate::TtlCache::builder().ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("TtlCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
-            (false, Some(size), true, None, None, refresh) => {
+            (Some(size), true, None, None, refresh) => {
                 let ttl_dur = ttl_duration.as_ref().expect("has_ttl implies ttl_duration");
                 let cache_ty = quote! {#krate::LruTtlCache<#cache_key_ty, #cache_value_ty>};
                 let cache_create = quote! {#krate::LruTtlCache::builder().max_size(#size).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("LruTtlCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
-            (false, None, false, None, None, _) => {
+            (None, false, None, None, _) => {
                 let cache_ty = quote! {#krate::UnboundCache<#cache_key_ty, #cache_value_ty>};
                 let cache_create = quote! {#krate::UnboundCache::builder().build().unwrap_or_else(|e| panic!("UnboundCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
-            (false, None, false, Some(type_str), Some(create_str), _) => {
+            (None, false, Some(type_str), Some(create_str), _) => {
                 let ty = match parse_str::<Type>(type_str) {
                     Ok(ty) => ty,
                     Err(error) => {
@@ -603,12 +594,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 (quote! { #ty }, quote! { #cache_create })
             }
-            (false, None, false, Some(_), None, _) => {
+            (None, false, Some(_), None, _) => {
                 return syn::Error::new(fn_ident.span(), "`ty` requires `create` to also be set")
                     .to_compile_error()
                     .into();
             }
-            (false, None, false, None, Some(_), _) => {
+            (None, false, None, Some(_), _) => {
                 return syn::Error::new(fn_ident.span(), "`create` requires `ty` to also be set")
                     .to_compile_error()
                     .into();
@@ -616,7 +607,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             _ => {
                 return syn::Error::new(
                 fn_ident.span(),
-                "cache types (`unbound`, `max_size` and/or `ttl`, or `ty` and `create`) are mutually exclusive",
+                "cache types (`max_size` and/or `ttl`, or `ty` and `create`) are mutually exclusive",
             )
             .to_compile_error()
             .into();

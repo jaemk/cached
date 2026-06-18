@@ -45,7 +45,7 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     size: Option<usize>,
     #[darling(default)]
-    refresh: Option<bool>,
+    refresh: bool,
     #[darling(default)]
     key: Option<String>,
     #[darling(default)]
@@ -110,7 +110,7 @@ fn check_create_conflicts(
     if args.ttl_millis.is_some() {
         conflicting.push("ttl_millis");
     }
-    if args.refresh.is_some() {
+    if args.refresh {
         conflicting.push("refresh");
     }
     if args.cache_prefix_block.is_some() {
@@ -377,7 +377,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
         }
-        if args.refresh.is_some() {
+        if args.refresh {
             return syn::Error::new(
                 fn_ident.span(),
                 "`expires` and `refresh` are mutually exclusive - `expires` delegates expiry to the value via `Expires::is_expired`",
@@ -1406,24 +1406,12 @@ fn get_redis_cache_type_and_create(
                         format!("unable to parse cache_prefix_block: {e}"),
                     )
                 })?;
-                match args.refresh {
-                    Some(refresh) => {
-                        if is_async {
-                            quote! { #krate::AsyncRedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
-                        } else {
-                            quote! {
-                                #krate::RedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
-                            }
-                        }
-                    }
-                    None => {
-                        if is_async {
-                            quote! { #krate::AsyncRedisCache::builder(#cache_prefix, #ttl_dur).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
-                        } else {
-                            quote! {
-                                #krate::RedisCache::builder(#cache_prefix, #ttl_dur).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
-                            }
-                        }
+                let refresh = args.refresh;
+                if is_async {
+                    quote! { #krate::AsyncRedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                } else {
+                    quote! {
+                        #krate::RedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                     }
                 }
             } else if is_async {
@@ -1485,14 +1473,8 @@ fn get_disk_cache_type_and_create(
                     }
                 }
             };
-            let create = match args.refresh {
-                None => create,
-                Some(refresh) => {
-                    quote! {
-                        (#create).refresh_on_hit(#refresh)
-                    }
-                }
-            };
+            let refresh = args.refresh;
+            let create = quote! { (#create).refresh_on_hit(#refresh) };
             let create = match args.durable {
                 None => create,
                 Some(durable) => {
@@ -1546,7 +1528,7 @@ fn get_sharded_cache_type_and_create(
     // No `ttl`/`ttl_secs`/`ttl_millis` zero check here: a zero `ttl_secs`/`ttl_millis`
     // is rejected at the top level of the macro (shared by every store path) before
     // this helper runs, and `ttl` (a Duration expression) has no compile-time value.
-    if args.refresh.is_some_and(|r| r) && ttl_duration.is_none() {
+    if args.refresh && ttl_duration.is_none() {
         return Err(syn::Error::new(
             fn_ident.span(),
             "`refresh` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set on the default in-memory sharded path",
@@ -1634,7 +1616,7 @@ fn get_sharded_cache_type_and_create(
             }
             (None, Some(ttl_dur)) => {
                 let ty = quote! { #krate::ShardedTtlCache<#cache_key_ty, #cache_value_ty> };
-                let refresh = args.refresh.unwrap_or(false);
+                let refresh = args.refresh;
                 let create = match args.shards {
                     Some(n) => quote! {{
                         let __c = #krate::ShardedTtlCache::builder()
@@ -1658,7 +1640,7 @@ fn get_sharded_cache_type_and_create(
             }
             (Some(size), Some(ttl_dur)) => {
                 let ty = quote! { #krate::ShardedLruTtlCache<#cache_key_ty, #cache_value_ty> };
-                let refresh = args.refresh.unwrap_or(false);
+                let refresh = args.refresh;
                 let create = match args.shards {
                     Some(n) => quote! {{
                         let __c = #krate::ShardedLruTtlCache::builder()

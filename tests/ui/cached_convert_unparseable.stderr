@@ -1,0 +1,7 @@
+error: unable to parse `convert` as a block: cannot parse string into token stream; `convert` must be a brace-delimited block, e.g. `convert = "{ format!(\"{}\", id) }"`
+ --> tests/ui/cached_convert_unparseable.rs:6:1
+  |
+6 | #[cached(key = "u32", convert = "{ this is not a block ")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

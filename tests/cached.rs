@@ -75,7 +75,9 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_expires_unsync_reads_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_non_expires_type.rs");
     t.compile_fail("tests/ui/cached_expires_refresh_exclusive.rs");
-    t.compile_fail("tests/ui/cached_expires_unbound_exclusive.rs");
+    t.compile_fail("tests/ui/cached_unbound_attr_removed.rs");
+    t.compile_fail("tests/ui/cached_key_unparseable.rs");
+    t.compile_fail("tests/ui/cached_convert_unparseable.rs");
     t.compile_fail("tests/ui/cached_expires_cache_none_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_cache_err_exclusive.rs");
     t.compile_fail("tests/ui/cached_cache_err_requires_result_return.rs");
@@ -2474,6 +2476,37 @@ mod disk_tests {
         assert_eq!(cached_disk(6), Err(TestError::Count(6)));
     }
 
+    // #8 disk-path parity: `refresh = true` on the disk (redb) path is now a
+    // plain `bool` and is wired straight into the store builder via
+    // `.refresh_on_hit(refresh)`. This proves the macro emits a working disk
+    // store with `refresh = true` + a TTL (compiles, caches an `Ok` hit, and
+    // does not cache `Err`). The TTL-renewal side effect of `refresh_on_hit`
+    // itself is exercised by the store-level tests; here we lock that the macro
+    // attribute path wires it without error.
+    #[concurrent_cached(
+        disk = true,
+        ttl_secs = 60,
+        refresh = true,
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
+    )]
+    fn cached_disk_refresh(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk_refresh() {
+        // First call: miss, Ok value computed and cached.
+        assert_eq!(cached_disk_refresh(1), Ok(1));
+        // Second call same arg: served from the disk cache (refresh_on_hit set).
+        assert_eq!(cached_disk_refresh(1), Ok(1));
+        // Err is not cached and is returned as-is.
+        assert_eq!(cached_disk_refresh(5), Err(TestError::Count(5)));
+    }
+
     #[concurrent_cached(
         disk = true,
         ttl_secs = 1,
@@ -2515,6 +2548,36 @@ mod disk_tests {
         assert_eq!(cached_disk_cache_create(1), Ok(1));
         assert_eq!(cached_disk_cache_create(5), Err(TestError::Count(5)));
         assert_eq!(cached_disk_cache_create(6), Err(TestError::Count(6)));
+    }
+
+    // #8: `refresh = false` is now the plain-bool default and must NOT conflict
+    // with a `create` block. Previously `refresh` was `Option<bool>`, so an
+    // explicit `refresh = Some(false)` alongside `create` tripped the
+    // create-conflict rejection (`check_create_conflicts`). It now compiles:
+    // `refresh = false` is treated as "not set" by the conflict check.
+    #[concurrent_cached(
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
+        refresh = false,
+        ty = "cached::RedbCache<u32, u32>",
+        create = r##" { RedbCache::builder("cached_disk_refresh_false_create").build().expect("error building disk cache") } "##
+    )]
+    fn cached_disk_refresh_false_create(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk_refresh_false_create() {
+        // `refresh = false` + `create` compiles and behaves as a plain cache.
+        assert_eq!(cached_disk_refresh_false_create(1), Ok(1));
+        assert_eq!(cached_disk_refresh_false_create(1), Ok(1));
+        assert_eq!(
+            cached_disk_refresh_false_create(5),
+            Err(TestError::Count(5))
+        );
     }
 
     /// Just calling the macro with durable to test it doesn't break with an expected value
@@ -3743,7 +3806,9 @@ mod sharded_send_sync_typecheck {
 fn concurrent_cached_trait_short_aliases_work() {
     use cached::{ConcurrentCached, ShardedUnboundCache};
 
-    let cache = ShardedUnboundCache::<String, u32>::builder().build().unwrap();
+    let cache = ShardedUnboundCache::<String, u32>::builder()
+        .build()
+        .unwrap();
     assert_eq!(cache.set("a".to_string(), 1).unwrap(), None);
     assert_eq!(cache.get(&"a".to_string()).unwrap(), Some(1));
     assert_eq!(cache.remove(&"a".to_string()).unwrap(), Some(1));
@@ -3755,7 +3820,7 @@ fn concurrent_cached_trait_short_aliases_work() {
 // increment gets moved before the early-return.
 #[test]
 fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
-    use cached::{ConcurrentCached, ShardedUnboundCache, ShardedLruCache};
+    use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 
     // ShardedUnboundCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
     let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
@@ -3786,7 +3851,7 @@ fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
 // (default no-op) overridden by the sharded stores to actually clear entries and zero metrics.
 #[test]
 fn concurrent_cached_trait_clear_and_reset_metrics_on_sharded_stores() {
-    use cached::{ConcurrentCached, ShardedUnboundCache, ShardedLruCache};
+    use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 
     // --- Unbound ShardedUnboundCache: cache_clear empties the store via the trait method ---
     let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
@@ -6582,9 +6647,9 @@ mod macro_arg_pairwise {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // name + unbound: custom static identifier, explicit unbound store.
+    // name: custom static identifier with the default UnboundCache.
     // Default sync_lock is RwLock, so the named static is read via `.write()`.
-    #[cached(name = "PAIRWISE_NAMED_UNBOUND", unbound)]
+    #[cached(name = "PAIRWISE_NAMED_UNBOUND")]
     fn named_unbound(n: u32) -> u32 {
         n + 1
     }

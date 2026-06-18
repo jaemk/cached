@@ -278,10 +278,7 @@ mod try_set_ttl_tests {
             .ttl(Duration::from_secs(15))
             .build()
             .expect("build TtlSortedCache");
-        assert_eq!(
-            cache.try_set_ttl(Duration::ZERO),
-            Err(SetTtlError::ZeroTtl)
-        );
+        assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
     }
 
     #[test]
@@ -338,7 +335,11 @@ mod try_set_ttl_tests {
         // try_set_ttl rejects zero without panicking and without touching the ttl.
         let prev = cache.ttl();
         assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
-        assert_eq!(cache.ttl(), prev, "rejected try_set_ttl must not change ttl");
+        assert_eq!(
+            cache.ttl(),
+            prev,
+            "rejected try_set_ttl must not change ttl"
+        );
 
         // The cache still works after the rejected call.
         cache.cache_set(1, 10);
@@ -362,7 +363,11 @@ mod try_set_ttl_tests {
 
         let prev = cache.ttl();
         assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
-        assert_eq!(cache.ttl(), prev, "rejected try_set_ttl must not change ttl");
+        assert_eq!(
+            cache.ttl(),
+            prev,
+            "rejected try_set_ttl must not change ttl"
+        );
         cache.cache_set(1, 10);
         assert_eq!(cache.cache_get(&1), Some(&10));
 
@@ -383,7 +388,11 @@ mod try_set_ttl_tests {
 
         let prev = cache.ttl();
         assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
-        assert_eq!(cache.ttl(), prev, "rejected try_set_ttl must not change ttl");
+        assert_eq!(
+            cache.ttl(),
+            prev,
+            "rejected try_set_ttl must not change ttl"
+        );
         cache.cache_set(1, 10);
         assert_eq!(cache.cache_get(&1), Some(&10));
 
@@ -434,17 +443,11 @@ mod concurrent_len_is_empty {
             .expect("build ShardedUnboundCache");
 
         // Empty initially.
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(true))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
 
         cache.cache_set(1, 10).unwrap();
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(false))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(false)));
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(1)));
 
         cache.cache_set(2, 20).unwrap();
@@ -452,17 +455,11 @@ mod concurrent_len_is_empty {
 
         cache.cache_remove(&1).unwrap();
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(1)));
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(false))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(false)));
 
         cache.cache_clear().unwrap();
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(true))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
     }
 
     /// `len` and `is_empty` on ShardedLruCache.
@@ -473,28 +470,19 @@ mod concurrent_len_is_empty {
             .build()
             .expect("build ShardedLruCache");
 
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(true))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
 
         cache.cache_set(42, 99).unwrap();
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(1)));
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(false))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(false)));
 
         cache.cache_set(43, 100).unwrap();
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(2)));
 
         cache.cache_reset().unwrap();
         assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
-        assert_eq!(
-            ConcurrentCached::is_empty(&cache),
-            Ok(Some(true))
-        );
+        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -502,9 +490,9 @@ mod concurrent_len_is_empty {
 
 #[cfg(feature = "async")]
 mod concurrent_len_is_empty_async {
-    use cached::{ConcurrentCachedAsync, ShardedUnboundCache};
     #[cfg(feature = "time_stores")]
     use cached::ShardedTtlCache;
+    use cached::{ConcurrentCachedAsync, ShardedUnboundCache};
 
     /// Async `len`/`is_empty` on ShardedUnboundCache track the live entry count.
     /// Fully-qualified syntax is required because the concrete sharded type has

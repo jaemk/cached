@@ -538,12 +538,22 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     }
 
     /// Insert k/v pair with explicit ttl. See `.insert_ttl_evict`
-    pub fn insert_ttl(&mut self, key: K, value: V, ttl: Duration) -> Result<Option<V>, TtlSortedCacheError> {
+    pub fn insert_ttl(
+        &mut self,
+        key: K,
+        value: V,
+        ttl: Duration,
+    ) -> Result<Option<V>, TtlSortedCacheError> {
         self.insert_ttl_evict(key, value, Some(ttl), false)
     }
 
     /// Insert k/v pair and run eviction logic. See `.insert_ttl_evict`
-    pub fn insert_evict(&mut self, key: K, value: V, evict: bool) -> Result<Option<V>, TtlSortedCacheError> {
+    pub fn insert_evict(
+        &mut self,
+        key: K,
+        value: V,
+        evict: bool,
+    ) -> Result<Option<V>, TtlSortedCacheError> {
         self.insert_ttl_evict(key, value, None, evict)
     }
 

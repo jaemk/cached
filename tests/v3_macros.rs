@@ -1415,6 +1415,37 @@ mod ttl_millis_tests {
         );
         assert_eq!(CONC_TTL_FR_CALLS.load(Ordering::SeqCst), 2);
     }
+
+    // ── #[concurrent_cached(refresh = true, ttl_millis = N)] ─────────────────
+    // Behavioral smoke-test: `refresh = true` is now a plain `bool` (not
+    // `Option<bool>`). The cache compiles and caches correctly. `refresh = false`
+    // (the default) is the baseline; `refresh = true` also caches correctly and the
+    // store is constructed with `refresh_on_hit(true)`. We verify caching behavior
+    // on the plain `refresh = false` path here; the TTL-renewal side effect of
+    // `refresh_on_hit(true)` cannot be tested without sleeping past the TTL again.
+
+    static REFRESH_CONC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[concurrent_cached(ttl_millis = 600_000, refresh = true)]
+    fn conc_refresh_fn(x: i32) -> i32 {
+        REFRESH_CONC_CALLS.fetch_add(1, Ordering::SeqCst);
+        x
+    }
+
+    #[test]
+    fn concurrent_cached_refresh_bool_compiles_and_caches() {
+        REFRESH_CONC_CALLS.store(0, Ordering::SeqCst);
+        // First call: miss, body runs.
+        assert_eq!(conc_refresh_fn(7), 7);
+        assert_eq!(REFRESH_CONC_CALLS.load(Ordering::SeqCst), 1);
+        // Second call: cache hit, body does not re-run.
+        assert_eq!(conc_refresh_fn(7), 7);
+        assert_eq!(
+            REFRESH_CONC_CALLS.load(Ordering::SeqCst),
+            1,
+            "refresh = true (bool) still caches: second call must be a hit"
+        );
+    }
 }
 
 // ── TTL spellings: `ttl` (Duration expr), `ttl_secs`, `ttl_millis` ─────────
@@ -1905,5 +1936,118 @@ mod async_in_impl_tests {
         // Different arg: new key, body runs again.
         assert_eq!(s.fetch(3).await, 13);
         assert_eq!(ASYNC_CONC_CALLS.load(Ordering::SeqCst), 2);
+    }
+}
+
+// ── #5: the `unbound` attribute is removed; plain `#[cached]` is the default
+//        unbounded store. These tests lock the behavior that replaced the
+//        removed attribute: a bare `#[cached]` (no max_size/ttl/expires)
+//        produces a working unbounded cache. `#[cached(unbound)]` is now a
+//        compile error, covered by the `cached_unbound_attr_removed` trybuild
+//        golden; here we prove the positive replacement behavior.
+mod unbound_default_tests {
+    use super::*;
+
+    // Each test uses its own `#[cached]` fn (hence its own cache static and
+    // counter) so the two tests never share a cache or counter across the
+    // single test binary. Counts are asserted as absolute values that hold for
+    // the sole caller of each function.
+
+    static UNBOUND_REPEAT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    // No `max_size`, `ttl`, or `expires`: the default store is an `UnboundCache`.
+    #[cached]
+    fn unbound_repeat(x: u32) -> u32 {
+        UNBOUND_REPEAT_CALLS.fetch_add(1, Ordering::SeqCst);
+        x * 2
+    }
+
+    #[test]
+    fn plain_cached_caches_repeated_same_arg() {
+        // First call for x=21: miss, body runs.
+        assert_eq!(unbound_repeat(21), 42);
+        assert_eq!(UNBOUND_REPEAT_CALLS.load(Ordering::SeqCst), 1);
+        // Repeated same-arg call: cache hit, body does not re-run. This is the
+        // behavior the removed `unbound` attribute used to opt into and is now
+        // the `#[cached]` default.
+        assert_eq!(unbound_repeat(21), 42);
+        assert_eq!(
+            UNBOUND_REPEAT_CALLS.load(Ordering::SeqCst),
+            1,
+            "plain #[cached] (no unbound attr) must cache repeated same-arg calls"
+        );
+    }
+
+    static UNBOUND_FILL_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[cached]
+    fn unbound_fill(x: u32) -> u32 {
+        UNBOUND_FILL_CALLS.fetch_add(1, Ordering::SeqCst);
+        x * 2
+    }
+
+    #[test]
+    fn plain_cached_is_unbounded_no_eviction() {
+        // Insert many distinct keys, far more than any LRU default would retain.
+        for i in 100..1100u32 {
+            assert_eq!(unbound_fill(i), i * 2);
+        }
+        let after_fill = UNBOUND_FILL_CALLS.load(Ordering::SeqCst);
+        assert_eq!(after_fill, 1000, "1000 distinct keys each computed once");
+        // The very first key inserted must still be cached (unbounded: no
+        // eviction). A bounded store would have evicted it by now and the body
+        // would re-run, bumping the counter.
+        assert_eq!(unbound_fill(100), 200);
+        assert_eq!(
+            UNBOUND_FILL_CALLS.load(Ordering::SeqCst),
+            after_fill,
+            "default #[cached] is unbounded: the earliest key is never evicted"
+        );
+    }
+}
+
+// ── #8: `#[concurrent_cached]` `refresh` is now a plain `bool` (parity with
+//        `#[cached]`). `refresh = false` is the default and no longer trips the
+//        expires+refresh or refresh+create conflict checks (previously
+//        `refresh = Some(false)` made those combinations a compile error). These
+//        are compile-and-behavior tests locking that `refresh = false` is inert.
+mod refresh_false_no_conflict_tests {
+    use super::*;
+
+    // Per-value expiry store payload: implements `Expires`. Used to prove
+    // `refresh = false` does NOT conflict with `expires = true` (the conflict
+    // only fires for `refresh = true`).
+    #[derive(Clone)]
+    struct NeverExpires(u32);
+
+    impl cached::Expires for NeverExpires {
+        fn is_expired(&self) -> bool {
+            false
+        }
+    }
+
+    static REFRESH_FALSE_EXPIRES_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    // `refresh = false` + `expires = true`: would have been a hard conflict when
+    // `refresh` was `Option<bool>` and `Some(false)` was set. Now compiles and
+    // behaves as a plain expires cache.
+    #[concurrent_cached(expires = true, refresh = false)]
+    fn refresh_false_expires(x: u32) -> NeverExpires {
+        REFRESH_FALSE_EXPIRES_CALLS.fetch_add(1, Ordering::SeqCst);
+        NeverExpires(x)
+    }
+
+    #[test]
+    fn refresh_false_does_not_conflict_with_expires() {
+        REFRESH_FALSE_EXPIRES_CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(refresh_false_expires(9).0, 9);
+        assert_eq!(REFRESH_FALSE_EXPIRES_CALLS.load(Ordering::SeqCst), 1);
+        // Cache hit: body not re-run. The value never expires.
+        assert_eq!(refresh_false_expires(9).0, 9);
+        assert_eq!(
+            REFRESH_FALSE_EXPIRES_CALLS.load(Ordering::SeqCst),
+            1,
+            "refresh = false + expires = true must compile and cache"
+        );
     }
 }
