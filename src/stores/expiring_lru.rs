@@ -218,12 +218,6 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
         self.store.capacity()
     }
 
-    /// Returns a reference to the inner [`LruCache`].
-    #[must_use]
-    pub fn store(&self) -> &LruCache<K, V> {
-        &self.store
-    }
-
     /// Change the maximum number of entries, returning the previous capacity;
     /// shrinking below the current entry count immediately evicts least-recently-used
     /// entries.
@@ -1069,14 +1063,14 @@ mod tests {
             .unwrap();
         c.cache_set(1u8, 20u8); // expired
 
-        c.cache_remove_entry(&1u8);
+        let _ = c.cache_remove_entry(&1u8);
         assert_eq!(
             count.load(Ordering::Relaxed),
             1,
             "on_evict fires for expired entries"
         );
 
-        c.cache_remove_entry(&99u8);
+        let _ = c.cache_remove_entry(&99u8);
         assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
     }
 
@@ -1093,8 +1087,8 @@ mod tests {
             ExpiringLruCache::builder().max_size(4).build().unwrap();
         c.cache_set(1u8, 20u8); // expired: 20 > 10
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u8); // expired but present - must increment
-        c.cache_remove_entry(&99u8); // absent - must not increment
+        let _ = c.cache_remove_entry(&1u8); // expired but present - must increment
+        let _ = c.cache_remove_entry(&99u8); // absent - must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,

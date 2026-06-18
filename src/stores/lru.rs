@@ -515,7 +515,7 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 .collect::<Vec<_>>()
         };
         for k in remove_keys {
-            self.cache_remove(&k);
+            let _ = self.cache_remove(&k);
         }
     }
 
@@ -1381,11 +1381,11 @@ mod tests {
             .build()
             .unwrap();
         c.cache_set(1u32, 10u32);
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         // No fire for absent key.
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
@@ -1394,8 +1394,8 @@ mod tests {
         let mut c = LruCache::builder().max_size(4).build().unwrap();
         c.cache_set(1u32, 10u32);
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u32);
-        c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&999u32); // absent — must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,

@@ -168,6 +168,23 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
+/// Error returned by [`Cached::cache_try_set`](crate::Cached::cache_try_set) when an entry
+/// cannot be stored - currently only when computing the entry's expiry `Instant` overflows.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum CacheSetError {
+    /// Computing the entry's expiry `Instant` overflowed `Instant`'s representable range.
+    TimeBounds,
+}
+impl std::fmt::Display for CacheSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CacheSetError::TimeBounds => f.write_str("ttl is outside Instant bounds"),
+        }
+    }
+}
+impl std::error::Error for CacheSetError {}
+
 /// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
 #[cfg(any(
     feature = "time_stores",
@@ -184,8 +201,8 @@ pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
 
 /// A cached value paired with its insertion timestamp for TTL tracking.
 ///
-/// Exposed through `TtlCache::store` and `LruTtlCache::store` for
-/// advanced introspection of cache internals.
+/// Used internally by [`TtlCache`](crate::TtlCache) and [`LruTtlCache`](crate::LruTtlCache)
+/// to pair each entry with the instant it was inserted (or last refreshed).
 #[derive(Debug)]
 pub struct TimedEntry<V> {
     /// The instant this entry was inserted (or last refreshed).
@@ -205,10 +222,7 @@ impl<V: Clone> Clone for TimedEntry<V> {
 
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
-pub use crate::stores::redb::{
-    DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError, RedbCache,
-    RedbCacheBuildError, RedbCacheBuilder, RedbCacheError,
-};
+pub use crate::stores::redb::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{
@@ -449,6 +463,7 @@ pub trait CacheEvict {
 pub trait ConcurrentCacheEvict {
     /// Remove all expired entries, returning the number removed. Fires `on_evict`
     /// and increments `cache_evictions()` for each removed entry.
+    #[must_use]
     fn evict(&self) -> usize;
 }
 

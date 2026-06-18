@@ -198,12 +198,6 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
         )
     }
 
-    /// Returns a reference to the cache's `store`
-    #[must_use]
-    pub fn store(&self) -> &HashMap<K, TimedEntry<V>, RandomState> {
-        &self.store
-    }
-
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
     /// evictions counter.
     ///
@@ -908,11 +902,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Even for an expired entry, on_evict must fire.
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         // No fire for absent key.
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
@@ -925,8 +919,8 @@ mod tests {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u32); // expired but present — must increment
-        c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32); // expired but present — must increment
+        let _ = c.cache_remove_entry(&999u32); // absent — must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,

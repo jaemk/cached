@@ -163,12 +163,6 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
         )
     }
 
-    /// Returns a reference to the cache's `store`
-    #[must_use]
-    pub fn store(&self) -> &HashMap<K, V, RandomState> {
-        &self.store
-    }
-
     /// Remove all entries and fire the `on_evict` callback for each one.
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
@@ -677,11 +671,11 @@ mod tests {
             .build()
             .unwrap();
         c.cache_set(1u32, 10u32);
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         // No fire for absent key.
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 

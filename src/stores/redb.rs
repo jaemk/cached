@@ -433,26 +433,6 @@ impl_from_redb!(
     redb::SetDurabilityError,
 );
 
-// ── Back-compat aliases ──────────────────────────────────────────────────────
-//
-// `DiskCache` was renamed to `RedbCache` so the type names its backend
-// explicitly (like `RedisCache`). These aliases are kept for convenience and
-// back-compat so existing code keeps compiling; they are intentionally NOT
-// deprecated.
-
-/// `DiskCache` was renamed to [`RedbCache`] to name its backend explicitly
-/// (like `RedisCache`). This alias is kept for convenience/back-compat.
-pub type DiskCache<K, V> = RedbCache<K, V>;
-/// `DiskCacheBuilder` was renamed to [`RedbCacheBuilder`] to name its backend
-/// explicitly (like `RedisCache`). This alias is kept for convenience/back-compat.
-pub type DiskCacheBuilder<K, V> = RedbCacheBuilder<K, V>;
-/// `DiskCacheError` was renamed to [`RedbCacheError`] to name its backend
-/// explicitly (like `RedisCache`). This alias is kept for convenience/back-compat.
-pub type DiskCacheError = RedbCacheError;
-/// `DiskCacheBuildError` was renamed to [`RedbCacheBuildError`] to name its backend
-/// explicitly (like `RedisCache`). This alias is kept for convenience/back-compat.
-pub type DiskCacheBuildError = RedbCacheBuildError;
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedDiskValue<V> {
     value: V,

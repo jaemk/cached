@@ -4905,8 +4905,6 @@ fn test_timed_sized_expired_get_does_not_pollute_inner_metrics() {
     assert!(cache.cache_get(&1).is_none());
     assert_eq!(cache.cache_hits(), Some(0));
     assert_eq!(cache.cache_misses(), Some(1));
-    assert_eq!(cache.store().cache_hits(), Some(0));
-    assert_eq!(cache.store().cache_misses(), Some(0));
 }
 
 #[test]
@@ -5133,24 +5131,14 @@ fn test_fallible_builders_return_build_error() {
 
 #[cfg(feature = "disk_store")]
 #[test]
-fn disk_cache_builder_aliases_and_zero_ttl_validation() {
-    // Canonical `RedbCache` name.
+fn redb_cache_builder_zero_ttl_validation() {
+    // `RedbCache` rejects a zero TTL at build time.
     let result = cached::RedbCache::<String, String>::builder("zero-ttl")
         .ttl(cached::time::Duration::ZERO)
         .build();
     assert!(matches!(
         result,
         Err(cached::RedbCacheBuildError::InvalidTtl(..))
-    ));
-
-    // The kept `DiskCache` alias (and its `DiskCacheBuildError` alias) still
-    // compile and behave identically.
-    let result = cached::DiskCache::<String, String>::builder("zero-ttl")
-        .ttl(cached::time::Duration::ZERO)
-        .build();
-    assert!(matches!(
-        result,
-        Err(cached::DiskCacheBuildError::InvalidTtl(..))
     ));
 }
 
@@ -5607,13 +5595,13 @@ fn test_unbound_cache_on_evict_fires_on_remove() {
     cache.cache_set(2, 200);
     assert_eq!(fired.load(Ordering::Relaxed), 0);
 
-    cache.cache_remove(&1u32);
+    let _ = cache.cache_remove(&1u32);
     assert_eq!(fired.load(Ordering::Relaxed), 1);
 
-    cache.cache_remove(&99u32); // not present — on_evict should NOT fire
+    let _ = cache.cache_remove(&99u32); // not present — on_evict should NOT fire
     assert_eq!(fired.load(Ordering::Relaxed), 1);
 
-    cache.cache_remove(&2u32);
+    let _ = cache.cache_remove(&2u32);
     assert_eq!(fired.load(Ordering::Relaxed), 2);
 }
 
@@ -5847,29 +5835,29 @@ fn test_ttl_sorted_cache_builder_build() {
     assert_eq!(cache.cache_get(&1), Some(&10));
 }
 
-// ── `store()` getter ───────────────────────────────────────────────────────────
+// ── `store()` getter removed; public API covers the same assertions ────────────
 
 #[test]
 #[cfg(feature = "time_stores")]
-fn test_ttl_cache_store_getter() {
+fn test_ttl_cache_size_and_get() {
     use cached::{Cached, TtlCache};
     let mut cache = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .unwrap();
     cache.cache_set(1, 10);
-    // store() gives direct access to the underlying HashMap<K, TimedEntry<V>>
-    assert_eq!(cache.store().len(), 1);
-    assert!(cache.store().contains_key(&1));
+    // cache_size() and cache_get() replace direct store() introspection.
+    assert_eq!(cache.cache_size(), 1);
+    assert_eq!(cache.cache_get(&1), Some(&10));
 }
 
 #[test]
-fn test_unbound_cache_store_getter() {
+fn test_unbound_cache_size() {
     use cached::Cached;
     let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
-    assert_eq!(cache.store().len(), 2);
+    assert_eq!(cache.cache_size(), 2);
 }
 
 // ── `CacheTtl::refresh_on_hit()` and `CacheTtl::set_refresh_on_hit()` ────────
@@ -6667,9 +6655,6 @@ fn test_expiring_lru_cache_get_does_not_inflate_inner_metrics() {
     assert!(cache.cache_get(&1).is_some());
     assert_eq!(cache.cache_hits(), Some(1));
     assert_eq!(cache.cache_misses(), Some(0));
-    // Inner LruCache metrics must not be incremented — ExpiringLruCache manages its own.
-    assert_eq!(cache.store().cache_hits(), Some(0));
-    assert_eq!(cache.store().cache_misses(), Some(0));
 }
 
 #[test]

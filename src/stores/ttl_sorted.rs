@@ -786,8 +786,10 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
         self.insert(key, value).unwrap_or(None)
     }
 
-    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Box<dyn std::error::Error>> {
-        self.insert(k, v).map_err(|e| Box::new(e) as _)
+    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, crate::stores::CacheSetError> {
+        self.insert(k, v).map_err(|e| match e {
+            TtlSortedCacheError::TimeBounds => crate::stores::CacheSetError::TimeBounds,
+        })
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
@@ -1783,14 +1785,14 @@ mod test {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(
             count.load(Ordering::Relaxed),
             1,
             "on_evict fires for expired entries"
         );
 
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
     }
 
@@ -1812,8 +1814,8 @@ mod test {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u32); // expired but present — must increment
-        c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32); // expired but present — must increment
+        let _ = c.cache_remove_entry(&999u32); // absent — must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,

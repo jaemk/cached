@@ -1026,14 +1026,14 @@ mod tests {
             .unwrap();
         c.cache_set(1u8, ExpiredU8(20)); // expired
 
-        c.cache_remove_entry(&1u8);
+        let _ = c.cache_remove_entry(&1u8);
         assert_eq!(
             count.load(Ordering::Relaxed),
             1,
             "on_evict fires for expired entries"
         );
 
-        c.cache_remove_entry(&99u8);
+        let _ = c.cache_remove_entry(&99u8);
         assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
     }
 
@@ -1048,8 +1048,8 @@ mod tests {
         let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
         c.cache_set(1u8, ExpiredU8(20)); // expired: value > 10
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u8); // expired but present — must increment
-        c.cache_remove_entry(&99u8); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u8); // expired but present — must increment
+        let _ = c.cache_remove_entry(&99u8); // absent — must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,

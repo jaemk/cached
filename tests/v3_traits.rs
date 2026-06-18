@@ -1,6 +1,10 @@
-//! Integration tests for the 3.0 trait additions:
+//! Integration tests for the 3.0 trait additions and audit-fix batch:
 //! - `*_mut` get-or-set variants (#179)
 //! - `SerializeCached`/`SerializeCachedAsync` borrowed set (#196)
+//! - `CacheSetError` concrete error type for `cache_try_set`
+//! - `ConcurrentCached::refresh_on_hit` getter default and override
+//! - `ConcurrentCached::cache_get_or_set_with` / `async_cache_get_or_set_with`
+//! - `store()` getter removal verified via public API
 
 use cached::{Cached, LruCache, UnboundCache};
 
@@ -780,4 +784,510 @@ mod redb_serialize_cached_async {
             Some("second".to_string())
         );
     }
+}
+
+// ── Item 1: CacheSetError ─────────────────────────────────────────────────────
+
+/// `CacheSetError` is a well-formed concrete `std::error::Error` type:
+/// it is `Debug`, has a `Display` impl, and can be boxed as a trait object.
+#[test]
+fn cache_set_error_is_std_error() {
+    use cached::CacheSetError;
+    use std::error::Error;
+
+    let err = CacheSetError::TimeBounds;
+
+    // Debug and Display both work.
+    assert!(format!("{err:?}").contains("TimeBounds"));
+    assert_eq!(err.to_string(), "ttl is outside Instant bounds");
+
+    // It is a leaf error: no source.
+    assert!(err.source().is_none());
+
+    // Can be boxed as a trait object.
+    let boxed: Box<dyn Error> = Box::new(CacheSetError::TimeBounds);
+    assert_eq!(boxed.to_string(), "ttl is outside Instant bounds");
+    assert!(boxed.source().is_none());
+}
+
+/// The default `cache_try_set` on stores that do not override it is infallible:
+/// it always returns `Ok(prev)`.
+#[test]
+fn cache_try_set_default_is_infallible() {
+    use cached::{CacheSetError, Cached, UnboundCache};
+
+    let mut cache: UnboundCache<u32, u32> =
+        UnboundCache::builder().build().expect("build UnboundCache");
+
+    // First insert: no previous value.
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 10);
+    assert_eq!(result.unwrap(), None);
+
+    // Second insert: returns the previous value.
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 20);
+    assert_eq!(result.unwrap(), Some(10));
+}
+
+/// `TtlSortedCache::cache_try_set` returns `Err(CacheSetError::TimeBounds)` when
+/// the computed expiry `Instant` would overflow. With a normally-representable TTL
+/// it succeeds infallibly.
+#[cfg(feature = "time_stores")]
+#[test]
+fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
+    use cached::time::Duration;
+    use cached::{CacheSetError, Cached, TtlSortedCache};
+
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build TtlSortedCache");
+
+    // A normal insert via cache_try_set must succeed and return the previous value.
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 42);
+    assert_eq!(result.unwrap(), None);
+
+    // A second insert returns the previous value.
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 99);
+    assert_eq!(result.unwrap(), Some(42));
+}
+
+/// `TtlSortedCache::cache_try_set` returns `Err(CacheSetError::TimeBounds)` when the
+/// configured ttl makes the computed expiry `Instant` overflow.
+///
+/// The overflow is triggered deterministically and portably: the public default ttl
+/// drives the expiry (`insert` -> `insert_inner` computes `Instant::now() + self.ttl`),
+/// and the builder's `validate_ttl` only rejects a *zero* ttl, so a near-`Duration::MAX`
+/// ttl passes `build()` and then overflows `Instant::checked_add` on every platform
+/// (no real `Instant` is anywhere near `Duration::MAX` from the epoch). The fallible
+/// `cache_try_set` path uses `TtlOverflow::Error`, so it must report the overflow rather
+/// than silently saturating or panicking, and the cache must be left unmutated.
+#[cfg(feature = "time_stores")]
+#[test]
+fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
+    use cached::time::Duration;
+    use cached::{CacheSetError, Cached, TtlSortedCache};
+
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::MAX)
+        .build()
+        .expect("Duration::MAX is non-zero so build() must succeed");
+
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 42);
+    assert!(
+        matches!(result, Err(CacheSetError::TimeBounds)),
+        "near-MAX ttl must overflow Instant and surface TimeBounds, got {result:?}"
+    );
+
+    // The failed try_set must not have stored anything (Error path mutates nothing).
+    assert_eq!(cache.cache_size(), 0, "overflowing try_set must not insert");
+    assert_eq!(
+        cache.cache_get(&1),
+        None,
+        "overflowing try_set must not insert"
+    );
+
+    // The ergonomic alias surfaces the same error.
+    let via_alias: Result<Option<u32>, CacheSetError> = cache.try_set(2, 7);
+    assert!(
+        matches!(via_alias, Err(CacheSetError::TimeBounds)),
+        "try_set alias must also surface TimeBounds, got {via_alias:?}"
+    );
+    assert_eq!(cache.cache_size(), 0);
+}
+
+/// `try_set` (the ergonomic alias) delegates to `cache_try_set` and returns the
+/// same `Result<Option<V>, CacheSetError>` type.
+#[cfg(feature = "time_stores")]
+#[test]
+fn try_set_alias_returns_cache_set_error() {
+    use cached::time::Duration;
+    use cached::{CacheSetError, Cached, TtlSortedCache};
+
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build TtlSortedCache");
+
+    let result: Result<Option<u32>, CacheSetError> = cache.try_set(1, 7);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), None);
+}
+
+// ── Item 5: refresh_on_hit getter on ConcurrentCached ────────────────────────
+
+/// `ConcurrentCached::refresh_on_hit` defaults to `false` on stores that have
+/// no TTL (e.g. `ShardedUnboundCache`).
+#[test]
+fn concurrent_refresh_on_hit_default_false() {
+    use cached::{ConcurrentCached, ShardedUnboundCache};
+
+    let cache: ShardedUnboundCache<u32, u32> =
+        ShardedUnboundCache::builder().build().expect("build");
+
+    assert!(!ConcurrentCached::refresh_on_hit(&cache));
+}
+
+/// On a TTL-capable sharded store, the `ConcurrentCached::set_refresh_on_hit` impl
+/// persists the flag in an `AtomicBool`; the store's inherent `refresh_on_hit()`
+/// reads it back. The trait-default `refresh_on_hit` returns `false` for stores
+/// that do not override it in the `ConcurrentCached` impl (sharded stores expose the
+/// getter as an inherent method instead).
+#[cfg(feature = "time_stores")]
+#[test]
+fn concurrent_set_refresh_on_hit_updates_inner_state() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCached, ShardedTtlCache};
+
+    let cache = ShardedTtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build ShardedTtlCache");
+
+    // Trait default is false (no trait-impl override for the getter on this store).
+    assert!(!ConcurrentCached::refresh_on_hit(&cache));
+
+    // `set_refresh_on_hit` returns the previous value (from the AtomicBool swap).
+    let prev = ConcurrentCached::set_refresh_on_hit(&cache, true);
+    assert!(!prev, "previous value must be false");
+
+    // The inherent `refresh_on_hit()` reads the AtomicBool - confirms the setter worked.
+    assert!(cache.refresh_on_hit());
+
+    // Disable via the trait method.
+    let prev = ConcurrentCached::set_refresh_on_hit(&cache, false);
+    assert!(prev, "previous value must be true");
+    assert!(!cache.refresh_on_hit());
+}
+
+/// Async counterpart of `concurrent_set_refresh_on_hit_updates_inner_state`:
+/// `ConcurrentCachedAsync::set_refresh_on_hit` on `ShardedTtlCache` swaps the inner
+/// `AtomicBool` (returning the previous flag), and the store's inherent
+/// `refresh_on_hit()` reads it back. The trait-level `refresh_on_hit` getter is the
+/// defaulted `false` on this store (neither trait overrides the getter), so the
+/// asymmetry between the real inherent state and the trait default is intentional
+/// and locked here.
+#[cfg(all(feature = "time_stores", feature = "async"))]
+#[test]
+fn concurrent_async_set_refresh_on_hit_updates_inner_state() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCachedAsync, ShardedTtlCache};
+
+    let cache = ShardedTtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build ShardedTtlCache");
+
+    // Trait-level getter is the default false (no override on this store).
+    assert!(!ConcurrentCachedAsync::refresh_on_hit(&cache));
+
+    // Setter swaps the AtomicBool and reports the previous value.
+    let prev = ConcurrentCachedAsync::set_refresh_on_hit(&cache, true);
+    assert!(!prev, "previous flag must be false");
+
+    // Inherent getter reflects the new state; trait default still reports false.
+    assert!(
+        cache.refresh_on_hit(),
+        "inherent getter must read the swapped flag"
+    );
+    assert!(
+        !ConcurrentCachedAsync::refresh_on_hit(&cache),
+        "trait-default getter intentionally stays false"
+    );
+
+    // Round-trip back to false.
+    let prev = ConcurrentCachedAsync::set_refresh_on_hit(&cache, false);
+    assert!(prev, "previous flag must be true");
+    assert!(!cache.refresh_on_hit());
+}
+
+// ── short remove/remove_entry aliases remain callable for-effect (no #[must_use]) ──
+
+/// Item 12 locks an intentional asymmetry: `#[must_use]` is on `cache_remove` /
+/// `cache_remove_entry` but NOT on the short `remove` / `remove_entry` aliases. This
+/// test calls the short aliases purely for-effect (discarding the return value with no
+/// `let _ =`); it only compiles cleanly because those aliases are not `#[must_use]`. A
+/// regression that added `#[must_use]` to the aliases would raise `unused_must_use` here,
+/// and CI runs `clippy --tests -- -D warnings`, so this is an enforced gate.
+#[test]
+fn short_remove_aliases_callable_for_effect() {
+    use cached::{Cached, UnboundCache};
+
+    let mut cache: UnboundCache<u32, u32> =
+        UnboundCache::builder().build().expect("build UnboundCache");
+    cache.cache_set(1, 10);
+    cache.cache_set(2, 20);
+
+    // For-effect calls: return values intentionally dropped (no `let _ =`).
+    // These would warn if the aliases were #[must_use].
+    cache.remove(&1);
+    cache.remove_entry(&2);
+
+    assert_eq!(
+        cache.cache_size(),
+        0,
+        "both entries removed via short aliases"
+    );
+
+    // Sanity: the must_use'd canonical methods still return the value as before.
+    cache.cache_set(3, 30);
+    assert_eq!(cache.cache_remove(&3), Some(30));
+}
+
+// ── Item 8: cache_get_or_set_with on ConcurrentCached ────────────────────────
+
+/// On a miss, `cache_get_or_set_with` calls the factory, stores the result, and
+/// returns it. On a hit, the factory is not called.
+#[test]
+fn concurrent_cache_get_or_set_with_hit_and_miss() {
+    use cached::{ConcurrentCached, ShardedUnboundCache};
+
+    let cache: ShardedUnboundCache<u32, u32> =
+        ShardedUnboundCache::builder().build().expect("build");
+
+    // Miss: factory is invoked and result is stored.
+    let v = ConcurrentCached::cache_get_or_set_with(&cache, 1, || 42).expect("infallible");
+    assert_eq!(v, 42);
+
+    // Confirm it was stored.
+    assert_eq!(cache.cache_get(&1).unwrap(), Some(42));
+
+    // Hit: factory must NOT be called (use a panicking closure to verify).
+    let v = ConcurrentCached::cache_get_or_set_with(&cache, 1, || panic!("must not be called"))
+        .expect("infallible");
+    assert_eq!(v, 42);
+}
+
+/// Locks the get-then-return contract with an explicit invocation counter (rather
+/// than a panicking closure): the factory runs exactly once across a miss followed by
+/// a hit. On the hit the stored value is returned without recomputation.
+#[test]
+fn concurrent_cache_get_or_set_with_factory_runs_once() {
+    use cached::{ConcurrentCached, ShardedUnboundCache};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let cache: ShardedUnboundCache<u32, u32> =
+        ShardedUnboundCache::builder().build().expect("build");
+
+    let calls = AtomicUsize::new(0);
+
+    // Miss: factory runs and the result is stored.
+    let v = ConcurrentCached::cache_get_or_set_with(&cache, 1, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        42
+    })
+    .expect("infallible");
+    assert_eq!(v, 42);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "miss must invoke the factory once"
+    );
+
+    // Hit: factory must NOT run; the previously stored value is returned verbatim.
+    let v = ConcurrentCached::cache_get_or_set_with(&cache, 1, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        999
+    })
+    .expect("infallible");
+    assert_eq!(
+        v, 42,
+        "hit must return the stored value, not the recomputed one"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "hit must not invoke the factory again"
+    );
+}
+
+/// The ergonomic alias `get_or_set_with` delegates to `cache_get_or_set_with`.
+#[test]
+fn concurrent_get_or_set_with_alias() {
+    use cached::{ConcurrentCached, ShardedUnboundCache};
+
+    let cache: ShardedUnboundCache<u32, u32> =
+        ShardedUnboundCache::builder().build().expect("build");
+
+    let v = ConcurrentCached::get_or_set_with(&cache, 10, || 99).expect("infallible");
+    assert_eq!(v, 99);
+
+    // Hit path via alias.
+    let v2 = ConcurrentCached::get_or_set_with(&cache, 10, || panic!("must not be called"))
+        .expect("infallible");
+    assert_eq!(v2, 99);
+}
+
+// ── Item 8 async: async_cache_get_or_set_with on ConcurrentCachedAsync ────────
+
+#[cfg(feature = "async")]
+mod async_cache_get_or_set_with_tests {
+    use cached::{ConcurrentCachedAsync, ShardedUnboundCache};
+
+    /// On a miss, `async_cache_get_or_set_with` calls the async factory, stores
+    /// the result, and returns it. On a hit, the factory is not called.
+    #[tokio::test]
+    async fn hit_and_miss() {
+        let cache: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+
+        // Miss: factory runs.
+        let v = ConcurrentCachedAsync::async_cache_get_or_set_with(&cache, 1, || async { 55 })
+            .await
+            .expect("infallible");
+        assert_eq!(v, 55);
+
+        // Confirm stored.
+        let stored = ConcurrentCachedAsync::async_cache_get(&cache, &1)
+            .await
+            .unwrap();
+        assert_eq!(stored, Some(55));
+
+        // Hit: factory must NOT run.
+        let v = ConcurrentCachedAsync::async_cache_get_or_set_with(&cache, 1, || async {
+            panic!("must not be called")
+        })
+        .await
+        .expect("infallible");
+        assert_eq!(v, 55);
+    }
+
+    /// Counter-based version of the get-then-return contract for the async variant:
+    /// the async factory runs exactly once across a miss followed by a hit, and the
+    /// hit returns the stored value without recomputation.
+    #[tokio::test]
+    async fn async_factory_runs_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+
+        let calls = AtomicUsize::new(0);
+
+        let v = ConcurrentCachedAsync::async_cache_get_or_set_with(&cache, 1, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            42
+        })
+        .await
+        .expect("infallible");
+        assert_eq!(v, 42);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "miss must run the factory once"
+        );
+
+        let v = ConcurrentCachedAsync::async_cache_get_or_set_with(&cache, 1, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            999
+        })
+        .await
+        .expect("infallible");
+        assert_eq!(v, 42, "hit returns the stored value");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "hit must not run the factory again"
+        );
+    }
+
+    /// `async_cache_get_or_set_with` on a TTL-capable async sharded store
+    /// (`ShardedTtlCache`): a miss computes and stores through the time-bounded
+    /// store, and a subsequent hit on the live entry skips the factory.
+    #[cfg(feature = "time_stores")]
+    #[tokio::test]
+    async fn ttl_store_hit_and_miss() {
+        use cached::ShardedTtlCache;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        let calls = AtomicUsize::new(0);
+
+        // Miss: factory runs and the value is stored in the TTL store.
+        let v = ConcurrentCachedAsync::async_cache_get_or_set_with(&cache, 1, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            77
+        })
+        .await
+        .expect("infallible");
+        assert_eq!(v, 77);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Confirm it was stored.
+        let stored = ConcurrentCachedAsync::async_cache_get(&cache, &1)
+            .await
+            .unwrap();
+        assert_eq!(stored, Some(77));
+
+        // Hit on the live entry: factory must NOT run.
+        let v = ConcurrentCachedAsync::async_cache_get_or_set_with(&cache, 1, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            999
+        })
+        .await
+        .expect("infallible");
+        assert_eq!(v, 77, "live hit returns the stored value");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "live hit must not run the factory"
+        );
+    }
+}
+
+// ── Item 6: DiskCache aliases removed ────────────────────────────────────────
+
+// No runtime test needed; the aliases were removed as a compile-time change.
+// The existing test `redb_cache_builder_zero_ttl_validation` in tests/cached.rs
+// confirms that `RedbCache` is the sole name and that builder validation works.
+
+// ── Item 7: store() getters removed - public API assertions cover the same ground ──
+
+/// `UnboundCache` entry count is accessible via `cache_size()`; `store()` is gone.
+#[test]
+fn unbound_cache_size_via_public_api() {
+    use cached::Cached;
+    let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
+    cache.cache_set(1, 10);
+    cache.cache_set(2, 20);
+    assert_eq!(cache.cache_size(), 2);
+    assert!(cache.cache_get(&1).is_some());
+    assert!(cache.cache_get(&2).is_some());
+}
+
+/// `TtlCache` entry count and lookups are accessible via public API; `store()` is gone.
+#[cfg(feature = "time_stores")]
+#[test]
+fn ttl_cache_size_and_lookup_via_public_api() {
+    use cached::time::Duration;
+    use cached::{Cached, TtlCache};
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    cache.cache_set(1, 10);
+    assert_eq!(cache.cache_size(), 1);
+    assert_eq!(cache.cache_get(&1), Some(&10));
+}
+
+/// `LruTtlCache` metrics are accessible directly on the cache; `store()` is gone.
+#[cfg(feature = "time_stores")]
+#[test]
+fn lru_ttl_cache_metrics_via_public_api() {
+    use cached::time::Duration;
+    use cached::{Cached, LruTtlCache};
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    cache.cache_set(1, 10);
+    cache.cache_reset_metrics();
+    assert!(cache.cache_get(&1).is_some());
+    assert_eq!(cache.cache_hits(), Some(1));
+    assert_eq!(cache.cache_misses(), Some(0));
 }

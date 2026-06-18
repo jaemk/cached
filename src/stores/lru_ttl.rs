@@ -394,12 +394,6 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         Ok(self.set_max_size(max_size))
     }
 
-    /// Returns a reference to the cache's `store`
-    #[must_use]
-    pub fn store(&self) -> &LruCache<K, TimedEntry<V>> {
-        &self.store
-    }
-
     /// Evict expired values from the cache.
     pub fn evict(&mut self) -> usize {
         let ttl = self.ttl;
@@ -1391,14 +1385,14 @@ mod tests {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(
             count.load(Ordering::Relaxed),
             1,
             "on_evict fires for expired entries"
         );
 
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
     }
 
@@ -1412,8 +1406,8 @@ mod tests {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u32); // expired but present — must increment
-        c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32); // expired but present — must increment
+        let _ = c.cache_remove_entry(&999u32); // absent — must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,

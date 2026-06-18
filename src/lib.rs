@@ -603,19 +603,13 @@ use std::future::Future;
 )]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
-    BuildError, CacheEvict, ConcurrentCacheEvict, DefaultShardHasher, Expires, ExpiringCache,
-    ExpiringCacheBuilder, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache, LruCacheBuilder,
-    SetMaxSizeError, SetTtlError, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBase,
-    ShardedExpiringCacheBuilder, ShardedExpiringLruCache, ShardedExpiringLruCacheBase,
-    ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder,
-    ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder, UnboundCache,
-    UnboundCacheBuilder,
-};
-#[cfg(feature = "disk_store")]
-#[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
-pub use stores::{
-    DiskCache, DiskCacheBuildError, DiskCacheBuilder, DiskCacheError, RedbCache,
-    RedbCacheBuildError, RedbCacheBuilder, RedbCacheError,
+    BuildError, CacheEvict, CacheSetError, ConcurrentCacheEvict, DefaultShardHasher, Expires,
+    ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache,
+    LruCacheBuilder, SetMaxSizeError, SetTtlError, ShardHasher, ShardedExpiringCache,
+    ShardedExpiringCacheBase, ShardedExpiringCacheBuilder, ShardedExpiringLruCache,
+    ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder, ShardedLruCache,
+    ShardedLruCacheBase, ShardedLruCacheBuilder, ShardedUnboundCache, ShardedUnboundCacheBase,
+    ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "time_stores")]
 #[doc(hidden)]
@@ -627,6 +621,9 @@ pub use stores::{
     ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder,
     TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder, TtlSortedCacheError,
 };
+#[cfg(feature = "disk_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
+pub use stores::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use stores::{RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError};
@@ -739,7 +736,7 @@ pub trait Cached<K, V> {
     /// Fallible variant of [`Self::cache_set`]. Returns `Err` if the store cannot accept the entry
     /// (e.g. the TTL duration overflows `Instant` bounds). The default implementation is
     /// infallible and delegates to [`Self::cache_set`].
-    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Box<dyn std::error::Error>> {
+    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, crate::stores::CacheSetError> {
         Ok(self.cache_set(k, v))
     }
 
@@ -807,6 +804,7 @@ pub trait Cached<K, V> {
     /// # assert_eq!(r1, Some("v1".to_string()));
     /// # assert_eq!(r2, Some("v2".to_string()));
     /// ```
+    #[must_use]
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
@@ -841,6 +839,7 @@ pub trait Cached<K, V> {
     /// // Returns None only when the key was never present.
     /// assert_eq!(cache.cache_remove_entry("missing"), None);
     /// ```
+    #[must_use]
     fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,
@@ -860,6 +859,7 @@ pub trait Cached<K, V> {
     ///
     /// For stores with TTL-based expiry, this count may include entries that have expired
     /// but not yet been evicted (lazy eviction).
+    #[must_use]
     fn cache_size(&self) -> usize;
 
     // ── Optional overrides ────────────────────────────────────────────────
@@ -868,16 +868,19 @@ pub trait Cached<K, V> {
     fn cache_reset_metrics(&mut self) {}
 
     /// Return the number of times a cached value was successfully retrieved.
+    #[must_use]
     fn cache_hits(&self) -> Option<u64> {
         None
     }
 
     /// Return the number of times a cached value was not found.
+    #[must_use]
     fn cache_misses(&self) -> Option<u64> {
         None
     }
 
     /// Return the cache capacity, if bounded.
+    #[must_use]
     fn cache_capacity(&self) -> Option<usize> {
         None
     }
@@ -916,7 +919,7 @@ pub trait Cached<K, V> {
     }
 
     /// Fallible insert. Delegates to [`cache_try_set`](Cached::cache_try_set).
-    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, Box<dyn std::error::Error>> {
+    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, crate::stores::CacheSetError> {
         self.cache_try_set(k, v)
     }
 
@@ -1018,26 +1021,31 @@ pub trait Cached<K, V> {
     }
 
     /// Return the number of entries currently in the cache. Delegates to [`cache_size`](Cached::cache_size).
+    #[must_use]
     fn len(&self) -> usize {
         self.cache_size()
     }
 
     /// Return `true` if the cache contains no entries.
+    #[must_use]
     fn is_empty(&self) -> bool {
         self.cache_size() == 0
     }
 
     /// Return the number of cache hits, if tracked.
+    #[must_use]
     fn hits(&self) -> Option<u64> {
         self.cache_hits()
     }
 
     /// Return the number of cache misses, if tracked.
+    #[must_use]
     fn misses(&self) -> Option<u64> {
         self.cache_misses()
     }
 
     /// Return a snapshot of cache metrics.
+    #[must_use]
     fn metrics(&self) -> CacheMetrics {
         CacheMetrics {
             hits: self.cache_hits(),
@@ -1049,6 +1057,7 @@ pub trait Cached<K, V> {
     }
 
     /// Return the number of times a value was evicted from the cache.
+    #[must_use]
     fn cache_evictions(&self) -> Option<u64> {
         None
     }
@@ -1294,6 +1303,7 @@ pub trait ConcurrentCloneCached<K, V> {
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub trait CacheTtl {
     /// Return the TTL applied to newly inserted entries.
+    #[must_use]
     fn ttl(&self) -> Option<Duration>;
 
     /// Set the TTL for newly inserted entries, returning the previous value.
@@ -1321,6 +1331,7 @@ pub trait CacheTtl {
     fn unset_ttl(&mut self) -> Option<Duration>;
 
     /// Return `true` if cache hits refresh the TTL of the accessed entry.
+    #[must_use]
     fn refresh_on_hit(&self) -> bool {
         false
     }
@@ -1747,14 +1758,23 @@ pub trait ConcurrentCached<K, V> {
         Ok(())
     }
 
+    /// Return `true` if cache hits refresh the ttl of the accessed entry. Default: `false`.
+    #[must_use]
+    fn refresh_on_hit(&self) -> bool {
+        false
+    }
+
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
     ///
     /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
     /// `AtomicBool`; `RedisCache` / `RedbCache` use interior mutability), so this is callable
     /// through a shared reference such as an `Arc` or a `LazyLock` static.
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool;
+    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
+        false
+    }
 
     /// Return the ttl of cached values (time to eviction).
+    #[must_use]
     fn ttl(&self) -> Option<Duration> {
         None
     }
@@ -1780,6 +1800,36 @@ pub trait ConcurrentCached<K, V> {
     /// callable through a shared reference.
     fn unset_ttl(&self) -> Option<Duration> {
         None
+    }
+
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// This is a non-atomic get-then-set: on a miss, another thread may store a value
+    /// for the same key between the get and the set, in which case the computed value
+    /// overwrites the concurrent write. For workloads requiring atomicity, use a store
+    /// that provides internal locking (e.g. `sync_writes` on the proc macro).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Self::Error` if `cache_get` or `cache_set` fails.
+    fn cache_get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
+    where
+        V: Clone,
+    {
+        if let Some(v) = self.cache_get(&k)? {
+            return Ok(v);
+        }
+        let v = f();
+        self.cache_set(k, v.clone())?;
+        Ok(v)
+    }
+
+    /// Ergonomic alias for [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with).
+    fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
+    where
+        V: Clone,
+    {
+        self.cache_get_or_set_with(k, f)
     }
 }
 
@@ -1929,14 +1979,23 @@ pub trait ConcurrentCachedAsync<K, V> {
         Ok(self.cache_size()?.map(|n| n == 0))
     }
 
+    /// Return `true` if cache hits refresh the ttl of the accessed entry. Default: `false`.
+    #[must_use]
+    fn refresh_on_hit(&self) -> bool {
+        false
+    }
+
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
     ///
     /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
     /// `AtomicBool`; `RedisCache` / `RedbCache` use interior mutability), so this is callable
     /// through a shared reference such as an `Arc` or a `LazyLock` static.
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool;
+    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
+        false
+    }
 
     /// Return the ttl of cached values (time to eviction).
+    #[must_use]
     fn ttl(&self) -> Option<Duration> {
         None
     }
@@ -1962,6 +2021,38 @@ pub trait ConcurrentCachedAsync<K, V> {
     /// callable through a shared reference.
     fn unset_ttl(&self) -> Option<Duration> {
         None
+    }
+
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// This is a non-atomic get-then-set: on a miss, another thread may store a value
+    /// for the same key between the get and the set, in which case the computed value
+    /// overwrites the concurrent write. For workloads requiring atomicity, use a store
+    /// that provides internal locking (e.g. `sync_writes` on the proc macro).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Self::Error` if `async_cache_get` or `async_cache_set` fails.
+    fn async_cache_get_or_set_with<F, Fut>(
+        &self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<V, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Send + Sync,
+        V: Clone + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
+    {
+        async move {
+            if let Some(v) = self.async_cache_get(&k).await? {
+                return Ok(v);
+            }
+            let v = f().await;
+            self.async_cache_set(k, v.clone()).await?;
+            Ok(v)
+        }
     }
 }
 
