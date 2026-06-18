@@ -562,6 +562,17 @@ pub struct RedisCache<K, V> {
     _phantom: PhantomData<fn() -> (K, V)>,
 }
 
+impl<K, V> std::fmt::Debug for RedisCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisCache")
+            .field("namespace", &self.namespace)
+            .field("prefix", &self.prefix)
+            .field("ttl", &*self.ttl.lock())
+            .field("refresh", &self.refresh.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl<K, V> RedisCache<K, V>
 where
     K: Display,
@@ -1129,6 +1140,17 @@ mod async_redis {
         // `OnceCell<AsyncRedisCache<_, _>>` static stays `Sync` for the runtime
         // (the async path uses tokio's `OnceCell` rather than `LazyLock`).
         _phantom: PhantomData<fn() -> (K, V)>,
+    }
+
+    impl<K, V> std::fmt::Debug for AsyncRedisCache<K, V> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("AsyncRedisCache")
+                .field("namespace", &self.namespace)
+                .field("prefix", &self.prefix)
+                .field("ttl", &*self.ttl.lock())
+                .field("refresh", &self.refresh.load(Ordering::Relaxed))
+                .finish_non_exhaustive()
+        }
     }
 
     impl<K, V> AsyncRedisCache<K, V>

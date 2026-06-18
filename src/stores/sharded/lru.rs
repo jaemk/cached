@@ -102,6 +102,7 @@ where
     /// builder's hasher type and `build` then yields a `ShardedLruCacheBase` over that hasher.
     /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
     /// introduced via `hasher`, never a `ShardedLruCacheBase::<_, _, H>` turbofish.
+    #[must_use]
     pub fn builder() -> ShardedLruCacheBuilder<K, V, DefaultShardHasher> {
         ShardedLruCacheBuilder::default()
     }
@@ -480,6 +481,7 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruCacheBuilder<K, V, H2> {
         ShardedLruCacheBuilder {
@@ -571,6 +573,7 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
     /// Returns [`BuildError`] if `max_size` (or `per_shard_max_size`) was not set, is `0`,
     /// or if both `max_size` and `per_shard_max_size` are set simultaneously, or if the
     /// effective sharded capacity overflows `usize`.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedLruCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq + Clone,

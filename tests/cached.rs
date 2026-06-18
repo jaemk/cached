@@ -2266,7 +2266,7 @@ mod sharded_ttl_tests {
     #[test]
     fn non_sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
-        use cached::{LruTtlCache, TtlCache};
+        use cached::{CacheTtl, LruTtlCache, TtlCache};
 
         // Primary `.refresh_on_hit(true)` setter.
         let ttl = TtlCache::<u32, u32>::builder()
@@ -2274,7 +2274,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(true)
             .build()
             .expect("valid config");
-        assert!(ttl.refresh_on_hit());
+        assert!(CacheTtl::refresh_on_hit(&ttl));
 
         let lru_ttl = LruTtlCache::<u32, u32>::builder()
             .max_size(64)
@@ -2282,7 +2282,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(true)
             .build()
             .expect("valid config");
-        assert!(lru_ttl.refresh_on_hit());
+        assert!(CacheTtl::refresh_on_hit(&lru_ttl));
 
         // Both setters default to / can clear the flag.
         let ttl_off = TtlCache::<u32, u32>::builder()
@@ -2290,7 +2290,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(false)
             .build()
             .expect("valid config");
-        assert!(!ttl_off.refresh_on_hit());
+        assert!(!CacheTtl::refresh_on_hit(&ttl_off));
     }
 
     #[test]
@@ -5822,7 +5822,7 @@ fn test_ttl_cache_builder_build() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_lru_ttl_cache_builder_build() {
-    use cached::{Cached, LruTtlCache};
+    use cached::{CacheTtl, Cached, LruTtlCache};
     let mut cache = LruTtlCache::<u32, u32>::builder()
         .max_size(4)
         .ttl(Duration::from_secs(60))
@@ -5831,7 +5831,7 @@ fn test_lru_ttl_cache_builder_build() {
         .unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
-    assert!(cache.refresh_on_hit());
+    assert!(CacheTtl::refresh_on_hit(&cache));
 }
 
 #[test]
@@ -5872,22 +5872,91 @@ fn test_unbound_cache_store_getter() {
     assert_eq!(cache.store().len(), 2);
 }
 
-// ── `refresh_on_hit()` getter and `set_refresh_on_hit()` setter ──────────────
+// ── `CacheTtl::refresh_on_hit()` and `CacheTtl::set_refresh_on_hit()` ────────
 
+// Confirms the inherent shadowing methods are gone and the trait methods work.
+// `set_refresh_on_hit` now returns the PREVIOUS value (trait contract).
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_ttl_cache_refresh_getter_and_setter() {
-    use cached::TtlCache;
+    use cached::{CacheTtl, TtlCache};
     let mut cache = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .refresh_on_hit(false)
         .build()
         .unwrap();
-    assert!(!cache.refresh_on_hit());
-    cache.set_refresh_on_hit(true);
-    assert!(cache.refresh_on_hit());
-    cache.set_refresh_on_hit(false);
-    assert!(!cache.refresh_on_hit());
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+    // set_refresh_on_hit returns the PREVIOUS value.
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, true);
+    assert!(!prev, "previous value was false");
+    assert!(CacheTtl::refresh_on_hit(&cache));
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, false);
+    assert!(prev, "previous value was true");
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+}
+
+// Same contract for LruTtlCache.
+#[test]
+#[cfg(feature = "time_stores")]
+fn test_lru_ttl_cache_refresh_getter_and_setter() {
+    use cached::{CacheTtl, LruTtlCache};
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(false)
+        .build()
+        .unwrap();
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+    // set_refresh_on_hit returns the PREVIOUS value.
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, true);
+    assert!(!prev, "previous value was false");
+    assert!(CacheTtl::refresh_on_hit(&cache));
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, false);
+    assert!(prev, "previous value was true");
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+}
+
+// Builder-time `refresh_on_hit(true)` must be reflected by the getter on BOTH
+// timed stores (the round-trip tests above start from `false`; this pins the
+// `true` builder default through to `CacheTtl::refresh_on_hit`).
+#[test]
+#[cfg(feature = "time_stores")]
+fn test_refresh_on_hit_builder_true_reflected_on_both_stores() {
+    use cached::{CacheTtl, LruTtlCache, TtlCache};
+
+    let ttl = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+    assert!(
+        CacheTtl::refresh_on_hit(&ttl),
+        "TtlCache builder refresh_on_hit(true) must be reflected"
+    );
+
+    let lru_ttl = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+    assert!(
+        CacheTtl::refresh_on_hit(&lru_ttl),
+        "LruTtlCache builder refresh_on_hit(true) must be reflected"
+    );
+
+    // And the unset builder default is `false` on both.
+    let ttl_default = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    assert!(!CacheTtl::refresh_on_hit(&ttl_default));
+    let lru_default = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    assert!(!CacheTtl::refresh_on_hit(&lru_default));
 }
 
 // ── CachedIter ────────────────────────────────────────────────────────────────

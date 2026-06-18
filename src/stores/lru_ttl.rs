@@ -351,17 +351,6 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         self.size
     }
 
-    /// Returns whether the ttl is refreshed when the value is retrieved.
-    #[must_use]
-    pub fn refresh_on_hit(&self) -> bool {
-        self.refresh
-    }
-
-    /// Sets whether the ttl is refreshed when the value is retrieved.
-    pub fn set_refresh_on_hit(&mut self, refresh: bool) {
-        self.refresh = refresh;
-    }
-
     /// Change the maximum number of entries, returning the previous capacity;
     /// shrinking below the current entry count immediately evicts least-recently-used
     /// entries.

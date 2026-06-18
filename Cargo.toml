@@ -29,7 +29,7 @@ async_core = []
 async = ["async_core", "tokio"]
 async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
-redis_connection_manager = ["async", "redis_store", "redis/connection-manager", "redis/tokio-comp"]
+redis_connection_manager = ["redis_tokio", "redis/connection-manager"]
 redis_smol = [
   "redis_store",
   "async",
@@ -47,7 +47,6 @@ redis_tokio_rustls = ["redis_tokio", "redis/tokio-rustls-comp"]
 redis_async_cache = ["redis_store", "async", "redis_tokio", "redis/cache-aio"]
 redis_ahash = ["redis_store", "redis/ahash"]
 disk_store = ["redb", "serde", "rmp-serde", "directories"]
-wasm = []
 time_stores = []
 
 [dependencies.cached_proc_macro]

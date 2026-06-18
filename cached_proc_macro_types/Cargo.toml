@@ -9,7 +9,7 @@ readme = "README.md"
 categories = ["caching"]
 keywords = ["caching", "cache", "memoize", "cached"]
 license = "MIT"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.89"
 
 [dependencies]

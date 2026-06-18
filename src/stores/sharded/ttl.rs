@@ -684,6 +684,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedTtlCacheBuilder<K, V, H2> {
         ShardedTtlCacheBuilder {
@@ -723,6 +724,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// Returns [`BuildError::MissingRequired`] if `ttl` was not set,
     /// [`BuildError::InvalidTtl`] if the TTL is zero, or [`BuildError`] if the
     /// shard count overflows.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedTtlCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq,

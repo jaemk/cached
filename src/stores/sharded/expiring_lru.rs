@@ -596,6 +596,7 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(
         self,
@@ -742,6 +743,7 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// Returns [`BuildError`] if `size` (or `per_shard_max_size`) was not set, is `0`,
     /// or if both `max_size` and `per_shard_max_size` are set simultaneously,
     /// or if the shard count overflows.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedExpiringLruCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq + Clone,

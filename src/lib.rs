@@ -78,8 +78,6 @@ collisions with the sync methods.
   Implies `redis_tokio`, `async`, and `redis_store`, but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_ahash`: Enable the optional `ahash` feature of `redis`
 - `disk_store`: Include disk cache store
-- `wasm`: Enable WASM support. Note that this feature is incompatible with `tokio`'s multi-thread
-  runtime (`async_tokio_rt_multi_thread`) and all Redis features (`redis_store`, `redis_smol`, `redis_smol_native_tls`, `redis_smol_rustls`, `redis_tokio`, `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_connection_manager`, `redis_async_cache`, `redis_ahash`)
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, `#[concurrent_cached(ttl_millis = ...)]`, `#[once(ttl_secs = ...)]`, `#[once(ttl = ...)]`, or `#[once(ttl_millis = ...)]` on the default in-memory path.
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
@@ -1500,6 +1498,14 @@ pub trait CachedAsync<K, V> {
 ///     }
 ///     fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, u32)>, Self::Error> {
 ///         Ok(self.0.lock().unwrap().remove_entry(k))
+///     }
+///     fn cache_clear(&self) -> Result<(), Self::Error> {
+///         self.0.lock().unwrap().clear();
+///         Ok(())
+///     }
+///     fn cache_reset(&self) -> Result<(), Self::Error> {
+///         self.0.lock().unwrap().clear();
+///         Ok(())
 ///     }
 ///     fn set_refresh_on_hit(&self, _refresh: bool) -> bool { false }
 /// }

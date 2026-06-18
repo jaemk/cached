@@ -191,17 +191,6 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
         }
     }
 
-    /// Returns whether the ttl is refreshed when the value is retrieved.
-    #[must_use]
-    pub fn refresh_on_hit(&self) -> bool {
-        self.refresh
-    }
-
-    /// Sets whether the ttl is refreshed when the value is retrieved.
-    pub fn set_refresh_on_hit(&mut self, refresh: bool) {
-        self.refresh = refresh;
-    }
-
     fn new_store(capacity: Option<usize>) -> HashMap<K, TimedEntry<V>, RandomState> {
         capacity.map_or_else(
             || HashMap::with_hasher(RandomState::new()),

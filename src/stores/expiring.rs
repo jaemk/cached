@@ -65,6 +65,26 @@ impl<K: Hash + Eq, V: Expires> std::fmt::Debug for ExpiringCache<K, V> {
     }
 }
 
+/// Two `ExpiringCache` values are equal when their stored entries are equal.
+/// Metrics (hits, misses, evictions) and the `on_evict` callback are not
+/// part of the comparison.
+impl<K, V> PartialEq for ExpiringCache<K, V>
+where
+    K: Hash + Eq,
+    V: Expires + PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.store == other.store
+    }
+}
+
+impl<K, V> Eq for ExpiringCache<K, V>
+where
+    K: Hash + Eq,
+    V: Expires + Eq,
+{
+}
+
 impl<K, V> Clone for ExpiringCache<K, V>
 where
     K: Clone + Hash + Eq,
@@ -1035,5 +1055,61 @@ mod tests {
             1,
             "cache_remove_entry must increment evictions for present key only"
         );
+    }
+
+    #[test]
+    fn eq_same_entries_compare_equal() {
+        let mut a: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let mut b: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        a.cache_set(1, ExpiredU8(5));
+        a.cache_set(2, ExpiredU8(6));
+        // Insert in a different order: HashMap-backed equality is order-independent.
+        b.cache_set(2, ExpiredU8(6));
+        b.cache_set(1, ExpiredU8(5));
+        assert_eq!(
+            a, b,
+            "caches with the same stored entries must compare equal"
+        );
+    }
+
+    #[test]
+    fn eq_ignores_metrics_and_on_evict() {
+        // Equality is over stored entries only: differing hit/miss/eviction
+        // counters and an `on_evict` callback on one side must not break it.
+        let mut a: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let mut b: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder()
+            .on_evict(|_k: &u8, _v: &ExpiredU8| {})
+            .build()
+            .unwrap();
+        a.cache_set(1, ExpiredU8(5));
+        b.cache_set(1, ExpiredU8(5));
+        // Drive `a`'s metrics away from `b`'s.
+        a.get(&1);
+        a.get(&99);
+        assert_ne!(a.cache_hits(), b.cache_hits());
+        assert_eq!(
+            a, b,
+            "metrics and on_evict must not participate in equality"
+        );
+    }
+
+    #[test]
+    fn ne_differing_entries() {
+        let mut a: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let mut b: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        a.cache_set(1, ExpiredU8(5));
+        b.cache_set(1, ExpiredU8(6)); // same key, different value
+        assert_ne!(a, b, "differing values must compare unequal");
+
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        c.cache_set(1, ExpiredU8(5));
+        c.cache_set(2, ExpiredU8(5)); // extra key
+        assert_ne!(a, c, "differing key sets must compare unequal");
+
+        // An empty cache differs from a populated one and equals another empty one.
+        let empty1: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let empty2: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        assert_eq!(empty1, empty2);
+        assert_ne!(empty1, a);
     }
 }

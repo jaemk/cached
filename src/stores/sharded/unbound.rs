@@ -92,6 +92,7 @@ where
     /// builder's hasher type and `build` then yields a `ShardedUnboundCacheBase` over that hasher.
     /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
     /// introduced via `hasher`, never a `ShardedUnboundCacheBase::<_, _, H>` turbofish.
+    #[must_use]
     pub fn builder() -> ShardedUnboundCacheBuilder<K, V, DefaultShardHasher> {
         ShardedUnboundCacheBuilder::default()
     }
@@ -446,6 +447,7 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
     ///
     /// Returns [`BuildError::InvalidValue`] if the `shards` count overflows
     /// when rounded up to the next power of two.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedUnboundCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq,

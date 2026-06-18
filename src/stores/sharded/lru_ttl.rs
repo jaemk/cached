@@ -755,6 +755,7 @@ impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruTtlCacheBuilder<K, V, H2, E> {
         ShardedLruTtlCacheBuilder {
@@ -879,6 +880,7 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, NoEvict> {
     /// or if both `max_size` and `per_shard_max_size` are set simultaneously. May also return
     /// [`BuildError::InvalidValue`] if the effective sharded capacity overflows `usize` or a
     /// per-shard allocation fails.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedLruTtlCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq + Clone,
@@ -964,6 +966,7 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, HasEvict> {
     /// or if both `max_size` and `per_shard_max_size` are set simultaneously. May also return
     /// [`BuildError::InvalidValue`] if the effective sharded capacity overflows `usize` or a
     /// per-shard allocation fails.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedLruTtlCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq + Clone + 'static,

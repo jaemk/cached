@@ -98,6 +98,7 @@ where
     /// builder's hasher type and `build` then yields a `ShardedExpiringCacheBase` over that
     /// hasher. `new` and `builder` exist only on the default-hasher alias, so a custom hasher is
     /// always introduced via `hasher`, never a `ShardedExpiringCacheBase::<_, _, H>` turbofish.
+    #[must_use]
     pub fn builder() -> ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
         ShardedExpiringCacheBuilder::default()
     }
@@ -516,6 +517,7 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedExpiringCacheBuilder<K, V, H2> {
         ShardedExpiringCacheBuilder {
@@ -592,6 +594,7 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
     ///
     /// Returns [`BuildError`] if the `shards` count is zero or overflows when rounded
     /// up to the next power of two.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedExpiringCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq,

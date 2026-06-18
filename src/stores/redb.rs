@@ -302,6 +302,17 @@ pub struct RedbCache<K, V> {
     _phantom: PhantomData<fn() -> (K, V)>,
 }
 
+impl<K, V> std::fmt::Debug for RedbCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedbCache")
+            .field("disk_path", &self.disk_path)
+            .field("ttl", &*self.ttl.lock())
+            .field("refresh", &self.refresh.load(Ordering::Relaxed))
+            .field("durable", &self.durable)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<K, V> RedbCache<K, V>
 where
     K: ToString,
@@ -1864,6 +1875,41 @@ mod tests {
             cache.cache_get(&key),
             ok(some(eq(&value2))),
             "cache_get should return the most recently set value"
+        );
+    }
+
+    #[test]
+    fn debug_smoke_exposes_non_secret_fields_only() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("debug-smoke")
+            .disk_directory(tmp_dir.path())
+            .ttl_secs(60)
+            .refresh_on_hit(true)
+            .build()
+            .expect("error building disk cache");
+
+        let s = format!("{:?}", cache);
+        assert!(!s.is_empty(), "Debug output must be non-empty");
+        // Type name and the non-secret config fields must be present.
+        assert!(s.contains("RedbCache"), "Debug must name the type: {s}");
+        assert!(s.contains("ttl"), "Debug must show ttl: {s}");
+        assert!(s.contains("refresh"), "Debug must show refresh: {s}");
+        assert!(s.contains("durable"), "Debug must show durable: {s}");
+        // finish_non_exhaustive renders a trailing `..`.
+        assert!(
+            s.contains(".."),
+            "Debug must be non-exhaustive (trailing ..): {s}"
+        );
+        // The private `connection` (live `Database` handle) must not be named.
+        assert!(
+            !s.contains("connection"),
+            "Debug must not expose the connection handle: {s}"
+        );
+        // Guard against a future regression that leaks a redis-style
+        // connection string from a disk cache that has none.
+        assert!(
+            !s.contains("redis://") && !s.contains("rediss://"),
+            "Debug must not contain a connection scheme: {s}"
         );
     }
 
