@@ -525,10 +525,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // macro would otherwise apply before the store-type match below. Without this
     // the match falls through to the generic "cache types are mutually exclusive"
     // arm (e.g. for `ttl_millis`), masking the specific conflict (#149).
-    if args.create.is_some() {
-        if let Err(error) = check_create_conflicts(&args, fn_ident.span()) {
-            return error.to_compile_error().into();
-        }
+    if args.create.is_some()
+        && let Err(error) = check_create_conflicts(&args, fn_ident.span())
+    {
+        return error.to_compile_error().into();
     }
 
     // make the cache type and create statement

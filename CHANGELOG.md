@@ -70,7 +70,14 @@
 
 #### Feature and toolchain
 - The `wasm` cargo feature is removed. It gated nothing - `web-time` provides wasm-compatible time types transparently with no opt-in feature. Drop it from your feature list; wasm targets need nothing extra.
-- `cached_proc_macro_types` moved to edition 2024 and raised its `rust-version` to 1.89, matching the workspace (its semver version is unchanged at `1.0`).
+- `cached_proc_macro_types` moved to edition 2024 and raised its `rust-version` to 1.89, matching the workspace (its semver version is unchanged at `1.0`). `cached_proc_macro`'s `rust-version` is likewise raised to 1.89.
+
+#### API audit follow-ups
+- `Cached::cache_try_set` (and its `try_set` alias) now return `Result<Option<V>, CacheSetError>` instead of `Result<Option<V>, Box<dyn std::error::Error>>`. `CacheSetError` is a new `#[non_exhaustive]` enum (variant `TimeBounds`) re-exported from the crate root, so callers can match on the failure instead of handling an opaque boxed error. Custom `Cached` impls that override `cache_try_set` must update the return type.
+- The `DiskCache` / `DiskCacheBuilder` / `DiskCacheError` / `DiskCacheBuildError` aliases for the `Redb*` types are removed (the rename to `RedbCache` happened earlier in this release; the aliases are not carried forward). Rename `DiskCache*` to `RedbCache*`.
+- The `store()` accessors on `UnboundCache`, `TtlCache`, `LruTtlCache`, and `ExpiringLruCache` are removed. They exposed the internal backing map (and leaked the internal `TimedEntry<V>` wrapper) and existed on only some stores. Use the public `Cached` API (`cache_get`, `cache_size`, iteration helpers) instead.
+- `ShardHasher` now requires `Clone` as a supertrait (the `deep_clone` / `copy_from` methods already required it de facto). Custom `ShardHasher` impls must be `Clone`; `DefaultShardHasher` already is.
+- `#[must_use]` was added to the pure-query trait methods (`cache_size`/`len`/`is_empty`/`metrics`/`hits`/`misses`/`ttl`/`refresh_on_hit`/...) and to `cache_remove`/`cache_remove_entry`. Code that discards these results under `-D warnings` will need `let _ = ...`. The short `remove`/`remove_entry` aliases are intentionally left un-annotated for for-effect removal.
 
 ### Additive / non-breaking
 - `cached::prelude` re-exports the common traits for a single glob import.
@@ -82,6 +89,13 @@
 - `#[must_use]` parity across the sharded builders, and the `with_hasher` doc alias is spread to every sharded builder's `hasher` method for discoverability.
 - Malformed `key` / `convert` macro attributes now produce a contextual error explaining what the attribute expects, with an example, instead of a bare `syn` "unexpected token".
 - `redis_connection_manager` now builds on the `redis_tokio` feature instead of re-listing redis sub-features (resolved feature set unchanged).
+- `ConcurrentCached` / `ConcurrentCachedAsync` gained a defaulted `cache_get_or_set_with` / `async_cache_get_or_set_with` (with a `get_or_set_with` alias), mirroring the single-owner traits. The default is a get-then-set (non-atomic; a concurrent miss may run the factory more than once).
+- `ConcurrentCached` / `ConcurrentCachedAsync` gained a defaulted `refresh_on_hit()` getter, and `set_refresh_on_hit` is now defaulted (`{ false }`) so custom impls no longer need to write it.
+- `RedisCache` and `AsyncRedisCache` now implement `Clone` (Arc-backed pool / cloneable connection). `RedbCache` stays non-`Clone`.
+- The `name` macro attribute is validated as a Rust identifier: an invalid `name` now produces a spanned "`name` must be a valid Rust identifier" error instead of a macro panic.
+- `#[once]` and `#[concurrent_cached]` now reject the `#[cached]`-only sync attributes (`sync_lock`, `unsync_reads`, and `sync_writes_buckets` on `#[concurrent_cached]`) with a clear "not supported on this macro" message instead of a generic unknown-field error.
+- `RedisCacheBuildError::MissingConnectionString` and the redis (de)serialization errors now expose their wrapped cause via `Error::source()` and render it through `Display` (cleaner than the previous debug formatting).
+- `ConcurrentCacheEvict::evict` is now `#[must_use]`.
 - `RedbCache::flush` and `RedbCache::async_flush` force a durable (fsync) commit, so you can run with `durable(false)` for cheap writes and flush at chosen points (periodically or before shutdown) to persist them.
 - `RedbCache::disk_path()` returns the path of the on-disk redb database file backing the cache.
 - New `SerializeCached` / `SerializeCachedAsync` traits with `cache_set_ref(&self, &K, &V)` / `async_cache_set_ref`, implemented by `RedisCache` / `AsyncRedisCache` / `RedbCache`, let serialize-backed stores set an entry without taking ownership of the key/value. The `#[concurrent_cached]` macro now calls the borrowed setter for any store implementing these traits (the built-in `redis`/`disk` stores and custom `ty`/`create` stores alike), avoiding an extra value clone on the set ([#196](https://github.com/jaemk/cached/issues/196), [#195](https://github.com/jaemk/cached/issues/195)).

@@ -18,8 +18,8 @@ enum ExampleError {
     DiskError(String),
 }
 
-// When the macro constructs your RedbCache instance (the default disk engine;
-// `DiskCache` is a kept type alias), the default cache files will be stored
+// When the macro constructs your RedbCache instance (the default disk engine),
+// the default cache files will be stored
 // under $system_cache_dir/<exe>_cached_disk_cache/
 #[concurrent_cached(
     disk = true,
