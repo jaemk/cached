@@ -55,9 +55,33 @@
 - `CacheMetrics.size` renamed to `entry_count` (the only field not matching its `cache_*` accessor).
 - Builder refresh naming unified on `refresh_on_hit`: the `refresh()` alias was removed from the in-memory TTL builders, and `DiskCacheBuilder` / `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `refresh` was renamed to `refresh_on_hit`. The `#[cached(refresh = true)]` attribute is unchanged.
 
+#### Sharded store and error-type renames
+- `ShardedCache` renamed to `ShardedUnboundCache` (along with `ShardedCacheBase` -> `ShardedUnboundCacheBase` and `ShardedCacheBuilder` -> `ShardedUnboundCacheBuilder`). The old name read as the umbrella for the whole sharded family while it only named the unbounded variant; the new name is parallel with `ShardedLruCache`, `ShardedTtlCache`, and the rest. No deprecated alias - rename at the call site.
+- `ttl_sorted::Error` renamed to `TtlSortedCacheError`, and the old `pub type TtlSortedCacheError = Error` alias is removed (the canonical name is now the only name). The unused `From<ttl_sorted::Error> for std::io::Error` impl is removed; the store never surfaced errors through `io::Error`.
+
+#### Required trait methods (custom `ConcurrentCached` / `CloneCached` impls)
+- `cache_clear` and `cache_reset` are now required on `ConcurrentCached` (and `async_cache_clear` / `async_cache_reset` on `ConcurrentCachedAsync`). Their previous no-op `Ok(())` defaults silently did nothing; every built-in store already overrides both. A custom impl must now provide them. `cache_reset_metrics` keeps its no-op default.
+- `cache_peek_with_expiry_status` is now required on `CloneCached` and `ConcurrentCloneCached`. The old provided defaults returned a wrong result (`(None, false)` / a side-effecting delegate) that silently broke `force_refresh` + `result_fallback` for custom stores. Every built-in store already overrides it; a custom expiry-capable store must provide a genuinely side-effect-free read.
+
+#### Macro attribute and store-method removals
+- The `unbound` attribute is removed from `#[cached]`. The default store (no `max_size`, `ttl`, or `expires`) is already an `UnboundCache`, so `#[cached(unbound)]` built an identical store to a bare `#[cached]`. The attribute is intercepted with a migration error; drop it.
+- `#[concurrent_cached]`'s `refresh` attribute is now a plain `bool` (was `Option<bool>`), matching `#[cached]`. `refresh = false` is the default and no longer conflicts with `expires` or a `create` block - only `refresh = true` does. No change needed unless you relied on `refresh = false` erroring next to `expires`/`create`.
+- The inherent `refresh_on_hit(&self) -> bool` and `set_refresh_on_hit(&mut self, bool)` methods on `TtlCache` and `LruTtlCache` are removed; they shadowed the `CacheTtl` trait methods, and the inherent setter returned `()` instead of the previous value. Bring `CacheTtl` into scope to call them (the trait setter returns the previous `bool`). The builder `refresh_on_hit(self, bool) -> Self` is unchanged.
+
+#### Feature and toolchain
+- The `wasm` cargo feature is removed. It gated nothing - `web-time` provides wasm-compatible time types transparently with no opt-in feature. Drop it from your feature list; wasm targets need nothing extra.
+- `cached_proc_macro_types` moved to edition 2024 and raised its `rust-version` to 1.89, matching the workspace (its semver version is unchanged at `1.0`).
+
 ### Additive / non-breaking
 - `cached::prelude` re-exports the common traits for a single glob import.
-- `ConcurrentCached` gained `cache_clear` / `cache_reset` / `cache_reset_metrics` (`&self`, default no-op). The sharded stores override all three; `DiskCache` and `RedisCache` / `AsyncRedisCache` override `cache_clear` / `cache_reset` (see below for redis) but keep the no-op `cache_reset_metrics` (they track no in-memory metrics). `ConcurrentCachedAsync` gained the async counterparts.
+- `ConcurrentCached` / `ConcurrentCachedAsync` gained a no-op-default `cache_reset_metrics` / `async_cache_reset_metrics` (`&self`). The sharded stores override it to zero their per-shard counters; `RedbCache` and `RedisCache` / `AsyncRedisCache` keep the no-op default (they track no in-memory metrics). `cache_clear` / `cache_reset` (and their async counterparts) are required methods, not defaults - see the breaking-changes entry above.
+- `CacheTtl::try_set_ttl` - a validated variant of `set_ttl` that returns the new `SetTtlError` (variant `ZeroTtl`) instead of storing a zero TTL (which would silently make every inserted entry expire on insertion). Provided default, so existing `CacheTtl` impls get it for free.
+- `ConcurrentCached` / `ConcurrentCachedAsync` gained ergonomic `len` / `is_empty` aliases over `cache_size`, mirroring the sync `Cached` trait.
+- `Debug` is implemented for `RedisCache`, `AsyncRedisCache`, and `RedbCache` (redacted: prints only namespace/prefix/path/ttl/refresh, never connection strings or credentials).
+- `PartialEq` / `Eq` are implemented for `ExpiringCache` and `ExpiringLruCache` (equal when their stored entries are equal).
+- `#[must_use]` parity across the sharded builders, and the `with_hasher` doc alias is spread to every sharded builder's `hasher` method for discoverability.
+- Malformed `key` / `convert` macro attributes now produce a contextual error explaining what the attribute expects, with an example, instead of a bare `syn` "unexpected token".
+- `redis_connection_manager` now builds on the `redis_tokio` feature instead of re-listing redis sub-features (resolved feature set unchanged).
 - `RedbCache::flush` and `RedbCache::async_flush` force a durable (fsync) commit, so you can run with `durable(false)` for cheap writes and flush at chosen points (periodically or before shutdown) to persist them.
 - `RedbCache::disk_path()` returns the path of the on-disk redb database file backing the cache.
 - New `SerializeCached` / `SerializeCachedAsync` traits with `cache_set_ref(&self, &K, &V)` / `async_cache_set_ref`, implemented by `RedisCache` / `AsyncRedisCache` / `RedbCache`, let serialize-backed stores set an entry without taking ownership of the key/value. The `#[concurrent_cached]` macro now calls the borrowed setter for any store implementing these traits (the built-in `redis`/`disk` stores and custom `ty`/`create` stores alike), avoiding an extra value clone on the set ([#196](https://github.com/jaemk/cached/issues/196), [#195](https://github.com/jaemk/cached/issues/195)).

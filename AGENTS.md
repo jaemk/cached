@@ -54,7 +54,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `TtlSortedCache<K,V>` | `cached::stores` | TTL-ordered, optional size limit; requires `time_stores` |
 | `ExpiringLruCache<K,V>` | `cached::stores` | LRU, size-bounded, per-value expiry via `Expires` trait |
 | `ExpiringCache<K,V>` | `cached::stores` | Unbounded HashMap-backed, per-value expiry via `Expires` trait; default store for `#[cached(expires = true)]` |
-| `ShardedCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
+| `ShardedUnboundCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
 | `ShardedLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU; default for `#[concurrent_cached(max_size = N)]` |
 | `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl_secs = N)]` (also selected by `ttl_millis` and `ttl = "<expr>"`); requires `time_stores` |
 | `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl_secs = N)]` (also selected by `ttl_millis` and `ttl = "<expr>"`); requires `time_stores` |
