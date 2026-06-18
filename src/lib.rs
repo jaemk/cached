@@ -1688,11 +1688,19 @@ pub trait ConcurrentCached<K, V> {
     }
 
     /// Ergonomic alias for [`cache_size`](Self::cache_size).
+    ///
+    /// Note: the sharded stores also expose an inherent `len(&self) -> usize`, which
+    /// takes priority at the call site (`store.len()` returns a bare `usize`). To call
+    /// this trait method, use fully-qualified syntax: `ConcurrentCached::len(&store)`.
     fn len(&self) -> Result<Option<usize>, Self::Error> {
         self.cache_size()
     }
 
-    /// Return `Ok(Some(true))` if the cache is known to be empty, `Ok(None)` if the size is unknown.
+    /// Return `Ok(Some(true))` if the cache is known to be empty, `Ok(Some(false))` if
+    /// known non-empty, or `Ok(None)` if the size is unknown.
+    ///
+    /// Note: like [`len`](Self::len), the sharded stores' inherent `is_empty(&self) -> bool`
+    /// takes priority; use `ConcurrentCached::is_empty(&store)` to call this trait method.
     fn is_empty(&self) -> Result<Option<bool>, Self::Error> {
         Ok(self.cache_size()?.map(|n| n == 0))
     }
@@ -1755,6 +1763,12 @@ pub trait ConcurrentCached<K, V> {
     ///
     /// Takes `&self`: concurrent stores are internally synchronized, so this is callable
     /// through a shared reference. The default is a no-op returning `None`.
+    ///
+    /// The ttl is stored unchecked: a zero `Duration` is accepted but makes every
+    /// subsequently inserted entry expire immediately. There is no concurrent
+    /// `try_set_ttl`; the validated variant lives on the single-owner [`CacheTtl`]
+    /// trait. Pass a non-zero `Duration`, or use [`unset_ttl`](Self::unset_ttl) to
+    /// disable expiry.
     fn set_ttl(&self, _ttl: Duration) -> Option<Duration> {
         None
     }
@@ -1898,11 +1912,19 @@ pub trait ConcurrentCachedAsync<K, V> {
     }
 
     /// Ergonomic alias for [`cache_size`](Self::cache_size).
+    ///
+    /// Note: the sharded stores also expose an inherent `len(&self) -> usize`, which
+    /// takes priority at the call site (`store.len()` returns a bare `usize`). To call
+    /// this trait method, use fully-qualified syntax: `ConcurrentCachedAsync::len(&store)`.
     fn len(&self) -> Result<Option<usize>, Self::Error> {
         self.cache_size()
     }
 
-    /// Return `Ok(Some(true))` if the cache is known to be empty, `Ok(None)` if the size is unknown.
+    /// Return `Ok(Some(true))` if the cache is known to be empty, `Ok(Some(false))` if
+    /// known non-empty, or `Ok(None)` if the size is unknown.
+    ///
+    /// Note: like [`len`](Self::len), the sharded stores' inherent `is_empty(&self) -> bool`
+    /// takes priority; use `ConcurrentCachedAsync::is_empty(&store)` to call this trait method.
     fn is_empty(&self) -> Result<Option<bool>, Self::Error> {
         Ok(self.cache_size()?.map(|n| n == 0))
     }
@@ -1923,6 +1945,12 @@ pub trait ConcurrentCachedAsync<K, V> {
     ///
     /// Takes `&self`: concurrent stores are internally synchronized, so this is callable
     /// through a shared reference. The default is a no-op returning `None`.
+    ///
+    /// The ttl is stored unchecked: a zero `Duration` is accepted but makes every
+    /// subsequently inserted entry expire immediately. There is no concurrent
+    /// `try_set_ttl`; the validated variant lives on the single-owner [`CacheTtl`]
+    /// trait. Pass a non-zero `Duration`, or use [`unset_ttl`](Self::unset_ttl) to
+    /// disable expiry.
     fn set_ttl(&self, _ttl: Duration) -> Option<Duration> {
         None
     }

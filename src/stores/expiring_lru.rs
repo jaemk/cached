@@ -78,8 +78,9 @@ impl<K: Hash + Eq, V: Expires> std::fmt::Debug for ExpiringLruCache<K, V> {
 }
 
 /// Two `ExpiringLruCache` values are equal when their stored entries are equal
-/// (same keys, same values, same LRU order). Metrics (hits, misses, evictions)
-/// and the `on_evict` callback are not part of the comparison.
+/// (same keys, same values). Equality is membership-based: LRU recency order is
+/// not compared. Metrics (hits, misses, evictions) and the `on_evict` callback
+/// are not part of the comparison.
 impl<K, V> PartialEq for ExpiringLruCache<K, V>
 where
     K: Clone + Hash + Eq,

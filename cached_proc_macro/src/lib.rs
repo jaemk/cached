@@ -68,8 +68,8 @@ use proc_macro::TokenStream;
 ///   cache lookup, while keeping writes synchronized. This only works for stores that implement `CachedRead`;
 ///   recency-updating or refresh-on-hit stores intentionally do not. For non-mutating diagnostic lookups,
 ///   use the separate `CachedPeek` trait directly on stores.
-/// - `ty`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`. When `unbound` is
-///   specified, defaults to `UnboundCache`. When `max_size` is specified, defaults to `LruCache`.
+/// - `ty`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`.
+///   When `max_size` is specified, defaults to `LruCache`.
 ///   When `ttl` is specified, defaults to `TtlCache`.
 ///   When `max_size` and `ttl` are specified, defaults to `LruTtlCache`. When `ty` is
 ///   specified, `create` must also be specified.
@@ -116,7 +116,7 @@ use proc_macro::TokenStream;
 ///   Compatible with `result_fallback`: on `Err`, returns the last-cached `Ok` value wrapped in `Ok(...)`,
 ///   even if that value's `is_expired()` returns `true`. Callers must check the value's expiry themselves
 ///   if they need to distinguish a fresh result from a stale fallback.
-///   Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `unsync_reads`, `refresh`, and `unbound`.
+///   Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `unsync_reads`, and `refresh`.
 ///
 /// ## Note
 /// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
