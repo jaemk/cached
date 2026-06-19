@@ -36,7 +36,9 @@ struct LruInner<K, V, H> {
 /// **Note**: LRU promotion requires mutable access to the per-shard store, so
 /// `cache_get` acquires a **write** lock (unlike `ShardedUnboundCache` which only needs a read lock).
 /// Under many concurrent readers this can be a bottleneck; consider `ShardedUnboundCache` if you do
-/// not need capacity bounding.
+/// not need capacity bounding. This write-lock-on-read behavior is a known limitation of the
+/// strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering
+/// will ship as a separate store type; the existing stores will not change semantics.
 ///
 /// **Note**: `K` must implement `Clone` (needed for LRU key tracking). `ShardedUnboundCache<K, V>`
 /// requires only `K: Hash + Eq`. `V` must also implement `Clone`, because reads return owned

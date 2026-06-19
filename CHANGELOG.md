@@ -91,11 +91,38 @@
 - `BuildError::InvalidTtl { ttl }` is removed. A zero TTL at build time now yields `BuildError::InvalidValue { field: "ttl", reason: "must be greater than zero" }`, which is more general (the variant can represent other field-validation failures) and more descriptive.
 - `RedisCacheBuildError::InvalidTtl` and `RedbCacheBuildError::InvalidTtl` are renamed to `RedisCacheBuildError::Build(BuildError)` and `RedbCacheBuildError::Build(BuildError)` respectively, wrapping the inner `BuildError` instead of duplicating its content. Exhaustive matches on these enums must be updated.
 
-#### `set_ttl(Duration::ZERO)` now disables expiry uniformly (I2)
-- A zero `Duration` passed to any `set_ttl` surface now means "expiry disabled" — exactly equivalent to `unset_ttl()`, with entries never expiring. It no longer panics (sharded stores) and no longer means "expire immediately". This is uniform across the sharded `ShardedTtlCache` / `ShardedLruTtlCache`, the single-owner `TtlCache` / `LruTtlCache`, and `RedisCache` / `AsyncRedisCache`. For the Redis stores a disabled TTL writes keys WITHOUT any expiry (a plain `SET` instead of `SETEX`), and the refresh-on-hit path issues no `EXPIRE`. `build()` still rejects a zero TTL, and `CacheTtl::try_set_ttl(0)` still returns `SetTtlError::ZeroTtl` — those are the strict "give me a real ttl" paths; to disable expiry, call `set_ttl(0)` or `unset_ttl()`. (`TtlSortedCache` is unchanged: a zero TTL there still means immediate expiry.)
+#### `set_ttl(Duration::ZERO)` now disables expiry for future inserts only (I2)
+- A zero `Duration` passed to any `set_ttl` surface now means "expiry disabled" -- exactly equivalent to `unset_ttl()`, with future-inserted entries never expiring. It no longer panics (sharded stores) and no longer means "expire immediately". This is uniform across the sharded `ShardedTtlCache` / `ShardedLruTtlCache`, the single-owner `TtlCache` / `LruTtlCache`, and `RedisCache` / `AsyncRedisCache`. For the Redis stores a disabled TTL writes keys WITHOUT any expiry (a plain `SET` instead of `SETEX`), and the refresh-on-hit path issues no `EXPIRE`. `build()` still rejects a zero TTL, and `CacheTtl::try_set_ttl(0)` still returns `SetTtlError::ZeroTtl` -- those are the strict "give me a real ttl" paths; to disable expiry, call `set_ttl(0)` or `unset_ttl()`. (`TtlSortedCache` is unchanged: a zero TTL there still means immediate expiry.) Because TTL stores now track per-entry expiry, `set_ttl` affects future inserts only; existing entries keep their computed expiry.
 
 #### `#[cached(refresh = true)]` without a TTL is now a compile error (I7)
 - Using `refresh = true` on `#[cached]` without also specifying a TTL (`ttl_secs`, `ttl_millis`, or `ttl`) is now a compile error. Previously the attribute was silently ignored in this configuration. This matches the existing behavior of `#[concurrent_cached]`, which has always required a TTL alongside `refresh = true`.
+
+#### `sync_writes` default on `#[cached]` changed to `"by_key"`
+- A bare `#[cached]` now uses `sync_writes = "by_key"`: concurrent first calls for the same key are deduplicated through bucketed per-key locks. Previously the default was no synchronization, mirroring Python's `functools.lru_cache`. Opt out with `sync_writes = false`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled` (not `"by_key"`). `#[once]` and `#[concurrent_cached]` defaults are unchanged.
+
+#### `Cached` trait: `type Error` associated type; `cache_try_set` / `try_set` return `Result<Option<V>, Self::Error>`
+- `Cached` gained `type Error`. Built-in infallible stores (`UnboundCache`, `LruCache`, sharded stores, `ExpiringCache`, `ExpiringLruCache`) set `type Error = std::convert::Infallible`. `TtlCache` / `LruTtlCache` set `type Error = CacheSetError`. `TtlSortedCache` sets `type Error = TtlSortedCacheError` (previously used `CacheSetError`). Custom `impl Cached` blocks must add the associated type; call sites that bound the error as `CacheSetError` for an infallible store must update to `Infallible` or drop the annotation.
+
+#### Sharded stores: inherent `get`/`set`/`remove`/`remove_entry`/`delete`/`reset` return unwrapped values
+- The six concrete sharded types now expose inherent methods returning `Option<V>`, `()`, and `bool` directly, so `store.get(&k)` is `Option<V>` rather than `Result<Option<V>, Infallible>`. To use the `Result`-returning trait methods, call through `ConcurrentCached` or use the `cache_`-prefixed names.
+
+#### `TimedEntry` is no longer public
+- `cached::TimedEntry` is now `pub(crate)`. Any `use cached::TimedEntry;` import fails. The type was only reachable after the `store()` accessors were removed.
+
+#### Runtime decoupling: `async_tokio_rt_multi_thread` removed; `async` no longer pulls tokio; `async_sync` re-exports changed
+- `async_tokio_rt_multi_thread` cargo feature removed. Users who need `tokio/rt-multi-thread` (e.g. for `#[tokio::test]`) must add `tokio` with `rt-multi-thread` directly to their own dev-dependencies.
+- The `async` feature no longer implies `tokio`. It now pulls only `async-lock` and `blocking` (runtime-agnostic). smol/async-std async users no longer compile tokio.
+- `cached::async_sync::{Mutex, RwLock, OnceCell}` now re-export from `async-lock` instead of `tokio::sync`. `OnceCell` from `async-lock` has no `const_new()`; replace with `OnceCell::new()`.
+- Async `RedbCache` runs blocking redb work on the `blocking` crate's thread pool instead of `tokio::spawn_blocking`, making it runtime-agnostic. `RedbCacheError::BackgroundTaskFailed` variant removed.
+
+#### Macro attributes `convert`, `create`, `force_refresh`, `map_error`, `cache_prefix_block` accept unquoted Rust
+- These attributes now accept unquoted Rust (e.g. `convert = { format!("{a}") }`, `map_error = |e| MyErr(e)`, `force_refresh = { id == 0 }`). The quoted-string form still works. `force_refresh = true` (a bare bool) is now also valid. `ty` and `key` remain quoted strings.
+
+#### `map_error` optional on disk/Redis `#[concurrent_cached]`
+- When omitted, the generated code uses `.map_err(Into::into)?`. The function's error type must implement `From<RedbCacheError>` (disk) or `From<RedisCacheError>` (Redis). Supplying `map_error` still works and requires no change.
+
+#### `companions_vis` macro attribute
+- `#[cached]`, `#[once]`, and `#[concurrent_cached]` accept `companions_vis = "<vis>"` to set the visibility of the generated `{fn}_no_cache` and `{fn}_prime_cache` companions independently of the cached function's own visibility. Defaults to the cached function's visibility (no change for existing code).
 
 ### Additive / non-breaking
 - `cached::prelude` re-exports the common traits for a single glob import.
@@ -133,6 +160,13 @@
 - `#[once]` now rejects the `#[cached]`-only attributes (`result_fallback`, `refresh`, `max_size`, `ty`, `create`, `key`, `convert`) with clear "not supported on `#[once]`" messages instead of a generic unknown-field error (I6).
 - `#[must_use]` added to `CacheEvict::evict` and the single-owner inherent `evict` methods (I3).
 - A non-string `force_refresh` value (e.g. `force_refresh = true` instead of the required block form `force_refresh = "{ ... }"`) now produces a helpful error message explaining the expected syntax (8b).
+- TTL stores (`TtlCache`, `LruTtlCache`, `ShardedTtlCache`, `ShardedLruTtlCache`) now store per-entry expiry timestamps; `set_ttl` applies to future inserts only; `refresh_on_hit` recomputes expiry from the current TTL at access time.
+- Per-entry expiry on the sharded TTL stores removes the need to re-read the global TTL on every lookup and eliminates a class of time-skew bugs where entries inserted before a `set_ttl` change could expire at unexpected times.
+- `async_sync::{Mutex, RwLock, OnceCell}` now re-export from `async-lock`; async `RedbCache` uses the `blocking` crate thread pool (runtime-agnostic). Async smol/async-std users no longer pull tokio.
+- Inherent `get`/`set`/`remove`/`remove_entry`/`delete`/`reset` on the six sharded types return unwrapped values directly (no `Result` wrapper).
+- Macro attributes `convert`, `create`, `force_refresh`, `map_error`, `cache_prefix_block` accept unquoted Rust in addition to the existing quoted-string form. `force_refresh = true` (bare bool) is now valid.
+- `map_error` is optional on `#[concurrent_cached(disk = true)]` and Redis-backed `#[concurrent_cached]`; when omitted the generated code uses `.map_err(Into::into)?`.
+- `companions_vis = "<vis>"` attribute on all three macros controls the visibility of generated `{fn}_no_cache` and `{fn}_prime_cache` companions.
 
 ## [2.0.2]
 - Docs/tests only (no API change): document the `Expires` trait / `expires = true` as the idiomatic way to set a dynamic, per-entry TTL (a lifetime computed at call time rather than the uniform `ttl = N`), with a runnable example reference, and add a regression test for the runtime-argument-driven TTL case ([#246](https://github.com/jaemk/cached/issues/246)).

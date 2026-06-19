@@ -12,12 +12,14 @@ Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe wi
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
 store's own internal synchronization: sharded stores use per-shard `parking_lot::RwLock`; Redis and
 disk stores rely on their respective server/file-system concurrency.
-By default, the function-cache is **not** locked for the duration of the function's execution, so initial (on an empty cache)
-concurrent calls of long-running functions with the same arguments will each execute fully and each overwrite
-the memoized value as they complete. This mirrors the behavior of Python's `functools.lru_cache`. To synchronize the execution and caching
-of un-cached arguments, specify `#[cached(sync_writes = true)]` / `#[once(sync_writes = true)]`; for
-`#[cached]`, use `sync_writes = "by_key"` to synchronize duplicate keys through bucketed per-key locks
-(not supported by `#[once]` or `#[concurrent_cached]`).
+By default, `#[cached]` uses `sync_writes = "by_key"`: concurrent first calls for the same key are
+deduplicated through bucketed per-key locks, so the function body runs at most once per key per miss
+window. To allow concurrent misses to each compute independently (the pre-3.0 default, which mirrored
+Python's `functools.lru_cache`), set `sync_writes = false`. To hold the whole-cache lock for the
+duration of each miss, use `sync_writes = true` (or `"default"`). `#[once]` defaults to no
+synchronization (add `sync_writes = true` to serialize concurrent first-calls); `#[concurrent_cached]`
+does not support `sync_writes`. For `#[cached]`, the number of per-key lock buckets for `"by_key"` is
+tunable with `sync_writes_buckets = N` (default 64).
 
 - See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
@@ -62,7 +64,7 @@ collisions with the sync methods.
 - `proc_macro`: Include proc macros
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async_core`: Include runtime-agnostic async traits used by async cache stores
-- `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency)
+- `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency; uses `async-lock` and `blocking`)
 - `redis_store`: Include Redis cache store
 - `redis_smol`: Include async Redis support using `smol` (no TLS); implies `redis_store` and `async`
 - `redis_smol_native_tls`: `redis_smol` + TLS via `native-tls` (system TLS library)
@@ -74,7 +76,7 @@ collisions with the sync methods.
   will use a connection manager instead of a `MultiplexedConnection`. Implies `async` (Tokio runtime) and `redis_store`,
   but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_async_cache`: Enable Redis client-side caching over RESP3 for async Redis caches.
-  Implies `redis_tokio`, `async`, and `redis_store`, but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+  Implies `redis_tokio`, `async`, and `redis_store`, but does not enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_ahash`: Enable the optional `ahash` feature of `redis`
 - `disk_store`: Include disk cache store
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
@@ -95,7 +97,8 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Use case | Annotated signature |
 |---|---|
 | **`#[cached]`** | |
-| Unbounded memoize (default) | `#[cached] fn fib(n: u64) -> u64` |
+| Unbounded memoize (default; deduplicates concurrent misses per key) | `#[cached] fn fib(n: u64) -> u64` |
+| Unbounded memoize, allow concurrent misses per key (old default) | `#[cached(sync_writes = false)] fn fib(n: u64) -> u64` |
 | LRU-bounded — evict past N entries | `#[cached(max_size = 1_000)] fn lookup(id: u32) -> Row` |
 | TTL — expire results after N whole seconds | `#[cached(ttl_secs = 60)] fn config() -> Config` |
 | TTL as a Duration expression (inlined verbatim, so `Duration` must be in scope; see note below) | `#[cached(ttl = "Duration::from_secs(60)")] fn config() -> Config` |
@@ -107,17 +110,18 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Force-cache `Err` returns | `#[cached(cache_err = true)] fn load(id: u64) -> Result<Data, E>` |
 | Serve stale value when function returns `Err` | `#[cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
 | Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
-| Deduplicate concurrent first calls for same key | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
-| Recompute when an expression over the args is true | `#[cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the function body still receives `refresh` as a normal parameter, so if your body does not otherwise use it, add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the unused-variable warning |
+| Deduplicate concurrent first calls for same key (explicit; same as bare `#[cached]`) | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
+| Recompute when an expression over the args is true | `#[cached(force_refresh = { id == 0 })] fn fetch(id: u64) -> Data` |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = { id }, force_refresh = { refresh })] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the function body still receives `refresh` as a normal parameter, so if your body does not otherwise use it, add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the unused-variable warning |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
+| Control visibility of generated `_no_cache` / `_prime_cache` companions | `#[cached(companions_vis = "pub(crate)")] pub fn compute(x: u64) -> u64` |
 | Async | `#[cached(max_size = 100)] async fn remote(id: u64) -> Data` |
 | **`#[once]`** | |
 | Compute and cache a global value forever | `#[once] fn app_config() -> Config` |
 | Refresh a global value periodically | `#[once(ttl_secs = 300, sync_writes = true)] fn pubkey() -> Key` |
 | TTL in milliseconds (sub-second capable) | `#[once(ttl_millis = 500)] fn pubkey() -> Key` |
 | Optional global — skip caching if `None` (implicit) | `#[once] fn feature_flag() -> Option<Flag>` |
-| Recompute when an expression is true | `#[once(force_refresh = "{ flag }")] fn config(flag: bool) -> Config` |
+| Recompute when an expression is true | `#[once(force_refresh = { flag })] fn config(flag: bool) -> Config` |
 | Cache a method inside an `impl` block (one value shared across all instances) | `#[once(in_impl = true)] fn config(&self) -> Config` |
 | **`#[concurrent_cached]`** | |
 | Thread-safe sharded memoize (no global lock per call) | `#[concurrent_cached] fn compute(x: u64) -> u64` |
@@ -130,11 +134,11 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Cache only successful results (implicit for `Result<T, E>`) | `#[concurrent_cached] fn load(id: u64) -> Result<Row, DbError>` |
 | Don't cache `None` returns (implicit for `Option<T>`) | `#[concurrent_cached] fn find(id: u64) -> Option<Row>` |
 | Serve stale value when function returns `Err` | `#[concurrent_cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
-| Recompute when an expression over the args is true | `#[concurrent_cached(force_refresh = "{ id == 0 }")] fn fetch(id: u64) -> Data` |
-| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the body still receives it as a normal parameter, so add `let _ = refresh;` (or `#[allow(unused_variables)]`) if your body does not otherwise use it |
+| Recompute when an expression over the args is true | `#[concurrent_cached(force_refresh = { id == 0 })] fn fetch(id: u64) -> Data` |
+| Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = { id }, force_refresh = { refresh })] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the body still receives it as a normal parameter, so add `let _ = refresh;` (or `#[allow(unused_variables)]`) if your body does not otherwise use it |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[concurrent_cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
-| Persist results to disk | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
-| Redis-backed async cache | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = r#"{ ... }"#, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
+| Persist results to disk (with `map_error`; or omit when `E: From<RedbCacheError>`) | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
+| Redis-backed async cache (quoted or unquoted `create`/`map_error`) | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = { ... }, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
 
 On `#[cached]` and `#[concurrent_cached]`, the LRU bound is set with `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The `size = N` spelling — a deprecated alias in 2.x — has been removed; only `max_size = N` is accepted.
 
@@ -144,8 +148,8 @@ For the default in-memory sharded stores, `#[concurrent_cached]` accepts any ret
 Plain values are always cached as-is. `Option<T>` returns skip caching `None` by default; use `cache_none = true` to also cache `None` values. `Result<T, E>` only caches `Ok` values; `Err` is returned without being stored. Use `cache_err = true` to also cache `Err` values.
 The macro detects `Result<T, E>` by matching the exact identifier `Result` (including fully-qualified paths such as `std::result::Result<T, E>`). Type aliases are not resolved at macro-expansion time, so any alias — even one whose name ends with `Result` (e.g. `type MyResult<T> = Result<T, E>`) — is treated as a plain value and its `Err` variant is cached. Use `Result<T, E>` directly when you need Ok-only caching behavior.
 The same applies to `Option<T>` detection: a type alias such as `type MaybeRow<T> = Option<T>` is treated as a plain value and its `None` variant is cached. Use `Option<T>` directly when you need `None`-skipping behavior.
-On the default in-memory path, do **not** specify `map_error` — the sharded stores are infallible and supplying it is a compile error.
-For `disk` and `redis` stores, `Result<T, E>` is required and `map_error` must convert the store's error into your `E`.
+On the default in-memory path, do not specify `map_error` -- the sharded stores are infallible and supplying it is a compile error.
+For `disk` and `redis` stores, `Result<T, E>` is required. `map_error` is optional: when supplied it converts the store error into your `E`; when omitted the generated code uses `.map_err(Into::into)?`, so `E` must implement `From<RedbCacheError>` (disk) or `From<RedisCacheError>` (Redis). Both quoted-string and unquoted forms are accepted: `map_error = |e| MyErr(e)` and `map_error = "|e| MyErr(e)"` are equivalent.
 
 **Store comparison**
 
@@ -172,7 +176,7 @@ For `disk` and `redis` stores, `Result<T, E>` is required and `map_error` must c
 
 `ShardedUnboundCache` and its variants are partitioned across power-of-two shards (default: `available_parallelism() × 4`, clamped to 8–1024; the 8–1024 clamp applies only to this computed default — an explicit `shards = N` is rounded up to a power of two but never clamped) each protected by a `parking_lot::RwLock`. Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
-Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled — enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes.
+Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
 > **`*Base` types:** Each sharded store has a corresponding `*Base` generic (`ShardedUnboundCacheBase<K, V, H>`, `ShardedLruCacheBase<K, V, H>`, etc.) parameterized on a custom [`ShardHasher`]. The named aliases (`ShardedUnboundCache`, `ShardedLruCache`, …) use the default hasher and are what most users should reach for. Use the `*Base` types only when implementing a custom `ShardHasher` for non-standard shard routing. Construct a custom-hasher cache through the alias builder and its `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `*Base<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher alias, so a custom hasher is always introduced through `hasher`, never a `*Base::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
 

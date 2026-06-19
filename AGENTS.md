@@ -77,7 +77,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 
 **Builder APIs**: All stores are constructed exclusively through a `::builder()` constructor (e.g., `LruCache::builder()`, `TtlCache::builder()`). `build()` returns `Result<Store, BuildError>` (fallible) — the direct constructors (`new`, `with_*`) and the `try_build()` alias were removed in 2.0. The size-bound setter is `.max_size(n)` (renamed from `.size(n)` in 2.0). Builders support an `on_evict(|k, v| { ... })` callback fired on every evicted entry.
 
-**`TimedEntry<V>`**: Exposed from `TtlCache::store()` and `LruTtlCache::store()` for direct introspection; fields `instant: Instant` and `value: V`.
+**`TimedEntry<V>`**: Now `pub(crate)` -- no longer exposed in the public API. The `store()` accessors on `TtlCache` and `LruTtlCache` were removed in a prior batch; `TimedEntry` followed as `pub(crate)` once there was no public surface that returned it. Use the `Cached` trait API for inspection.
 
 ---
 
@@ -119,13 +119,15 @@ The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseco
 **2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **hard rename error** — the macro rejects it with "`size` was renamed to `max_size`; use `max_size = ...`" and does not compile. Use `max_size = N`.
 
 **Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `cache_err`, `cache_none`, `with_cached_flag`):
-- `sync_writes`: `false` (default), `true` / `"default"` (whole-cache lock), or `"by_key"` (per-key bucketed locks; `#[cached]` only)
+- `sync_writes`: `"by_key"` (default for `#[cached]`; per-key bucketed locks), `false` (no synchronization; old default), `true` / `"default"` (whole-cache lock). `#[once]` defaults to `false`; `#[concurrent_cached]` does not support `sync_writes`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled`.
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
 - `unsync_reads`: `bool` — use a shared read lock for cache hits; only works for stores implementing `CachedRead` (e.g. `UnboundCache`, `TtlSortedCache`, `HashMap`)
 - `result_fallback`: `bool` — on `Err`, return the last cached `Ok` value instead; requires a `Result<T, E>` return type
-- `force_refresh`: `{ <bool expr> }` block over the function args — when true, bypasses the cache and recomputes the value unconditionally
+- `force_refresh`: unquoted block `{ <bool expr> }` or quoted string `"{ <bool expr> }"` over the function args -- when true, bypasses the cache and recomputes unconditionally. `force_refresh = true` (bare bool) is also accepted.
 - `in_impl`: `bool` — generates a `<fn>_no_cache` sibling and a function-local cache static; suppresses the `_prime_cache` companion (the cache static is function-local and cannot be shared with a sibling)
+- `companions_vis`: string — visibility of the generated `{fn}_no_cache` and `{fn}_prime_cache` companions (e.g. `"pub(crate)"`, `""` for private); defaults to the cached function's own visibility
+- `map_error` (disk/redis `#[concurrent_cached]` only): unquoted closure `|e| MyErr(e)` or quoted string `"|e| MyErr(e)"` — converts the store error into the function's error type. Optional: when omitted, `.map_err(Into::into)?` is generated, requiring `E: From<StoreError>`.
 
 **`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution), except `in_impl` methods, for which the `_prime_cache` companion is not generated (the cache static is function-local). `#[once]` functions emit `foo_prime_cache()` with no arguments.
 
@@ -242,8 +244,7 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `ahash` (default) | ahash hasher for internal hash maps |
 | `time_stores` (default) | `TtlCache`, `LruTtlCache`, `TtlSortedCache` |
 | `async_core` | Async support marker (no runtime); use with custom async runtimes |
-| `async` | Async support via Tokio (enables `async_core` + `tokio`) |
-| `async_tokio_rt_multi_thread` | Tokio multi-thread runtime (required for `#[tokio::test]`) |
+| `async` | Async support (runtime-agnostic; pulls `async-lock` and `blocking`, no tokio) |
 | `redis_store` | Synchronous Redis backend |
 | `redis_tokio` | Async Redis backend (Tokio, no TLS); implies `redis_store` + `async` |
 | `redis_tokio_native_tls` | `redis_tokio` + TLS via `native-tls` |
@@ -252,9 +253,8 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `redis_smol_native_tls` | `redis_smol` + TLS via `native-tls` |
 | `redis_smol_rustls` | `redis_smol` + TLS via `rustls` |
 | `redis_connection_manager` | Redis connection-manager support (no TLS; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
-| `redis_async_cache` | Redis client-side caching over RESP3 for async caches (uses the Tokio runtime with native-tls) |
+| `redis_async_cache` | Redis client-side caching over RESP3 for async caches (TLS-agnostic; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
 | `disk_store` | Disk-backed cache via `redb` |
-| `wasm` | WASM compatibility |
 
 ---
 
