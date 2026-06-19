@@ -187,36 +187,45 @@ fn sharded_lru_ttl_set_zero_disables_expiry_like_unset() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Re-arming expiry: a non-zero set after a disabled ttl re-enables expiry.
+// Re-arming expiry: a non-zero set after a disabled ttl makes FUTURE inserts
+// expirable, but entries inserted while TTL was disabled keep expires_at = None.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_set_nonzero_after_disable_re_enables_expiry() {
+fn sharded_ttl_set_nonzero_after_disable_only_affects_future_inserts() {
     let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .expect("build ShardedTtlCache");
 
     cache.set_ttl(Duration::ZERO);
+    // Entry 1 is inserted while TTL is disabled: gets expires_at = None.
     cache.cache_set(1, 10).unwrap();
+    assert_eq!(cache.cache_get(&1), Ok(Some(10)));
+
+    // Re-arm with a short ttl: only FUTURE inserts get a real expires_at.
+    cache.set_ttl(Duration::from_millis(20));
+    // Entry 2 is inserted now with the short TTL: gets expires_at = now + 20ms.
+    cache.cache_set(2, 20).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    // Entry 1 (inserted under disabled TTL) must still be live (expires_at = None).
     assert_eq!(
         cache.cache_get(&1),
         Ok(Some(10)),
-        "with expiry disabled, the entry never expires"
+        "entry inserted under disabled ttl keeps expires_at=None; must survive re-arming"
     );
-
-    // Re-arm with a short ttl: the existing entry must now expire.
-    cache.set_ttl(Duration::from_millis(20));
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    // Entry 2 (inserted under the short TTL) must have expired.
     assert_eq!(
-        cache.cache_get(&1),
+        cache.cache_get(&2),
         Ok(None),
-        "set_ttl(nonzero) after a disabled ttl must re-enable expiry"
+        "entry inserted after set_ttl(nonzero) must expire at the new deadline"
     );
 }
 
 #[test]
-fn sharded_lru_ttl_set_nonzero_after_disable_re_enables_expiry() {
+fn sharded_lru_ttl_set_nonzero_after_disable_only_affects_future_inserts() {
     let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
         .max_size(8)
         .shards(1)
@@ -225,15 +234,27 @@ fn sharded_lru_ttl_set_nonzero_after_disable_re_enables_expiry() {
         .expect("build ShardedLruTtlCache");
 
     cache.set_ttl(Duration::ZERO);
+    // Entry 1 inserted while disabled: expires_at = None.
     cache.cache_set(1, 10).unwrap();
     assert_eq!(cache.cache_get(&1), Ok(Some(10)));
 
     cache.set_ttl(Duration::from_millis(20));
+    // Entry 2 inserted after re-arming: expires_at = now + 20ms.
+    cache.cache_set(2, 20).unwrap();
+
     std::thread::sleep(std::time::Duration::from_millis(60));
+
+    // Entry 1 (expires_at = None) must still be live.
     assert_eq!(
         cache.cache_get(&1),
+        Ok(Some(10)),
+        "disabled-TTL entry keeps expires_at=None; must survive re-arming"
+    );
+    // Entry 2 must have expired.
+    assert_eq!(
+        cache.cache_get(&2),
         Ok(None),
-        "set_ttl(nonzero) after a disabled ttl must re-enable expiry on the LRU store"
+        "entry inserted after set_ttl(nonzero) must expire at the new deadline on LRU store"
     );
 }
 

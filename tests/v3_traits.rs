@@ -1458,7 +1458,8 @@ mod sharded_set_ttl_zero {
 
     #[test]
     fn sharded_ttl_set_zero_is_equivalent_to_unset() {
-        // set_ttl(ZERO) and unset_ttl() are observably identical: both disable expiry.
+        // set_ttl(ZERO) and unset_ttl() are observably identical: both disable expiry
+        // for FUTURE inserts. Entries already in the cache keep their per-entry expires_at.
         let via_zero: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
             .ttl(Duration::from_secs(60))
             .build()
@@ -1473,18 +1474,28 @@ mod sharded_set_ttl_zero {
         assert_eq!(via_zero.ttl(), via_unset.ttl());
         assert_eq!(via_zero.ttl(), None);
 
+        // Insert AFTER disabling: these entries get expires_at = None (never expire).
         via_zero.cache_set(3, 30).unwrap();
         via_unset.cache_set(3, 30).unwrap();
         assert_eq!(via_zero.cache_get(&3), Ok(Some(30)));
         assert_eq!(via_unset.cache_get(&3), Ok(Some(30)));
 
-        // Re-arming a real ttl after either disable resumes expiry.
+        // Re-arming only affects FUTURE inserts; existing entries (expires_at=None) live on.
         via_zero.set_ttl(Duration::from_millis(20));
+        // New insert under the re-armed TTL: this one should expire.
+        via_zero.cache_set(4, 40).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(60));
+        // Entry 3 (inserted while disabled, expires_at=None) must still be live.
         assert_eq!(
             via_zero.cache_get(&3),
+            Ok(Some(30)),
+            "entry inserted while disabled keeps expires_at=None; must survive re-arming"
+        );
+        // Entry 4 (inserted after re-arming) must have expired.
+        assert_eq!(
+            via_zero.cache_get(&4),
             Ok(None),
-            "set_ttl(nonzero) after a zero disable re-enables expiry"
+            "entry inserted after set_ttl(nonzero) must expire at the new deadline"
         );
     }
 }

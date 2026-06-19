@@ -98,6 +98,7 @@ mod unbound;
     feature = "redis_store"
 ))]
 use crate::time::Duration;
+#[cfg(feature = "time_stores")]
 use crate::time::Instant;
 
 pub(super) type OnEvict<K, V> = std::sync::Arc<dyn Fn(&K, &V) + Send + Sync>;
@@ -200,22 +201,30 @@ pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
     }
 }
 
-/// A cached value paired with its insertion timestamp for TTL tracking.
+/// A cached value paired with its per-entry expiry instant for TTL tracking.
 ///
-/// Used internally by [`TtlCache`] and [`LruTtlCache`]
-/// to pair each entry with the instant it was inserted (or last refreshed).
+/// Used internally by [`TtlCache`], [`LruTtlCache`], [`ShardedTtlCache`], and
+/// [`ShardedLruTtlCache`]. The `expires_at` field holds the absolute instant at
+/// which this entry expires, or `None` if the entry never expires (i.e. the TTL
+/// was disabled at insert time via `set_ttl(Duration::ZERO)` / `unset_ttl()`).
+///
+/// Because expiry is fixed at insertion time, calling `set_ttl` after inserting an
+/// entry does **not** retroactively change when existing entries expire. Only newly
+/// inserted (or refreshed-on-hit) entries use the TTL current at that point.
+#[cfg(feature = "time_stores")]
 #[derive(Debug)]
-pub struct TimedEntry<V> {
-    /// The instant this entry was inserted (or last refreshed).
-    pub instant: Instant,
+pub(crate) struct TimedEntry<V> {
+    /// The absolute instant at which this entry expires, or `None` for never.
+    pub(crate) expires_at: Option<Instant>,
     /// The cached value.
-    pub value: V,
+    pub(crate) value: V,
 }
 
+#[cfg(feature = "time_stores")]
 impl<V: Clone> Clone for TimedEntry<V> {
     fn clone(&self) -> Self {
         Self {
-            instant: self.instant,
+            expires_at: self.expires_at,
             value: self.value.clone(),
         }
     }

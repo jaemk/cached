@@ -1,14 +1,17 @@
 //! Outside-in certification of the v3 "`set_ttl(Duration::ZERO)` == expiry disabled"
 //! semantic on the SINGLE-OWNER time stores (`TtlCache`, `LruTtlCache`).
 //!
-//! The existing `try_set_ttl_tests` in `v3_traits.rs` only prove that a disabled
-//! ttl keeps a just-inserted entry live through `cache_get`. These tests pin the
-//! semantic on every OTHER read/sweep/state path that routes through
-//! `entry_live(ttl, instant)`: `iter`, `retain`, `cache_peek`,
-//! `cache_get_with_expiry_status`, `cache_peek_with_expiry_status`, `evict`, the
-//! async get-or-set, the full `set_ttl`/`unset_ttl`/`ttl()` state machine with its
-//! prior-value contract, the `build()`/`try_set_ttl` zero-rejection regression
-//! guard, and the `TtlSortedCache` out-of-scope boundary.
+//! # v3 per-entry expiry semantics
+//!
+//! As of v3, each entry stores an absolute `expires_at: Option<Instant>` computed
+//! at INSERT time from the TTL that was active when the entry was inserted.
+//! `set_ttl` only affects FUTURE inserts; existing entries keep their original
+//! `expires_at`.  `set_ttl(Duration::ZERO)` makes new entries never expire
+//! (`expires_at = None`), but entries already in the cache still expire at their
+//! original deadline.
+//!
+//! Tests that used to verify that `set_ttl(ZERO)` retroactively kept already-
+//! inserted entries live have been updated to match the new contract.
 #![cfg(feature = "time_stores")]
 
 use cached::time::Duration;
@@ -16,94 +19,147 @@ use cached::{
     CacheTtl, Cached, CachedIter, CachedPeek, CloneCached, LruTtlCache, SetTtlError, TtlCache,
 };
 
-// A duration short enough that any nonzero ttl set in these tests is already
-// elapsed by the time we read (so a regression that treats 0 as "expired now"
-// or fails to disable expiry is caught without a sleep where possible).
+// A duration short enough that any nonzero ttl used in these tests expires
+// well before the sleep. Must be shorter than SLEEP.
 const SHORT: Duration = Duration::from_millis(30);
 const SLEEP: std::time::Duration = std::time::Duration::from_millis(80);
 
 // ─────────────────────────── TtlCache ───────────────────────────
 
-// gap 3: a disabled ttl must make entries permanently live on EVERY read path,
-// not just `cache_get`.
-
+// Entries inserted BEFORE set_ttl(ZERO) keep their original expires_at and
+// therefore still expire.  Entries inserted AFTER never expire.
 #[test]
-fn ttl_cache_disabled_ttl_keeps_entry_live_on_iter_peek_and_status() {
+fn ttl_cache_set_zero_only_affects_future_inserts() {
     let mut c = TtlCache::<u32, u32>::builder()
         .ttl(SHORT)
         .build()
         .expect("build TtlCache");
-    // Insert under a real (short) ttl, then disable expiry and sleep well past it.
+
+    // Insert under SHORT ttl; this entry gets expires_at = now + 30ms.
     c.cache_set(1, 10);
+
     let prev = c.set_ttl(Duration::ZERO);
     assert_eq!(prev, Some(SHORT), "set_ttl returns the prior ttl");
     assert_eq!(c.ttl(), None, "zero ttl resolves to None");
+
+    // Insert AFTER set_ttl(ZERO); this entry gets expires_at = None (never-expires).
+    c.cache_set(2, 20);
+
+    std::thread::sleep(SLEEP); // 80ms > 30ms: entry 1 has expired
+
+    // Entry 1 (inserted before set_ttl) must be expired now.
+    assert_eq!(
+        c.cache_get(&1),
+        None,
+        "entry inserted before set_ttl(ZERO) must expire at its original deadline"
+    );
+
+    // Entry 2 (inserted after set_ttl(ZERO)) must still be live.
+    assert_eq!(
+        c.cache_get(&2),
+        Some(&20),
+        "entry inserted after set_ttl(ZERO) must never expire"
+    );
+}
+
+#[test]
+fn ttl_cache_pre_zero_entry_expired_on_all_paths() {
+    let mut c = TtlCache::<u32, u32>::builder()
+        .ttl(SHORT)
+        .build()
+        .expect("build TtlCache");
+    c.cache_set(1, 10);
+    c.set_ttl(Duration::ZERO);
     std::thread::sleep(SLEEP);
 
-    // iter must yield the entry (entry_live returns true for zero ttl).
+    // cache_peek must not see the expired entry.
+    assert_eq!(
+        c.cache_peek(&1),
+        None,
+        "cache_peek must not return an expired entry"
+    );
+
+    // CloneCached status reads must report expired.
+    let (val, expired) = c.cache_peek_with_expiry_status(&1);
+    assert_eq!(val, Some(10));
+    assert!(expired, "peek_with_expiry_status must report expired entry");
+
+    let (val2, expired2) = c.cache_get_with_expiry_status(&1);
+    assert_eq!(val2, Some(10));
+    assert!(expired2, "get_with_expiry_status must report expired entry");
+
+    // iter must not yield the expired entry.
+    let items: Vec<(u32, u32)> = c.iter().map(|(k, v)| (*k, *v)).collect();
+    assert!(items.is_empty(), "iter must exclude expired entries");
+}
+
+#[test]
+fn ttl_cache_post_zero_entry_live_on_all_paths() {
+    let mut c = TtlCache::<u32, u32>::builder()
+        .ttl(SHORT)
+        .build()
+        .expect("build TtlCache");
+    c.set_ttl(Duration::ZERO);
+    // Insert AFTER disabling; entry gets expires_at = None.
+    c.cache_set(1, 10);
+    std::thread::sleep(SLEEP);
+
+    // iter must yield the entry.
     let items: Vec<(u32, u32)> = c.iter().map(|(k, v)| (*k, *v)).collect();
     assert_eq!(
         items,
         vec![(1, 10)],
-        "iter must include entries when expiry is disabled"
+        "iter must include entries whose expires_at is None"
     );
 
-    // cache_peek must see it (no side effects).
-    assert_eq!(
-        c.cache_peek(&1),
-        Some(&10),
-        "cache_peek must return the value under disabled ttl"
-    );
+    // cache_peek must see it.
+    assert_eq!(c.cache_peek(&1), Some(&10));
 
     // CloneCached status reads must report not-expired.
     let (val, expired) = c.cache_peek_with_expiry_status(&1);
     assert_eq!(val, Some(10));
-    assert!(
-        !expired,
-        "peek_with_expiry_status must report live under zero ttl"
-    );
+    assert!(!expired, "peek_with_expiry_status must report live entry");
 
     let (val2, expired2) = c.cache_get_with_expiry_status(&1);
     assert_eq!(val2, Some(10));
-    assert!(
-        !expired2,
-        "get_with_expiry_status must report live under zero ttl"
-    );
+    assert!(!expired2, "get_with_expiry_status must report live entry");
 
-    // And a plain cache_get still hits.
+    // Plain cache_get must hit.
     assert_eq!(c.cache_get(&1), Some(&10));
 }
 
 #[test]
-fn ttl_cache_disabled_ttl_evict_is_noop() {
-    // `TtlCache` has no public `retain`; the LRU variant covers retain below.
+fn ttl_cache_evict_expires_pre_zero_entries_but_not_post_zero() {
     let mut c = TtlCache::<u32, u32>::builder()
         .ttl(SHORT)
         .build()
         .expect("build TtlCache");
-    for i in 0..5u32 {
+    // Insert 3 entries under SHORT ttl.
+    for i in 0..3u32 {
         c.cache_set(i, i * 10);
     }
     c.set_ttl(Duration::ZERO);
+    // Insert 2 entries under disabled (never-expire) ttl.
+    c.cache_set(10, 100);
+    c.cache_set(11, 110);
+
     std::thread::sleep(SLEEP);
 
-    // evict() must sweep nothing — a zero ttl disables expiry.
-    assert_eq!(c.evict(), 0, "evict must be a no-op under disabled ttl");
+    // evict() must only remove the 3 expired entries (keys 0-2), not the never-expire ones.
+    let removed = c.evict();
     assert_eq!(
-        c.cache_size(),
-        5,
-        "no entry may be swept under disabled ttl"
+        removed, 3,
+        "evict must remove exactly the 3 expired entries"
     );
-
-    // A subsequent read still hits — entries remain live.
-    assert_eq!(c.cache_get(&2), Some(&20));
+    assert_eq!(c.cache_size(), 2, "two never-expire entries must remain");
+    assert_eq!(c.cache_get(&10), Some(&100));
+    assert_eq!(c.cache_get(&11), Some(&110));
 }
 
 #[test]
-fn ttl_cache_disabled_ttl_get_or_set_with_treats_old_entry_as_live() {
-    // get_or_set_with_mut must HIT the existing entry (not recompute) because a
-    // disabled ttl makes it live, even though it was inserted under a short ttl
-    // and we slept past it.
+fn ttl_cache_disabled_ttl_get_or_set_with_recomputes_expired_entry() {
+    // When an entry was inserted under SHORT ttl and that ttl has elapsed,
+    // get_or_set_with_mut must recompute (the entry is expired), not hit.
     let mut c = TtlCache::<u32, u32>::builder()
         .ttl(SHORT)
         .build()
@@ -114,14 +170,17 @@ fn ttl_cache_disabled_ttl_get_or_set_with_treats_old_entry_as_live() {
 
     let v = c.cache_get_or_set_with_mut(1, || 999);
     assert_eq!(
-        *v, 10,
-        "disabled ttl => existing entry is live => get_or_set must not recompute"
+        *v, 999,
+        "expired entry must be replaced by get_or_set; new entry never expires"
     );
+    // The newly inserted entry must itself never expire.
+    std::thread::sleep(SLEEP);
+    assert_eq!(c.cache_get(&1), Some(&999));
 }
 
 #[cfg(feature = "async")]
 #[tokio::test]
-async fn ttl_cache_disabled_ttl_async_get_or_set_treats_old_entry_as_live() {
+async fn ttl_cache_disabled_ttl_async_get_or_set_recomputes_expired_entry() {
     use cached::CachedAsync;
     let mut c = TtlCache::<u32, u32>::builder()
         .ttl(SHORT)
@@ -132,10 +191,7 @@ async fn ttl_cache_disabled_ttl_async_get_or_set_treats_old_entry_as_live() {
     std::thread::sleep(SLEEP);
 
     let v = c.async_cache_get_or_set_with(1, || async { 999 }).await;
-    assert_eq!(
-        *v, 10,
-        "async get_or_set must hit the live (disabled-ttl) entry, not recompute"
-    );
+    assert_eq!(*v, 999, "async get_or_set must recompute the expired entry");
 }
 
 // gap 4: full state machine + prior-value contract on TtlCache.
@@ -187,8 +243,8 @@ fn ttl_cache_set_unset_ttl_state_machine_and_prior_values() {
 }
 
 #[test]
-fn ttl_cache_set_zero_observably_identical_to_unset() {
-    // Two caches, same history, one disabled via set_ttl(0), the other via unset_ttl.
+fn ttl_cache_set_zero_and_unset_both_disable_future_expiry() {
+    // Both set_ttl(ZERO) and unset_ttl() should make FUTURE inserts never expire.
     let mut via_zero = TtlCache::<u32, u32>::builder()
         .ttl(SHORT)
         .build()
@@ -198,17 +254,18 @@ fn ttl_cache_set_zero_observably_identical_to_unset() {
         .build()
         .expect("build");
 
-    via_zero.cache_set(1, 10);
-    via_unset.cache_set(1, 10);
-
+    // Disable expiry first, then insert.
     assert_eq!(via_zero.set_ttl(Duration::ZERO), Some(SHORT));
     assert_eq!(via_unset.unset_ttl(), Some(SHORT));
+
+    via_zero.cache_set(1, 10);
+    via_unset.cache_set(1, 10);
 
     assert_eq!(via_zero.ttl(), via_unset.ttl());
     assert_eq!(via_zero.ttl(), None);
 
     std::thread::sleep(SLEEP);
-    // Both keep the (would-be-expired) entry live.
+    // Both entries (inserted after disabling) must still be live.
     assert_eq!(via_zero.cache_get(&1), Some(&10));
     assert_eq!(via_unset.cache_get(&1), Some(&10));
 }
@@ -216,7 +273,7 @@ fn ttl_cache_set_zero_observably_identical_to_unset() {
 // ─────────────────────────── LruTtlCache ───────────────────────────
 
 #[test]
-fn lru_ttl_cache_disabled_ttl_keeps_entry_live_on_iter_peek_status_and_orders() {
+fn lru_ttl_cache_set_zero_only_affects_future_inserts() {
     let mut c = LruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .ttl(SHORT)
@@ -224,8 +281,45 @@ fn lru_ttl_cache_disabled_ttl_keeps_entry_live_on_iter_peek_status_and_orders() 
         .expect("build LruTtlCache");
     c.cache_set(1, 10);
     c.cache_set(2, 20);
+
     assert_eq!(c.set_ttl(Duration::ZERO), Some(SHORT));
     assert_eq!(c.ttl(), None);
+
+    // Insert AFTER disabling; these get expires_at = None.
+    c.cache_set(3, 30);
+    c.cache_set(4, 40);
+
+    std::thread::sleep(SLEEP);
+
+    // Entries 1 and 2 (inserted before disabling) must be expired.
+    assert_eq!(
+        c.cache_get(&1),
+        None,
+        "entry 1 inserted before set_ttl(ZERO) must expire"
+    );
+    assert_eq!(
+        c.cache_get(&2),
+        None,
+        "entry 2 inserted before set_ttl(ZERO) must expire"
+    );
+
+    // Entries 3 and 4 (inserted after disabling) must be live.
+    assert_eq!(c.cache_get(&3), Some(&30));
+    assert_eq!(c.cache_get(&4), Some(&40));
+}
+
+#[test]
+fn lru_ttl_cache_post_zero_entry_live_on_iter_peek_status_and_orders() {
+    let mut c = LruTtlCache::<u32, u32>::builder()
+        .max_size(8)
+        .ttl(SHORT)
+        .build()
+        .expect("build LruTtlCache");
+
+    // Disable first, then insert; entries get expires_at = None.
+    c.set_ttl(Duration::ZERO);
+    c.cache_set(1, 10);
+    c.cache_set(2, 20);
     std::thread::sleep(SLEEP);
 
     // iter (CachedIter) must include both.
@@ -234,7 +328,7 @@ fn lru_ttl_cache_disabled_ttl_keeps_entry_live_on_iter_peek_status_and_orders() 
     assert_eq!(items, vec![(1, 10), (2, 20)]);
 
     // iter_order / key_order / value_order all filter by entry_live and must
-    // include the would-be-expired entries.
+    // include the never-expiring entries.
     assert_eq!(c.iter_order().len(), 2, "iter_order must keep live entries");
     assert_eq!(c.key_order().len(), 2, "key_order must keep live entries");
     assert_eq!(
@@ -254,33 +348,61 @@ fn lru_ttl_cache_disabled_ttl_keeps_entry_live_on_iter_peek_status_and_orders() 
 }
 
 #[test]
-fn lru_ttl_cache_disabled_ttl_evict_is_noop_and_retain_keeps_live() {
+fn lru_ttl_cache_evict_expires_pre_zero_entries_but_not_post_zero() {
     let mut c = LruTtlCache::<u32, u32>::builder()
-        .max_size(8)
+        .max_size(16)
         .ttl(SHORT)
         .build()
         .expect("build LruTtlCache");
+
+    // Insert 5 entries under SHORT ttl, then disable, then insert 2 more.
     for i in 0..5u32 {
         c.cache_set(i, i * 10);
     }
     c.set_ttl(Duration::ZERO);
+    c.cache_set(10, 100);
+    c.cache_set(11, 110);
+
     std::thread::sleep(SLEEP);
 
-    assert_eq!(c.evict(), 0, "evict must be a no-op under disabled ttl");
-    assert_eq!(c.cache_size(), 5);
+    let removed = c.evict();
+    assert_eq!(
+        removed, 5,
+        "evict must remove exactly the 5 expired entries"
+    );
+    assert_eq!(c.cache_size(), 2, "two never-expire entries must remain");
+    assert_eq!(c.cache_get(&10), Some(&100));
+    assert_eq!(c.cache_get(&11), Some(&110));
+}
 
+#[test]
+fn lru_ttl_cache_retain_keeps_never_expire_entries() {
+    let mut c = LruTtlCache::<u32, u32>::builder()
+        .max_size(16)
+        .ttl(SHORT)
+        .build()
+        .expect("build LruTtlCache");
+
+    // Disable first, insert never-expire entries.
+    c.set_ttl(Duration::ZERO);
+    for i in 0..5u32 {
+        c.cache_set(i, i * 10);
+    }
+    std::thread::sleep(SLEEP);
+
+    // retain by even keys.
     c.retain(|k, _v| k % 2 == 0);
     let mut kept: Vec<u32> = c.iter().map(|(k, _)| *k).collect();
     kept.sort_unstable();
     assert_eq!(
         kept,
         vec![0, 2, 4],
-        "retain under disabled ttl must not treat would-be-expired entries as expired"
+        "retain must keep live never-expire entries matching the predicate"
     );
 }
 
 #[test]
-fn lru_ttl_cache_disabled_ttl_get_or_set_with_treats_old_entry_as_live() {
+fn lru_ttl_cache_disabled_ttl_get_or_set_with_recomputes_expired_entry() {
     let mut c = LruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .ttl(SHORT)
@@ -289,16 +411,20 @@ fn lru_ttl_cache_disabled_ttl_get_or_set_with_treats_old_entry_as_live() {
     c.cache_set(1, 10);
     c.set_ttl(Duration::ZERO);
     std::thread::sleep(SLEEP);
+
     let v = c.cache_get_or_set_with_mut(1, || 999);
     assert_eq!(
-        *v, 10,
-        "disabled ttl => existing LRU entry is live => no recompute"
+        *v, 999,
+        "expired entry must be replaced; new entry inserted under disabled ttl never expires"
     );
+    // The new entry must itself never expire.
+    std::thread::sleep(SLEEP);
+    assert_eq!(c.cache_get(&1), Some(&999));
 }
 
 #[cfg(feature = "async")]
 #[tokio::test]
-async fn lru_ttl_cache_disabled_ttl_async_get_or_set_treats_old_entry_as_live() {
+async fn lru_ttl_cache_disabled_ttl_async_get_or_set_recomputes_expired_entry() {
     use cached::CachedAsync;
     let mut c = LruTtlCache::<u32, u32>::builder()
         .max_size(8)
@@ -310,8 +436,8 @@ async fn lru_ttl_cache_disabled_ttl_async_get_or_set_treats_old_entry_as_live() 
     std::thread::sleep(SLEEP);
     let v = c.async_cache_get_or_set_with(1, || async { 999 }).await;
     assert_eq!(
-        *v, 10,
-        "async get_or_set must hit the live (disabled-ttl) LRU entry"
+        *v, 999,
+        "async get_or_set must recompute the expired LRU entry"
     );
 }
 

@@ -259,11 +259,28 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         }
     }
 
-    /// `true` if an entry stamped at `instant` is still live under `ttl`.
-    /// A zero TTL means expiry is disabled, so every entry is always live.
+    /// `true` if the entry is still live.
+    /// `expires_at = None` means the entry never expires (TTL was disabled at insert time).
     #[inline]
-    pub(super) fn entry_live(ttl: Duration, instant: Instant) -> bool {
-        ttl.is_zero() || instant.elapsed() < ttl
+    pub(super) fn entry_live(expires_at: Option<Instant>) -> bool {
+        expires_at.is_none_or(|t| Instant::now() < t)
+    }
+
+    /// Compute the expiry instant for a new or refreshed entry given the current TTL.
+    /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
+    /// Returns `Err(CacheSetError::TimeBounds)` on overflow.
+    #[inline]
+    pub(super) fn compute_expires_at(
+        ttl: Duration,
+        now: Instant,
+    ) -> Result<Option<Instant>, super::CacheSetError> {
+        if ttl.is_zero() {
+            Ok(None)
+        } else {
+            now.checked_add(ttl)
+                .map(Some)
+                .ok_or(super::CacheSetError::TimeBounds)
+        }
     }
 
     fn new_internal(size: usize, ttl: Duration, refresh: bool) -> Result<Self, super::BuildError> {
@@ -281,22 +298,21 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         })
     }
 
-    /// Return an iterator of key-value pairs with their insertion timestamps
+    /// Return an iterator of key-value pairs with their expiry instants
     /// in the current order from most to least recently used.
-    /// Items passed their expiration seconds will be excluded.
-    pub fn iter_order(&self) -> Vec<(K, (Instant, V))>
+    /// Items past their expiry will be excluded.
+    pub fn iter_order(&self) -> Vec<(K, (Option<Instant>, V))>
     where
         K: Clone,
         V: Clone,
     {
-        let max_ttl = self.ttl;
         self.store
             .iter_order()
             .into_iter()
             .filter_map(|(k, entry)| {
-                let instant = entry.instant;
-                if Self::entry_live(max_ttl, instant) {
-                    Some((k.clone(), (instant, entry.value.clone())))
+                let expires_at = entry.expires_at;
+                if Self::entry_live(expires_at) {
+                    Some((k.clone(), (expires_at, entry.value.clone())))
                 } else {
                     None
                 }
@@ -306,17 +322,16 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
 
     /// Return an iterator of keys in the current order from most
     /// to least recently used.
-    /// Items passed their expiration seconds will be excluded.
+    /// Items past their expiry will be excluded.
     pub fn key_order(&self) -> Vec<K>
     where
         K: Clone,
     {
-        let max_ttl = self.ttl;
         self.store
             .order
             .iter()
             .filter_map(|(k, entry)| {
-                if Self::entry_live(max_ttl, entry.instant) {
+                if Self::entry_live(entry.expires_at) {
                     Some(k.clone())
                 } else {
                     None
@@ -325,21 +340,20 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
             .collect()
     }
 
-    /// Return an iterator of timestamped values in the current order
+    /// Return an iterator of (expiry, value) pairs in the current order
     /// from most to least recently used.
-    /// Items passed their expiration seconds will be excluded.
-    pub fn value_order(&self) -> Vec<(Instant, V)>
+    /// Items past their expiry will be excluded.
+    pub fn value_order(&self) -> Vec<(Option<Instant>, V)>
     where
         V: Clone,
     {
-        let max_ttl = self.ttl;
         self.store
             .order
             .iter()
             .filter_map(|(_k, entry)| {
-                let instant = entry.instant;
-                if Self::entry_live(max_ttl, instant) {
-                    Some((instant, entry.value.clone()))
+                let expires_at = entry.expires_at;
+                if Self::entry_live(expires_at) {
+                    Some((expires_at, entry.value.clone()))
                 } else {
                     None
                 }
@@ -404,17 +418,13 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     /// Evict expired values from the cache.
     #[must_use]
     pub fn evict(&mut self) -> usize {
-        let ttl = self.ttl;
-        // A zero TTL disables expiry — nothing is ever expired, so there is
-        // nothing to sweep.
-        if ttl.is_zero() {
-            return 0;
-        }
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
+        let now = Instant::now();
         self.store.retain_silent(|key, entry| {
-            if entry.instant.elapsed() < ttl {
+            // None means never-expires; Some(t) expires when now >= t.
+            if entry.expires_at.is_none_or(|t| now < t) {
                 true
             } else {
                 if let Some(on_evict) = on_evict {
@@ -434,11 +444,10 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     /// are removed. `on_evict` is called and the eviction counter incremented
     /// for each removed entry.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
-        let ttl = self.ttl;
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         self.store.retain_silent(|key, entry| {
-            let expired = !Self::entry_live(ttl, entry.instant);
+            let expired = !Self::entry_live(entry.expires_at);
             if expired || !keep(key, &entry.value) {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, &entry.value);
@@ -490,11 +499,16 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         let hash = self.store.hash(key);
         if let Some(index) = self.store.get_index(hash, key) {
             let entry = &self.store.order.get(index).1;
-            if Self::entry_live(self.ttl, entry.instant) {
+            if Self::entry_live(entry.expires_at) {
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    self.store.order.get_mut(index).1.instant = Instant::now();
+                    let now = Instant::now();
+                    let new_exp = Self::compute_expires_at(self.ttl, now)
+                        .ok()
+                        .flatten()
+                        .or(self.store.order.get(index).1.expires_at);
+                    self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 Some(&self.store.order.get(index).1.value)
             } else {
@@ -521,11 +535,16 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         let hash = self.store.hash(key);
         if let Some(index) = self.store.get_index(hash, key) {
             let entry = &self.store.order.get(index).1;
-            if Self::entry_live(self.ttl, entry.instant) {
+            if Self::entry_live(entry.expires_at) {
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    self.store.order.get_mut(index).1.instant = Instant::now();
+                    let now = Instant::now();
+                    let new_exp = Self::compute_expires_at(self.ttl, now)
+                        .ok()
+                        .flatten()
+                        .or(self.store.order.get(index).1.expires_at);
+                    self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 Some(&mut self.store.order.get_mut(index).1.value)
             } else {
@@ -546,18 +565,26 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         let key_for_evict = key.clone();
-        let setter = || TimedEntry {
-            instant: Instant::now(),
-            value: f(),
+        let ttl = self.ttl;
+        let setter = || {
+            let now = Instant::now();
+            let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
+            TimedEntry {
+                expires_at,
+                value: f(),
+            }
         };
-        let max_ttl = self.ttl;
         let (was_present, was_valid, old_entry, entry) =
-            self.store.get_or_set_with_if(key, setter, |entry| {
-                Self::entry_live(max_ttl, entry.instant)
-            });
+            self.store
+                .get_or_set_with_if(key, setter, |entry| Self::entry_live(entry.expires_at));
         if was_present && was_valid {
             if self.refresh {
-                entry.instant = Instant::now();
+                let now = Instant::now();
+                let new_exp = Self::compute_expires_at(self.ttl, now)
+                    .ok()
+                    .flatten()
+                    .or(entry.expires_at);
+                entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -578,20 +605,26 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         f: F,
     ) -> Result<&mut V, E> {
         let key_for_evict = key.clone();
+        let ttl = self.ttl;
         let setter = || {
+            let now = Instant::now();
+            let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
             Ok(TimedEntry {
-                instant: Instant::now(),
+                expires_at,
                 value: f()?,
             })
         };
-        let max_ttl = self.ttl;
         let (was_present, was_valid, old_entry, entry) =
-            self.store.try_get_or_set_with_if(key, setter, |entry| {
-                Self::entry_live(max_ttl, entry.instant)
-            })?;
+            self.store
+                .try_get_or_set_with_if(key, setter, |entry| Self::entry_live(entry.expires_at))?;
         if was_present && was_valid {
             if self.refresh {
-                entry.instant = Instant::now();
+                let now = Instant::now();
+                let new_exp = Self::compute_expires_at(self.ttl, now)
+                    .ok()
+                    .flatten()
+                    .or(entry.expires_at);
+                entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -609,18 +642,36 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
     /// Insert a key-value pair. Returns the previous value only if it had not yet expired.
     /// Expired previous values are silently discarded.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
+        let now = Instant::now();
+        let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
         let entry = TimedEntry {
-            instant: Instant::now(),
+            expires_at,
             value: val,
         };
         let stamped = self.store.set(key, entry);
         stamped.and_then(|entry| {
-            if Self::entry_live(self.ttl, entry.instant) {
+            if Self::entry_live(entry.expires_at) {
                 Some(entry.value)
             } else {
                 None
             }
         })
+    }
+
+    fn cache_try_set(&mut self, key: K, val: V) -> Result<Option<V>, super::CacheSetError> {
+        let now = Instant::now();
+        let expires_at = Self::compute_expires_at(self.ttl, now)?;
+        let entry = TimedEntry {
+            expires_at,
+            value: val,
+        };
+        Ok(self.store.set(key, entry).and_then(|entry| {
+            if Self::entry_live(entry.expires_at) {
+                Some(entry.value)
+            } else {
+                None
+            }
+        }))
     }
 
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
@@ -633,7 +684,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
                 on_evict(&stored_k, &entry.value);
             }
             self.evictions.fetch_add(1, Ordering::Relaxed);
-            if Self::entry_live(self.ttl, entry.instant) {
+            if Self::entry_live(entry.expires_at) {
                 Some(entry.value)
             } else {
                 None
@@ -702,9 +753,8 @@ impl<K: Hash + Eq + Clone, V> CachedIter<K, V> for LruTtlCache<K, V> {
         K: 'a,
         V: 'a,
     {
-        let max_ttl = self.ttl;
         CachedIter::iter(&self.store).filter_map(move |(k, entry)| {
-            if Self::entry_live(max_ttl, entry.instant) {
+            if Self::entry_live(entry.expires_at) {
                 Some((k, &entry.value))
             } else {
                 None
@@ -720,7 +770,7 @@ impl<K: Hash + Eq + Clone, V> CachedPeek<K, V> for LruTtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.cache_peek(k)
-            && Self::entry_live(self.ttl, entry.instant)
+            && Self::entry_live(entry.expires_at)
         {
             return Some(&entry.value);
         }
@@ -768,7 +818,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for LruTtlCache<K, V> {
         let hash = self.store.hash(k);
         if let Some(index) = self.store.get_index(hash, k) {
             let entry = &self.store.order.get(index).1;
-            let expired = !Self::entry_live(self.ttl, entry.instant);
+            let expired = !Self::entry_live(entry.expires_at);
             if expired {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 (Some(self.store.order.get(index).1.value.clone()), true)
@@ -776,7 +826,12 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for LruTtlCache<K, V> {
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    self.store.order.get_mut(index).1.instant = Instant::now();
+                    let now = Instant::now();
+                    let new_exp = Self::compute_expires_at(self.ttl, now)
+                        .ok()
+                        .flatten()
+                        .or(self.store.order.get(index).1.expires_at);
+                    self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 (Some(self.store.order.get(index).1.value.clone()), false)
             }
@@ -799,7 +854,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for LruTtlCache<K, V> {
     {
         // Use the inner LruCache's `cache_peek` to avoid LRU promotion.
         if let Some(entry) = self.store.cache_peek(k) {
-            let expired = !Self::entry_live(self.ttl, entry.instant);
+            let expired = !Self::entry_live(entry.expires_at);
             (Some(entry.value.clone()), expired)
         } else {
             (None, false)
@@ -825,22 +880,27 @@ where
     {
         async move {
             let key_for_evict = key.clone();
-            let setter = || async {
+            let ttl = self.ttl;
+            let setter = || async move {
+                let now = Instant::now();
+                let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
                 TimedEntry {
-                    instant: Instant::now(),
+                    expires_at,
                     value: f().await,
                 }
             };
-            let max_ttl = self.ttl;
             let (was_present, was_valid, old_entry, entry) = self
                 .store
-                .get_or_set_with_if_async(key, setter, |entry| {
-                    Self::entry_live(max_ttl, entry.instant)
-                })
+                .get_or_set_with_if_async(key, setter, |entry| Self::entry_live(entry.expires_at))
                 .await;
             if was_present && was_valid {
                 if self.refresh {
-                    entry.instant = Instant::now();
+                    let now = Instant::now();
+                    let new_exp = Self::compute_expires_at(self.ttl, now)
+                        .ok()
+                        .flatten()
+                        .or(entry.expires_at);
+                    entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -870,23 +930,30 @@ where
     {
         async move {
             let key_for_evict = key.clone();
-            let setter = || async {
+            let ttl = self.ttl;
+            let setter = || async move {
                 let new_val = f().await?;
+                let now = Instant::now();
+                let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
                 Ok(TimedEntry {
-                    instant: Instant::now(),
+                    expires_at,
                     value: new_val,
                 })
             };
-            let max_ttl = self.ttl;
             let (was_present, was_valid, old_entry, entry) = self
                 .store
                 .try_get_or_set_with_if_async(key, setter, |entry| {
-                    Self::entry_live(max_ttl, entry.instant)
+                    Self::entry_live(entry.expires_at)
                 })
                 .await?;
             if was_present && was_valid {
                 if self.refresh {
-                    entry.instant = Instant::now();
+                    let now = Instant::now();
+                    let new_exp = Self::compute_expires_at(self.ttl, now)
+                        .ok()
+                        .flatten()
+                        .or(entry.expires_at);
+                    entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
             } else {

@@ -162,9 +162,21 @@ where
 
     #[inline]
     fn is_expired(&self, entry: &TimedEntry<V>) -> bool {
-        match self.ttl_duration() {
+        // `expires_at = None` means never-expires (TTL was disabled at insert time).
+        match entry.expires_at {
             None => false,
-            Some(ttl) => entry.instant.elapsed() >= ttl,
+            Some(t) => Instant::now() >= t,
+        }
+    }
+
+    /// Compute the expiry instant for a new or refreshed entry given the current TTL.
+    fn compute_expires_at(&self, now: Instant) -> Option<Instant> {
+        let nanos = self.inner.ttl_nanos.load(Ordering::Relaxed);
+        if nanos == 0 {
+            None
+        } else {
+            let ttl = Duration::from_nanos(nanos);
+            now.checked_add(ttl)
         }
     }
 }
@@ -300,10 +312,6 @@ where
     where
         K: Clone,
     {
-        let ttl = match self.ttl_duration() {
-            None => return 0,
-            Some(t) => t,
-        };
         let mut total = 0;
         let now = Instant::now();
         for shard in self.inner.shards.iter() {
@@ -311,7 +319,9 @@ where
                 let mut guard = shard.lock.write();
                 let expired_keys: Vec<K> = guard
                     .iter()
-                    .filter(|(_, e)| now.saturating_duration_since(e.instant) >= ttl)
+                    // An entry is expired when expires_at is Some(t) and now >= t.
+                    // None means never-expires.
+                    .filter(|(_, e)| e.expires_at.is_some_and(|t| now >= t))
                     .map(|(k, _)| k.clone())
                     .collect();
                 let mut removed = Vec::new();
@@ -442,7 +452,8 @@ where
             let mut guard = shard.lock.write();
             match guard.get_mut(k) {
                 Some(entry) if !self.is_expired(entry) => {
-                    entry.instant = Instant::now();
+                    let now = Instant::now();
+                    entry.expires_at = self.compute_expires_at(now).or(entry.expires_at);
                     let value = Some(entry.value.clone());
                     drop(guard);
                     shard.hits.fetch_add(1, Ordering::Relaxed);
@@ -519,8 +530,10 @@ where
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
+        let now = Instant::now();
+        let expires_at = self.compute_expires_at(now);
         let new_entry = TimedEntry {
-            instant: Instant::now(),
+            expires_at,
             value: v,
         };
         let old = shard.lock.write().insert(k, new_entry);
@@ -535,7 +548,8 @@ where
             if let Some(cb) = &self.inner.on_evict {
                 cb(&stored_k, &entry.value);
             }
-            if self.is_expired(&entry) {
+            // expired = None (never-expires) -> live; Some(t) -> live if now < t
+            if entry.expires_at.is_some_and(|t| Instant::now() >= t) {
                 Ok(None)
             } else {
                 Ok(Some(entry.value))
@@ -792,18 +806,16 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         let new_cache = self
             .build()
             .unwrap_or_else(|e| panic!("ShardedTtlCache build failed: {e}"));
-        let existing_ttl = existing.ttl_duration();
+        let _existing_ttl = existing.ttl_duration();
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, TimedEntry<V>)> = {
                 let guard = shard.lock.read();
+                let now = Instant::now();
                 guard
                     .iter()
                     .filter(|(_, entry)| {
-                        // Skip entries that are already expired per the existing cache's TTL.
-                        match existing_ttl {
-                            None => true,
-                            Some(ttl) => entry.instant.elapsed() < ttl,
-                        }
+                        // Skip entries that are already expired per their per-entry expires_at.
+                        entry.expires_at.is_none_or(|t| now < t)
                     })
                     .map(|(k, e)| (k.clone(), e.clone()))
                     .collect()
@@ -829,7 +841,7 @@ where
     fn cache_get_with_expiry_status(&self, k: &K) -> (Option<V>, bool) {
         let shard = self.shard_of(k);
         if self.inner.refresh.load(Ordering::Relaxed) {
-            // Refresh-on-hit path: write lock needed to update the entry's TTL timestamp.
+            // Refresh-on-hit path: write lock needed to update the entry's expires_at.
             let mut guard = shard.lock.write();
             match guard.get_mut(k) {
                 None => {
@@ -841,7 +853,8 @@ where
                     let expired = self.is_expired(entry);
                     let value = entry.value.clone();
                     if !expired {
-                        entry.instant = Instant::now();
+                        let now = Instant::now();
+                        entry.expires_at = self.compute_expires_at(now).or(entry.expires_at);
                     }
                     drop(guard);
                     if expired {
