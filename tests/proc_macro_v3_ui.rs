@@ -5,8 +5,6 @@ Covers:
 - I7: `#[cached(refresh = true)]` rejected when no TTL is set.
 - I6: the remaining `#[cached]`-only attributes rejected on `#[once]`
   (`result_fallback`, `refresh`, `max_size`, `ty`, `create`, `key`, `convert`).
-- 8b: a non-string `force_refresh` value (e.g. `force_refresh = true`) rejected
-  with a message pointing at the curly-brace block string form.
 
 All fire during macro expansion before any feature-gated store type is emitted,
 so `proc_macro` alone is sufficient (no `time_stores` needed).
@@ -27,6 +25,4 @@ fn compile_fail_proc_macro_v3() {
     t.compile_fail("tests/ui/once_create_rejected.rs");
     t.compile_fail("tests/ui/once_key_rejected.rs");
     t.compile_fail("tests/ui/once_convert_rejected.rs");
-    // 8b: non-string `force_refresh` value rejected.
-    t.compile_fail("tests/ui/cached_force_refresh_non_string.rs");
 }

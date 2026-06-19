@@ -87,4 +87,10 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/concurrent_cached_sync_writes_buckets_unsupported.rs");
     t.compile_fail("tests/ui/concurrent_cached_sync_lock_unsupported.rs");
     t.compile_fail("tests/ui/concurrent_cached_unsync_reads_unsupported.rs");
+    // Item #1: explicit sync_writes = "by_key" combined with result_fallback errors.
+    t.compile_fail("tests/ui/cached_result_fallback_sync_writes_by_key.rs");
+    // Item #2: malformed unquoted convert block (syntax error) rejected.
+    t.compile_fail("tests/ui/cached_convert_malformed_unquoted.rs");
+    // Item #2: map_error = 5 (non-closure expression) rejected.
+    t.compile_fail("tests/ui/concurrent_cached_map_error_non_closure.rs");
 }

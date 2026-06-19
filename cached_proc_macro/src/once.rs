@@ -4,7 +4,7 @@ use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Ident, ItemFn, ReturnType, parse_macro_input};
+use syn::{Ident, ItemFn, ReturnType, parse_macro_input, parse_str};
 
 #[derive(FromMeta)]
 struct OnceMacroArgs {
@@ -26,8 +26,9 @@ struct OnceMacroArgs {
     ttl_millis: Option<u64>,
     #[darling(default)]
     time: Option<u64>,
+    /// `None` = not specified by user (defaults to `Disabled` for `#[once]`).
     #[darling(default)]
-    sync_writes: SyncWriteMode,
+    sync_writes: Option<SyncWriteMode>,
     #[darling(default = "default_sync_writes_buckets")]
     sync_writes_buckets: usize,
     #[darling(default)]
@@ -44,14 +45,18 @@ struct OnceMacroArgs {
     /// (#16/#140).
     #[darling(default)]
     in_impl: bool,
-    /// Opt-in boolean expression over the fn args, written as a curly-brace Rust
-    /// block (e.g. `force_refresh = "{ id == 0 }"`). When it evaluates `true`, the
+    /// Opt-in boolean expression over the fn args. Both unquoted `{ expr }` and
+    /// legacy quoted `"{ expr }"` forms are accepted. When it evaluates `true`, the
     /// single cached value is bypassed and the body re-runs and re-caches.
     /// `#[once]` has no per-call key, so unlike `#[cached]` there is no "exclude
     /// the flag from the key" caveat: a forced recompute overwrites the one shared
     /// value for all callers.
     #[darling(default)]
-    force_refresh: Option<String>,
+    force_refresh: Option<syn::Expr>,
+    /// Override the visibility of the companion fns (`{fn}_no_cache`,
+    /// `{fn}_prime_cache`). `None` (default) inherits the cached fn's visibility.
+    #[darling(default)]
+    companions_vis: Option<String>,
     // Removed attributes intercepted to provide helpful error messages
     #[darling(default)]
     result: Option<bool>,
@@ -76,7 +81,7 @@ struct OnceMacroArgs {
     #[darling(default)]
     key: Option<String>,
     #[darling(default)]
-    convert: Option<String>,
+    convert: Option<syn::Expr>,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -90,9 +95,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
-    if let Err(e) = validate_force_refresh_is_string(&attr_args) {
-        return e.to_compile_error().into();
-    }
     let args = match OnceMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -109,6 +111,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // Resolve the path to the `cached` crate (renamed-dependency support, #157).
     let krate = crate_path();
+
+    // Resolve the effective sync_writes mode.
+    // `None` (unspecified by user) defaults to `Disabled` for `#[once]`.
+    // `#[once]` never changes its default based on other attrs.
+    let sync_writes = args.sync_writes.unwrap_or(SyncWriteMode::Disabled);
 
     // pull out the parts of the function signature
     let fn_ident = signature.ident.clone();
@@ -427,7 +434,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     if let Err(error) = validate_sync_writes_buckets(args.sync_writes_buckets, fn_ident.span()) {
         return error.to_compile_error().into();
     }
-    if args.sync_writes == SyncWriteMode::ByKey {
+    if sync_writes == SyncWriteMode::ByKey {
         return syn::Error::new(
             fn_ident.span(),
             "`sync_writes = \"by_key\"` is not supported by `#[once]` because `#[once]` stores a single value for all arguments",
@@ -570,9 +577,29 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     // The `in_impl` origin sibling is a public impl method; hide it from consumers'
     // rustdoc with `#[doc(hidden)]` (it stays callable as an escape hatch).
+    // Resolve companion fn visibility (#9). Needs to come before inner_sibling_def.
+    let companions_visibility = match &args.companions_vis {
+        None => quote! { #visibility },
+        Some(s) if s.is_empty() => quote! {},
+        Some(s) => match parse_str::<syn::Visibility>(s) {
+            Ok(vis) => quote! { #vis },
+            Err(e) => {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    format!(
+                        "unable to parse `companions_vis` as a visibility: {e}; \
+                         expected a Rust visibility, e.g. `\"pub\"`, `\"pub(crate)\"`, or `\"\"`"
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+    };
+
     let (inner_sibling_def, inner_nested_def) = if args.in_impl {
         (
-            quote! { #[doc(hidden)] #visibility #inner_sig #body },
+            quote! { #[doc(hidden)] #companions_visibility #inner_sig #body },
             quote! {},
         )
     } else {
@@ -607,7 +634,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         let cache_ty = cache_ty.clone();
         let cache_create = cache_create.clone();
         let krate = krate.clone();
-        let is_by_key = args.sync_writes == SyncWriteMode::ByKey;
+        let is_by_key = sync_writes == SyncWriteMode::ByKey;
         make_static = Box::new(move |vis: &proc_macro2::TokenStream| {
             if is_by_key {
                 quote! {
@@ -639,7 +666,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         let cache_ty = cache_ty.clone();
         let cache_create = cache_create.clone();
         let krate = krate.clone();
-        let is_by_key = args.sync_writes == SyncWriteMode::ByKey;
+        let is_by_key = sync_writes == SyncWriteMode::ByKey;
         make_static = Box::new(move |vis: &proc_macro2::TokenStream| {
             if is_by_key {
                 quote! {
@@ -655,7 +682,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let module_ty = make_static(&quote! { #visibility });
     let body_ty = make_static(&quote! {});
 
-    let prime_do_set_return_block = match args.sync_writes {
+    let prime_do_set_return_block = match sync_writes {
         SyncWriteMode::ByKey => unreachable!("ByKey rejected above"),
         _ => quote! {
             #w_lock
@@ -675,7 +702,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let do_set_return_block = match args.sync_writes {
+    let do_set_return_block = match sync_writes {
         SyncWriteMode::Default => {
             // When `force_refresh` IS set, hoist its predicate into a single
             // boolean so it is evaluated ONCE per call. Without this the
@@ -792,7 +819,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             // `dead_code` for callers that generate but never call the companion.
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
-            #visibility #prime_sig {
+            #companions_visibility #prime_sig {
                 #body_static
                 #now_block
                 #prime_do_set_return_block

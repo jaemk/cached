@@ -4,7 +4,7 @@ use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Block, Ident, ItemFn, ReturnType, Type, parse_macro_input, parse_str};
+use syn::{Ident, ItemFn, ReturnType, Type, parse_macro_input, parse_str};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 enum SyncLock {
@@ -62,13 +62,17 @@ struct CachedMacroArgs {
     #[darling(default)]
     key: Option<String>,
     #[darling(default)]
-    convert: Option<String>,
+    convert: Option<syn::Expr>,
     #[darling(default)]
     cache_err: bool,
     #[darling(default)]
     cache_none: bool,
+    /// `None` = not specified by user (defaults to `ByKey` for `#[cached]`).
+    /// `Some(Disabled)` = explicit `sync_writes = false`.
+    /// `Some(Default)` = explicit `sync_writes = true` / `"default"`.
+    /// `Some(ByKey)` = explicit `sync_writes = "by_key"`.
     #[darling(default)]
-    sync_writes: SyncWriteMode,
+    sync_writes: Option<SyncWriteMode>,
     #[darling(default = "default_sync_writes_buckets")]
     sync_writes_buckets: usize,
     #[darling(default)]
@@ -78,7 +82,7 @@ struct CachedMacroArgs {
     #[darling(default)]
     ty: Option<String>,
     #[darling(default)]
-    create: Option<String>,
+    create: Option<syn::Expr>,
     #[darling(default)]
     result_fallback: bool,
     #[darling(default)]
@@ -88,9 +92,15 @@ struct CachedMacroArgs {
     /// A boolean expression over the function arguments; when it evaluates to
     /// `true`, the cached value (if any) is bypassed and the function body is
     /// re-run and re-cached. Orthogonal to `refresh` (which renews a TTL on a
-    /// cache hit). Parsed like `key`/`convert` (#146).
+    /// cache hit). Both unquoted `{ expr }` and legacy quoted `"{ expr }"` forms
+    /// are accepted (#146).
     #[darling(default)]
-    force_refresh: Option<String>,
+    force_refresh: Option<syn::Expr>,
+    /// Override the visibility of the companion fns (`{fn}_no_cache`,
+    /// `{fn}_prime_cache`). Parsed as a `syn::Visibility` string. `None` (default)
+    /// inherits the cached fn's visibility. `""` means private.
+    #[darling(default)]
+    companions_vis: Option<String>,
     /// Allow the macro on a method that takes `self` inside an `impl` block.
     /// The cache static is emitted inside the generated fn body (legal there)
     /// and the receiver is preserved/forwarded (#16/#140).
@@ -159,9 +169,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
-    if let Err(e) = validate_force_refresh_is_string(&attr_args) {
-        return e.to_compile_error().into();
-    }
     let args = match CachedMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -180,6 +187,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // dependency is renamed by the downstream crate (#157).
     let krate = crate_path();
 
+    // Resolve the effective sync_writes mode.
+    // `None` (unspecified by user) defaults to `ByKey` for `#[cached]`.
+    // Explicit `sync_writes = false` => Disabled; `= true`/`"default"` => Default;
+    // `= "by_key"` => ByKey.
+    let sync_writes_explicit = args.sync_writes.is_some();
+    let sync_writes = args.sync_writes.unwrap_or(SyncWriteMode::ByKey);
+
     // pull out the parts of the function signature
     let fn_ident = signature.ident.clone();
     let inputs = signature.inputs.clone();
@@ -188,6 +202,28 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let has_receiver = inputs
         .iter()
         .any(|input| matches!(input, syn::FnArg::Receiver(_)));
+
+    // Resolve companion fn visibility (#9). `companions_vis = None` inherits the
+    // cached fn's visibility. `companions_vis = Some(s)` parses `s` as a
+    // `syn::Visibility`; an empty string produces private visibility.
+    let companions_visibility = match &args.companions_vis {
+        None => quote! { #visibility },
+        Some(s) if s.is_empty() => quote! {},
+        Some(s) => match parse_str::<syn::Visibility>(s) {
+            Ok(vis) => quote! { #vis },
+            Err(e) => {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    format!(
+                        "unable to parse `companions_vis` as a visibility: {e}; \
+                         expected a Rust visibility, e.g. `\"pub\"`, `\"pub(crate)\"`, or `\"\"`"
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+    };
 
     // Reject `self` methods unless `in_impl = true`. A `self` receiver only
     // exists inside an `impl`/trait, and off the `in_impl` path the cache static
@@ -594,7 +630,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 let cache_create = quote! {#krate::UnboundCache::builder().build().unwrap_or_else(|e| panic!("UnboundCache build failed in #[cached]: {e}"))};
                 (cache_ty, cache_create)
             }
-            (None, false, Some(type_str), Some(create_str), _) => {
+            (None, false, Some(type_str), Some(create_expr), _) => {
                 let ty = match parse_str::<Type>(type_str) {
                     Ok(ty) => ty,
                     Err(error) => {
@@ -607,17 +643,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 };
 
-                let cache_create = match parse_str::<Block>(create_str) {
-                    Ok(block) => block,
-                    Err(error) => {
-                        return syn::Error::new(
-                            fn_ident.span(),
-                            format!("unable to parse cache create block: {error}"),
-                        )
-                        .to_compile_error()
-                        .into();
-                    }
-                };
+                let cache_create = expr_to_block(create_expr.clone());
 
                 (quote! { #ty }, quote! { #cache_create })
             }
@@ -687,7 +713,12 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         return error.to_compile_error().into();
     }
 
-    if args.result_fallback && args.sync_writes != SyncWriteMode::Disabled {
+    // `result_fallback` is only mutually exclusive with EXPLICITLY set non-Disabled
+    // `sync_writes`. When `sync_writes` was not specified (unspecified, defaulting to
+    // `ByKey`), `result_fallback` implicitly selects `Disabled` instead (per spec).
+    // This lets `#[cached(result_fallback = true, ttl_secs = N)]` compile without
+    // needing the user to also write `sync_writes = false`.
+    if args.result_fallback && sync_writes_explicit && sync_writes != SyncWriteMode::Disabled {
         return syn::Error::new(
             fn_ident.span(),
             "`result_fallback` and `sync_writes` are mutually exclusive",
@@ -695,6 +726,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+
+    // When `result_fallback` is set and `sync_writes` was not explicitly specified,
+    // override the default-ByKey to Disabled (result_fallback and ByKey are also
+    // mutually exclusive, but we silently resolve the conflict for the unspecified case
+    // rather than erroring).
+    let sync_writes = if args.result_fallback && !sync_writes_explicit {
+        SyncWriteMode::Disabled
+    } else {
+        sync_writes
+    };
 
     if args.result_fallback && !is_result_return {
         return syn::Error::new(
@@ -806,7 +847,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // module-scope static keeps the method's `#visibility`, but the `in_impl`
     // function-local static is emitted bare (no visibility): a visibility on a
     // function-local item is meaningless and trips `unreachable_pub` (#7).
-    let make_static = |vis: &proc_macro2::TokenStream| match args.sync_writes {
+    let make_static = |vis: &proc_macro2::TokenStream| match sync_writes {
         SyncWriteMode::ByKey => quote! {
             #vis static #cache_ident: ::std::sync::LazyLock<(#lock_type<#cache_ty>, Vec<std::sync::Arc<#lock_type<()>>>)> = ::std::sync::LazyLock::new(|| (#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#lock_type::new(()))).collect()));
         },
@@ -847,7 +888,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     let (lock, do_set_return_block) = {
-        let lock = match args.sync_writes {
+        let lock = match sync_writes {
             SyncWriteMode::ByKey => {
                 let key_lock_block = by_key_lock_block(
                     quote! { __cached_key },
@@ -911,7 +952,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         };
 
-        let do_set_return_block = match args.sync_writes {
+        let do_set_return_block = match sync_writes {
             SyncWriteMode::ByKey => {
                 let key_lock_block = by_key_lock_block(
                     quote! { __cached_key },
@@ -1146,7 +1187,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
             #(#attributes)*
-            #visibility #prime_sig {
+            #companions_visibility #prime_sig {
                 #body_static
                 use #krate::Cached;
                 let __cached_key = #key_convert_block;
@@ -1171,7 +1212,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #module_static
         // No cache function (origin of the cached function)
         #no_cache_fn_doc
-        #visibility #function_no_cache
+        #companions_visibility #function_no_cache
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {

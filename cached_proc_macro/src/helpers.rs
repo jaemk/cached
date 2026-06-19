@@ -162,7 +162,7 @@ pub(super) fn resolve_ttl_duration(
     Ok((ttl_duration.is_some(), ttl_duration))
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub(super) enum SyncWriteMode {
     #[default]
     Disabled,
@@ -351,13 +351,13 @@ pub(super) fn first_type_arg<'a>(
 // make the cache key type and block that converts the inputs into the key type
 pub(super) fn make_cache_key_type(
     key: &Option<String>,
-    convert: &Option<String>,
+    convert: &Option<syn::Expr>,
     ty: &Option<String>,
     input_tys: Vec<Type>,
     input_names: &[Pat],
 ) -> Result<(TokenStream2, TokenStream2), syn::Error> {
     match (key, convert, ty) {
-        (Some(key_str), Some(convert_str), _) => {
+        (Some(key_str), Some(convert_expr), _) => {
             let cache_key_ty = parse_str::<Type>(key_str).map_err(|error| {
                 syn::Error::new(
                     Span::call_site(),
@@ -369,30 +369,12 @@ pub(super) fn make_cache_key_type(
                 )
             })?;
 
-            let key_convert_block = parse_str::<Block>(convert_str).map_err(|error| {
-                syn::Error::new(
-                    Span::call_site(),
-                    format!(
-                        "unable to parse `convert` as a block: {error}; \
-                         `convert` must be a brace-delimited block, e.g. \
-                         `convert = \"{{ format!(\\\"{{}}\\\", id) }}\"`"
-                    ),
-                )
-            })?;
+            let key_convert_block = expr_to_block(convert_expr.clone());
 
             Ok((quote! {#cache_key_ty}, quote! {#key_convert_block}))
         }
-        (None, Some(convert_str), Some(_)) => {
-            let key_convert_block = parse_str::<Block>(convert_str).map_err(|error| {
-                syn::Error::new(
-                    Span::call_site(),
-                    format!(
-                        "unable to parse `convert` as a block: {error}; \
-                         `convert` must be a brace-delimited block, e.g. \
-                         `convert = \"{{ format!(\\\"{{}}\\\", id) }}\"`"
-                    ),
-                )
-            })?;
+        (None, Some(convert_expr), Some(_)) => {
+            let key_convert_block = expr_to_block(convert_expr.clone());
 
             Ok((quote! {}, quote! {#key_convert_block}))
         }
@@ -534,81 +516,59 @@ pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: Stri
     .into()
 }
 
-/// Reject a `force_refresh` value that is not a string literal.
-///
-/// `force_refresh` takes a curly-brace Rust block written inside a string literal
-/// (e.g. `force_refresh = "{ id == 0 }"`). A bare `force_refresh = true` (or any
-/// other non-string literal) would otherwise surface darling's generic
-/// "unexpected literal type" error, which does not tell the caller the expected
-/// shape. This validator runs against the raw attribute meta list before
-/// `from_list` and emits a friendly, uniform message for every macro entry point
-/// (`#[cached]`, `#[once]`, `#[concurrent_cached]`).
-pub(super) fn validate_force_refresh_is_string(
-    attr_args: &[darling::ast::NestedMeta],
-) -> Result<(), syn::Error> {
-    for arg in attr_args {
-        let darling::ast::NestedMeta::Meta(syn::Meta::NameValue(nv)) = arg else {
-            continue;
-        };
-        if !nv.path.is_ident("force_refresh") {
-            continue;
-        }
-        let is_str = matches!(
-            &nv.value,
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(_),
-                ..
-            })
-        );
-        if !is_str {
-            return Err(syn::Error::new_spanned(
-                &nv.value,
-                "`force_refresh` takes a curly-brace block string, e.g. \
-                 `force_refresh = \"{ id == 0 }\"`",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Parse the `force_refresh` string into an `Option<syn::Block>` exactly once.
+/// Parse the `force_refresh` expression (`Option<syn::Expr>`, already parsed by
+/// darling) into an `Option<syn::Block>` for use in generated code.
 ///
 /// Returns `Ok(None)` when `force_refresh` is `None`. Shared by
 /// `build_force_refresh_guard` and by `#[concurrent_cached]`, which needs the
-/// same parsed block to build its `force_refresh_bypass` token, so the string is
-/// parsed only once per macro expansion.
+/// same parsed block to build its `force_refresh_bypass` token, so the expression
+/// is extracted only once per macro expansion.
+///
+/// If the `Expr` is already `Expr::Block`, its inner `Block` is used directly.
+/// Otherwise the expression is wrapped in a synthetic block so a bare expression
+/// (e.g. `force_refresh = { id == 0 }`) also works.
 pub(super) fn parse_force_refresh_block(
-    force_refresh: &Option<String>,
-    span: Span,
+    force_refresh: &Option<syn::Expr>,
+    _span: Span,
 ) -> Result<Option<Block>, syn::Error> {
     match force_refresh {
-        Some(src) => {
-            let block = parse_str::<Block>(src).map_err(|error| {
-                syn::Error::new(
-                    span,
-                    format!(
-                        "unable to parse `force_refresh` block: {error}; it must be a \
-                         curly-brace block over the function arguments, e.g. `{{ id == 0 }}`"
-                    ),
-                )
-            })?;
+        Some(expr) => {
+            let block = expr_to_block(expr.clone());
             Ok(Some(block))
         }
         None => Ok(None),
     }
 }
 
+/// Convert a `syn::Expr` to a `syn::Block`.
+///
+/// If `expr` is already `Expr::Block`, return its inner block directly.
+/// Otherwise wrap it in a synthetic block `{ expr }`.
+pub(super) fn expr_to_block(expr: syn::Expr) -> Block {
+    use syn::{Stmt, parse_quote};
+    match expr {
+        syn::Expr::Block(eb) => eb.block,
+        other => {
+            let stmt: Stmt = parse_quote! { #other };
+            Block {
+                brace_token: Default::default(),
+                stmts: vec![stmt],
+            }
+        }
+    }
+}
+
 /// Build the `force_refresh` guard token that wraps a cached-hit early return.
 ///
 /// `force_refresh` is an opt-in boolean expression block over the function args,
-/// written in curly braces like `convert` (e.g. `force_refresh = "{ id == 0 }"`).
-/// When it evaluates to `true`, the cached-hit early return is skipped so the
-/// body re-runs and re-caches. The returned token is `if !(block)`; with no
-/// `force_refresh` it is `if true` (always take the cached value). Orthogonal to
-/// `refresh` (TTL renewal on hit) (#146). Shared by `#[cached]`,
-/// `#[concurrent_cached]`, and `#[once]`.
+/// in curly braces like `convert` (e.g. `force_refresh = { id == 0 }` or the
+/// legacy quoted form `force_refresh = "{ id == 0 }"`). When it evaluates to
+/// `true`, the cached-hit early return is skipped so the body re-runs and
+/// re-caches. The returned token is `if !(block)`; with no `force_refresh` it is
+/// `if true` (always take the cached value). Orthogonal to `refresh` (TTL renewal
+/// on hit) (#146). Shared by `#[cached]`, `#[concurrent_cached]`, and `#[once]`.
 pub(super) fn build_force_refresh_guard(
-    force_refresh: &Option<String>,
+    force_refresh: &Option<syn::Expr>,
     span: Span,
 ) -> Result<TokenStream2, syn::Error> {
     match parse_force_refresh_block(force_refresh, span)? {

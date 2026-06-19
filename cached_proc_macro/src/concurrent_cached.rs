@@ -4,15 +4,12 @@ use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{
-    Block, ExprClosure, GenericArgument, Ident, ItemFn, ReturnType, Type, parse_macro_input,
-    parse_str,
-};
+use syn::{GenericArgument, Ident, ItemFn, ReturnType, Type, parse_macro_input, parse_str};
 
 #[derive(FromMeta)]
 struct ConcurrentCachedArgs {
     #[darling(default)]
-    map_error: Option<String>,
+    map_error: Option<syn::Expr>,
     #[darling(default)]
     disk: bool,
     #[darling(default)]
@@ -20,7 +17,7 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     redis: bool,
     #[darling(default)]
-    cache_prefix_block: Option<String>,
+    cache_prefix_block: Option<syn::Expr>,
     #[darling(default)]
     name: Option<String>,
     /// A TTL expressed as a `Duration` expression in a string literal (same
@@ -49,7 +46,7 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     key: Option<String>,
     #[darling(default)]
-    convert: Option<String>,
+    convert: Option<syn::Expr>,
     #[darling(default)]
     with_cached_flag: bool,
     #[darling(default)]
@@ -65,7 +62,7 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     ty: Option<String>,
     #[darling(default)]
-    create: Option<String>,
+    create: Option<syn::Expr>,
     #[darling(default)]
     durable: Option<bool>,
     /// Total LRU capacity for the default in-memory sharded store.
@@ -81,9 +78,14 @@ struct ConcurrentCachedArgs {
     expires: bool,
     /// A boolean expression over the function arguments; when `true`, the cached
     /// value is bypassed and the body is re-run and re-cached. Orthogonal to
-    /// `refresh`. Parsed like `key`/`convert` (#146).
+    /// `refresh`. Both unquoted `{ expr }` and legacy quoted `"{ expr }"` forms
+    /// are accepted (#146).
     #[darling(default)]
-    force_refresh: Option<String>,
+    force_refresh: Option<syn::Expr>,
+    /// Override the visibility of the companion fns (`{fn}_no_cache`,
+    /// `{fn}_prime_cache`). `None` (default) inherits the cached fn's visibility.
+    #[darling(default)]
+    companions_vis: Option<String>,
     /// Allow the macro on a method that takes `self` inside an `impl` block.
     /// The cache static is emitted inside the generated fn body and the receiver
     /// is preserved/forwarded (#16/#140).
@@ -194,9 +196,6 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
     if let Err(e) = reject_cached_only_attrs(&attr_args) {
-        return e.to_compile_error().into();
-    }
-    if let Err(e) = validate_force_refresh_is_string(&attr_args) {
         return e.to_compile_error().into();
     }
     let args = match ConcurrentCachedArgs::from_list(&attr_args) {
@@ -875,9 +874,11 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // never fail and `.expect(...)` is always correct.  `map_error` is rejected on
     // this path - there are no errors to map.
     //
-    // For the fallible redis / disk / custom paths the user must supply
-    // `map_error = "..."` and we keep the original `.map_err(#map_error)?` pattern.
-    let map_error_opt: Option<ExprClosure> = match (&args.map_error, infallible_default) {
+    // For the fallible redis / disk / custom paths, if the user supplies
+    // `map_error = |e| ...`, we emit `.map_err(closure)?`. If `map_error` is
+    // absent on a fallible path, we emit `.map_err(::std::convert::Into::into)?`,
+    // which works when the function's error type implements `From<StoreError>`.
+    let map_error_closure: Option<syn::Expr> = match (&args.map_error, infallible_default) {
         (Some(_), true) => {
             return syn::Error::new(
                 fn_ident.span(),
@@ -889,46 +890,61 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
         }
-        (Some(src), false) => match parse_str::<ExprClosure>(src) {
-            Ok(map_error) => Some(map_error),
-            Err(error) => {
-                return syn::Error::new(
-                    fn_ident.span(),
-                    format!("unable to parse `map_error` closure: {error}"),
+        (Some(expr), false) => {
+            // Verify the expression is a closure; other expression types are not
+            // valid for `map_error`.
+            if !matches!(expr, syn::Expr::Closure(_)) {
+                return syn::Error::new_spanned(
+                    expr,
+                    "`map_error` must be a closure, e.g. `map_error = |e| MyErr(e)`",
                 )
                 .to_compile_error()
                 .into();
             }
-        },
-        (None, true) => None, // infallible: use .expect(...) in generated code
-        (None, false) => {
-            return syn::Error::new(
-                fn_ident.span(),
-                "#[concurrent_cached] requires `map_error = \"...\"` when the cache type \
-                 has a fallible error (redis/disk/custom)",
-            )
-            .to_compile_error()
-            .into();
+            Some(expr.clone())
         }
+        (None, true) => None,  // infallible: use .expect(...) in generated code
+        (None, false) => None, // fallible but no map_error: use Into::into
     };
 
-    // Emit either `.map_err(closure)?` for fallible stores or `.expect(...)` for
-    // infallible stores.  The macro helpers below use these token-stream fragments.
-    //
-    // `infallible_default` is true for the default in-memory sharded stores; their error
-    // type is `Infallible`, so the ops always succeed and `.expect(...)` is correct.
-    // `map_error` on this path is rejected above as a compile error.
+    // Emit either `.map_err(closure)?`, bare `?`, or `.expect(...)`
+    // for fallible stores or infallible stores.
     let (cache_get_unwrap, cache_set_unwrap): (proc_macro2::TokenStream, proc_macro2::TokenStream) =
         if infallible_default {
             // The store's error type is `Infallible`; these `.expect()`s are unreachable.
             let msg = "cache operation on the default in-memory sharded store is infallible";
             (quote! { .expect(#msg) }, quote! { .expect(#msg) })
-        } else {
-            let me = map_error_opt
-                .as_ref()
-                .expect("fallible path requires map_error (validated above)");
+        } else if let Some(me) = &map_error_closure {
             (quote! { .map_err(#me)? }, quote! { .map_err(#me)? })
+        } else {
+            // No explicit map_error on a fallible path: use `?` directly so that the
+            // standard `From` trait machinery handles the conversion. `?` on a
+            // `Result<_, StoreError>` in a function returning `Result<_, E>` calls
+            // `E::from(e)`, which requires only `E: From<StoreError>`. This avoids the
+            // type-inference ambiguity that `.map_err(Into::into)` can produce when the
+            // target error type has multiple `From` implementations.
+            (quote! { ? }, quote! { ? })
         };
+
+    // Resolve companion fn visibility (#9).
+    let companions_visibility = match &args.companions_vis {
+        None => quote! { #visibility },
+        Some(s) if s.is_empty() => quote! {},
+        Some(s) => match parse_str::<syn::Visibility>(s) {
+            Ok(vis) => quote! { #vis },
+            Err(e) => {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    format!(
+                        "unable to parse `companions_vis` as a visibility: {e}; \
+                         expected a Rust visibility, e.g. `\"pub\"`, `\"pub(crate)\"`, or `\"\"`"
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+    };
     // For `await`-ed variants we need identical logic.
     let cache_get_unwrap_async = cache_get_unwrap.clone();
     let cache_set_unwrap_async = cache_set_unwrap.clone();
@@ -1043,7 +1059,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // rustdoc with `#[doc(hidden)]` (it stays callable as an escape hatch).
     let (inner_sibling_def, inner_nested_def) = if args.in_impl {
         (
-            quote! { #[doc(hidden)] #visibility #inner_sig #body },
+            quote! { #[doc(hidden)] #companions_visibility #inner_sig #body },
             quote! {},
         )
     } else {
@@ -1292,7 +1308,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
             // `dead_code` for callers that generate but never call the companion.
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
-            #visibility #prime_sig {
+            #companions_visibility #prime_sig {
                 #body_static
                 let __cached_key = #key_convert_block;
                 #prime_do_set_return_block
@@ -1392,41 +1408,32 @@ fn get_redis_cache_type_and_create(
         }
     };
     let cache_create = match &args.create {
-        Some(cache_create) => {
+        Some(create_expr) => {
             check_create_conflicts(args, cache_ident.span())?;
-            let cache_create = parse_str::<Block>(cache_create.as_ref()).map_err(|e| {
-                syn::Error::new(
-                    cache_ident.span(),
-                    format!("unable to parse cache create block: {e}"),
-                )
-            })?;
+            let cache_create = expr_to_block(create_expr.clone());
             quote! { #cache_create }
         }
         None => {
             if let Some(ttl_dur) = ttl_duration {
-                let cache_prefix = if let Some(cp) = &args.cache_prefix_block {
-                    cp.to_string()
+                let cache_prefix_block: proc_macro2::TokenStream = if let Some(cp_expr) =
+                    &args.cache_prefix_block
+                {
+                    // User supplied a `cache_prefix_block` expression; extract it as a block.
+                    let block = expr_to_block(cp_expr.clone());
+                    quote! { #block }
                 } else {
                     // Runtime key-prefix string: NOT a path into the `cached`
                     // crate, so it is intentionally left as the literal
                     // `cached::macros::...` namespace (do not rewrite to `#krate`).
-                    format!(
-                        " {{ \"cached::macros::concurrent_cached::{}\" }}",
-                        cache_ident
-                    )
+                    let prefix_str = format!("cached::macros::concurrent_cached::{}", cache_ident);
+                    quote! { { #prefix_str } }
                 };
-                let cache_prefix = parse_str::<Block>(cache_prefix.as_ref()).map_err(|e| {
-                    syn::Error::new(
-                        cache_ident.span(),
-                        format!("unable to parse cache_prefix_block: {e}"),
-                    )
-                })?;
                 let refresh = args.refresh;
                 if is_async {
-                    quote! { #krate::AsyncRedisCache::builder().prefix(#cache_prefix).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                    quote! { #krate::AsyncRedisCache::builder().prefix(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                 } else {
                     quote! {
-                        #krate::RedisCache::builder().prefix(#cache_prefix).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                        #krate::RedisCache::builder().prefix(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                     }
                 }
             } else if is_async {
@@ -1466,14 +1473,9 @@ fn get_disk_cache_type_and_create(
         }
     };
     let cache_create = match &args.create {
-        Some(cache_create) => {
+        Some(create_expr) => {
             check_create_conflicts(args, fn_ident.span())?;
-            let cache_create = parse_str::<Block>(cache_create.as_ref()).map_err(|e| {
-                syn::Error::new(
-                    fn_ident.span(),
-                    format!("unable to parse cache create block: {e}"),
-                )
-            })?;
+            let cache_create = expr_to_block(create_expr.clone());
             quote! { #cache_create }
         }
         None => {
@@ -1704,14 +1706,9 @@ fn get_custom_cache_type_and_create(
         }
     };
     let cache_create = match &args.create {
-        Some(cache_create) => {
+        Some(create_expr) => {
             check_create_conflicts(args, fn_ident.span())?;
-            let cache_create = parse_str::<Block>(cache_create.as_ref()).map_err(|e| {
-                syn::Error::new(
-                    fn_ident.span(),
-                    format!("unable to parse cache create block: {e}"),
-                )
-            })?;
+            let cache_create = expr_to_block(create_expr.clone());
             quote! { #cache_create }
         }
         None => {

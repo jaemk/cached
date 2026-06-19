@@ -169,7 +169,9 @@ pub fn main() {
     fib(3);
     fib(3);
     {
-        let cache = FIB.read();
+        // `.0` accesses the inner lock of the (lock, key-buckets) tuple generated
+        // by the default `sync_writes = "by_key"` mode.
+        let cache = FIB.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
@@ -181,7 +183,7 @@ pub fn main() {
     fib_specific(20);
     fib_specific(20);
     {
-        let cache = FIB_SPECIFIC.read();
+        let cache = FIB_SPECIFIC.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
@@ -192,7 +194,7 @@ pub fn main() {
     println!("\n ** custom cache **");
     custom(25);
     {
-        let cache = CUSTOM.read();
+        let cache = CUSTOM.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
@@ -204,7 +206,7 @@ pub fn main() {
     println!(" - second run `slow(10)`");
     slow(10, 10);
     {
-        let cache = SLOW.read();
+        let cache = SLOW.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
         // make sure the cache-lock is dropped
@@ -217,7 +219,7 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     expires(1);
     {
-        let cache = EXPIRES.read();
+        let cache = EXPIRES.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
     }
@@ -229,7 +231,7 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     let _ = expires_result(1);
     {
-        let cache = EXPIRES_RESULT.read();
+        let cache = EXPIRES_RESULT.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
     }
@@ -241,7 +243,7 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     expires_option(1);
     {
-        let cache = EXPIRES_OPTION.read();
+        let cache = EXPIRES_OPTION.0.read();
         println!("hits: {:?}", cache.hits());
         println!("misses: {:?}", cache.misses());
     }
@@ -255,7 +257,7 @@ pub fn main() {
     expires_for_priming_prime_cache(1);
     expires_for_priming_prime_cache(2);
     {
-        let c = EXPIRES_FOR_PRIMING.read();
+        let c = EXPIRES_FOR_PRIMING.0.read();
         // Only the two explicit function calls above count toward metrics
         assert_eq!(c.hits(), Some(1)); // second call was a hit
         assert_eq!(c.misses(), Some(1)); // first call was a miss
@@ -267,7 +269,7 @@ pub fn main() {
     // Now calling the function finds the freshly-primed value - it's a hit
     assert_eq!(expires_for_priming(1), 1);
     {
-        let c = EXPIRES_FOR_PRIMING.read();
+        let c = EXPIRES_FOR_PRIMING.0.read();
         assert_eq!(c.hits(), Some(2)); // this last call was also a hit
         assert_eq!(c.misses(), Some(1)); // still only 1 miss
     }

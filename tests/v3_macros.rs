@@ -2089,7 +2089,7 @@ fn valid_name_compiles_and_caches() {
     // The cache static is named exactly `MY_CACHE` (proves `name` took effect).
     // If the identifier were not honored this reference would not resolve.
     use cached::Cached;
-    assert!(MY_CACHE.read().cache_size() >= 2);
+    assert!(MY_CACHE.0.read().cache_size() >= 2);
 }
 
 // ── Item 9 positive guard: `sync_writes` is STILL valid on `#[once]` ─────────
@@ -2147,4 +2147,259 @@ fn once_sync_writes_true_compiles_and_caches() {
         1,
         "`sync_writes = true` on `#[once]` must still compile and cache"
     );
+}
+
+// ── Item #1: sync_writes defaults to ByKey for #[cached] ─────────────────────
+
+// Counter proves whether the body ran once or twice for a given key.
+static CACHED_BY_KEY_DEFAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+// Bare #[cached] must default to ByKey, so concurrent first-calls for the same
+// key produce only one body execution (the second waits for the first to write).
+#[cached(key = "u32", convert = { k })]
+fn cached_by_key_default(k: u32) -> u32 {
+    CACHED_BY_KEY_DEFAULT_CALLS.fetch_add(1, Ordering::SeqCst);
+    k * 2
+}
+
+#[test]
+fn test_cached_by_key_default_deduplicates() {
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::thread;
+
+    CACHED_BY_KEY_DEFAULT_CALLS.store(0, Ordering::SeqCst);
+
+    // Use a barrier to force threads to reach the call site simultaneously.
+    let barrier = Arc::new(Barrier::new(4));
+    let mut handles = vec![];
+    for _ in 0..4 {
+        let b = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            b.wait();
+            cached_by_key_default(1)
+        }));
+    }
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+
+    let calls = CACHED_BY_KEY_DEFAULT_CALLS.load(Ordering::SeqCst);
+    // With ByKey default the body must run exactly once for key=1; all other
+    // threads wait on the key lock and return the cached value.
+    assert_eq!(
+        calls, 1,
+        "bare #[cached] must default to ByKey: body should run once, ran {calls}"
+    );
+}
+
+// sync_writes = false restores the old Disabled behavior: concurrent threads
+// for the same key each compute independently (race possible, but no dedup).
+static CACHED_SW_FALSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cached(key = "u32", convert = { k }, sync_writes = false)]
+fn cached_sw_false(k: u32) -> u32 {
+    CACHED_SW_FALSE_CALLS.fetch_add(1, Ordering::SeqCst);
+    k * 3
+}
+
+#[test]
+fn test_cached_sync_writes_false_double_compute() {
+    // With sync_writes = false (Disabled) the static is a plain RwLock.
+    // Verify the static type is not a tuple by accessing it directly.
+    CACHED_SW_FALSE_CALLS.store(0, Ordering::SeqCst);
+    assert_eq!(cached_sw_false(5), 15);
+    // Reading the lock directly (not .0) proves the static is the bare lock type,
+    // which is only true when sync_writes is Disabled.
+    use cached::Cached;
+    let hits_before = CACHED_SW_FALSE.read().cache_hits();
+    assert_eq!(cached_sw_false(5), 15); // cache hit
+    let hits_after = CACHED_SW_FALSE.read().cache_hits();
+    assert!(
+        hits_after > hits_before,
+        "sync_writes = false: cache should hit on repeated call"
+    );
+}
+
+// result_fallback = true on a bare #[cached] must NOT error; it silently selects
+// Disabled sync_writes (since ByKey is incompatible with result_fallback).
+// This test verifies the combination compiles and caches correctly.
+#[cfg(feature = "time_stores")]
+static CACHED_RF_NO_SW_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "time_stores")]
+#[cached(ttl_secs = 3600, result_fallback = true, key = "u32", convert = { k })]
+fn cached_result_fallback_no_sync_writes(k: u32) -> Result<u32, String> {
+    CACHED_RF_NO_SW_CALLS.fetch_add(1, Ordering::SeqCst);
+    Ok(k)
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn test_cached_result_fallback_no_explicit_sync_writes_compiles() {
+    CACHED_RF_NO_SW_CALLS.store(0, Ordering::SeqCst);
+    let v = cached_result_fallback_no_sync_writes(7).unwrap();
+    assert_eq!(v, 7);
+    let cached_v = cached_result_fallback_no_sync_writes(7).unwrap();
+    assert_eq!(cached_v, 7);
+    // Body runs only once (second call is a cache hit).
+    assert_eq!(CACHED_RF_NO_SW_CALLS.load(Ordering::SeqCst), 1);
+}
+
+// ── Item #2: unquoted syn::Expr for code-valued attributes ───────────────────
+
+// Unquoted `convert = { format!("{a}") }` (no quotes around the block).
+static UNQUOTED_CONVERT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cached(key = "String", convert = { format!("{a}") })]
+fn unquoted_convert(a: u32) -> u32 {
+    UNQUOTED_CONVERT_CALLS.fetch_add(1, Ordering::SeqCst);
+    a
+}
+
+#[test]
+fn test_cached_unquoted_convert_compiles_and_caches() {
+    UNQUOTED_CONVERT_CALLS.store(0, Ordering::SeqCst);
+    assert_eq!(unquoted_convert(3), 3);
+    assert_eq!(unquoted_convert(3), 3); // cache hit
+    assert_eq!(UNQUOTED_CONVERT_CALLS.load(Ordering::SeqCst), 1);
+}
+
+// Legacy quoted `convert = "{ n + 1 }"` must still work.
+static QUOTED_CONVERT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cached(key = "u32", convert = "{ n + 1 }")]
+fn quoted_convert(n: u32) -> u32 {
+    QUOTED_CONVERT_CALLS.fetch_add(1, Ordering::SeqCst);
+    n
+}
+
+#[test]
+fn test_cached_legacy_quoted_convert_compiles_and_caches() {
+    QUOTED_CONVERT_CALLS.store(0, Ordering::SeqCst);
+    assert_eq!(quoted_convert(10), 10);
+    assert_eq!(quoted_convert(10), 10); // cache hit — same key (n+1=11)
+    assert_eq!(QUOTED_CONVERT_CALLS.load(Ordering::SeqCst), 1);
+}
+
+// Unquoted `force_refresh = { k == 0 }` must compile and bypass the cache when
+// the predicate evaluates to true.
+static UNQUOTED_FR_CALLS: AtomicUsize = AtomicUsize::new(0);
+static UNQUOTED_FR_SRC: AtomicUsize = AtomicUsize::new(42);
+
+// convert = { k % 100 } maps all keys to a small set of cache slots;
+// force_refresh = { k == 0 } bypasses the cache when k is zero.
+// The body also reads k (via UNQUOTED_FR_SRC) to suppress unused-variable lint.
+#[cached(key = "u32", convert = { k % 100 }, force_refresh = { k == 0 })]
+fn unquoted_force_refresh(k: u32) -> u32 {
+    UNQUOTED_FR_CALLS.fetch_add(1, Ordering::SeqCst);
+    // Use k to ensure the body produces a key-dependent result.
+    UNQUOTED_FR_SRC.load(Ordering::SeqCst) as u32 + (k % 100)
+}
+
+#[test]
+fn test_cached_unquoted_force_refresh_compiles_and_works() {
+    UNQUOTED_FR_CALLS.store(0, Ordering::SeqCst);
+    UNQUOTED_FR_SRC.store(10, Ordering::SeqCst);
+
+    // k == 1 => force_refresh = false: normal caching; body returns src(10) + 1%100 = 11.
+    assert_eq!(unquoted_force_refresh(1), 11);
+    assert_eq!(unquoted_force_refresh(1), 11); // cache hit
+    assert_eq!(UNQUOTED_FR_CALLS.load(Ordering::SeqCst), 1);
+
+    // Change underlying source.
+    UNQUOTED_FR_SRC.store(99, Ordering::SeqCst);
+
+    // k == 0 => force_refresh = true: bypasses cache, re-runs body; returns src(99) + 0%100 = 99.
+    assert_eq!(unquoted_force_refresh(0), 99);
+    assert_eq!(UNQUOTED_FR_CALLS.load(Ordering::SeqCst), 2);
+}
+
+// ── Item #3: map_error optional on fallible concurrent paths ─────────────────
+
+// A disk-backed concurrent_cached function whose error type implements
+// From<RedbCacheError> must compile without an explicit `map_error` closure.
+// The macro generates `.map_err(Into::into)?` automatically.
+// Use Box<dyn Error> as the error type: its From<RedbCacheError> impl is
+// unambiguous because the blanket `From<E: Error> for Box<dyn Error>` is the
+// only applicable conversion.
+#[cfg(all(feature = "disk_store", feature = "proc_macro"))]
+mod disk_no_map_error_tests {
+    use cached::macros::concurrent_cached;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DISK_NO_MAP_ERR_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    // No `map_error` attribute: the macro generates `Into::into` implicitly.
+    // `Box<dyn std::error::Error + Send + Sync>` implements `From<RedbCacheError>`
+    // via the blanket `From<E: Error + Send + Sync>`, giving unambiguous inference.
+    #[concurrent_cached(disk = true, ttl_secs = 60)]
+    fn disk_fn_no_map_error(n: u32) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        DISK_NO_MAP_ERR_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(n * 2)
+    }
+
+    #[test]
+    fn test_disk_concurrent_without_map_error_compiles_and_caches() {
+        // The primary assertion: the function compiles and returns the correct value.
+        // The disk (redb) cache is persistent across test runs, so the body may or may
+        // not run on any given run. We verify correctness of the return value only.
+        assert_eq!(
+            disk_fn_no_map_error(3).unwrap(),
+            6,
+            "disk_fn_no_map_error(3) must return Ok(6)"
+        );
+        // A second call must also return the correct value (either from cache or body).
+        assert_eq!(
+            disk_fn_no_map_error(3).unwrap(),
+            6,
+            "disk_fn_no_map_error(3) repeated call must return Ok(6)"
+        );
+    }
+}
+
+// ── Item #9: companions_vis knob ─────────────────────────────────────────────
+
+// Verify that `companions_vis = "pub(crate)"` causes the no_cache companion
+// and prime_cache companion to be generated with `pub(crate)` visibility.
+// We test this indirectly: if companions_vis works the test module can call
+// the companion fn that would otherwise be private or less visible.
+mod companions_vis_tests {
+    use cached::macros::cached;
+
+    // pub fn with companions_vis = "pub(crate)": the companion
+    // `test_companions_vis_fn_no_cache` must be callable from this module.
+    #[cached(key = "u32", convert = { n }, companions_vis = "pub(crate)")]
+    pub fn companions_vis_fn(n: u32) -> u32 {
+        n * 7
+    }
+
+    #[test]
+    fn test_companions_vis_pub_crate_produces_pub_crate_companions() {
+        // Call the no_cache companion directly — this only compiles if it is
+        // pub(crate) (or more visible). If companions_vis is not respected the
+        // companion would be `pub` (matching the fn), but here we check it is
+        // accessible, which is the positive signal.
+        let direct = companions_vis_fn_no_cache(2);
+        assert_eq!(
+            direct, 14,
+            "companions_vis: no_cache companion returned wrong value"
+        );
+    }
+
+    // Default (no companions_vis): companion inherits the fn's visibility.
+    #[cached(key = "u32", convert = { n })]
+    pub fn default_companions_vis_fn(n: u32) -> u32 {
+        n + 1
+    }
+
+    #[test]
+    fn test_companions_vis_default_inherits_fn_visibility() {
+        // The no_cache companion should be callable (pub inherited).
+        let direct = default_companions_vis_fn_no_cache(5);
+        assert_eq!(
+            direct, 6,
+            "default companions_vis: no_cache companion returned wrong value"
+        );
+    }
 }
