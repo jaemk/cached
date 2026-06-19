@@ -166,10 +166,10 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
-/// Error returned by [`Cached::cache_try_set`](crate::Cached::cache_try_set) when an entry
+/// Error returned by [`Cached::cache_try_set`] when an entry
 /// cannot be stored - currently only when computing the entry's expiry `Instant` overflows.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheSetError {
     /// Computing the entry's expiry `Instant` overflowed `Instant`'s representable range.
     TimeBounds,
@@ -202,7 +202,7 @@ pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
 
 /// A cached value paired with its insertion timestamp for TTL tracking.
 ///
-/// Used internally by [`TtlCache`](crate::TtlCache) and [`LruTtlCache`](crate::LruTtlCache)
+/// Used internally by [`TtlCache`] and [`LruTtlCache`]
 /// to pair each entry with the instant it was inserted (or last refreshed).
 #[derive(Debug)]
 pub struct TimedEntry<V> {
@@ -499,5 +499,11 @@ mod tests {
             err2.to_string(),
             "invalid value for field `max_size`: must be greater than zero"
         );
+    }
+
+    #[test]
+    fn cache_set_error_is_clone_eq() {
+        // Parity with `SetMaxSizeError`/`SetTtlError`, which already derive these.
+        assert_eq!(CacheSetError::TimeBounds, CacheSetError::TimeBounds.clone());
     }
 }

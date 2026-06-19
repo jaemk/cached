@@ -420,15 +420,19 @@ enum ExampleError {
     RedisError(String),
 }
 
-/// Cache the results of an async function in redis. Cache
-/// keys will be prefixed with `cache_redis_prefix`.
+/// Cache the results of an async function in redis. Redis keys are laid out as
+/// `{namespace}:{prefix}:{key}`, where `namespace` defaults to `cached-redis-store:`
+/// and `prefix` is required (here `cached_redis_prefix`). The prefix is what scopes
+/// `cache_clear` to this logical cache, so give each cache a distinct prefix.
 /// Redis and disk stores require `Result<T, E>`; supply a `map_error` closure
 /// to convert store errors into your error type.
 #[concurrent_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder("cached_redis_prefix", Duration::from_secs(1))
+        AsyncRedisCache::builder()
+            .prefix("cached_redis_prefix")
+            .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()
             .await

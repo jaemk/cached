@@ -330,6 +330,18 @@ impl std::fmt::Display for ConnectionString {
 
 use thiserror::Error;
 
+/// Error returned when building a [`RedisCache`]/[`AsyncRedisCache`].
+///
+/// Configuration problems (a missing `prefix`/`ttl`, or a zero `ttl`) surface as the
+/// transparent [`Build`](Self::Build) variant wrapping a [`BuildError`](super::BuildError):
+///
+/// ```ignore
+/// match RedisCache::<String, u32>::builder().build() {
+///     Err(RedisCacheBuildError::Build(BuildError::MissingRequired(field))) => { /* e.g. "prefix" */ }
+///     Err(RedisCacheBuildError::Build(BuildError::InvalidValue { field, reason })) => { /* e.g. "ttl" */ }
+///     _ => {}
+/// }
+/// ```
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedisCacheBuildError {
@@ -638,7 +650,9 @@ where
     ///
     /// The key `prefix` and `ttl` are required; set them via
     /// [`RedisCacheBuilder::prefix`] and [`RedisCacheBuilder::ttl`] before calling
-    /// [`build`](RedisCacheBuilder::build).
+    /// [`build`](RedisCacheBuilder::build). If either is missing, `build` returns
+    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`)` rather
+    /// than panicking.
     #[must_use]
     pub fn builder() -> RedisCacheBuilder<K, V> {
         RedisCacheBuilder::new()
@@ -887,7 +901,7 @@ where
     /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
     /// TTL was applied when they were originally inserted.
     ///
-    /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+    /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
     /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
     /// until explicitly removed. Use [`try_set_ttl`](crate::CacheTtl::try_set_ttl) if you
     /// want a zero TTL rejected instead.
@@ -1504,7 +1518,7 @@ mod async_redis {
         /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
         /// TTL was applied when they were originally inserted.
         ///
-        /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+        /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
         /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys
         /// persist until explicitly removed. Use
         /// [`try_set_ttl`](crate::CacheTtl::try_set_ttl) if you want a zero TTL rejected.

@@ -44,6 +44,18 @@ macro_rules! impl_from_redb {
     };
 }
 
+/// Error returned when building a [`RedbCache`].
+///
+/// Configuration problems (a missing `name`, or a zero `ttl`) surface as the transparent
+/// [`Build`](Self::Build) variant wrapping a [`BuildError`](super::BuildError):
+///
+/// ```ignore
+/// match RedbCache::<String, u32>::builder().build() {
+///     Err(RedbCacheBuildError::Build(BuildError::MissingRequired(field))) => { /* e.g. "name" */ }
+///     Err(RedbCacheBuildError::Build(BuildError::InvalidValue { field, reason })) => { /* e.g. "ttl" */ }
+///     _ => {}
+/// }
+/// ```
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedbCacheBuildError {
@@ -347,7 +359,9 @@ where
     /// Initialize a `RedbCacheBuilder`.
     ///
     /// The cache name is required; set it via [`RedbCacheBuilder::name`] before
-    /// calling [`build`](RedbCacheBuilder::build).
+    /// calling [`build`](RedbCacheBuilder::build). If it is missing, `build` returns
+    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`)` rather
+    /// than panicking.
     #[must_use]
     pub fn builder() -> RedbCacheBuilder<K, V> {
         RedbCacheBuilder::new()
@@ -777,8 +791,18 @@ where
         *self.ttl.lock()
     }
 
+    /// Set the TTL applied to newly inserted entries, returning the previous TTL
+    /// (`None` if expiry was disabled).
+    ///
+    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: subsequent writes
+    /// store entries with no expiry. Existing entries keep the expiry they were written with.
     fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        self.ttl.lock().replace(ttl)
+        let mut guard = self.ttl.lock();
+        if ttl.is_zero() {
+            guard.take()
+        } else {
+            guard.replace(ttl)
+        }
     }
 
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
@@ -923,8 +947,18 @@ where
         *self.ttl.lock()
     }
 
+    /// Set the TTL applied to newly inserted entries, returning the previous TTL
+    /// (`None` if expiry was disabled).
+    ///
+    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: subsequent writes
+    /// store entries with no expiry. Existing entries keep the expiry they were written with.
     fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        self.ttl.lock().replace(ttl)
+        let mut guard = self.ttl.lock();
+        if ttl.is_zero() {
+            guard.take()
+        } else {
+            guard.replace(ttl)
+        }
     }
 
     fn unset_ttl(&self) -> Option<Duration> {
@@ -1036,6 +1070,29 @@ mod tests {
             .build()
             .expect("build must succeed");
         assert_eq!(cache.cache_set(1, 100).unwrap(), None);
+        assert_eq!(cache.cache_get(&1).unwrap(), Some(100));
+    }
+
+    #[test]
+    fn set_ttl_zero_disables_expiry() {
+        // `set_ttl(Duration::ZERO)` must disable expiry (== `unset_ttl`), not make
+        // entries expire immediately: an entry written under a short ttl survives well
+        // past it once expiry is disabled.
+        let dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("set-ttl-zero-disables")
+            .disk_directory(dir.path())
+            .ttl_millis(20)
+            .build()
+            .expect("build must succeed");
+        assert_eq!(cache.cache_set(1, 100).unwrap(), None);
+        // Disabling returns the prior ttl, and `ttl()` then reports `None`.
+        assert_eq!(
+            cache.set_ttl(Duration::ZERO),
+            Some(Duration::from_millis(20))
+        );
+        assert_eq!(cache.ttl(), None);
+        std::thread::sleep(Duration::from_millis(60));
         assert_eq!(cache.cache_get(&1).unwrap(), Some(100));
     }
 

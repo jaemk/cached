@@ -737,7 +737,7 @@ impl<K: Hash + Eq + Clone, V> crate::CacheTtl for LruTtlCache<K, V> {
             Some(self.ttl)
         }
     }
-    /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+    /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
     /// Returns the previous TTL, or `None` if expiry was already disabled.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;

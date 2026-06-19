@@ -420,15 +420,19 @@ enum ExampleError {
     RedisError(String),
 }
 
-/// Cache the results of an async function in redis. Cache
-/// keys will be prefixed with `cache_redis_prefix`.
+/// Cache the results of an async function in redis. Redis keys are laid out as
+/// `{namespace}:{prefix}:{key}`, where `namespace` defaults to `cached-redis-store:`
+/// and `prefix` is required (here `cached_redis_prefix`). The prefix is what scopes
+/// `cache_clear` to this logical cache, so give each cache a distinct prefix.
 /// Redis and disk stores require `Result<T, E>`; supply a `map_error` closure
 /// to convert store errors into your error type.
 #[concurrent_cached(
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder("cached_redis_prefix", Duration::from_secs(1))
+        AsyncRedisCache::builder()
+            .prefix("cached_redis_prefix")
+            .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()
             .await
@@ -1309,9 +1313,13 @@ pub trait CacheTtl {
     /// Set the TTL for newly inserted entries, returning the previous value (or `None`
     /// if expiry was disabled).
     ///
-    /// A zero `ttl` disables expiry — it is exactly equivalent to
-    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
-    /// Use [`try_set_ttl`](Self::try_set_ttl) if you want a zero `ttl` rejected instead.
+    /// A zero `ttl` disables expiry on stores that support a disabled state — it is then
+    /// exactly equivalent to [`unset_ttl`](Self::unset_ttl), and subsequently inserted
+    /// entries never expire. Expiry-ordered stores that always require a TTL
+    /// (notably [`TtlSortedCache`]) cannot disable expiry; they
+    /// store a zero `ttl` as-is, making entries expire immediately (see that store's own
+    /// `set_ttl` docs). Use [`try_set_ttl`](Self::try_set_ttl) if you want a zero `ttl`
+    /// rejected instead.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration>;
 
     /// Validated variant of [`set_ttl`](Self::set_ttl): returns [`SetTtlError::ZeroTtl`]
@@ -1797,7 +1805,8 @@ pub trait ConcurrentCached<K, V> {
         None
     }
 
-    /// Remove the ttl for cached values, returning the previous value.
+    /// Remove the ttl for cached values, returning the previous value. Equivalent to
+    /// [`set_ttl`](Self::set_ttl) with a zero `Duration`.
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
     /// a no-op. Takes `&self`: concurrent stores are internally synchronized, so this is
@@ -2018,7 +2027,8 @@ pub trait ConcurrentCachedAsync<K, V> {
         None
     }
 
-    /// Remove the ttl for cached values, returning the previous value.
+    /// Remove the ttl for cached values, returning the previous value. Equivalent to
+    /// [`set_ttl`](Self::set_ttl) with a zero `Duration`.
     ///
     /// For cache implementations that don't support retaining values indefinitely, this method is
     /// a no-op. Takes `&self`: concurrent stores are internally synchronized, so this is

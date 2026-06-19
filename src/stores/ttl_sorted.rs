@@ -69,7 +69,7 @@ impl<T> Borrow<T> for CacheArc<T> {
 /// Error type returned by [`TtlSortedCache`] operations
 /// (e.g. [`Cached::cache_try_set`](crate::Cached::cache_try_set)).
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TtlSortedCacheError {
     /// Calculating expiration `Instant`s resulted in a
     /// value outside of `Instant`s internal bounds
@@ -928,9 +928,17 @@ impl<K: Hash + Eq + Ord, V> CachedIter<K, V> for TtlSortedCache<K, V> {
 }
 
 impl<K: Hash + Eq + Ord, V> CacheTtl for TtlSortedCache<K, V> {
+    /// Always returns `Some` - `TtlSortedCache` is expiry-ordered and always has an
+    /// active TTL (it has no disabled state, so this never returns `None`).
     fn ttl(&self) -> Option<Duration> {
         Some(self.ttl)
     }
+    /// Set the global TTL, returning the previous value.
+    ///
+    /// Unlike the other TTL stores, `TtlSortedCache` is ordered by expiry and cannot
+    /// disable expiry, so a zero `Duration` is **not** treated as "disable" here: it is
+    /// stored as-is and makes entries expire immediately. To retain entries effectively
+    /// forever, pass a large TTL or use an unordered store (`UnboundCache`/`LruCache`).
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let prev = self.ttl;
         self.ttl = ttl;
@@ -1090,6 +1098,15 @@ mod test {
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn error_is_clone_eq() {
+        use crate::stores::TtlSortedCacheError;
+        assert_eq!(
+            TtlSortedCacheError::TimeBounds,
+            TtlSortedCacheError::TimeBounds.clone()
+        );
+    }
 
     #[derive(Clone, Debug)]
     struct CountingKey {
