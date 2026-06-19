@@ -21,12 +21,30 @@ enum ExampleError {
 // When the macro constructs your RedbCache instance (the default disk engine),
 // the default cache files will be stored
 // under $system_cache_dir/<exe>_cached_disk_cache/
+//
+// `map_error` is an unquoted closure here; the legacy quoted-string form
+// (`map_error = r##"|e| ..."##`) is still accepted.
 #[concurrent_cached(
     disk = true,
     ttl_secs = 30,
-    map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##
+    map_error = |e| ExampleError::DiskError(format!("{e:?}"))
 )]
 fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
+    std::thread::sleep(Duration::from_secs(secs));
+    Ok(())
+}
+
+// `map_error` is now optional: when the function's error type implements
+// `From<RedbCacheError>`, the macro converts store errors automatically via
+// `Into::into`, so no `map_error` closure is needed.
+impl From<cached::RedbCacheError> for ExampleError {
+    fn from(e: cached::RedbCacheError) -> Self {
+        ExampleError::DiskError(format!("{e:?}"))
+    }
+}
+
+#[concurrent_cached(disk = true, ttl_secs = 30)]
+fn cached_sleep_secs_from(secs: u64) -> Result<(), ExampleError> {
     std::thread::sleep(Duration::from_secs(secs));
     Ok(())
 }
@@ -64,4 +82,10 @@ fn main() {
     }
     cache.flush().unwrap(); // one durable commit persisting the cheap writes above
     println!("flushed 3 cheap writes to disk in a single durable commit");
+
+    // No `map_error` needed: ExampleError: From<RedbCacheError> handles conversion.
+    print!("call without map_error (From<RedbCacheError>) ...");
+    io::stdout().flush().unwrap();
+    cached_sleep_secs_from(1).unwrap();
+    println!("done");
 }

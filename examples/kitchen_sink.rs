@@ -29,7 +29,7 @@ fn fib(n: u32) -> u32 {
 // Note that the cache key type is a tuple of function argument types.
 #[cached(
     ty = "UnboundCache<u32, u32>",
-    create = "{ UnboundCache::builder().capacity(50).build().unwrap() }"
+    create = UnboundCache::builder().capacity(50).build().unwrap()
 )]
 fn fib_specific(n: u32) -> u32 {
     if n == 0 || n == 1 {
@@ -50,7 +50,7 @@ fn slow(a: u32, b: u32) -> u32 {
 // Note that the cache key type is a `String` created from the borrow arguments
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
+    create = LruCache::builder().max_size(100).build().unwrap(),
     convert = r#"{ format!("{a}{b}") }"#
 )]
 fn keyed(a: &str, b: &str) -> usize {
@@ -137,7 +137,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 #[cached(
     name = "CUSTOM",
     ty = "MyCache<u32, ()>",
-    create = "{ MyCache::with_capacity(50) }"
+    create = MyCache::with_capacity(50)
 )]
 fn custom(n: u32) {
     if n == 0 {

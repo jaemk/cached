@@ -92,8 +92,8 @@ fn main() {
     // Result: only Ok is cached
     let r1 = load_record(42);
     let r2 = load_record(42);
-    assert_eq!(r1.as_deref().expect("infallible"), "record_42");
-    assert_eq!(r2.as_deref().expect("infallible"), "record_42");
+    assert_eq!(r1.as_deref().expect("load_record returns Ok"), "record_42");
+    assert_eq!(r2.as_deref().expect("load_record returns Ok"), "record_42");
     println!("load_record(42) = {:?} (cached)", r1);
 
     // Option: None is NOT cached by default; the function re-executes each time

@@ -54,10 +54,19 @@ impl Worker {
     /// `convert` folds `self.id` into the key so different instances
     /// do not share cache entries.
     ///
-    /// A `compute_no_cache` sibling is also generated (same visibility)
-    /// for calling the raw computation without touching the cache.
+    /// A `compute_no_cache` sibling is also generated for calling the raw
+    /// computation without touching the cache. Its visibility defaults to the
+    /// method's own; `companions_vis = "pub(crate)"` overrides it independently.
     /// The `_prime_cache` companion is NOT generated for `in_impl` methods.
-    #[cached(in_impl = true, key = "(u64, u32)", convert = "{ (self.id, n) }")]
+    ///
+    /// `convert` is an unquoted block here (`{ (self.id, n) }`); the legacy
+    /// quoted-string form (`convert = "{ (self.id, n) }"`) is still accepted.
+    #[cached(
+        in_impl = true,
+        key = "(u64, u32)",
+        convert = { (self.id, n) },
+        companions_vis = "pub(crate)"
+    )]
     fn compute(&self, n: u32) -> u32 {
         println!("  [miss] Worker(id={}) compute(n={n})", self.id);
         self.factor * n
@@ -128,7 +137,7 @@ trait Processor {
 
 /// Cached computation for any `Processor`-like object.
 /// Key: `(id, input)`.  `factor` is only used on a cache miss.
-#[cached(key = "(u64, u32)", convert = "{ (id, input) }")]
+#[cached(key = "(u64, u32)", convert = { (id, input) })]
 fn processor_compute(id: u64, factor: u32, input: u32) -> u32 {
     println!("  [miss] processor_compute(id={id}, factor={factor}, input={input})");
     input * factor

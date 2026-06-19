@@ -48,7 +48,7 @@ impl Expires for MyValue {
 // Add `max_size = N` to switch to an LRU-bounded ExpiringLruCache.
 // `key`/`convert` narrow the cache key to just user_id so expiry_offset_ms only
 // influences the token's lifetime, not which cache slot it occupies.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token(user_id: u64, expiry_offset_ms: u64) -> MyValue {
     println!("  -> [fetch_token] generating new token for user {user_id}...");
     let n = CALL_N.fetch_add(1, Ordering::Relaxed);
@@ -72,7 +72,7 @@ fn get_session_token(expiry_offset_ms: u64) -> MyValue {
 // `expires = true` composes with a `Result` return: only the `Ok(MyValue)` is
 // cached (and expires per-value via `Expires`); an `Err` is never cached, so a
 // failing call always re-executes.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token_result(user_id: u64, expiry_offset_ms: u64, fail: bool) -> Result<MyValue, String> {
     println!("  -> [fetch_token_result] generating token for user {user_id} (fail={fail})...");
     if fail {
@@ -88,7 +88,7 @@ fn fetch_token_result(user_id: u64, expiry_offset_ms: u64, fail: bool) -> Result
 // `expires = true` composes with an `Option` return: only `Some(MyValue)` is
 // cached (and expires per-value); a `None` is never cached, so a miss keeps
 // re-executing until a `Some` is produced.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token_option(user_id: u64, expiry_offset_ms: u64, found: bool) -> Option<MyValue> {
     println!("  -> [fetch_token_option] generating token for user {user_id} (found={found})...");
     if !found {
