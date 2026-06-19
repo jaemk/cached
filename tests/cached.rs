@@ -4587,6 +4587,250 @@ mod redis_tests {
                 ))
             ));
         }
+
+        // I2 (async): set_ttl(0) disables expiry — keys written afterward are
+        // persistent (raw TTL == -1), and set_ttl(nonzero) resumes expiry.
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_set_ttl_zero_writes_key_without_expiry() {
+            use cached::ConcurrentCachedAsync;
+
+            let prefix = "async_test_set_ttl_zero_no_expiry";
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            // Probe the raw Redis TTL synchronously (-1 == persistent, no expiry).
+            let conn_str = cache.connection_string();
+            let raw_ttl = |key: &str| -> i64 {
+                let client =
+                    redis::Client::open(conn_str.clone()).expect("open redis client for TTL probe");
+                let mut conn = client
+                    .get_connection()
+                    .expect("redis connection for TTL probe");
+                redis::cmd("TTL")
+                    .arg(format!("{prefix}:{key}"))
+                    .query(&mut conn)
+                    .expect("TTL query")
+            };
+
+            // Baseline: a real ttl writes the key with a positive TTL.
+            cache
+                .async_cache_set("k_live".to_string(), "v".to_string())
+                .await
+                .expect("set k_live");
+            assert!(
+                raw_ttl("k_live") > 0,
+                "a non-zero ttl must write the key with a positive TTL"
+            );
+
+            // Disable expiry.
+            let prev = ConcurrentCachedAsync::set_ttl(&cache, Duration::ZERO);
+            assert_eq!(prev, Some(Duration::from_secs(30)));
+            assert_eq!(ConcurrentCachedAsync::ttl(&cache), None);
+
+            cache
+                .async_cache_set("k_persist".to_string(), "v".to_string())
+                .await
+                .expect("set k_persist");
+            assert_eq!(
+                raw_ttl("k_persist"),
+                -1,
+                "set_ttl(0) must write the key WITHOUT any expiry (persistent)"
+            );
+            assert_eq!(
+                cache
+                    .async_cache_get(&"k_persist".to_string())
+                    .await
+                    .expect("get"),
+                Some("v".to_string())
+            );
+
+            // Re-arm a real ttl.
+            ConcurrentCachedAsync::set_ttl(&cache, Duration::from_secs(30));
+            cache
+                .async_cache_set("k_rearm".to_string(), "v".to_string())
+                .await
+                .expect("set k_rearm");
+            assert!(
+                raw_ttl("k_rearm") > 0,
+                "set_ttl(nonzero) must resume writing keys with a TTL"
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
+
+        // gap 2 (async): `async_cache_set_ref` (SerializeCachedAsync) must honor
+        // the disabled-ttl path — write WITHOUT expiry when ttl is zero, and WITH
+        // expiry when nonzero. Only `async_cache_set` was previously covered.
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_set_ref_zero_ttl_writes_key_without_expiry() {
+            use cached::{ConcurrentCachedAsync, SerializeCachedAsync};
+
+            let prefix = "async_test_set_ref_zero_ttl";
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            let conn_str = cache.connection_string();
+            let raw_ttl = move |key: &str| -> i64 {
+                let client =
+                    redis::Client::open(conn_str.clone()).expect("open redis client for TTL probe");
+                let mut conn = client
+                    .get_connection()
+                    .expect("redis connection for TTL probe");
+                redis::cmd("TTL")
+                    .arg(format!("{prefix}:{key}"))
+                    .query(&mut conn)
+                    .expect("TTL query")
+            };
+
+            // Baseline: a real ttl via set_ref writes with a positive TTL.
+            let prev = cache
+                .async_cache_set_ref(&"k_live".to_string(), &"v".to_string())
+                .await
+                .expect("set_ref k_live");
+            assert_eq!(prev, None, "first set_ref must return None");
+            assert!(
+                raw_ttl("k_live") > 0,
+                "set_ref under a real ttl must write a positive TTL"
+            );
+
+            // Disable expiry: set_ref must write the key WITHOUT any expiry.
+            ConcurrentCachedAsync::set_ttl(&cache, Duration::ZERO);
+            let prev2 = cache
+                .async_cache_set_ref(&"k_persist".to_string(), &"v".to_string())
+                .await
+                .expect("set_ref k_persist");
+            assert_eq!(prev2, None);
+            assert_eq!(
+                raw_ttl("k_persist"),
+                -1,
+                "set_ref under disabled ttl must write the key WITHOUT expiry (persistent)"
+            );
+            assert_eq!(
+                cache
+                    .async_cache_get(&"k_persist".to_string())
+                    .await
+                    .expect("get k_persist"),
+                Some("v".to_string())
+            );
+
+            // Re-arm a real ttl: set_ref resumes writing a TTL, and returns the prior value.
+            ConcurrentCachedAsync::set_ttl(&cache, Duration::from_secs(30));
+            let prev3 = cache
+                .async_cache_set_ref(&"k_persist".to_string(), &"v2".to_string())
+                .await
+                .expect("set_ref k_persist overwrite");
+            assert_eq!(
+                prev3,
+                Some("v".to_string()),
+                "set_ref overwrite must return the previous value"
+            );
+            assert!(
+                raw_ttl("k_persist") > 0,
+                "set_ref under a re-enabled ttl must write a positive TTL"
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
+
+        // gap 1 (async): refresh-on-hit skip-EXPIRE under disabled ttl, and the
+        // reverse (re-enabled ttl adds EXPIRE to a previously persistent key).
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_refresh_on_hit_disabled_then_reenabled_ttl() {
+            use cached::ConcurrentCachedAsync;
+
+            let prefix = "async_test_refresh_disabled_reenabled";
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(100))
+                .namespace("")
+                .refresh_on_hit(true)
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            let conn_str = cache.connection_string();
+            let raw_ttl = move |key: &str| -> i64 {
+                let client =
+                    redis::Client::open(conn_str.clone()).expect("open redis client for TTL probe");
+                let mut conn = client
+                    .get_connection()
+                    .expect("redis connection for TTL probe");
+                redis::cmd("TTL")
+                    .arg(format!("{prefix}:{key}"))
+                    .query(&mut conn)
+                    .expect("TTL query")
+            };
+
+            // Key written WITH a TTL.
+            cache
+                .async_cache_set("k".to_string(), "v".to_string())
+                .await
+                .expect("set k");
+            let ttl_before = raw_ttl("k");
+            assert!(ttl_before > 0, "key must start with a positive TTL");
+
+            // Disable expiry, refresh-on-hit GET: prior TTL must remain intact
+            // (skip-EXPIRE: not renewed, not PERSISTed).
+            ConcurrentCachedAsync::set_ttl(&cache, Duration::ZERO);
+            assert_eq!(
+                cache
+                    .async_cache_get(&"k".to_string())
+                    .await
+                    .expect("get k"),
+                Some("v".to_string())
+            );
+            let ttl_after_disable = raw_ttl("k");
+            assert!(
+                ttl_after_disable > 0,
+                "skip-EXPIRE must leave the prior TTL intact (not PERSIST), got {ttl_after_disable}"
+            );
+            assert!(
+                ttl_after_disable <= ttl_before,
+                "skip-EXPIRE must not renew the prior TTL: before={ttl_before} after={ttl_after_disable}"
+            );
+
+            // Write a persistent key under disabled ttl, re-arm, then refresh-on-hit
+            // GET must add a TTL.
+            cache
+                .async_cache_set("p".to_string(), "v".to_string())
+                .await
+                .expect("set p");
+            assert_eq!(
+                raw_ttl("p"),
+                -1,
+                "persistent key written under disabled ttl"
+            );
+            ConcurrentCachedAsync::set_ttl(&cache, Duration::from_secs(50));
+            assert_eq!(
+                cache
+                    .async_cache_get(&"p".to_string())
+                    .await
+                    .expect("get p"),
+                Some("v".to_string())
+            );
+            assert!(
+                raw_ttl("p") > 0,
+                "refresh-on-hit under a re-enabled ttl must add a TTL to the persistent key"
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
     }
 
     // Requires a live Redis server (provided by CI).
@@ -4695,6 +4939,214 @@ mod redis_tests {
             got2,
             Some(val2),
             "cache_get must return the overwritten value"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // Read the raw Redis `TTL` (in seconds) for the namespace-less key
+    // `{prefix}:{key}` directly via the redis client. Returns -1 for a
+    // persistent (no-expiry) key, -2 if the key is absent, or the remaining
+    // seconds otherwise.
+    fn raw_ttl_secs(cache: &RedisCache<String, String>, prefix: &str, key: &str) -> i64 {
+        let client = redis::Client::open(cache.connection_string())
+            .expect("open redis client for TTL probe");
+        let mut conn = client
+            .get_connection()
+            .expect("redis connection for TTL probe");
+        let full_key = format!("{prefix}:{key}");
+        redis::cmd("TTL")
+            .arg(full_key)
+            .query(&mut conn)
+            .expect("TTL query")
+    }
+
+    // I2: set_ttl(0) disables expiry. A key written afterward must have NO TTL
+    // (persistent, raw TTL == -1), and set_ttl(nonzero) must resume expiry.
+    #[test]
+    fn test_redis_set_ttl_zero_writes_key_without_expiry() {
+        let prefix = "test_set_ttl_zero_no_expiry";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Baseline: a freshly-built cache writes with a real TTL.
+        cache
+            .cache_set("k_live".to_string(), "v".to_string())
+            .expect("set k_live");
+        let live_ttl = raw_ttl_secs(&cache, prefix, "k_live");
+        assert!(
+            live_ttl > 0,
+            "a non-zero ttl must write the key with a positive TTL, got {live_ttl}"
+        );
+
+        // Disable expiry: ttl() now resolves to None.
+        let prev = cache.set_ttl(Duration::ZERO);
+        assert_eq!(prev, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), None, "set_ttl(0) disables expiry");
+
+        // A key written under the disabled ttl must be persistent (raw TTL == -1).
+        cache
+            .cache_set("k_persist".to_string(), "v".to_string())
+            .expect("set k_persist");
+        assert_eq!(
+            raw_ttl_secs(&cache, prefix, "k_persist"),
+            -1,
+            "set_ttl(0) must write the key WITHOUT any expiry (persistent)"
+        );
+        // ...and it is readable.
+        assert_eq!(
+            cache.cache_get(&"k_persist".to_string()).expect("get"),
+            Some("v".to_string())
+        );
+
+        // Re-arm a real ttl: subsequent writes carry a TTL again.
+        cache.set_ttl(Duration::from_secs(30));
+        cache
+            .cache_set("k_rearm".to_string(), "v".to_string())
+            .expect("set k_rearm");
+        assert!(
+            raw_ttl_secs(&cache, prefix, "k_rearm") > 0,
+            "set_ttl(nonzero) must resume writing keys with a TTL"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // unset_ttl() is equivalent to set_ttl(0) on the Redis store: keys written
+    // afterward are persistent.
+    #[test]
+    fn test_redis_unset_ttl_writes_key_without_expiry() {
+        let prefix = "test_unset_ttl_no_expiry";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        let prev = cache.unset_ttl();
+        assert_eq!(prev, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), None, "unset_ttl disables expiry");
+
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        assert_eq!(
+            raw_ttl_secs(&cache, prefix, "k"),
+            -1,
+            "unset_ttl must write the key WITHOUT any expiry (persistent)"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // gap 1 (sync): refresh-on-hit interaction with the disabled-ttl write path.
+    //
+    // The implementor chose to SKIP `EXPIRE` on a refresh-on-hit GET when the ttl
+    // is disabled. So a key written WITH a TTL, then read after `set_ttl(0)`, must
+    // KEEP its prior TTL (the refresh path neither renews it nor PERSISTs it).
+    // Conversely a key written WITHOUT a TTL (disabled), then read after
+    // `set_ttl(nonzero)`, must GAIN a TTL via the refresh `EXPIRE`.
+    #[test]
+    fn test_redis_refresh_on_hit_disabled_ttl_skips_expire_preexisting_key() {
+        let prefix = "test_refresh_disabled_skips_expire";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(100))
+            .namespace("")
+            .refresh_on_hit(true)
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Write a key WITH a TTL while expiry is enabled.
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        let ttl_before = raw_ttl_secs(&cache, prefix, "k");
+        assert!(
+            ttl_before > 0,
+            "key written under a real ttl must have a positive TTL, got {ttl_before}"
+        );
+
+        // Disable expiry, then refresh-on-hit GET the pre-existing key.
+        assert_eq!(
+            cache.set_ttl(Duration::ZERO),
+            Some(Duration::from_secs(100))
+        );
+        assert_eq!(
+            cache.cache_get(&"k".to_string()).expect("get k"),
+            Some("v".to_string()),
+            "refresh-on-hit get under disabled ttl must still return the value"
+        );
+
+        // The skip-EXPIRE choice: the prior TTL must remain INTACT (not renewed,
+        // not PERSISTed). It must still be a positive, non-increased TTL.
+        let ttl_after = raw_ttl_secs(&cache, prefix, "k");
+        assert!(
+            ttl_after > 0,
+            "skip-EXPIRE on a disabled-ttl refresh must leave the prior TTL intact \
+             (not PERSIST it); got {ttl_after}"
+        );
+        assert!(
+            ttl_after <= ttl_before,
+            "skip-EXPIRE must NOT renew/extend the prior TTL: before={ttl_before} after={ttl_after}"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    #[test]
+    fn test_redis_refresh_on_hit_reenabled_ttl_adds_expire_to_persistent_key() {
+        let prefix = "test_refresh_reenabled_adds_expire";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::ZERO) // start disabled — strict build path is exercised elsewhere
+            .namespace("")
+            .refresh_on_hit(true)
+            .build();
+        // build() rejects a zero ttl, so construct with a real ttl then disable.
+        assert!(
+            cache.is_err(),
+            "build() must reject a zero ttl even on the refresh path"
+        );
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(100))
+            .namespace("")
+            .refresh_on_hit(true)
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Disable expiry and write a persistent (no-TTL) key.
+        cache.set_ttl(Duration::ZERO);
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        assert_eq!(
+            raw_ttl_secs(&cache, prefix, "k"),
+            -1,
+            "key written under disabled ttl must be persistent"
+        );
+
+        // Re-arm a real ttl, then refresh-on-hit GET: the key must GAIN a TTL.
+        cache.set_ttl(Duration::from_secs(50));
+        assert_eq!(
+            cache.cache_get(&"k".to_string()).expect("get k"),
+            Some("v".to_string())
+        );
+        let ttl_after = raw_ttl_secs(&cache, prefix, "k");
+        assert!(
+            ttl_after > 0,
+            "refresh-on-hit under a re-enabled ttl must EXPIRE the previously \
+             persistent key (give it a TTL); got {ttl_after}"
         );
 
         cache.cache_clear().expect("clean up");

@@ -2,6 +2,24 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// Encode a TTL into the `ttl_nanos` atomic. A zero duration encodes as `0`
+/// (expiry disabled / no expiry).
+#[inline]
+fn encode_ttl(ttl: Duration) -> u64 {
+    ttl.as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// Decode the `ttl_nanos` atomic into an optional TTL. `0` means expiry is
+/// disabled (entries never expire), so it decodes to `None`.
+#[inline]
+fn decode_ttl(nanos: u64) -> Option<Duration> {
+    if nanos == 0 {
+        None
+    } else {
+        Some(Duration::from_nanos(nanos))
+    }
+}
+
 #[cfg(feature = "ahash")]
 use ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
@@ -27,12 +45,10 @@ struct TtlInner<K, V, H> {
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
-    /// TTL in nanoseconds. Only meaningful when `ttl_set` is `true`; a stored value of
-    /// `0` with `ttl_set == true` is a real zero TTL (entries expire immediately).
+    /// TTL in nanoseconds, or `0` to mean expiry is disabled (entries never expire).
+    /// A zero stored value is the single sentinel for "no expiry"; there is no separate
+    /// `ttl_set` flag. `unset_ttl`/`set_ttl(0)` store `0`; `set_ttl(nonzero)` stores the ttl.
     ttl_nanos: AtomicU64,
-    /// Whether a TTL is currently configured. When `false`, entries never expire
-    /// regardless of `ttl_nanos`. `unset_ttl` clears this; `set_ttl` sets it.
-    ttl_set: AtomicBool,
     refresh: AtomicBool,
     evictions: AtomicU64,
 }
@@ -82,17 +98,11 @@ impl<K, V, H> std::fmt::Debug for ShardedTtlCacheBase<K, V, H> {
 impl<K, V, H> ShardedTtlCacheBase<K, V, H> {
     /// Resolve the currently configured TTL, independent of hasher bounds.
     ///
-    /// Returns `None` when no TTL is configured (entries never expire), otherwise
-    /// `Some(ttl)` where a zero duration means entries expire immediately.
+    /// Returns `None` when expiry is disabled (entries never expire), otherwise
+    /// `Some(ttl)`.
     #[inline]
     fn ttl_duration_impl(&self) -> Option<Duration> {
-        if self.inner.ttl_set.load(Ordering::Relaxed) {
-            Some(Duration::from_nanos(
-                self.inner.ttl_nanos.load(Ordering::Relaxed),
-            ))
-        } else {
-            None
-        }
+        decode_ttl(self.inner.ttl_nanos.load(Ordering::Relaxed))
     }
 }
 
@@ -186,7 +196,6 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedTtlCacheBase<K, V
                 hasher: self.inner.hasher.clone(),
                 on_evict: self.inner.on_evict.clone(),
                 ttl_nanos: AtomicU64::new(self.inner.ttl_nanos.load(Ordering::Relaxed)),
-                ttl_set: AtomicBool::new(self.inner.ttl_set.load(Ordering::Relaxed)),
                 refresh: AtomicBool::new(self.inner.refresh.load(Ordering::Relaxed)),
                 evictions: AtomicU64::new(self.inner.evictions.load(Ordering::Relaxed)),
             }),
@@ -339,23 +348,20 @@ where
     /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
     /// nanoseconds (~584 years). In practice this limit is never reached.
     ///
-    /// A zero `ttl` is stored as-is; subsequently inserted entries are then immediately
-    /// expired. Use [`unset_ttl`](Self::unset_ttl) to disable expiry instead.
+    /// A zero `ttl` disables expiry — it is exactly equivalent to
+    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
     pub fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let prev = self.ttl_duration_impl();
-        self.inner.ttl_nanos.store(
-            ttl.as_nanos().min(u64::MAX as u128) as u64,
-            Ordering::Relaxed,
-        );
-        self.inner.ttl_set.store(true, Ordering::Relaxed);
-        prev
+        let prev = self
+            .inner
+            .ttl_nanos
+            .swap(encode_ttl(ttl), Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     /// Remove the TTL (entries never expire after this point).
     pub fn unset_ttl(&self) -> Option<Duration> {
-        let prev = self.ttl_duration_impl();
-        self.inner.ttl_set.store(false, Ordering::Relaxed);
-        prev
+        let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     /// Set whether cache hits refresh the TTL of the accessed entry,
@@ -748,8 +754,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
                     .hasher
                     .expect("hasher is always initialized via Default or .hasher()"),
                 on_evict: self.on_evict,
-                ttl_nanos: AtomicU64::new(ttl.as_nanos().min(u64::MAX as u128) as u64),
-                ttl_set: AtomicBool::new(true),
+                ttl_nanos: AtomicU64::new(encode_ttl(ttl)),
                 refresh: AtomicBool::new(self.refresh),
                 evictions: AtomicU64::new(0),
             }),

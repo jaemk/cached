@@ -303,21 +303,14 @@ mod try_set_ttl_tests {
         assert_eq!(msg, "ttl must be greater than zero");
     }
 
-    /// Panic-prevention contract for `try_set_ttl(Duration::ZERO)`.
+    /// `try_set_ttl` is the strict "give me a real ttl" path: it rejects a zero ttl
+    /// with `Err(ZeroTtl)` and leaves the ttl unchanged. It exists alongside two
+    /// disabling routes — `set_ttl(0)` and `unset_ttl()` — so callers who want a
+    /// zero rejected (rather than interpreted as "disable expiry") opt in explicitly.
     ///
-    /// `try_set_ttl` exists so callers can reject a zero ttl explicitly instead of
-    /// silently installing one. The footgun it guards against is NOT a panic in
-    /// `set_ttl` itself: the `CacheTtl::set_ttl` impls for these in-memory stores
-    /// accept any Duration and never panic. The hazard is that a zero ttl makes
-    /// every inserted entry immediately expired (`elapsed() >= 0` is always true),
-    /// silently breaking the cache. These tests assert:
-    ///   1. `try_set_ttl(ZERO)` returns `Err(ZeroTtl)` and leaves the ttl unchanged,
-    ///      so the cache keeps working;
-    ///   2. the bypassed `set_ttl(ZERO)` path is the broken one: after it, a freshly
-    ///      inserted live entry reads back as absent (proving why callers want the
-    ///      fallible variant).
-    ///
-    /// All three `CacheTtl` impls are covered.
+    /// `TtlSortedCache` is out of scope for the v3 zero-ttl-disables change: on that
+    /// store a zero ttl still means "expire immediately". This helper documents that
+    /// behavior so the `try_set_ttl` guard is still meaningfully motivated there.
     fn assert_zero_ttl_silently_breaks<C: Cached<u32, u32> + CacheTtl>(cache: &mut C) {
         // Force the broken state via the panic-free set_ttl, then prove it is broken.
         let _ = cache.set_ttl(Duration::ZERO);
@@ -330,7 +323,7 @@ mod try_set_ttl_tests {
     }
 
     #[test]
-    fn ttl_cache_try_set_ttl_prevents_zero_ttl_breakage() {
+    fn ttl_cache_try_set_ttl_rejects_zero_set_ttl_disables() {
         let mut cache = TtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(10))
             .build()
@@ -349,16 +342,23 @@ mod try_set_ttl_tests {
         cache.cache_set(1, 10);
         assert_eq!(cache.cache_get(&1), Some(&10));
 
-        // Document the bypassed set_ttl(ZERO) breakage on a separate instance.
-        let mut broken = TtlCache::<u32, u32>::builder()
+        // set_ttl(ZERO) disables expiry (== unset_ttl): a just-inserted entry survives.
+        let mut disabled = TtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(10))
             .build()
             .expect("build TtlCache");
-        assert_zero_ttl_silently_breaks(&mut broken);
+        let _ = disabled.set_ttl(Duration::ZERO);
+        assert_eq!(disabled.ttl(), None, "set_ttl(0) resolves ttl to None");
+        disabled.cache_set(7, 70);
+        assert_eq!(
+            disabled.cache_get(&7),
+            Some(&70),
+            "set_ttl(0) must NOT expire a just-inserted entry"
+        );
     }
 
     #[test]
-    fn lru_ttl_cache_try_set_ttl_prevents_zero_ttl_breakage() {
+    fn lru_ttl_cache_try_set_ttl_rejects_zero_set_ttl_disables() {
         let mut cache = LruTtlCache::<u32, u32>::builder()
             .max_size(8)
             .ttl(Duration::from_secs(10))
@@ -375,12 +375,19 @@ mod try_set_ttl_tests {
         cache.cache_set(1, 10);
         assert_eq!(cache.cache_get(&1), Some(&10));
 
-        let mut broken = LruTtlCache::<u32, u32>::builder()
+        let mut disabled = LruTtlCache::<u32, u32>::builder()
             .max_size(8)
             .ttl(Duration::from_secs(10))
             .build()
             .expect("build LruTtlCache");
-        assert_zero_ttl_silently_breaks(&mut broken);
+        let _ = disabled.set_ttl(Duration::ZERO);
+        assert_eq!(disabled.ttl(), None, "set_ttl(0) resolves ttl to None");
+        disabled.cache_set(7, 70);
+        assert_eq!(
+            disabled.cache_get(&7),
+            Some(&70),
+            "set_ttl(0) must NOT expire a just-inserted LRU entry"
+        );
     }
 
     #[test]
@@ -400,6 +407,7 @@ mod try_set_ttl_tests {
         cache.cache_set(1, 10);
         assert_eq!(cache.cache_get(&1), Some(&10));
 
+        // TtlSortedCache is unchanged: a bypassed set_ttl(ZERO) still breaks reads.
         let mut broken = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(10))
             .build()
@@ -1296,36 +1304,40 @@ fn lru_ttl_cache_metrics_via_public_api() {
     assert_eq!(cache.cache_misses(), Some(0));
 }
 
-// ── set_ttl(Duration::ZERO) on sharded TTL stores no longer panics (I2) ───────
+// ── set_ttl(Duration::ZERO) on sharded TTL stores disables expiry (I2) ────────
 //
 // The inherent `set_ttl` and the `ConcurrentCached::set_ttl` delegation used to
-// `assert!(!ttl.is_zero())` and panic on a zero ttl. After the fix a zero ttl is
-// stored unchecked, so the call returns normally and any subsequently inserted
-// entry is immediately expired (read back as a miss).
+// `assert!(!ttl.is_zero())` and panic on a zero ttl. In v3 a zero ttl means
+// "expiry disabled" — exactly equivalent to `unset_ttl()`: the call returns
+// normally and subsequently inserted entries never expire.
 #[cfg(feature = "time_stores")]
 mod sharded_set_ttl_zero {
     use cached::time::Duration;
     use cached::{ConcurrentCached, ShardedLruTtlCache, ShardedTtlCache};
 
     #[test]
-    fn sharded_ttl_inherent_set_ttl_zero_does_not_panic_and_expires() {
+    fn sharded_ttl_inherent_set_ttl_zero_disables_expiry() {
         let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build ShardedTtlCache");
 
-        // Inherent set_ttl(ZERO) must not panic.
+        // Inherent set_ttl(ZERO) must not panic and disables expiry (ttl -> None).
         let prev = cache.set_ttl(Duration::ZERO);
         assert_eq!(prev, Some(Duration::from_secs(60)));
-        assert_eq!(cache.ttl(), Some(Duration::ZERO));
+        assert_eq!(
+            cache.ttl(),
+            None,
+            "a zero ttl disables expiry (resolves to None)"
+        );
 
-        // A freshly inserted entry is immediately expired -> read back as a miss.
+        // A freshly inserted entry never expires -> still present.
         cache.cache_set(1, 10).unwrap();
-        assert_eq!(cache.cache_get(&1), Ok(None));
+        assert_eq!(cache.cache_get(&1), Ok(Some(10)));
     }
 
     #[test]
-    fn sharded_ttl_trait_set_ttl_zero_does_not_panic_and_expires() {
+    fn sharded_ttl_trait_set_ttl_zero_disables_expiry() {
         let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
             .ttl(Duration::from_secs(60))
             .build()
@@ -1336,11 +1348,11 @@ mod sharded_set_ttl_zero {
         assert_eq!(prev, Some(Duration::from_secs(60)));
 
         cache.cache_set(2, 20).unwrap();
-        assert_eq!(cache.cache_get(&2), Ok(None));
+        assert_eq!(cache.cache_get(&2), Ok(Some(20)));
     }
 
     #[test]
-    fn sharded_lru_ttl_inherent_set_ttl_zero_does_not_panic_and_expires() {
+    fn sharded_lru_ttl_inherent_set_ttl_zero_disables_expiry() {
         let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
             .max_size(8)
             .ttl(Duration::from_secs(60))
@@ -1349,14 +1361,14 @@ mod sharded_set_ttl_zero {
 
         let prev = cache.set_ttl(Duration::ZERO);
         assert_eq!(prev, Some(Duration::from_secs(60)));
-        assert_eq!(cache.ttl(), Some(Duration::ZERO));
+        assert_eq!(cache.ttl(), None);
 
         cache.cache_set(1, 10).unwrap();
-        assert_eq!(cache.cache_get(&1), Ok(None));
+        assert_eq!(cache.cache_get(&1), Ok(Some(10)));
     }
 
     #[test]
-    fn sharded_lru_ttl_trait_set_ttl_zero_does_not_panic_and_expires() {
+    fn sharded_lru_ttl_trait_set_ttl_zero_disables_expiry() {
         let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
             .max_size(8)
             .ttl(Duration::from_secs(60))
@@ -1367,23 +1379,39 @@ mod sharded_set_ttl_zero {
         assert_eq!(prev, Some(Duration::from_secs(60)));
 
         cache.cache_set(2, 20).unwrap();
-        assert_eq!(cache.cache_get(&2), Ok(None));
+        assert_eq!(cache.cache_get(&2), Ok(Some(20)));
     }
 
     #[test]
-    fn sharded_ttl_unset_ttl_after_zero_disables_expiry() {
-        // unset_ttl must still mean "never expires", distinct from set_ttl(ZERO).
-        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+    fn sharded_ttl_set_zero_is_equivalent_to_unset() {
+        // set_ttl(ZERO) and unset_ttl() are observably identical: both disable expiry.
+        let via_zero: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+        let via_unset: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build ShardedTtlCache");
 
-        let _ = cache.set_ttl(Duration::ZERO);
-        assert_eq!(cache.unset_ttl(), Some(Duration::ZERO));
-        assert_eq!(cache.ttl(), None);
+        let _ = via_zero.set_ttl(Duration::ZERO);
+        let _ = via_unset.unset_ttl();
+        assert_eq!(via_zero.ttl(), via_unset.ttl());
+        assert_eq!(via_zero.ttl(), None);
 
-        cache.cache_set(3, 30).unwrap();
-        assert_eq!(cache.cache_get(&3), Ok(Some(30)));
+        via_zero.cache_set(3, 30).unwrap();
+        via_unset.cache_set(3, 30).unwrap();
+        assert_eq!(via_zero.cache_get(&3), Ok(Some(30)));
+        assert_eq!(via_unset.cache_get(&3), Ok(Some(30)));
+
+        // Re-arming a real ttl after either disable resumes expiry.
+        via_zero.set_ttl(Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(
+            via_zero.cache_get(&3),
+            Ok(None),
+            "set_ttl(nonzero) after a zero disable re-enables expiry"
+        );
     }
 }
 

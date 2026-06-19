@@ -259,6 +259,13 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         }
     }
 
+    /// `true` if an entry stamped at `instant` is still live under `ttl`.
+    /// A zero TTL means expiry is disabled, so every entry is always live.
+    #[inline]
+    pub(super) fn entry_live(ttl: Duration, instant: Instant) -> bool {
+        ttl.is_zero() || instant.elapsed() < ttl
+    }
+
     fn new_internal(size: usize, ttl: Duration, refresh: bool) -> Result<Self, super::BuildError> {
         let mut store = LruCache::builder().max_size(size).build()?;
         store.disable_hit_miss_tracking();
@@ -288,7 +295,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
             .into_iter()
             .filter_map(|(k, entry)| {
                 let instant = entry.instant;
-                if instant.elapsed() < max_ttl {
+                if Self::entry_live(max_ttl, instant) {
                     Some((k.clone(), (instant, entry.value.clone())))
                 } else {
                     None
@@ -309,7 +316,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
             .order
             .iter()
             .filter_map(|(k, entry)| {
-                if entry.instant.elapsed() < max_ttl {
+                if Self::entry_live(max_ttl, entry.instant) {
                     Some(k.clone())
                 } else {
                     None
@@ -331,7 +338,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
             .iter()
             .filter_map(|(_k, entry)| {
                 let instant = entry.instant;
-                if instant.elapsed() < max_ttl {
+                if Self::entry_live(max_ttl, instant) {
                     Some((instant, entry.value.clone()))
                 } else {
                     None
@@ -398,6 +405,11 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     #[must_use]
     pub fn evict(&mut self) -> usize {
         let ttl = self.ttl;
+        // A zero TTL disables expiry — nothing is ever expired, so there is
+        // nothing to sweep.
+        if ttl.is_zero() {
+            return 0;
+        }
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
@@ -426,7 +438,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         self.store.retain_silent(|key, entry| {
-            let expired = entry.instant.elapsed() >= ttl;
+            let expired = !Self::entry_live(ttl, entry.instant);
             if expired || !keep(key, &entry.value) {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, &entry.value);
@@ -478,7 +490,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         let hash = self.store.hash(key);
         if let Some(index) = self.store.get_index(hash, key) {
             let entry = &self.store.order.get(index).1;
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(self.ttl, entry.instant) {
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
@@ -509,7 +521,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         let hash = self.store.hash(key);
         if let Some(index) = self.store.get_index(hash, key) {
             let entry = &self.store.order.get(index).1;
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(self.ttl, entry.instant) {
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
@@ -540,8 +552,9 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         };
         let max_ttl = self.ttl;
         let (was_present, was_valid, old_entry, entry) =
-            self.store
-                .get_or_set_with_if(key, setter, |entry| entry.instant.elapsed() < max_ttl);
+            self.store.get_or_set_with_if(key, setter, |entry| {
+                Self::entry_live(max_ttl, entry.instant)
+            });
         if was_present && was_valid {
             if self.refresh {
                 entry.instant = Instant::now();
@@ -573,8 +586,9 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         };
         let max_ttl = self.ttl;
         let (was_present, was_valid, old_entry, entry) =
-            self.store
-                .try_get_or_set_with_if(key, setter, |entry| entry.instant.elapsed() < max_ttl)?;
+            self.store.try_get_or_set_with_if(key, setter, |entry| {
+                Self::entry_live(max_ttl, entry.instant)
+            })?;
         if was_present && was_valid {
             if self.refresh {
                 entry.instant = Instant::now();
@@ -601,7 +615,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
         };
         let stamped = self.store.set(key, entry);
         stamped.and_then(|entry| {
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(self.ttl, entry.instant) {
                 Some(entry.value)
             } else {
                 None
@@ -619,7 +633,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
                 on_evict(&stored_k, &entry.value);
             }
             self.evictions.fetch_add(1, Ordering::Relaxed);
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(self.ttl, entry.instant) {
                 Some(entry.value)
             } else {
                 None
@@ -690,7 +704,7 @@ impl<K: Hash + Eq + Clone, V> CachedIter<K, V> for LruTtlCache<K, V> {
     {
         let max_ttl = self.ttl;
         CachedIter::iter(&self.store).filter_map(move |(k, entry)| {
-            if entry.instant.elapsed() < max_ttl {
+            if Self::entry_live(max_ttl, entry.instant) {
                 Some((k, &entry.value))
             } else {
                 None
@@ -706,7 +720,7 @@ impl<K: Hash + Eq + Clone, V> CachedPeek<K, V> for LruTtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.cache_peek(k)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(self.ttl, entry.instant)
         {
             return Some(&entry.value);
         }
@@ -716,15 +730,24 @@ impl<K: Hash + Eq + Clone, V> CachedPeek<K, V> for LruTtlCache<K, V> {
 
 impl<K: Hash + Eq + Clone, V> crate::CacheTtl for LruTtlCache<K, V> {
     fn ttl(&self) -> Option<Duration> {
-        Some(self.ttl)
+        // A zero TTL means expiry is disabled.
+        if self.ttl.is_zero() {
+            None
+        } else {
+            Some(self.ttl)
+        }
     }
+    /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+    /// Returns the previous TTL, or `None` if expiry was already disabled.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = ttl;
-        Some(old)
+        if old.is_zero() { None } else { Some(old) }
     }
     fn unset_ttl(&mut self) -> Option<Duration> {
-        None
+        let old = self.ttl;
+        self.ttl = Duration::ZERO;
+        if old.is_zero() { None } else { Some(old) }
     }
     fn refresh_on_hit(&self) -> bool {
         self.refresh
@@ -745,7 +768,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for LruTtlCache<K, V> {
         let hash = self.store.hash(k);
         if let Some(index) = self.store.get_index(hash, k) {
             let entry = &self.store.order.get(index).1;
-            let expired = entry.instant.elapsed() >= self.ttl;
+            let expired = !Self::entry_live(self.ttl, entry.instant);
             if expired {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 (Some(self.store.order.get(index).1.value.clone()), true)
@@ -776,7 +799,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for LruTtlCache<K, V> {
     {
         // Use the inner LruCache's `cache_peek` to avoid LRU promotion.
         if let Some(entry) = self.store.cache_peek(k) {
-            let expired = entry.instant.elapsed() >= self.ttl;
+            let expired = !Self::entry_live(self.ttl, entry.instant);
             (Some(entry.value.clone()), expired)
         } else {
             (None, false)
@@ -811,7 +834,9 @@ where
             let max_ttl = self.ttl;
             let (was_present, was_valid, old_entry, entry) = self
                 .store
-                .get_or_set_with_if_async(key, setter, |entry| entry.instant.elapsed() < max_ttl)
+                .get_or_set_with_if_async(key, setter, |entry| {
+                    Self::entry_live(max_ttl, entry.instant)
+                })
                 .await;
             if was_present && was_valid {
                 if self.refresh {
@@ -856,7 +881,7 @@ where
             let (was_present, was_valid, old_entry, entry) = self
                 .store
                 .try_get_or_set_with_if_async(key, setter, |entry| {
-                    entry.instant.elapsed() < max_ttl
+                    Self::entry_live(max_ttl, entry.instant)
                 })
                 .await?;
             if was_present && was_valid {

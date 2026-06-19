@@ -736,7 +736,11 @@ where
         pipe.get(&key);
         if self.refresh.load(Ordering::Relaxed) {
             let ttl = *self.ttl.lock();
-            pipe.expire(key, ttl_seconds_i64(ttl)?).ignore();
+            // A zero (disabled) TTL means entries are stored without expiry; skip the
+            // refresh `EXPIRE` so the key stays persistent (no TTL to renew).
+            if !ttl.is_zero() {
+                pipe.expire(key, ttl_seconds_i64(ttl)?).ignore();
+            }
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
@@ -759,17 +763,19 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(&key);
 
-        let ttl_secs = ttl_seconds(*self.ttl.lock())?;
+        let ttl = *self.ttl.lock();
 
         let val = CachedRedisValue::new(val);
+        let serialized = serde_json::to_string(&val)
+            .map_err(|e| RedisCacheError::CacheSerialization { error: e })?;
         pipe.get(&key);
-        pipe.set_ex::<String, String>(
-            key,
-            serde_json::to_string(&val)
-                .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
-            ttl_secs,
-        )
-        .ignore();
+        if ttl.is_zero() {
+            // Disabled TTL: write the key without expiry (plain `SET`).
+            pipe.set::<String, String>(key, serialized).ignore();
+        } else {
+            pipe.set_ex::<String, String>(key, serialized, ttl_seconds(ttl)?)
+                .ignore();
+        }
 
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
         match res.0 {
@@ -873,25 +879,36 @@ where
     }
 
     fn ttl(&self) -> Option<Duration> {
-        Some(*self.ttl.lock())
+        let ttl = *self.ttl.lock();
+        if ttl.is_zero() { None } else { Some(ttl) }
     }
 
-    /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
-    /// they retain whatever TTL was applied when they were originally inserted.
+    /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
+    /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
+    /// TTL was applied when they were originally inserted.
+    ///
+    /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+    /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
+    /// until explicitly removed. Use [`try_set_ttl`](crate::CacheTtl::try_set_ttl) if you
+    /// want a zero TTL rejected instead.
     fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
         let mut guard = self.ttl.lock();
         let old = *guard;
         *guard = ttl;
-        Some(old)
+        if old.is_zero() { None } else { Some(old) }
     }
 
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
         self.refresh.swap(refresh, Ordering::Relaxed)
     }
 
-    /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
+    /// Disable expiry: subsequent `cache_set` writes store keys without a TTL (plain `SET`).
+    /// Returns the previous TTL, or `None` if expiry was already disabled.
     fn unset_ttl(&self) -> Option<Duration> {
-        None
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = Duration::ZERO;
+        if old.is_zero() { None } else { Some(old) }
     }
 }
 
@@ -908,17 +925,19 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(key);
 
-        let ttl_secs = ttl_seconds(*self.ttl.lock())?;
+        let ttl = *self.ttl.lock();
 
         let val = CachedRedisValueRef::new(val);
+        let serialized = serde_json::to_string(&val)
+            .map_err(|e| RedisCacheError::CacheSerialization { error: e })?;
         pipe.get(&key);
-        pipe.set_ex::<String, String>(
-            key,
-            serde_json::to_string(&val)
-                .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
-            ttl_secs,
-        )
-        .ignore();
+        if ttl.is_zero() {
+            // Disabled TTL: write the key without expiry (plain `SET`).
+            pipe.set::<String, String>(key, serialized).ignore();
+        } else {
+            pipe.set_ex::<String, String>(key, serialized, ttl_seconds(ttl)?)
+                .ignore();
+        }
 
         let res: (Option<String>,) = pipe.query(&mut *conn)?;
         match res.0 {
@@ -1324,7 +1343,11 @@ mod async_redis {
             pipe.get(&key);
             if self.refresh.load(Ordering::Relaxed) {
                 let ttl = *self.ttl.lock();
-                pipe.expire(key, super::ttl_seconds_i64(ttl)?).ignore();
+                // A zero (disabled) TTL means entries are stored without expiry; skip the
+                // refresh `EXPIRE` so the key stays persistent (no TTL to renew).
+                if !ttl.is_zero() {
+                    pipe.expire(key, super::ttl_seconds_i64(ttl)?).ignore();
+                }
             }
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
@@ -1347,17 +1370,19 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
 
-            let ttl_secs = super::ttl_seconds(*self.ttl.lock())?;
+            let ttl = *self.ttl.lock();
 
             let val = CachedRedisValue::new(val);
+            let serialized = serde_json::to_string(&val)
+                .map_err(|e| RedisCacheError::CacheSerialization { error: e })?;
             pipe.get(&key);
-            pipe.set_ex::<String, String>(
-                key,
-                serde_json::to_string(&val)
-                    .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
-                ttl_secs,
-            )
-            .ignore();
+            if ttl.is_zero() {
+                // Disabled TTL: write the key without expiry (plain `SET`).
+                pipe.set::<String, String>(key, serialized).ignore();
+            } else {
+                pipe.set_ex::<String, String>(key, serialized, super::ttl_seconds(ttl)?)
+                    .ignore();
+            }
 
             let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
@@ -1469,23 +1494,34 @@ mod async_redis {
             self.refresh.swap(refresh, Ordering::Relaxed)
         }
 
-        /// Return the ttl of cached values (time to eviction).
+        /// Return the ttl of cached values (time to eviction), or `None` if expiry is disabled.
         fn ttl(&self) -> Option<Duration> {
-            Some(*self.ttl.lock())
+            let ttl = *self.ttl.lock();
+            if ttl.is_zero() { None } else { Some(ttl) }
         }
 
-        /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
-        /// they retain whatever TTL was applied when they were originally inserted.
+        /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
+        /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
+        /// TTL was applied when they were originally inserted.
+        ///
+        /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+        /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys
+        /// persist until explicitly removed. Use
+        /// [`try_set_ttl`](crate::CacheTtl::try_set_ttl) if you want a zero TTL rejected.
         fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
             let mut guard = self.ttl.lock();
             let old = *guard;
             *guard = ttl;
-            Some(old)
+            if old.is_zero() { None } else { Some(old) }
         }
 
-        /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
+        /// Disable expiry: subsequent `async_cache_set` writes store keys without a TTL
+        /// (plain `SET`). Returns the previous TTL, or `None` if expiry was already disabled.
         fn unset_ttl(&self) -> Option<Duration> {
-            None
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = Duration::ZERO;
+            if old.is_zero() { None } else { Some(old) }
         }
     }
 
@@ -1508,7 +1544,14 @@ mod async_redis {
         ) -> impl std::future::Future<Output = Result<Option<V>, Self::Error>> + Send {
             let mut conn = self.connection.clone();
             let key = self.generate_key(key);
-            let ttl_secs = super::ttl_seconds(*self.ttl.lock());
+            let ttl = *self.ttl.lock();
+            // Compute the seconds eagerly (only for a real, non-zero TTL) so any error is
+            // surfaced before the future is awaited, matching the eager serialization below.
+            let ttl_secs = if ttl.is_zero() {
+                Ok(None)
+            } else {
+                super::ttl_seconds(ttl).map(Some)
+            };
             let serialized = serde_json::to_string(&CachedRedisValueRef::new(val))
                 .map_err(|e| RedisCacheError::CacheSerialization { error: e });
             async move {
@@ -1516,8 +1559,13 @@ mod async_redis {
                 let serialized = serialized?;
                 let ttl_secs = ttl_secs?;
                 pipe.get(&key);
-                pipe.set_ex::<String, String>(key, serialized, ttl_secs)
-                    .ignore();
+                match ttl_secs {
+                    // Disabled TTL: write the key without expiry (plain `SET`).
+                    None => pipe.set::<String, String>(key, serialized).ignore(),
+                    Some(ttl_secs) => pipe
+                        .set_ex::<String, String>(key, serialized, ttl_secs)
+                        .ignore(),
+                };
 
                 let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
                 match res.0 {

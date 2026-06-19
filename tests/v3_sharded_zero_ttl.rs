@@ -1,16 +1,16 @@
-//! Outside-in coverage for the zero-TTL / `ttl_set` sequencing on the sharded
-//! TTL stores (`ShardedTtlCache` / `ShardedLruTtlCache`), finding I2.
+//! Outside-in coverage for the zero-TTL semantics on the sharded TTL stores
+//! (`ShardedTtlCache` / `ShardedLruTtlCache`), pinning I2.
 //!
-//! Background: these stores used to `assert!(!ttl.is_zero())` and panic on a zero
-//! ttl. They now store a zero ttl unchecked, distinguishing "expire immediately"
-//! (a `ttl_set == true` + `ttl_nanos == 0` pair) from "never expires"
-//! (`ttl_set == false`, set by `unset_ttl`). The implementor's `sharded_set_ttl_zero`
-//! module in `v3_traits.rs` covers no-panic, immediate expiry, and `unset_ttl` after
-//! a zero set. This module adds the paths it does not: the full state-transition
-//! cycle with prior-value semantics, the `evict`/`on_evict` sweep, the LruTtl
-//! refresh-on-hit and expiry-status read paths, `cache_get_or_set_with`, `Debug`,
-//! `deep_clone` flag propagation, and a concurrency stress that flips the ttl while
-//! other threads read and write.
+//! Semantic (v3): `set_ttl(Duration::ZERO)` means "expiry disabled / no expiry" and is
+//! exactly equivalent to `unset_ttl()`. A zero ttl is the single sentinel for "disabled";
+//! it does NOT mean "expire immediately". `set_ttl(nonzero)` re-arms expiry. The builder
+//! still rejects a zero ttl, and `try_set_ttl(0)` still returns `SetTtlError::ZeroTtl` —
+//! disabling is done via `set_ttl(0)` or `unset_ttl()`.
+//!
+//! This module covers: the full state-transition cycle with prior-value semantics, the
+//! `evict`/`on_evict` no-op under a disabled ttl, the LruTtl refresh-on-hit and
+//! expiry-status read paths, `cache_get_or_set_with`, `Debug`, `deep_clone` propagation,
+//! and a concurrency stress that flips the ttl while other threads read and write.
 
 #![cfg(feature = "time_stores")]
 
@@ -25,11 +25,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // ─────────────────────────────────────────────────────────────────────────────
 // State-transition cycle + prior-value semantics
 //
-// never-set is unreachable on these stores (builder rejects a zero/absent ttl and
-// always starts `ttl_set == true`), so the reachable lattice is:
-//   set(nonzero) -> set(zero) -> unset -> set(zero) -> set(nonzero) -> unset
-// Each `set_ttl`/`unset_ttl` must return the *prior* resolved ttl, where a zero set
-// reads back as `Some(ZERO)` (NOT `None`) and an unset reads back as `None`.
+// A zero ttl is the disabled sentinel, so `set_ttl(0)` and `unset_ttl()` are observably
+// identical: both store the disabled state and the cache's ttl resolves to `None`.
+// Each `set_ttl`/`unset_ttl` must return the *prior* resolved ttl, where the disabled
+// state (zero or unset) reads back as `None` and a non-zero ttl reads back as `Some(d)`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -47,7 +46,7 @@ fn sharded_ttl_state_transition_cycle_returns_prior_ttl() {
     );
     assert_eq!(cache.ttl(), Some(Duration::from_secs(30)));
 
-    // set(zero): prior is the previous 30s; ttl now resolves to Some(ZERO), not None.
+    // set(zero): prior is the previous 30s; ttl now resolves to None (disabled).
     assert_eq!(
         cache.set_ttl(Duration::ZERO),
         Some(Duration::from_secs(30)),
@@ -55,32 +54,31 @@ fn sharded_ttl_state_transition_cycle_returns_prior_ttl() {
     );
     assert_eq!(
         cache.ttl(),
-        Some(Duration::ZERO),
-        "a zero ttl must resolve to Some(ZERO), distinct from unset's None"
+        None,
+        "a zero ttl disables expiry — ttl resolves to None"
     );
 
-    // unset: prior is the zero ttl, reported as Some(ZERO) (the never-expire flag was
-    // still set at the moment of the call).
+    // unset from the disabled state: prior is None (already disabled).
     assert_eq!(
         cache.unset_ttl(),
-        Some(Duration::ZERO),
-        "unset_ttl after a zero set must report Some(ZERO) as prior, not None"
+        None,
+        "unset_ttl after a zero set must report None as prior (already disabled)"
     );
     assert_eq!(cache.ttl(), None, "after unset, ttl resolves to None");
 
-    // set(zero) again from the unset state: prior is None (was never-expire).
+    // set(zero) again from the disabled state: prior is None (idempotent disable).
     assert_eq!(
         cache.set_ttl(Duration::ZERO),
         None,
-        "set_ttl from the unset state must report None as prior"
+        "set_ttl(ZERO) from the disabled state must report None as prior"
     );
-    assert_eq!(cache.ttl(), Some(Duration::ZERO));
+    assert_eq!(cache.ttl(), None);
 
-    // set(nonzero) from a zero state: prior is Some(ZERO).
+    // set(nonzero) from a disabled state: prior is None (was disabled).
     assert_eq!(
         cache.set_ttl(Duration::from_secs(5)),
-        Some(Duration::ZERO),
-        "set_ttl(nonzero) from a zero state must report Some(ZERO) as prior"
+        None,
+        "set_ttl(nonzero) from a disabled state must report None as prior"
     );
     assert_eq!(cache.ttl(), Some(Duration::from_secs(5)));
 
@@ -92,11 +90,11 @@ fn sharded_ttl_state_transition_cycle_returns_prior_ttl() {
     );
     assert_eq!(cache.ttl(), None);
 
-    // unset again from the already-unset state: prior is None (idempotent).
+    // unset again from the already-disabled state: prior is None (idempotent).
     assert_eq!(
         cache.unset_ttl(),
         None,
-        "unset_ttl on an already-unset cache must report None"
+        "unset_ttl on an already-disabled cache must report None"
     );
 }
 
@@ -113,58 +111,61 @@ fn sharded_lru_ttl_state_transition_cycle_returns_prior_ttl() {
         Some(Duration::from_secs(60))
     );
     assert_eq!(cache.set_ttl(Duration::ZERO), Some(Duration::from_secs(30)));
-    assert_eq!(cache.ttl(), Some(Duration::ZERO));
-    assert_eq!(cache.unset_ttl(), Some(Duration::ZERO));
+    assert_eq!(cache.ttl(), None, "zero ttl disables expiry");
+    assert_eq!(cache.unset_ttl(), None, "already disabled");
     assert_eq!(cache.ttl(), None);
     assert_eq!(cache.set_ttl(Duration::ZERO), None);
-    assert_eq!(cache.ttl(), Some(Duration::ZERO));
+    assert_eq!(cache.ttl(), None);
     assert_eq!(
         cache.set_ttl(Duration::from_secs(5)),
-        Some(Duration::ZERO),
-        "set_ttl(nonzero) from a zero state must report Some(ZERO) as prior"
+        None,
+        "set_ttl(nonzero) from a disabled state must report None as prior"
     );
     assert_eq!(cache.unset_ttl(), Some(Duration::from_secs(5)));
     assert_eq!(cache.unset_ttl(), None);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Re-arming after unset: unset -> set(zero) must re-enable immediate expiry.
+// set_ttl(0) is observably equivalent to unset_ttl(): a just-inserted entry survives.
 //
-// The implementor's test covers set(zero) -> unset (expiry disabled). This is the
-// reverse: a zero set after an unset must flip `ttl_set` back on so entries expire
-// immediately again. A bug that only ever stored `ttl_set = false` on unset and
-// never re-set it would pass the implementor's test but fail here.
+// The entry inserted under a live ttl must remain present after disabling expiry via
+// either route, and a newly inserted entry must also persist (never expires).
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_set_zero_after_unset_re_enables_immediate_expiry() {
+fn sharded_ttl_set_zero_disables_expiry_like_unset() {
     let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .expect("build ShardedTtlCache");
 
-    cache.unset_ttl();
     cache.cache_set(1, 10).unwrap();
-    assert_eq!(
-        cache.cache_get(&1),
-        Ok(Some(10)),
-        "with ttl unset, the entry never expires"
-    );
-
-    // Re-arm with a zero ttl: the *existing* entry must now read back expired, and
-    // a newly inserted one too.
+    // Disable via set_ttl(0): the existing entry must remain live.
     cache.set_ttl(Duration::ZERO);
     assert_eq!(
         cache.cache_get(&1),
-        Ok(None),
-        "set_ttl(ZERO) after unset must expire the previously-live entry"
+        Ok(Some(10)),
+        "set_ttl(0) must NOT expire a just-inserted entry"
     );
     cache.cache_set(2, 20).unwrap();
-    assert_eq!(cache.cache_get(&2), Ok(None));
+    assert_eq!(
+        cache.cache_get(&2),
+        Ok(Some(20)),
+        "entries inserted under a disabled ttl never expire"
+    );
+
+    // Re-arm with a real ttl, then disable again via unset_ttl(): same observable result.
+    cache.set_ttl(Duration::from_secs(60));
+    cache.unset_ttl();
+    assert_eq!(
+        cache.cache_get(&1),
+        Ok(Some(10)),
+        "unset_ttl must also keep entries live"
+    );
 }
 
 #[test]
-fn sharded_lru_ttl_set_zero_after_unset_re_enables_immediate_expiry() {
+fn sharded_lru_ttl_set_zero_disables_expiry_like_unset() {
     let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
         .max_size(8)
         .shards(1)
@@ -172,29 +173,79 @@ fn sharded_lru_ttl_set_zero_after_unset_re_enables_immediate_expiry() {
         .build()
         .expect("build ShardedLruTtlCache");
 
-    cache.unset_ttl();
     cache.cache_set(1, 10).unwrap();
-    assert_eq!(cache.cache_get(&1), Ok(Some(10)));
-
     cache.set_ttl(Duration::ZERO);
     assert_eq!(
         cache.cache_get(&1),
+        Ok(Some(10)),
+        "set_ttl(0) must NOT expire a just-inserted LRU entry"
+    );
+
+    cache.set_ttl(Duration::from_secs(60));
+    cache.unset_ttl();
+    assert_eq!(cache.cache_get(&1), Ok(Some(10)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-arming expiry: a non-zero set after a disabled ttl re-enables expiry.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sharded_ttl_set_nonzero_after_disable_re_enables_expiry() {
+    let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build ShardedTtlCache");
+
+    cache.set_ttl(Duration::ZERO);
+    cache.cache_set(1, 10).unwrap();
+    assert_eq!(
+        cache.cache_get(&1),
+        Ok(Some(10)),
+        "with expiry disabled, the entry never expires"
+    );
+
+    // Re-arm with a short ttl: the existing entry must now expire.
+    cache.set_ttl(Duration::from_millis(20));
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        cache.cache_get(&1),
         Ok(None),
-        "set_ttl(ZERO) after unset must expire the previously-live LRU entry"
+        "set_ttl(nonzero) after a disabled ttl must re-enable expiry"
+    );
+}
+
+#[test]
+fn sharded_lru_ttl_set_nonzero_after_disable_re_enables_expiry() {
+    let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+        .max_size(8)
+        .shards(1)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build ShardedLruTtlCache");
+
+    cache.set_ttl(Duration::ZERO);
+    cache.cache_set(1, 10).unwrap();
+    assert_eq!(cache.cache_get(&1), Ok(Some(10)));
+
+    cache.set_ttl(Duration::from_millis(20));
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(
+        cache.cache_get(&1),
+        Ok(None),
+        "set_ttl(nonzero) after a disabled ttl must re-enable expiry on the LRU store"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// evict() / ConcurrentCacheEvict sweeps zero-ttl entries and fires on_evict.
+// evict() / ConcurrentCacheEvict is a no-op under a disabled (zero) ttl.
 //
-// The implementor's tests only exercise lazy expiry through cache_get. The explicit
-// sweep is a distinct path: it reads the ttl via ttl_duration(); a zero ttl must be
-// treated as "everything is expired" (elapsed >= 0 is always true) rather than as
-// the `None`/never-expire early-return.
+// With expiry disabled, no entry is ever expired, so an explicit sweep removes nothing
+// and does not fire on_evict — identical to the unset case.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_evict_sweeps_zero_ttl_entries_and_fires_on_evict() {
+fn sharded_ttl_evict_is_noop_under_zero_ttl() {
     let count = Arc::new(AtomicU64::new(0));
     let count2 = count.clone();
     let cache = ShardedTtlCache::<u32, u32>::builder()
@@ -206,25 +257,24 @@ fn sharded_ttl_evict_sweeps_zero_ttl_entries_and_fires_on_evict() {
         .build()
         .expect("build ShardedTtlCache");
 
-    // Insert under a live ttl, then flip to zero. The entries are now all expired.
     for i in 0..10u32 {
         cache.cache_set(i, i).unwrap();
     }
     cache.set_ttl(Duration::ZERO);
 
     let removed = ConcurrentCacheEvict::evict(&cache);
-    assert_eq!(removed, 10, "evict must sweep every zero-ttl entry");
+    assert_eq!(removed, 0, "evict under a disabled ttl must remove nothing");
     assert_eq!(
         count.load(Ordering::Relaxed),
-        10,
-        "on_evict must fire for each swept zero-ttl entry"
+        0,
+        "on_evict must not fire under a disabled ttl"
     );
-    assert_eq!(cache.metrics().evictions, Some(10));
-    assert_eq!(cache.len(), 0, "all entries swept");
+    assert_eq!(cache.metrics().evictions, Some(0));
+    assert_eq!(cache.len(), 10, "all entries survive a disabled-ttl evict");
 }
 
 #[test]
-fn sharded_lru_ttl_evict_sweeps_zero_ttl_entries_and_fires_on_evict() {
+fn sharded_lru_ttl_evict_is_noop_under_zero_ttl() {
     let count = Arc::new(AtomicU64::new(0));
     let count2 = count.clone();
     let cache = ShardedLruTtlCache::<u32, u32>::builder()
@@ -243,17 +293,17 @@ fn sharded_lru_ttl_evict_sweeps_zero_ttl_entries_and_fires_on_evict() {
     cache.set_ttl(Duration::ZERO);
 
     let removed = ConcurrentCacheEvict::evict(&cache);
-    assert_eq!(removed, 10, "evict must sweep every zero-ttl LRU entry");
+    assert_eq!(removed, 0, "evict under a disabled ttl must remove nothing");
     assert_eq!(
         count.load(Ordering::Relaxed),
-        10,
-        "on_evict must fire for each swept zero-ttl LRU entry"
+        0,
+        "on_evict must not fire under a disabled ttl"
     );
-    assert_eq!(cache.len(), 0);
+    assert_eq!(cache.len(), 10);
 }
 
-// evict() under unset ttl must be a no-op (early return on None), in contrast to a
-// zero ttl which sweeps everything. This pins the None-vs-zero distinction in evict.
+// evict() under unset ttl must also be a no-op — confirms set_ttl(0) and unset_ttl()
+// behave identically for the explicit sweep.
 #[test]
 fn sharded_ttl_evict_under_unset_ttl_is_noop() {
     let cache = ShardedTtlCache::<u32, u32>::builder()
@@ -274,14 +324,14 @@ fn sharded_ttl_evict_under_unset_ttl_is_noop() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// cache_remove / cache_remove_entry under a zero ttl.
+// cache_remove / cache_remove_entry under a disabled (zero) ttl.
 //
-// A zero-ttl entry is "expired but present": cache_remove must report None (expired),
-// while cache_remove_entry must still return Some (it does not consult expiry).
+// A disabled-ttl entry is live (never expired): cache_remove must return Some(v),
+// and cache_remove_entry must return Some too.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_remove_under_zero_ttl_distinguishes_remove_vs_remove_entry() {
+fn sharded_ttl_remove_under_zero_ttl_returns_live_value() {
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .shards(1)
@@ -293,18 +343,18 @@ fn sharded_ttl_remove_under_zero_ttl_distinguishes_remove_vs_remove_entry() {
 
     assert_eq!(
         cache.cache_remove(&1),
-        Ok(None),
-        "cache_remove must return None for a zero-ttl (expired) entry"
+        Ok(Some(100)),
+        "cache_remove must return the live value for a disabled-ttl entry"
     );
     assert_eq!(
         cache.cache_remove_entry(&2),
         Ok(Some((2, 200))),
-        "cache_remove_entry must return Some even for a zero-ttl entry"
+        "cache_remove_entry must return Some for a disabled-ttl entry"
     );
 }
 
 #[test]
-fn sharded_lru_ttl_remove_under_zero_ttl_distinguishes_remove_vs_remove_entry() {
+fn sharded_lru_ttl_remove_under_zero_ttl_returns_live_value() {
     let cache = ShardedLruTtlCache::<u32, u32>::builder()
         .max_size(64)
         .shards(1)
@@ -317,26 +367,22 @@ fn sharded_lru_ttl_remove_under_zero_ttl_distinguishes_remove_vs_remove_entry() 
 
     assert_eq!(
         cache.cache_remove(&1),
-        Ok(None),
-        "cache_remove must return None for a zero-ttl LRU entry"
+        Ok(Some(100)),
+        "cache_remove must return the live value for a disabled-ttl LRU entry"
     );
     assert_eq!(
         cache.cache_remove_entry(&2),
         Ok(Some((2, 200))),
-        "cache_remove_entry must return Some even for a zero-ttl LRU entry"
+        "cache_remove_entry must return Some for a disabled-ttl LRU entry"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LruTtl-specific: refresh_on_hit must NOT rescue a zero-ttl entry.
-//
-// The LruTtl cache_get peeks for expiry *before* promoting/refreshing. With a zero
-// ttl, even an entry whose timestamp is refreshed reads back expired on the very
-// next get, because elapsed() >= ZERO holds the instant after the refresh.
+// LruTtl-specific: refresh_on_hit under a disabled ttl keeps the entry live.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_lru_ttl_refresh_on_hit_does_not_rescue_zero_ttl_entry() {
+fn sharded_lru_ttl_refresh_on_hit_keeps_zero_ttl_entry_live() {
     let cache = ShardedLruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .shards(1)
@@ -346,26 +392,19 @@ fn sharded_lru_ttl_refresh_on_hit_does_not_rescue_zero_ttl_entry() {
         .expect("build ShardedLruTtlCache");
 
     cache.cache_set(1, 10).unwrap();
-    assert_eq!(cache.cache_get(&1), Ok(Some(10)), "live before zero ttl");
+    assert_eq!(cache.cache_get(&1), Ok(Some(10)), "live before disable");
 
     cache.set_ttl(Duration::ZERO);
-    // With refresh_on_hit on, a hit would normally bump the timestamp; under a zero
-    // ttl the entry is expired on read and removed instead of refreshed.
     assert_eq!(
         cache.cache_get(&1),
-        Ok(None),
-        "refresh_on_hit must not keep a zero-ttl entry alive"
+        Ok(Some(10)),
+        "with expiry disabled, the entry stays live across hits"
     );
-    // The expired entry must have been swept by the get (not left behind).
-    assert_eq!(
-        cache.len(),
-        0,
-        "expired zero-ttl entry must be removed on get"
-    );
+    assert_eq!(cache.len(), 1, "disabled-ttl entry must not be removed");
 }
 
 #[test]
-fn sharded_ttl_refresh_on_hit_does_not_rescue_zero_ttl_entry() {
+fn sharded_ttl_refresh_on_hit_keeps_zero_ttl_entry_live() {
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .shards(1)
         .refresh_on_hit(true)
@@ -379,22 +418,21 @@ fn sharded_ttl_refresh_on_hit_does_not_rescue_zero_ttl_entry() {
     cache.set_ttl(Duration::ZERO);
     assert_eq!(
         cache.cache_get(&1),
-        Ok(None),
-        "refresh_on_hit must not keep a zero-ttl entry alive"
+        Ok(Some(10)),
+        "with expiry disabled, the entry stays live across hits"
     );
-    assert_eq!(cache.len(), 0);
+    assert_eq!(cache.len(), 1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConcurrentCloneCached expiry-status reads under a zero ttl.
+// ConcurrentCloneCached expiry-status reads under a disabled (zero) ttl.
 //
-// cache_get_with_expiry_status must report (Some(v), true) for a zero-ttl entry
-// (stale, no removal), and cache_peek_with_expiry_status must report expired too,
-// without renewing or removing.
+// cache_get_with_expiry_status / cache_peek_with_expiry_status must report
+// (Some(v), false) — the entry is live (never expired) — with no side effects.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_expiry_status_reads_report_zero_ttl_as_expired() {
+fn sharded_ttl_expiry_status_reads_report_zero_ttl_as_live() {
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .shards(1)
         .ttl(Duration::from_secs(60))
@@ -404,17 +442,12 @@ fn sharded_ttl_expiry_status_reads_report_zero_ttl_as_expired() {
     cache.set_ttl(Duration::ZERO);
 
     let (val, expired) = ConcurrentCloneCached::cache_get_with_expiry_status(&cache, &1);
-    assert_eq!(
-        val,
-        Some(42),
-        "expiry-status read must return the stale value"
-    );
-    assert!(expired, "zero-ttl entry must report expired=true");
+    assert_eq!(val, Some(42), "expiry-status read must return the value");
+    assert!(!expired, "disabled-ttl entry must report expired=false");
 
-    // peek: same verdict, no side effects, entry still present.
     let (pval, pexpired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&cache, &1);
     assert_eq!(pval, Some(42));
-    assert!(pexpired, "peek must report a zero-ttl entry as expired");
+    assert!(!pexpired, "peek must report a disabled-ttl entry as live");
     assert_eq!(
         cache.metrics().evictions,
         Some(0),
@@ -423,7 +456,7 @@ fn sharded_ttl_expiry_status_reads_report_zero_ttl_as_expired() {
 }
 
 #[test]
-fn sharded_lru_ttl_expiry_status_reads_report_zero_ttl_as_expired() {
+fn sharded_lru_ttl_expiry_status_reads_report_zero_ttl_as_live() {
     let cache = ShardedLruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .shards(1)
@@ -434,27 +467,26 @@ fn sharded_lru_ttl_expiry_status_reads_report_zero_ttl_as_expired() {
     cache.set_ttl(Duration::ZERO);
 
     let (val, expired) = ConcurrentCloneCached::cache_get_with_expiry_status(&cache, &1);
-    assert_eq!(
-        val,
-        Some(42),
-        "expiry-status read must return the stale value"
-    );
-    assert!(expired, "zero-ttl LRU entry must report expired=true");
+    assert_eq!(val, Some(42), "expiry-status read must return the value");
+    assert!(!expired, "disabled-ttl LRU entry must report expired=false");
 
     let (pval, pexpired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&cache, &1);
     assert_eq!(pval, Some(42));
-    assert!(pexpired, "peek must report a zero-ttl LRU entry as expired");
+    assert!(
+        !pexpired,
+        "peek must report a disabled-ttl LRU entry as live"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// cache_get_or_set_with under a zero ttl.
+// cache_get_or_set_with under a disabled (zero) ttl.
 //
-// Each call misses (the just-stored value is immediately expired), so the closure
-// must run every time and the value never persists as a live hit.
+// The first call computes and stores the value; subsequent calls hit the live entry,
+// so the closure runs exactly once.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_get_or_set_with_recomputes_under_zero_ttl() {
+fn sharded_ttl_get_or_set_with_caches_under_zero_ttl() {
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .shards(1)
         .ttl(Duration::from_secs(60))
@@ -475,18 +507,18 @@ fn sharded_ttl_get_or_set_with_recomputes_under_zero_ttl() {
     }
     assert_eq!(
         calls.load(Ordering::Relaxed),
-        3,
-        "zero ttl makes every get_or_set_with a miss -> closure runs every call"
+        1,
+        "disabled ttl keeps the entry live -> closure runs once"
     );
     assert_eq!(
         cache.cache_get(&1),
-        Ok(None),
-        "no live entry persists under a zero ttl"
+        Ok(Some(7)),
+        "the entry persists under a disabled ttl"
     );
 }
 
 #[test]
-fn sharded_lru_ttl_get_or_set_with_recomputes_under_zero_ttl() {
+fn sharded_lru_ttl_get_or_set_with_caches_under_zero_ttl() {
     let cache = ShardedLruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .shards(1)
@@ -508,20 +540,17 @@ fn sharded_lru_ttl_get_or_set_with_recomputes_under_zero_ttl() {
     }
     assert_eq!(
         calls.load(Ordering::Relaxed),
-        3,
-        "zero ttl makes every get_or_set_with a miss on the LRU store too"
+        1,
+        "disabled ttl keeps the entry live on the LRU store too"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Debug output reflects the resolved ttl: Some(0ns) for a zero ttl, None for unset.
-//
-// The implementor flagged Debug as under-tested. The Debug impl reads
-// ttl_duration_impl(), so it must print the zero/unset distinction faithfully.
+// Debug output: both a zero ttl and an unset ttl resolve to None and print as None.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_debug_distinguishes_zero_from_unset() {
+fn sharded_ttl_debug_prints_disabled_ttl_as_none() {
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
@@ -530,12 +559,8 @@ fn sharded_ttl_debug_distinguishes_zero_from_unset() {
     cache.set_ttl(Duration::ZERO);
     let zero_dbg = format!("{cache:?}");
     assert!(
-        zero_dbg.contains("ttl: Some("),
-        "zero ttl must Debug-print as Some(..), got: {zero_dbg}"
-    );
-    assert!(
-        !zero_dbg.contains("ttl: None"),
-        "zero ttl must NOT Debug-print as None, got: {zero_dbg}"
+        zero_dbg.contains("ttl: None"),
+        "a disabled (zero) ttl must Debug-print as None, got: {zero_dbg}"
     );
 
     cache.unset_ttl();
@@ -544,10 +569,18 @@ fn sharded_ttl_debug_distinguishes_zero_from_unset() {
         unset_dbg.contains("ttl: None"),
         "unset ttl must Debug-print as None, got: {unset_dbg}"
     );
+
+    // A real ttl prints as Some(..).
+    cache.set_ttl(Duration::from_secs(5));
+    let some_dbg = format!("{cache:?}");
+    assert!(
+        some_dbg.contains("ttl: Some("),
+        "a non-zero ttl must Debug-print as Some(..), got: {some_dbg}"
+    );
 }
 
 #[test]
-fn sharded_lru_ttl_debug_distinguishes_zero_from_unset() {
+fn sharded_lru_ttl_debug_prints_disabled_ttl_as_none() {
     let cache = ShardedLruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .ttl(Duration::from_secs(60))
@@ -557,10 +590,9 @@ fn sharded_lru_ttl_debug_distinguishes_zero_from_unset() {
     cache.set_ttl(Duration::ZERO);
     let zero_dbg = format!("{cache:?}");
     assert!(
-        zero_dbg.contains("ttl: Some("),
-        "zero ttl must Debug-print as Some(..), got: {zero_dbg}"
+        zero_dbg.contains("ttl: None"),
+        "a disabled (zero) ttl must Debug-print as None, got: {zero_dbg}"
     );
-    assert!(!zero_dbg.contains("ttl: None"), "got: {zero_dbg}");
 
     cache.unset_ttl();
     let unset_dbg = format!("{cache:?}");
@@ -571,18 +603,12 @@ fn sharded_lru_ttl_debug_distinguishes_zero_from_unset() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// deep_clone carries the ttl_set flag AND the ttl_nanos value.
-//
-// Two distinct states to verify, because copying only one of the pair would slip
-// through a single-state test:
-//   * a zero-ttl source (ttl_set == true, ttl_nanos == 0) must clone to a cache that
-//     also expires immediately (NOT a never-expire clone);
-//   * an unset source (ttl_set == false) must clone to a never-expire cache, even
-//     though ttl_nanos still holds a stale non-zero value underneath.
+// deep_clone carries the disabled ttl: a zero-ttl source clones to a never-expire cache,
+// identical to an unset source.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn sharded_ttl_deep_clone_carries_zero_ttl() {
+fn sharded_ttl_deep_clone_carries_disabled_ttl() {
     let src = ShardedTtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
@@ -592,20 +618,19 @@ fn sharded_ttl_deep_clone_carries_zero_ttl() {
     let clone = src.deep_clone();
     assert_eq!(
         clone.ttl(),
-        Some(Duration::ZERO),
-        "deep_clone must carry the zero ttl, not drop ttl_set"
+        None,
+        "deep_clone must carry the disabled ttl (resolves to None)"
     );
     clone.cache_set(1, 10).unwrap();
     assert_eq!(
         clone.cache_get(&1),
-        Ok(None),
-        "the deep-cloned zero-ttl cache must expire entries immediately"
+        Ok(Some(10)),
+        "the deep-cloned disabled-ttl cache must never expire entries"
     );
 }
 
 #[test]
 fn sharded_ttl_deep_clone_carries_unset_ttl() {
-    // Build with a non-zero ttl so ttl_nanos holds a stale value, then unset.
     let src = ShardedTtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
@@ -616,8 +641,7 @@ fn sharded_ttl_deep_clone_carries_unset_ttl() {
     assert_eq!(
         clone.ttl(),
         None,
-        "deep_clone of an unset cache must stay unset (ttl_set == false), \
-         despite a stale ttl_nanos"
+        "deep_clone of an unset cache must stay unset"
     );
     clone.cache_set(1, 10).unwrap();
     assert_eq!(
@@ -628,7 +652,23 @@ fn sharded_ttl_deep_clone_carries_unset_ttl() {
 }
 
 #[test]
-fn sharded_lru_ttl_deep_clone_carries_zero_and_unset_ttl() {
+fn sharded_ttl_deep_clone_carries_nonzero_ttl() {
+    let src = ShardedTtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build ShardedTtlCache");
+    src.set_ttl(Duration::from_secs(30));
+
+    let clone = src.deep_clone();
+    assert_eq!(
+        clone.ttl(),
+        Some(Duration::from_secs(30)),
+        "deep_clone must carry a non-zero ttl unchanged"
+    );
+}
+
+#[test]
+fn sharded_lru_ttl_deep_clone_carries_disabled_and_nonzero_ttl() {
     let src = ShardedLruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .ttl(Duration::from_secs(60))
@@ -639,36 +679,25 @@ fn sharded_lru_ttl_deep_clone_carries_zero_and_unset_ttl() {
     let zclone = src.deep_clone();
     assert_eq!(
         zclone.ttl(),
-        Some(Duration::ZERO),
-        "deep_clone must carry the zero ttl on the LRU store"
+        None,
+        "deep_clone must carry the disabled ttl on the LRU store"
     );
     zclone.cache_set(1, 10).unwrap();
-    assert_eq!(zclone.cache_get(&1), Ok(None));
+    assert_eq!(zclone.cache_get(&1), Ok(Some(10)));
 
-    src.unset_ttl();
-    let uclone = src.deep_clone();
+    src.set_ttl(Duration::from_secs(30));
+    let nclone = src.deep_clone();
     assert_eq!(
-        uclone.ttl(),
-        None,
-        "deep_clone of an unset LRU cache must stay unset"
+        nclone.ttl(),
+        Some(Duration::from_secs(30)),
+        "deep_clone must carry a non-zero ttl on the LRU store"
     );
-    uclone.cache_set(2, 20).unwrap();
-    assert_eq!(uclone.cache_get(&2), Ok(Some(20)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Concurrency: one thread flips set_ttl(ZERO) / unset_ttl / set_ttl(nonzero) while
-// others insert and read. Asserts:
-//   * no panic and no deadlock (the bounded loops join);
-//   * the resolved (ttl_set, ttl) pair is never torn into an impossible combination
-//     — specifically, when ttl resolves to Some(d) the cache must behave consistently
-//     for that d on a settled read, and metrics stay internally sane (size never
-//     exceeds the number of distinct keys, evictions monotonic).
-//
-// This is a smoke test for the Relaxed sequencing between ttl_set and ttl_nanos. It
-// cannot prove the absence of a transient torn read (Relaxed permits one), but it
-// exercises the path under contention and pins the invariant that the cache stays
-// usable and crash-free.
+// Concurrency: one thread flips set_ttl(nonzero) / set_ttl(ZERO) / unset_ttl while
+// others insert and read. Asserts no panic / no deadlock, reads never return another
+// key's value, and the cache stays usable and metrics internally sane afterward.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -686,7 +715,7 @@ fn sharded_ttl_concurrent_ttl_flips_stay_consistent() {
 
     let mut handles = Vec::new();
 
-    // Flipper: cycles through nonzero -> zero -> unset.
+    // Flipper: cycles through nonzero -> zero(disabled) -> unset(disabled).
     {
         let cache = cache.clone();
         let stop = stop.clone();
@@ -720,8 +749,7 @@ fn sharded_ttl_concurrent_ttl_flips_stay_consistent() {
         }));
     }
 
-    // Readers — each read must return Ok (Infallible), value is either the stored
-    // mapping or None; never a different key's value.
+    // Readers — each read returns Ok (Infallible); a present value is always this key's.
     for _ in 0..2 {
         let cache = cache.clone();
         handles.push(std::thread::spawn(move || {
@@ -735,9 +763,6 @@ fn sharded_ttl_concurrent_ttl_flips_stay_consistent() {
         }));
     }
 
-    // The writers/readers are bounded by ITERS and finish on their own; the flipper
-    // spins until told to stop. Give the bounded threads time to run, then stop the
-    // flipper and join everything.
     std::thread::sleep(std::time::Duration::from_millis(50));
     stop.store(true, Ordering::Relaxed);
     for h in handles {

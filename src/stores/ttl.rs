@@ -191,6 +191,13 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
         }
     }
 
+    /// `true` if an entry stamped at `instant` is still live under the current TTL.
+    /// A zero TTL means expiry is disabled, so every entry is always live.
+    #[inline]
+    pub(super) fn entry_live(ttl: Duration, instant: Instant) -> bool {
+        ttl.is_zero() || instant.elapsed() < ttl
+    }
+
     fn new_store(capacity: Option<usize>) -> HashMap<K, TimedEntry<V>, RandomState> {
         capacity.map_or_else(
             || HashMap::with_hasher(RandomState::new()),
@@ -225,6 +232,11 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
     #[must_use]
     pub fn evict(&mut self) -> usize {
         let ttl = self.ttl;
+        // A zero TTL disables expiry — nothing is ever expired, so there is
+        // nothing to sweep.
+        if ttl.is_zero() {
+            return 0;
+        }
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
@@ -252,7 +264,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(key)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(self.ttl, entry.instant)
         {
             self.hits.fetch_add(1, Ordering::Relaxed);
             if self.refresh {
@@ -282,7 +294,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(key)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(self.ttl, entry.instant)
         {
             self.hits.fetch_add(1, Ordering::Relaxed);
             if self.refresh {
@@ -306,7 +318,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
-                if occupied.get().instant.elapsed() < self.ttl {
+                if Self::entry_live(self.ttl, occupied.get().instant) {
                     if self.refresh {
                         occupied.get_mut().instant = Instant::now();
                     }
@@ -345,7 +357,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
     ) -> Result<&mut V, E> {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
-                if occupied.get().instant.elapsed() < self.ttl {
+                if Self::entry_live(self.ttl, occupied.get().instant) {
                     if self.refresh {
                         occupied.get_mut().instant = Instant::now();
                     }
@@ -385,7 +397,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
             value: val,
         };
         self.store.insert(key, entry).and_then(|entry| {
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(self.ttl, entry.instant) {
                 Some(entry.value)
             } else {
                 None
@@ -402,7 +414,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
                 on_evict(&stored_k, &entry.value);
             }
             self.evictions.fetch_add(1, Ordering::Relaxed);
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(self.ttl, entry.instant) {
                 Some(entry.value)
             } else {
                 None
@@ -463,7 +475,7 @@ impl<K: Hash + Eq, V> CachedIter<K, V> for TtlCache<K, V> {
     {
         let ttl = self.ttl;
         self.store.iter().filter_map(move |(k, entry)| {
-            if entry.instant.elapsed() < ttl {
+            if Self::entry_live(ttl, entry.instant) {
                 Some((k, &entry.value))
             } else {
                 None
@@ -479,7 +491,7 @@ impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get(k)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(self.ttl, entry.instant)
         {
             return Some(&entry.value);
         }
@@ -489,15 +501,24 @@ impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
 
 impl<K: Hash + Eq, V> crate::CacheTtl for TtlCache<K, V> {
     fn ttl(&self) -> Option<Duration> {
-        Some(self.ttl)
+        // A zero TTL means expiry is disabled.
+        if self.ttl.is_zero() {
+            None
+        } else {
+            Some(self.ttl)
+        }
     }
+    /// A zero `ttl` disables expiry — exactly equivalent to [`unset_ttl`](Self::unset_ttl).
+    /// Returns the previous TTL, or `None` if expiry was already disabled.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = ttl;
-        Some(old)
+        if old.is_zero() { None } else { Some(old) }
     }
     fn unset_ttl(&mut self) -> Option<Duration> {
-        None
+        let old = self.ttl;
+        self.ttl = Duration::ZERO;
+        if old.is_zero() { None } else { Some(old) }
     }
     fn refresh_on_hit(&self) -> bool {
         self.refresh
@@ -516,7 +537,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(k) {
-            let expired = entry.instant.elapsed() >= self.ttl;
+            let expired = !Self::entry_live(self.ttl, entry.instant);
             if expired {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 (Some(entry.value.clone()), true)
@@ -545,7 +566,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TtlCache<K, V> {
         V: Clone,
     {
         if let Some(entry) = self.store.get(k) {
-            let expired = entry.instant.elapsed() >= self.ttl;
+            let expired = !Self::entry_live(self.ttl, entry.instant);
             (Some(entry.value.clone()), expired)
         } else {
             (None, false)
@@ -572,7 +593,7 @@ where
         async move {
             match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
-                    if occupied.get().instant.elapsed() < self.ttl {
+                    if Self::entry_live(self.ttl, occupied.get().instant) {
                         if self.refresh {
                             occupied.get_mut().instant = Instant::now();
                         }
@@ -618,7 +639,7 @@ where
         async move {
             let v = match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
-                    if occupied.get().instant.elapsed() < self.ttl {
+                    if Self::entry_live(self.ttl, occupied.get().instant) {
                         if self.refresh {
                             occupied.get_mut().instant = Instant::now();
                         }

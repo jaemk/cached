@@ -1306,18 +1306,18 @@ pub trait CacheTtl {
     #[must_use]
     fn ttl(&self) -> Option<Duration>;
 
-    /// Set the TTL for newly inserted entries, returning the previous value.
+    /// Set the TTL for newly inserted entries, returning the previous value (or `None`
+    /// if expiry was disabled).
     ///
-    /// The TTL is stored unchecked: a zero `ttl` is accepted but makes every
-    /// subsequently inserted entry expire immediately (reads return it as absent).
-    /// Use [`try_set_ttl`](Self::try_set_ttl) to reject a zero `ttl`, or
-    /// [`unset_ttl`](Self::unset_ttl) to disable expiry entirely.
+    /// A zero `ttl` disables expiry — it is exactly equivalent to
+    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
+    /// Use [`try_set_ttl`](Self::try_set_ttl) if you want a zero `ttl` rejected instead.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration>;
 
     /// Validated variant of [`set_ttl`](Self::set_ttl): returns [`SetTtlError::ZeroTtl`]
-    /// when `ttl` is zero (which would otherwise silently make every inserted entry
-    /// expire on insertion) instead of storing it. Use [`unset_ttl`](Self::unset_ttl)
-    /// to disable expiry.
+    /// when `ttl` is zero instead of storing it. This is the strict "give me a real ttl"
+    /// path; to disable expiry, call [`set_ttl`](Self::set_ttl) with a zero `Duration` or
+    /// [`unset_ttl`](Self::unset_ttl).
     fn try_set_ttl(&mut self, ttl: Duration) -> Result<Option<Duration>, crate::SetTtlError> {
         if ttl.is_zero() {
             return Err(crate::SetTtlError::ZeroTtl);
@@ -1788,11 +1788,11 @@ pub trait ConcurrentCached<K, V> {
     /// Takes `&self`: concurrent stores are internally synchronized, so this is callable
     /// through a shared reference. The default is a no-op returning `None`.
     ///
-    /// The ttl is stored unchecked: a zero `Duration` is accepted but makes every
-    /// subsequently inserted entry expire immediately. There is no concurrent
-    /// `try_set_ttl`; the validated variant lives on the single-owner [`CacheTtl`]
-    /// trait. Pass a non-zero `Duration`, or use [`unset_ttl`](Self::unset_ttl) to
-    /// disable expiry.
+    /// A zero `Duration` disables expiry — it is exactly equivalent to
+    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
+    /// For the Redis stores this writes keys without any expiry (a plain `SET`). There is
+    /// no concurrent `try_set_ttl`; the validated variant that rejects a zero `ttl` lives
+    /// on the single-owner [`CacheTtl`] trait.
     fn set_ttl(&self, _ttl: Duration) -> Option<Duration> {
         None
     }
@@ -2009,11 +2009,11 @@ pub trait ConcurrentCachedAsync<K, V> {
     /// Takes `&self`: concurrent stores are internally synchronized, so this is callable
     /// through a shared reference. The default is a no-op returning `None`.
     ///
-    /// The ttl is stored unchecked: a zero `Duration` is accepted but makes every
-    /// subsequently inserted entry expire immediately. There is no concurrent
-    /// `try_set_ttl`; the validated variant lives on the single-owner [`CacheTtl`]
-    /// trait. Pass a non-zero `Duration`, or use [`unset_ttl`](Self::unset_ttl) to
-    /// disable expiry.
+    /// A zero `Duration` disables expiry — it is exactly equivalent to
+    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
+    /// For the Redis stores this writes keys without any expiry (a plain `SET`). There is
+    /// no concurrent `try_set_ttl`; the validated variant that rejects a zero `ttl` lives
+    /// on the single-owner [`CacheTtl`] trait.
     fn set_ttl(&self, _ttl: Duration) -> Option<Duration> {
         None
     }
