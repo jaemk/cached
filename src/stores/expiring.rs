@@ -200,6 +200,7 @@ impl<K: Hash + Eq, V: Expires> ExpiringCache<K, V> {
     /// Returns the number of entries removed. Fires the `on_evict` callback for each
     /// removed entry. Use this periodically for high-cardinality workloads to reclaim
     /// memory from entries that expire but are never re-accessed.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
@@ -462,7 +463,7 @@ where
     K: Hash + Eq + Send,
     V: Expires + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -497,7 +498,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,

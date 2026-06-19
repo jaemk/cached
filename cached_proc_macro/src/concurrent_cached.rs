@@ -196,6 +196,9 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if let Err(e) = reject_cached_only_attrs(&attr_args) {
         return e.to_compile_error().into();
     }
+    if let Err(e) = validate_force_refresh_is_string(&attr_args) {
+        return e.to_compile_error().into();
+    }
     let args = match ConcurrentCachedArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -1420,10 +1423,10 @@ fn get_redis_cache_type_and_create(
                 })?;
                 let refresh = args.refresh;
                 if is_async {
-                    quote! { #krate::AsyncRedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                    quote! { #krate::AsyncRedisCache::builder().prefix(#cache_prefix).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                 } else {
                     quote! {
-                        #krate::RedisCache::builder(#cache_prefix, #ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                        #krate::RedisCache::builder().prefix(#cache_prefix).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                     }
                 }
             } else if is_async {
@@ -1475,7 +1478,7 @@ fn get_disk_cache_type_and_create(
         }
         None => {
             let create = quote! {
-                #krate::RedbCache::builder(#cache_name)
+                #krate::RedbCache::builder().name(#cache_name)
             };
             let create = match ttl_duration {
                 None => create,

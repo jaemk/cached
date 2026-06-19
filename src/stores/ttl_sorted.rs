@@ -461,6 +461,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
 
     /// Evict values that have expired.
     /// Returns number of dropped items.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
         let cutoff = Instant::now();
         let min = Stamped::bound(self.min_instant);
@@ -642,7 +643,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
                     self.retain_latest(size_limit, evict);
                 }
             } else if evict {
-                self.evict();
+                let _ = self.evict();
             }
         }
 
@@ -1020,7 +1021,7 @@ where
     K: Hash + Eq + Ord + Clone + Send + Sync,
     V: Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -1046,7 +1047,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -1578,7 +1579,7 @@ mod test {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn async_get_or_set_with_max_size_limit_short_ttl_does_not_panic() {
+    async fn async_cache_get_or_set_with_max_size_limit_short_ttl_does_not_panic() {
         use crate::CachedAsync;
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(1))
@@ -1589,7 +1590,7 @@ mod test {
             .insert_ttl("long", 1u32, Duration::from_secs(60))
             .unwrap();
         let v = cache
-            .async_get_or_set_with("short", || async { 2u32 })
+            .async_cache_get_or_set_with("short", || async { 2u32 })
             .await;
         assert_eq!(*v, 2);
         assert_eq!(cache.cache_size(), 1);

@@ -792,7 +792,7 @@ impl<K, V> CachedAsync<K, V> for LruCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -809,7 +809,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -1175,37 +1175,37 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 2, || async { _get(2).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(2).await }).await,
             &2
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 3, || async { _get(3).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(3).await }).await,
             &3
         );
 
         // hits — should not re-evaluate
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 1, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(99).await }).await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 2, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(99).await }).await,
             &2
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 3, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(99).await }).await,
             &3
         );
 
@@ -1219,13 +1219,13 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(0).await })
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(0).await })
                 .await
                 .unwrap(),
             &0
         );
         assert_eq!(
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
                 .await
                 .unwrap(),
             &0 // cached value, 5 never evaluated
@@ -1233,16 +1233,20 @@ mod tests {
 
         c.cache_reset();
         let res: Result<&usize, String> =
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(10).await })
-                .await;
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+                _try_get(10).await
+            })
+            .await;
         assert!(res.is_err());
         assert!(c.key_order().is_empty());
 
         let res: Result<&usize, String> =
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(1).await }).await;
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(1).await })
+                .await;
         assert_eq!(res.unwrap(), &1);
         let res: Result<&usize, String> =
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await }).await;
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
+                .await;
         assert_eq!(res.unwrap(), &1);
     }
 

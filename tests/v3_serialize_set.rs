@@ -82,7 +82,7 @@ static CUSTOM_CALLS: AtomicU32 = AtomicU32::new(0);
 #[concurrent_cached(
     map_error = r##"|e| SerializeSetError::Disk(format!("{e:?}"))"##,
     ty = "cached::RedbCache<u32, u32>",
-    create = r##" { RedbCache::builder("serialize_set_custom_redb").build().expect("build redb") } "##
+    create = r##" { RedbCache::builder().name("serialize_set_custom_redb").build().expect("build redb") } "##
 )]
 fn custom_redb(n: u32) -> Result<u32, SerializeSetError> {
     CUSTOM_CALLS.fetch_add(1, Ordering::SeqCst);

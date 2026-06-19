@@ -644,7 +644,8 @@ mod redb_serialize_cached {
     use tempfile::TempDir;
 
     fn build_cache(dir: &TempDir, name: &str) -> RedbCache<u32, String> {
-        RedbCache::<u32, String>::builder(name)
+        RedbCache::<u32, String>::builder()
+            .name(name)
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache")
@@ -697,7 +698,8 @@ mod redb_serialize_cached {
     #[test]
     fn cache_set_ref_ttl_expiry() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_ttl_expiry")
+        let cache: RedbCache<u32, String> = RedbCache::builder()
+            .name("serialize_cached_ttl_expiry")
             .disk_directory(dir.path())
             .ttl(Duration::from_millis(100))
             .build()
@@ -729,7 +731,8 @@ mod redb_serialize_cached_async {
     #[tokio::test]
     async fn async_cache_set_ref_round_trip() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_round_trip")
+        let cache: RedbCache<u32, String> = RedbCache::builder()
+            .name("serialize_cached_async_round_trip")
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache");
@@ -757,7 +760,8 @@ mod redb_serialize_cached_async {
     #[tokio::test]
     async fn async_cache_set_ref_overwrite() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_overwrite")
+        let cache: RedbCache<u32, String> = RedbCache::builder()
+            .name("serialize_cached_async_overwrite")
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache");
@@ -1290,4 +1294,147 @@ fn lru_ttl_cache_metrics_via_public_api() {
     assert!(cache.cache_get(&1).is_some());
     assert_eq!(cache.cache_hits(), Some(1));
     assert_eq!(cache.cache_misses(), Some(0));
+}
+
+// ── set_ttl(Duration::ZERO) on sharded TTL stores no longer panics (I2) ───────
+//
+// The inherent `set_ttl` and the `ConcurrentCached::set_ttl` delegation used to
+// `assert!(!ttl.is_zero())` and panic on a zero ttl. After the fix a zero ttl is
+// stored unchecked, so the call returns normally and any subsequently inserted
+// entry is immediately expired (read back as a miss).
+#[cfg(feature = "time_stores")]
+mod sharded_set_ttl_zero {
+    use cached::time::Duration;
+    use cached::{ConcurrentCached, ShardedLruTtlCache, ShardedTtlCache};
+
+    #[test]
+    fn sharded_ttl_inherent_set_ttl_zero_does_not_panic_and_expires() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        // Inherent set_ttl(ZERO) must not panic.
+        let prev = cache.set_ttl(Duration::ZERO);
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+        assert_eq!(cache.ttl(), Some(Duration::ZERO));
+
+        // A freshly inserted entry is immediately expired -> read back as a miss.
+        cache.cache_set(1, 10).unwrap();
+        assert_eq!(cache.cache_get(&1), Ok(None));
+    }
+
+    #[test]
+    fn sharded_ttl_trait_set_ttl_zero_does_not_panic_and_expires() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        // The `ConcurrentCached::set_ttl` delegation must not panic either.
+        let prev = ConcurrentCached::set_ttl(&cache, Duration::ZERO);
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+
+        cache.cache_set(2, 20).unwrap();
+        assert_eq!(cache.cache_get(&2), Ok(None));
+    }
+
+    #[test]
+    fn sharded_lru_ttl_inherent_set_ttl_zero_does_not_panic_and_expires() {
+        let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(8)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedLruTtlCache");
+
+        let prev = cache.set_ttl(Duration::ZERO);
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+        assert_eq!(cache.ttl(), Some(Duration::ZERO));
+
+        cache.cache_set(1, 10).unwrap();
+        assert_eq!(cache.cache_get(&1), Ok(None));
+    }
+
+    #[test]
+    fn sharded_lru_ttl_trait_set_ttl_zero_does_not_panic_and_expires() {
+        let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(8)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedLruTtlCache");
+
+        let prev = ConcurrentCached::set_ttl(&cache, Duration::ZERO);
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+
+        cache.cache_set(2, 20).unwrap();
+        assert_eq!(cache.cache_get(&2), Ok(None));
+    }
+
+    #[test]
+    fn sharded_ttl_unset_ttl_after_zero_disables_expiry() {
+        // unset_ttl must still mean "never expires", distinct from set_ttl(ZERO).
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        let _ = cache.set_ttl(Duration::ZERO);
+        assert_eq!(cache.unset_ttl(), Some(Duration::ZERO));
+        assert_eq!(cache.ttl(), None);
+
+        cache.cache_set(3, 30).unwrap();
+        assert_eq!(cache.cache_get(&3), Ok(Some(30)));
+    }
+}
+
+// ── Builder missing-required errors are server-free (C1) ──────────────────────
+//
+// The redis/redb builders are now no-arg; the former positional args
+// (`prefix`/`ttl` for redis, `name` for redb) are required setters. A `build()`
+// with a required field unset must return `BuildError::MissingRequired(...)`
+// WITHOUT attempting any IO/connection, so these tests need no live server.
+#[cfg(feature = "disk_store")]
+#[test]
+fn redb_builder_missing_name_is_server_free_error() {
+    use cached::{BuildError, RedbCache, RedbCacheBuildError};
+    let result = RedbCache::<u32, u32>::builder().build();
+    assert!(
+        matches!(
+            result,
+            Err(RedbCacheBuildError::Build(BuildError::MissingRequired(
+                "name"
+            )))
+        ),
+        "expected Build(MissingRequired(\"name\"))"
+    );
+}
+
+#[cfg(feature = "redis_store")]
+#[test]
+fn redis_builder_missing_required_is_server_free_error() {
+    use cached::{BuildError, RedisCache, RedisCacheBuildError};
+
+    // No prefix and no ttl -> prefix is reported first.
+    let result = RedisCache::<u32, u32>::builder().build();
+    assert!(
+        matches!(
+            result,
+            Err(RedisCacheBuildError::Build(BuildError::MissingRequired(
+                "prefix"
+            )))
+        ),
+        "expected Build(MissingRequired(\"prefix\"))"
+    );
+
+    // prefix set, ttl unset -> ttl is reported, still before any connection attempt.
+    let result = RedisCache::<u32, u32>::builder().prefix("x").build();
+    assert!(
+        matches!(
+            result,
+            Err(RedisCacheBuildError::Build(BuildError::MissingRequired(
+                "ttl"
+            )))
+        ),
+        "expected Build(MissingRequired(\"ttl\"))"
+    );
 }

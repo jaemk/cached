@@ -38,7 +38,9 @@ enum ExampleError {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder("cached-csc-example", Duration::from_secs(30))
+        AsyncRedisCache::builder()
+            .prefix("cached-csc-example")
+            .ttl(Duration::from_secs(30))
             .client_side_caching(true)
             .build()
             .await

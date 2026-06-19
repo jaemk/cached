@@ -327,7 +327,7 @@ impl<K, V> CachedAsync<K, V> for UnboundCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         key: K,
         f: F,
@@ -352,7 +352,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         key: K,
         f: F,

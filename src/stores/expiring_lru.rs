@@ -249,6 +249,7 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
     }
 
     /// Evict expired values from the cache.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
@@ -498,7 +499,7 @@ where
     K: Hash + Eq + Clone + Send,
     V: Expires + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -530,7 +531,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -823,7 +824,7 @@ mod tests {
 
         // It should only evict n > 10
         assert_eq!(2, c.cache_size());
-        c.evict();
+        let _ = c.evict();
         assert_eq!(1, c.cache_size());
     }
 

@@ -534,6 +534,43 @@ pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: Stri
     .into()
 }
 
+/// Reject a `force_refresh` value that is not a string literal.
+///
+/// `force_refresh` takes a curly-brace Rust block written inside a string literal
+/// (e.g. `force_refresh = "{ id == 0 }"`). A bare `force_refresh = true` (or any
+/// other non-string literal) would otherwise surface darling's generic
+/// "unexpected literal type" error, which does not tell the caller the expected
+/// shape. This validator runs against the raw attribute meta list before
+/// `from_list` and emits a friendly, uniform message for every macro entry point
+/// (`#[cached]`, `#[once]`, `#[concurrent_cached]`).
+pub(super) fn validate_force_refresh_is_string(
+    attr_args: &[darling::ast::NestedMeta],
+) -> Result<(), syn::Error> {
+    for arg in attr_args {
+        let darling::ast::NestedMeta::Meta(syn::Meta::NameValue(nv)) = arg else {
+            continue;
+        };
+        if !nv.path.is_ident("force_refresh") {
+            continue;
+        }
+        let is_str = matches!(
+            &nv.value,
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(_),
+                ..
+            })
+        );
+        if !is_str {
+            return Err(syn::Error::new_spanned(
+                &nv.value,
+                "`force_refresh` takes a curly-brace block string, e.g. \
+                 `force_refresh = \"{ id == 0 }\"`",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse the `force_refresh` string into an `Option<syn::Block>` exactly once.
 ///
 /// Returns `Ok(None)` when `force_refresh` is `None`. Shared by

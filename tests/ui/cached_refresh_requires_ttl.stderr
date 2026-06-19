@@ -1,0 +1,5 @@
+error: `refresh` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set - `refresh` renews a TTL on cache hit, but the default `UnboundCache`/`LruCache` stores have no TTL to renew
+ --> tests/ui/cached_refresh_requires_ttl.rs:4:4
+  |
+4 | fn f(k: i32) -> i32 {
+  |    ^

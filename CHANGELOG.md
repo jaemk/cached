@@ -79,6 +79,22 @@
 - `ShardHasher` now requires `Clone` as a supertrait (the `deep_clone` / `copy_from` methods already required it de facto). Custom `ShardHasher` impls must be `Clone`; `DefaultShardHasher` already is.
 - `#[must_use]` was added to the pure-query trait methods (`cache_size`/`len`/`is_empty`/`metrics`/`hits`/`misses`/`ttl`/`refresh_on_hit`/...) and to `cache_remove`/`cache_remove_entry`. Code that discards these results under `-D warnings` will need `let _ = ...`. The short `remove`/`remove_entry` aliases are intentionally left un-annotated for for-effect removal.
 
+#### Store builder API uniformity (C1)
+- `RedbCache::builder(name)`, `RedisCache::builder(prefix, ttl)`, and `AsyncRedisCache::builder(prefix, ttl)` now take no arguments: `::builder()`. Required fields (`name`, `prefix`, `ttl`) are set via dedicated setters and validated in `build()`, which returns `BuildError::MissingRequired(field_name)` if a required field is absent. All store builders now share a uniform no-arg `::builder()` entry point.
+
+#### `CachedAsync` method renames (I1)
+- The four `async_get_or_set_with*` methods on the `CachedAsync` trait are renamed with the `cache_` namespace infix, matching the `Cached` trait convention: `async_get_or_set_with` → `async_cache_get_or_set_with`, `async_get_or_set_with_mut` → `async_cache_get_or_set_with_mut`, `async_try_get_or_set_with` → `async_cache_try_get_or_set_with`, `async_try_get_or_set_with_mut` → `async_cache_try_get_or_set_with_mut`. The `ConcurrentCachedAsync` trait is unchanged.
+
+#### Error vocabulary for TTL validation (I4+I5)
+- `BuildError::InvalidTtl { ttl }` is removed. A zero TTL at build time now yields `BuildError::InvalidValue { field: "ttl", reason: "must be greater than zero" }`, which is more general (the variant can represent other field-validation failures) and more descriptive.
+- `RedisCacheBuildError::InvalidTtl` and `RedbCacheBuildError::InvalidTtl` are renamed to `RedisCacheBuildError::Build(BuildError)` and `RedbCacheBuildError::Build(BuildError)` respectively, wrapping the inner `BuildError` instead of duplicating its content. Exhaustive matches on these enums must be updated.
+
+#### Sharded TTL store: zero-TTL `set_ttl` no longer panics (I2)
+- `ConcurrentCached::set_ttl` (and the inherent `set_ttl`) on the sharded TTL stores (`ShardedTtlCache`, `ShardedLruTtlCache`) no longer panic when passed a zero `Duration`. A zero TTL is stored as-is; every subsequently inserted entry expires immediately. This matches the documented contract and the behavior of the Redis and single-owner stores. Use `CacheTtl::try_set_ttl` to validate before storing.
+
+#### `#[cached(refresh = true)]` without a TTL is now a compile error (I7)
+- Using `refresh = true` on `#[cached]` without also specifying a TTL (`ttl_secs`, `ttl_millis`, or `ttl`) is now a compile error. Previously the attribute was silently ignored in this configuration. This matches the existing behavior of `#[concurrent_cached]`, which has always required a TTL alongside `refresh = true`.
+
 ### Additive / non-breaking
 - `cached::prelude` re-exports the common traits for a single glob import.
 - `ConcurrentCached` / `ConcurrentCachedAsync` gained a no-op-default `cache_reset_metrics` / `async_cache_reset_metrics` (`&self`). The sharded stores override it to zero their per-shard counters; `RedbCache` and `RedisCache` / `AsyncRedisCache` keep the no-op default (they track no in-memory metrics). `cache_clear` / `cache_reset` (and their async counterparts) are required methods, not defaults - see the breaking-changes entry above.
@@ -112,6 +128,9 @@
 - The release workflow now creates a git tag and GitHub release for each workspace crate that is newly published, via `bin/tag-release.sh`. The root crate keeps the bare `vX.Y.Z` tag; subcrates are tagged `<crate-name>-vX.Y.Z` ([#245](https://github.com/jaemk/cached/issues/245)).
 - Doc fixes: corrected the "sharded stores expose inherent helpers" note, added a `Cached::get` mutability note, documented the sharded-LRU minimum-per-shard capacity, named floats as the canonical `convert` case ([#78](https://github.com/jaemk/cached/issues/78)), and added a cache-invalidation example ([#21](https://github.com/jaemk/cached/issues/21)) and a struct-method example ([#236](https://github.com/jaemk/cached/pull/236)).
 - `hashbrown` updated to 0.17 (internal). Dev-only: `criterion` 0.8, `googletest` 0.14.
+- `#[once]` now rejects the `#[cached]`-only attributes (`result_fallback`, `refresh`, `max_size`, `ty`, `create`, `key`, `convert`) with clear "not supported on `#[once]`" messages instead of a generic unknown-field error (I6).
+- `#[must_use]` added to `CacheEvict::evict` and the single-owner inherent `evict` methods (I3).
+- A non-string `force_refresh` value (e.g. `force_refresh = true` instead of the required block form `force_refresh = "{ ... }"`) now produces a helpful error message explaining the expected syntax (8b).
 
 ## [2.0.2]
 - Docs/tests only (no API change): document the `Expires` trait / `expires = true` as the idiomatic way to set a dynamic, per-entry TTL (a lifetime computed at call time rather than the uniform `ttl = N`), with a runnable example reference, and add a regression test for the runtime-argument-driven TTL case ([#246](https://github.com/jaemk/cached/issues/246)).

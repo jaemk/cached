@@ -114,9 +114,9 @@ use cached::macros::concurrent_cached;
 
 The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseconds), or `ttl = "<Duration expr>"` (not `time =`); and `refresh =` (not `time_refresh =`). Note: `#[once]` supports `ttl_secs`/`ttl_millis`/`ttl` but has never had a `refresh =` attribute (single-value cache, refresh-on-hit is not applicable).
 
-**2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **deprecated alias** for the preferred `max_size = N` (emits a deprecation warning).
+**2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **hard rename error** — the macro rejects it with "`size` was renamed to `max_size`; use `max_size = ...`" and does not compile. Use `max_size = N`.
 
-**Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`):
+**Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `cache_err`, `cache_none`, `with_cached_flag`):
 - `sync_writes`: `false` (default), `true` / `"default"` (whole-cache lock), or `"by_key"` (per-key bucketed locks; `#[cached]` only)
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static

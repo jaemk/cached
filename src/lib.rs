@@ -50,10 +50,10 @@ Every synchronous cache operation has a short alias (`get`/`set`/`remove`/`clear
 The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short alias
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
-`ConcurrentCachedAsync` keeps the `async_cache_*` spelling (`async_cache_get`, `async_cache_set`,
-`async_cache_remove`, …). `CachedAsync` uses the `async_`-prefixed `get_or_set_with` family
-(`async_get_or_set_with`, `async_try_get_or_set_with`, and their `_mut` variants); it has no
-`async_cache_*` methods. Neither trait has a short alias; the `async_` prefix already prevents
+Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has the
+`get_or_set_with` family (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`, and
+their `_mut` variants). Neither trait has a short alias; the `async_` prefix already prevents
 collisions with the sync methods.
 
 **Features**
@@ -682,11 +682,11 @@ pub mod prelude {
 /// The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short
 /// alias would collide with another in-scope trait's method of the same name (for example, your
 /// type also implements a trait with its own `get`).
-/// `ConcurrentCachedAsync` keeps the `async_cache_*` spelling (`async_cache_get`,
-/// `async_cache_set`, `async_cache_remove`, …). `CachedAsync` uses the `async_`-prefixed
-/// `get_or_set_with` family (`async_get_or_set_with`, `async_try_get_or_set_with`, and their
-/// `_mut` variants); it has no `async_cache_*` methods. Neither trait has a short alias; the
-/// `async_` prefix already prevents collisions with the sync methods.
+/// Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
+/// `async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has the
+/// `get_or_set_with` family (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`,
+/// and their `_mut` variants). Neither trait has a short alias; the `async_` prefix already
+/// prevents collisions with the sync methods.
 ///
 /// ```rust
 /// use cached::{Cached, UnboundCache};
@@ -1353,15 +1353,15 @@ pub trait CachedAsync<K, V> {
     /// at the call site.
     ///
     /// Returns `&V`. Use
-    /// [`async_get_or_set_with_mut`](CachedAsync::async_get_or_set_with_mut) for a
+    /// [`async_cache_get_or_set_with_mut`](CachedAsync::async_cache_get_or_set_with_mut) for a
     /// mutable reference.
     ///
     /// This default returns a `Send` future, so it carries `Self: Send, K: Send`
     /// (the future captures `&mut self` and `k` across the await). A store that is
     /// genuinely `!Send` cannot use this default and should implement
-    /// [`async_get_or_set_with_mut`](CachedAsync::async_get_or_set_with_mut)
+    /// [`async_cache_get_or_set_with_mut`](CachedAsync::async_cache_get_or_set_with_mut)
     /// directly; the `&V` wrapper is only a convenience over it.
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_cache_get_or_set_with<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -1373,14 +1373,14 @@ pub trait CachedAsync<K, V> {
         F: FnOnce() -> Fut + Send + 'a,
         Fut: Future<Output = V> + Send + 'a,
     {
-        async move { &*self.async_get_or_set_with_mut(k, f).await }
+        async move { &*self.async_cache_get_or_set_with_mut(k, f).await }
     }
 
     /// The mutable counterpart of
-    /// [`async_get_or_set_with`](CachedAsync::async_get_or_set_with): returns
+    /// [`async_cache_get_or_set_with`](CachedAsync::async_cache_get_or_set_with): returns
     /// `&mut V`. Stores implement this method; the shared-reference variant
     /// delegates to it.
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -1391,18 +1391,18 @@ pub trait CachedAsync<K, V> {
         F: FnOnce() -> Fut + Send + 'a,
         Fut: Future<Output = V> + Send + 'a;
 
-    /// Like [`async_get_or_set_with`](CachedAsync::async_get_or_set_with), but
+    /// Like [`async_cache_get_or_set_with`](CachedAsync::async_cache_get_or_set_with), but
     /// `f` is fallible: on a miss the value is cached only if `f` resolves to
     /// `Ok`, and an `Err` is returned without caching.
     ///
     /// Returns `Result<&V, E>`. Use
-    /// [`async_try_get_or_set_with_mut`](CachedAsync::async_try_get_or_set_with_mut)
+    /// [`async_cache_try_get_or_set_with_mut`](CachedAsync::async_cache_try_get_or_set_with_mut)
     /// for a mutable reference.
     ///
-    /// Like [`async_get_or_set_with`](CachedAsync::async_get_or_set_with), this
+    /// Like [`async_cache_get_or_set_with`](CachedAsync::async_cache_get_or_set_with), this
     /// default returns a `Send` future and so carries `Self: Send, K: Send`; a
     /// `!Send` store should implement the `_mut` variant directly.
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -1415,13 +1415,17 @@ pub trait CachedAsync<K, V> {
         F: FnOnce() -> Fut + Send + 'a,
         Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
-        async move { self.async_try_get_or_set_with_mut(k, f).await.map(|v| &*v) }
+        async move {
+            self.async_cache_try_get_or_set_with_mut(k, f)
+                .await
+                .map(|v| &*v)
+        }
     }
 
     /// The mutable counterpart of
-    /// [`async_try_get_or_set_with`](CachedAsync::async_try_get_or_set_with):
+    /// [`async_cache_try_get_or_set_with`](CachedAsync::async_cache_try_get_or_set_with):
     /// returns `Result<&mut V, E>`.
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,

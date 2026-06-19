@@ -1209,7 +1209,7 @@ mod time_store_tests {
             assert_eq!(cache.cache_misses(), Some(1));
             assert!(cache.cache_size() > 0);
             std::thread::sleep(Duration::from_millis(1000));
-            cache.evict();
+            let _ = cache.evict();
             assert_eq!(cache.cache_size(), 0);
         }
     }
@@ -1731,9 +1731,9 @@ mod time_store_tests {
 
             let mut cache = ExpiringCache::builder().build().unwrap();
 
-            // async_get_or_set_with: vacant
+            // async_cache_get_or_set_with: vacant
             let r1 = cache
-                .async_get_or_set_with("key".to_string(), || async {
+                .async_cache_get_or_set_with("key".to_string(), || async {
                     AsyncValue {
                         val: "hello".to_string(),
                         expired: false,
@@ -1742,9 +1742,9 @@ mod time_store_tests {
                 .await;
             assert_eq!(r1.val, "hello");
 
-            // async_get_or_set_with: occupied and fresh
+            // async_cache_get_or_set_with: occupied and fresh
             let r2 = cache
-                .async_get_or_set_with("key".to_string(), || async {
+                .async_cache_get_or_set_with("key".to_string(), || async {
                     AsyncValue {
                         val: "ignored".to_string(),
                         expired: false,
@@ -1762,9 +1762,9 @@ mod time_store_tests {
                 },
             );
 
-            // async_get_or_set_with: occupied but expired
+            // async_cache_get_or_set_with: occupied but expired
             let r3 = cache
-                .async_get_or_set_with("key".to_string(), || async {
+                .async_cache_get_or_set_with("key".to_string(), || async {
                     AsyncValue {
                         val: "new_fresh".to_string(),
                         expired: false,
@@ -2532,7 +2532,7 @@ mod disk_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         ty = "cached::RedbCache<u32, u32>",
-        create = r##" { RedbCache::builder("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
+        create = r##" { RedbCache::builder().name("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -2559,7 +2559,7 @@ mod disk_tests {
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         refresh = false,
         ty = "cached::RedbCache<u32, u32>",
-        create = r##" { RedbCache::builder("cached_disk_refresh_false_create").build().expect("error building disk cache") } "##
+        create = r##" { RedbCache::builder().name("cached_disk_refresh_false_create").build().expect("error building disk cache") } "##
     )]
     fn cached_disk_refresh_false_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4479,7 +4479,7 @@ mod redis_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
         ty = "cached::RedisCache<u32, u32>",
-        create = r##" { RedisCache::builder("cache_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
+        create = r##" { RedisCache::builder().prefix("cache_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4549,7 +4549,7 @@ mod redis_tests {
         #[concurrent_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
             ty = "cached::AsyncRedisCache<u32, u32>",
-            create = r##" { AsyncRedisCache::builder("async_cached_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
+            create = r##" { AsyncRedisCache::builder().prefix("async_cached_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
             if n < 5 {
@@ -4575,15 +4575,16 @@ mod redis_tests {
 
         #[tokio::test]
         async fn async_redis_builder_aliases_and_zero_ttl_validation() {
-            let result = cached::AsyncRedisCache::<String, String>::builder(
-                "async-zero-ttl",
-                Duration::ZERO,
-            )
-            .build()
-            .await;
+            let result = cached::AsyncRedisCache::<String, String>::builder()
+                .prefix("async-zero-ttl")
+                .ttl(Duration::ZERO)
+                .build()
+                .await;
             assert!(matches!(
                 result,
-                Err(cached::RedisCacheBuildError::InvalidTtl(..))
+                Err(cached::RedisCacheBuildError::Build(
+                    cached::BuildError::InvalidValue { field: "ttl", .. }
+                ))
             ));
         }
     }
@@ -4595,17 +4596,19 @@ mod redis_tests {
     fn test_redis_cache_clear_scoped() {
         // Build two caches with different prefixes under an empty namespace so
         // only the SCAN scope (prefix) distinguishes them.
-        let cache_a =
-            RedisCache::<String, String>::builder("test_clear_scope_a", Duration::from_secs(30))
-                .namespace("")
-                .build()
-                .expect("build cache_a");
+        let cache_a = RedisCache::<String, String>::builder()
+            .prefix("test_clear_scope_a")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache_a");
 
-        let cache_b =
-            RedisCache::<String, String>::builder("test_clear_scope_b", Duration::from_secs(30))
-                .namespace("")
-                .build()
-                .expect("build cache_b");
+        let cache_b = RedisCache::<String, String>::builder()
+            .prefix("test_clear_scope_b")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache_b");
 
         // Seed both caches.
         cache_a
@@ -4650,11 +4653,12 @@ mod redis_tests {
 
     #[test]
     fn test_redis_cache_set_ref_round_trip() {
-        let cache =
-            RedisCache::<String, String>::builder("test_set_ref_rt", Duration::from_secs(30))
-                .namespace("")
-                .build()
-                .expect("build cache");
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_set_ref_rt")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
 
         cache.cache_clear().unwrap();
 
@@ -5086,8 +5090,11 @@ fn test_fallible_builders_return_build_error() {
             .ttl(cached::time::Duration::ZERO)
             .build();
         assert!(
-            matches!(zero_ttl.unwrap_err(), cached::BuildError::InvalidTtl { .. }),
-            "expected InvalidTtl"
+            matches!(
+                zero_ttl.unwrap_err(),
+                cached::BuildError::InvalidValue { field: "ttl", .. }
+            ),
+            "expected InvalidValue(ttl)"
         );
 
         let zero_lru_ttl = cached::LruTtlCache::<i32, i32>::builder()
@@ -5097,9 +5104,9 @@ fn test_fallible_builders_return_build_error() {
         assert!(
             matches!(
                 zero_lru_ttl.unwrap_err(),
-                cached::BuildError::InvalidTtl { .. }
+                cached::BuildError::InvalidValue { field: "ttl", .. }
             ),
-            "expected InvalidTtl"
+            "expected InvalidValue(ttl)"
         );
 
         let zero_sorted_ttl = cached::TtlSortedCache::<i32, i32>::builder()
@@ -5108,9 +5115,9 @@ fn test_fallible_builders_return_build_error() {
         assert!(
             matches!(
                 zero_sorted_ttl.unwrap_err(),
-                cached::BuildError::InvalidTtl { .. }
+                cached::BuildError::InvalidValue { field: "ttl", .. }
             ),
-            "expected InvalidTtl"
+            "expected InvalidValue(ttl)"
         );
     }
 
@@ -5133,24 +5140,30 @@ fn test_fallible_builders_return_build_error() {
 #[test]
 fn redb_cache_builder_zero_ttl_validation() {
     // `RedbCache` rejects a zero TTL at build time.
-    let result = cached::RedbCache::<String, String>::builder("zero-ttl")
+    let result = cached::RedbCache::<String, String>::builder()
+        .name("zero-ttl")
         .ttl(cached::time::Duration::ZERO)
         .build();
     assert!(matches!(
         result,
-        Err(cached::RedbCacheBuildError::InvalidTtl(..))
+        Err(cached::RedbCacheBuildError::Build(
+            cached::BuildError::InvalidValue { field: "ttl", .. }
+        ))
     ));
 }
 
 #[cfg(feature = "redis_store")]
 #[test]
 fn redis_cache_builder_aliases_and_zero_ttl_validation() {
-    let result =
-        cached::RedisCache::<String, String>::builder("zero-ttl", cached::time::Duration::ZERO)
-            .build();
+    let result = cached::RedisCache::<String, String>::builder()
+        .prefix("zero-ttl")
+        .ttl(cached::time::Duration::ZERO)
+        .build();
     assert!(matches!(
         result,
-        Err(cached::RedisCacheBuildError::InvalidTtl(..))
+        Err(cached::RedisCacheBuildError::Build(
+            cached::BuildError::InvalidValue { field: "ttl", .. }
+        ))
     ));
 }
 
@@ -5267,7 +5280,7 @@ async fn test_timed_cache_async_on_evict_fires() {
     cache.cache_set(1, 10);
     tokio::time::sleep(cached::time::Duration::from_millis(100)).await;
 
-    let val = CachedAsync::async_get_or_set_with(&mut cache, 1, || async { 99u32 }).await;
+    let val = CachedAsync::async_cache_get_or_set_with(&mut cache, 1, || async { 99u32 }).await;
     assert_eq!(*val, 99);
     assert_eq!(
         evicted_count.load(Ordering::Relaxed),
@@ -5456,7 +5469,10 @@ fn test_ttl_cache_zero_ttl() {
         .ttl(Duration::from_nanos(0))
         .build()
         .unwrap_err();
-    assert!(matches!(err, cached::BuildError::InvalidTtl { .. }));
+    assert!(matches!(
+        err,
+        cached::BuildError::InvalidValue { field: "ttl", .. }
+    ));
 }
 
 #[cfg(feature = "time_stores")]
@@ -5469,7 +5485,10 @@ fn test_lru_ttl_cache_zero_ttl() {
         .ttl(Duration::from_nanos(0))
         .build()
         .unwrap_err();
-    assert!(matches!(err, cached::BuildError::InvalidTtl { .. }));
+    assert!(matches!(
+        err,
+        cached::BuildError::InvalidValue { field: "ttl", .. }
+    ));
 }
 
 #[cfg(feature = "time_stores")]
@@ -5719,11 +5738,11 @@ async fn test_ttl_sorted_cache_cached_async() {
         .build()
         .unwrap();
 
-    let val = CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { 42u32 }).await;
+    let val = CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 42u32 }).await;
     assert_eq!(*val, 42);
 
     // Second call returns cached value.
-    let val2 = CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { 99u32 }).await;
+    let val2 = CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 99u32 }).await;
     assert_eq!(*val2, 42);
 }
 
@@ -5746,12 +5765,14 @@ async fn test_expiring_lru_cache_cached_async() {
         .unwrap();
 
     let val =
-        CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(42) }).await;
+        CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(42) })
+            .await;
     assert_eq!(val.0, 42);
 
     // Cache hit: factory not called.
     let val2 =
-        CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(99) }).await;
+        CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(99) })
+            .await;
     assert_eq!(val2.0, 42);
 
     assert_eq!(cache.cache_hits(), Some(1));
@@ -6888,7 +6909,7 @@ mod async_cache_store_tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         let val = cache
-            .async_get_or_set_with(1, || {
+            .async_cache_get_or_set_with(1, || {
                 let calls = calls_clone.clone();
                 async move {
                     calls.fetch_add(1, Ordering::Relaxed);
@@ -6901,7 +6922,7 @@ mod async_cache_store_tests {
 
         // Get from cache
         let val = cache
-            .async_get_or_set_with(1, || async {
+            .async_cache_get_or_set_with(1, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
                 "world".to_string()
             })
@@ -6913,7 +6934,7 @@ mod async_cache_store_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
 
         let val = cache
-            .async_get_or_set_with(1, || async {
+            .async_cache_get_or_set_with(1, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
                 "world".to_string()
             })
@@ -6935,7 +6956,7 @@ mod async_cache_store_tests {
             .unwrap();
 
         let val = cache
-            .async_try_get_or_set_with(1, || async { Ok::<_, ()>("hello".to_string()) })
+            .async_cache_try_get_or_set_with(1, || async { Ok::<_, ()>("hello".to_string()) })
             .await
             .unwrap();
         assert_eq!(val, "hello");
@@ -6946,7 +6967,7 @@ mod async_cache_store_tests {
 
         // Try get or set with a new value, triggers evict on old expired value
         let val = cache
-            .async_try_get_or_set_with(1, || async { Ok::<_, ()>("world".to_string()) })
+            .async_cache_try_get_or_set_with(1, || async { Ok::<_, ()>("world".to_string()) })
             .await
             .unwrap();
         assert_eq!(val, "world");
@@ -6967,16 +6988,16 @@ mod async_cache_store_tests {
             .unwrap();
 
         cache
-            .async_get_or_set_with(1, || async { "one".to_string() })
+            .async_cache_get_or_set_with(1, || async { "one".to_string() })
             .await;
         cache
-            .async_get_or_set_with(2, || async { "two".to_string() })
+            .async_cache_get_or_set_with(2, || async { "two".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 0);
 
         // Trigger LRU eviction by size limit
         cache
-            .async_get_or_set_with(3, || async { "three".to_string() })
+            .async_cache_get_or_set_with(3, || async { "three".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 1);
 
@@ -6985,7 +7006,7 @@ mod async_cache_store_tests {
 
         // Trigger evict on expired value
         cache
-            .async_get_or_set_with(3, || async { "new_three".to_string() })
+            .async_cache_get_or_set_with(3, || async { "new_three".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 2);
     }
@@ -7003,14 +7024,14 @@ mod async_cache_store_tests {
             .unwrap();
 
         cache
-            .async_get_or_set_with(1, || async { "one".to_string() })
+            .async_cache_get_or_set_with(1, || async { "one".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 0);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
 
         cache
-            .async_get_or_set_with(1, || async { "new_one".to_string() })
+            .async_cache_get_or_set_with(1, || async { "new_one".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 1);
     }
@@ -7038,13 +7059,13 @@ mod async_cache_store_tests {
             .unwrap();
 
         cache
-            .async_get_or_set_with(1, || async { ExpiringVal { expired: true } })
+            .async_cache_get_or_set_with(1, || async { ExpiringVal { expired: true } })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 0);
 
         // Fetching it when expired triggers eviction
         cache
-            .async_get_or_set_with(1, || async { ExpiringVal { expired: false } })
+            .async_cache_get_or_set_with(1, || async { ExpiringVal { expired: false } })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 1);
     }
@@ -7053,7 +7074,7 @@ mod async_cache_store_tests {
     async fn test_unbound_cache_async() {
         let mut cache = UnboundCache::builder().build().unwrap();
         let val = cache
-            .async_get_or_set_with(1, || async { "hello".to_string() })
+            .async_cache_get_or_set_with(1, || async { "hello".to_string() })
             .await;
         assert_eq!(val, "hello");
     }

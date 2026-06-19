@@ -69,7 +69,9 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::RedisCache<u64, String>",
     create = r##" {
-        RedisCache::builder("cache_redis_example_cached_sleep_secs_config", Duration::from_secs(1))
+        RedisCache::builder()
+            .prefix("cache_redis_example_cached_sleep_secs_config")
+            .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)
             .build()

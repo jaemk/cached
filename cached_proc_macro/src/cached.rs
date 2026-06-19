@@ -159,6 +159,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
+    if let Err(e) = validate_force_refresh_is_string(&attr_args) {
+        return e.to_compile_error().into();
+    }
     let args = match CachedMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -401,6 +404,23 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             "`expires` and `refresh` are mutually exclusive - \
              `refresh` renews a TTL on cache hit, but `ExpiringCache` and \
              `ExpiringLruCache` have no TTL to refresh; expiry is controlled by the value",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // `refresh = true` renews a TTL on cache hit. The default `UnboundCache`/`LruCache`
+    // stores have no TTL to renew, so reject `refresh` unless a TTL is set (mirrors the
+    // check in `concurrent_cached.rs`). `expires` is handled by the dedicated
+    // mutual-exclusion check above, so exclude it here to avoid a confusing double error.
+    // When a `create` block is supplied, the store is user-constructed and `refresh` is
+    // rejected by `check_create_conflicts` below with a more specific message; skip here.
+    if args.refresh && !has_ttl && !args.expires && args.create.is_none() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`refresh` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set - \
+             `refresh` renews a TTL on cache hit, but the default `UnboundCache`/`LruCache` \
+             stores have no TTL to renew",
         )
         .to_compile_error()
         .into();

@@ -51,10 +51,10 @@ Every synchronous cache operation has a short alias (`get`/`set`/`remove`/`clear
 The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short alias
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
-`ConcurrentCachedAsync` keeps the `async_cache_*` spelling (`async_cache_get`, `async_cache_set`,
-`async_cache_remove`, …). `CachedAsync` uses the `async_`-prefixed `get_or_set_with` family
-(`async_get_or_set_with`, `async_try_get_or_set_with`, and their `_mut` variants); it has no
-`async_cache_*` methods. Neither trait has a short alias; the `async_` prefix already prevents
+Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has the
+`get_or_set_with` family (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`, and
+their `_mut` variants). Neither trait has a short alias; the `async_` prefix already prevents
 collisions with the sync methods.
 
 **Features**

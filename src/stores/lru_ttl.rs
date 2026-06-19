@@ -395,6 +395,7 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
     }
 
     /// Evict expired values from the cache.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
         let ttl = self.ttl;
         let on_evict = &self.on_evict;
@@ -788,7 +789,7 @@ impl<K, V> CachedAsync<K, V> for LruTtlCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         key: K,
         f: F,
@@ -830,7 +831,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         key: K,
         f: F,
@@ -1253,15 +1254,15 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
             &0
         );
     }

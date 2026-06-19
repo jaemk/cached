@@ -22,7 +22,7 @@ pub struct RedbCacheBuilder<K, V> {
     refresh: bool,
     durable: bool,
     disk_dir: Option<PathBuf>,
-    cache_name: String,
+    cache_name: Option<String>,
     // fn-pointer phantom — see the rationale on `RedbCache::_phantom`; keeps the
     // type unconditionally `Send + Sync` regardless of `K`/`V`.
     _phantom: PhantomData<fn() -> (K, V)>,
@@ -50,7 +50,7 @@ pub enum RedbCacheBuildError {
     #[error("Storage connection error")]
     Connection(#[from] redb::Error),
     #[error(transparent)]
-    InvalidTtl(#[from] super::BuildError),
+    Build(#[from] super::BuildError),
     #[error("I/O error preparing the disk cache directory")]
     Io(#[from] std::io::Error),
     /// The `cache_name` passed to [`RedbCacheBuilder`] is invalid: it must not be empty,
@@ -78,22 +78,44 @@ static DISK_FILE_PREFIX: &str = "cached_disk_cache";
 // per-entry `version` field), so an incompatible older file is never read.
 const DISK_FILE_VERSION: u64 = 3;
 
+impl<K, V> Default for RedbCacheBuilder<K, V>
+where
+    K: ToString,
+    V: Serialize + DeserializeOwned,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K, V> RedbCacheBuilder<K, V>
 where
     K: ToString,
     V: Serialize + DeserializeOwned,
 {
-    /// Initialize a `RedbCacheBuilder`
+    /// Initialize a `RedbCacheBuilder`.
+    ///
+    /// The cache name is required; set it with [`name`](Self::name) before calling
+    /// [`build`](Self::build).
     #[must_use]
-    pub fn new<S: AsRef<str>>(cache_name: S) -> RedbCacheBuilder<K, V> {
+    pub fn new() -> RedbCacheBuilder<K, V> {
         Self {
             ttl: None,
             refresh: false,
             durable: true,
             disk_dir: None,
-            cache_name: cache_name.as_ref().to_string(),
+            cache_name: None,
             _phantom: Default::default(),
         }
+    }
+
+    /// Set the cache name (required). Used as a filename component for the on-disk
+    /// database file, so it must not be empty, contain a path separator (`/` or `\`),
+    /// contain a NUL byte, or be `.` or `..`.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.cache_name = Some(name.into());
+        self
     }
 
     /// Specify the cache TTL as a `Duration`.
@@ -203,12 +225,16 @@ where
     ///
     /// # Errors
     ///
+    /// - `Build(BuildError::MissingRequired("name"))`: no cache name was set.
     /// - `InvalidCacheName`: `cache_name` is empty, contains a path separator
     ///   (`/` or `\`), contains a NUL byte, or is the path-traversal component `.` or `..`.
-    /// - `InvalidTtl`: the configured TTL is zero.
+    /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
     /// - `Io`: the cache directory could not be created.
     /// - `Connection`: the redb database file could not be opened or initialized.
     pub fn build(self) -> Result<RedbCache<K, V>, RedbCacheBuildError> {
+        let cache_name = self
+            .cache_name
+            .ok_or(super::BuildError::MissingRequired("name"))?;
         // Validate cache_name before using it as a filename component.
         // An empty name yields a meaningless filename. A name containing a path
         // separator ('/' or '\\') or a NUL byte can silently escape the cache
@@ -220,7 +246,7 @@ where
         // names. (':' is allowed: it is established usage in
         // module-path-derived names.)
         {
-            let n = &self.cache_name;
+            let n = &cache_name;
             if n.is_empty()
                 || n.contains('/')
                 || n.contains('\\')
@@ -234,7 +260,7 @@ where
         if let Some(ttl) = self.ttl {
             super::validate_ttl(ttl)?;
         }
-        let cache_dir_name = format!("{}_v{}", self.cache_name, DISK_FILE_VERSION);
+        let cache_dir_name = format!("{}_v{}", cache_name, DISK_FILE_VERSION);
 
         // redb stores a single file. Resolve the directory (explicit or
         // default), ensure it exists, then use `<cache_dir_name>.redb` inside it
@@ -319,9 +345,12 @@ where
     V: Serialize + DeserializeOwned,
 {
     /// Initialize a `RedbCacheBuilder`.
+    ///
+    /// The cache name is required; set it via [`RedbCacheBuilder::name`] before
+    /// calling [`build`](RedbCacheBuilder::build).
     #[must_use]
-    pub fn builder(cache_name: &str) -> RedbCacheBuilder<K, V> {
-        RedbCacheBuilder::new(cache_name)
+    pub fn builder() -> RedbCacheBuilder<K, V> {
+        RedbCacheBuilder::new()
     }
 
     /// Return the path of the on-disk redb database file backing this cache.
@@ -960,29 +989,36 @@ mod tests {
     #[test]
     fn ttl_secs_and_ttl_millis_set_duration() {
         // No disk needed -- inspect the builder's ttl field without calling build().
-        let b = RedbCache::<u32, u32>::builder("ttl-secs-builder").ttl_secs(7);
+        let b = RedbCache::<u32, u32>::builder()
+            .name("ttl-secs-builder")
+            .ttl_secs(7);
         assert_eq!(b.ttl, Some(Duration::from_secs(7)));
 
-        let b = RedbCache::<u32, u32>::builder("ttl-millis-builder").ttl_millis(250);
+        let b = RedbCache::<u32, u32>::builder()
+            .name("ttl-millis-builder")
+            .ttl_millis(250);
         assert_eq!(b.ttl, Some(Duration::from_millis(250)));
     }
 
     #[test]
     fn ttl_setters_override_last_writer_wins() {
         // ttl(secs=10) then ttl_secs(5) -> 5s
-        let b = RedbCache::<u32, u32>::builder("ttl-override-a")
+        let b = RedbCache::<u32, u32>::builder()
+            .name("ttl-override-a")
             .ttl(Duration::from_secs(10))
             .ttl_secs(5);
         assert_eq!(b.ttl, Some(Duration::from_secs(5)));
 
         // ttl_secs then ttl_millis -> the millis value
-        let b = RedbCache::<u32, u32>::builder("ttl-override-b")
+        let b = RedbCache::<u32, u32>::builder()
+            .name("ttl-override-b")
             .ttl_secs(10)
             .ttl_millis(500);
         assert_eq!(b.ttl, Some(Duration::from_millis(500)));
 
         // ttl_millis then ttl -> the ttl value
-        let b = RedbCache::<u32, u32>::builder("ttl-override-c")
+        let b = RedbCache::<u32, u32>::builder()
+            .name("ttl-override-c")
             .ttl_millis(500)
             .ttl(Duration::from_secs(3));
         assert_eq!(b.ttl, Some(Duration::from_secs(3)));
@@ -993,7 +1029,8 @@ mod tests {
         // RedbCache has no `new()` (builder-only); the ttl_secs convenience
         // setter produces a working disk cache that respects the TTL.
         let dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("ttl-secs-roundtrip")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("ttl-secs-roundtrip")
             .disk_directory(dir.path())
             .ttl_secs(60)
             .build()
@@ -1081,13 +1118,13 @@ mod tests {
     #[test]
     fn cache_get_returns_serialize_error_when_refresh_fails() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> =
-            RedbCache::builder("serialize_error_on_refresh")
-                .disk_directory(tmp_dir.path())
-                .ttl(Duration::from_secs(10))
-                .refresh_on_hit(true)
-                .build()
-                .expect("error building disk cache");
+        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> = RedbCache::builder()
+            .name("serialize_error_on_refresh")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(10))
+            .refresh_on_hit(true)
+            .build()
+            .expect("error building disk cache");
         let cached = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
         raw_insert(
             &cache,
@@ -1104,7 +1141,8 @@ mod tests {
     #[test]
     fn cache_get_returns_decode_error_for_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-get")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-cache-get")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1120,7 +1158,8 @@ mod tests {
     #[test]
     fn cache_delete_removes_corrupted_value_without_decoding() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-delete")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-cache-delete")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1134,7 +1173,8 @@ mod tests {
     #[test]
     fn cache_set_overwrites_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-set")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-cache-set")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1149,7 +1189,8 @@ mod tests {
     #[test]
     fn cache_remove_removes_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-remove")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-cache-remove")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1164,7 +1205,8 @@ mod tests {
     #[test]
     fn cache_remove_entry_round_trips_and_removes_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("remove-entry-roundtrip")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("remove-entry-roundtrip")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1189,7 +1231,8 @@ mod tests {
     #[test]
     fn cache_remove_entry_returns_expired_but_present_entry() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("remove-entry-expired")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("remove-entry-expired")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_1_SEC)
             .build()
@@ -1211,7 +1254,8 @@ mod tests {
     fn flush_forces_durable_commit_and_preserves_data() {
         let tmp_dir = temp_dir!();
         // Opt into Durability::None writes so flush() has buffered writes to persist.
-        let cache: RedbCache<u32, u32> = RedbCache::builder("flush-test")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("flush-test")
             .disk_directory(tmp_dir.path())
             .durable(false)
             .build()
@@ -1232,14 +1276,16 @@ mod tests {
         // writes are present. (The fsync itself is not observable from a graceful
         // in-process reopen, so this checks the round-trip, not crash durability.)
         drop(cache);
-        let reopened: RedbCache<u32, u32> = RedbCache::builder("flush-test")
+        let reopened: RedbCache<u32, u32> = RedbCache::builder()
+            .name("flush-test")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error re-opening cache");
         assert_that!(reopened.cache_get(&TEST_KEY), ok(some(eq(&TEST_VAL))));
 
         // flush is a safe no-op on an already-durable cache, and on an empty cache.
-        let durable: RedbCache<u32, u32> = RedbCache::builder("flush-test-durable")
+        let durable: RedbCache<u32, u32> = RedbCache::builder()
+            .name("flush-test-durable")
             .disk_directory(tmp_dir.path())
             .durable(true)
             .build()
@@ -1262,7 +1308,8 @@ mod tests {
 
         let dir_a = temp_dir!();
         let src = dir_a.path().join(&file_name);
-        let a: RedbCache<u32, u32> = RedbCache::builder(NAME)
+        let a: RedbCache<u32, u32> = RedbCache::builder()
+            .name(NAME)
             .disk_directory(dir_a.path())
             .durable(false) // opt into Durability::None writes
             .build()
@@ -1272,7 +1319,8 @@ mod tests {
         // Snapshot before flush: a fresh instance on the copy must NOT see the entry.
         let dir_before = temp_dir!();
         std::fs::copy(&src, dir_before.path().join(&file_name)).unwrap();
-        let before: RedbCache<u32, u32> = RedbCache::builder(NAME)
+        let before: RedbCache<u32, u32> = RedbCache::builder()
+            .name(NAME)
             .disk_directory(dir_before.path())
             .build()
             .unwrap();
@@ -1286,7 +1334,8 @@ mod tests {
         a.flush().unwrap();
         let dir_after = temp_dir!();
         std::fs::copy(&src, dir_after.path().join(&file_name)).unwrap();
-        let after: RedbCache<u32, u32> = RedbCache::builder(NAME)
+        let after: RedbCache<u32, u32> = RedbCache::builder()
+            .name(NAME)
             .disk_directory(dir_after.path())
             .build()
             .unwrap();
@@ -1300,7 +1349,8 @@ mod tests {
     #[test]
     fn remove_expired_entries_returns_decode_error_for_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-sweep")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-sweep")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
             .build()
@@ -1316,7 +1366,8 @@ mod tests {
     #[test]
     fn remove_expired_entries_returns_count_of_removed_entries() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-count")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("sweep-count")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_1_SEC)
             .build()
@@ -1343,7 +1394,8 @@ mod tests {
     #[googletest::test]
     fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("test-cache")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -1388,7 +1440,8 @@ mod tests {
     #[googletest::test]
     fn cache_clear_empties_the_table() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache-clear")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("test-cache-clear")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -1413,7 +1466,8 @@ mod tests {
     #[googletest::test]
     fn values_expire_when_lifespan_elapses_returning_none() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_2_SECS)
             .build()
@@ -1450,7 +1504,8 @@ mod tests {
     fn set_ttl_to_a_different_ttl_is_respected() {
         // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_2_SECS)
             .build()
@@ -1529,7 +1584,8 @@ mod tests {
         const LIFE_SPAN: Duration = LIFE_SPAN_2_SECS;
         const HALF_LIFE_SPAN: Duration = LIFE_SPAN_1_SEC;
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN)
             .refresh_on_hit(true) // ENABLE REFRESH - this is what we're testing
@@ -1569,11 +1625,11 @@ mod tests {
     // Smoke test for the default disk directory: a full get/set/remove
     // round-trip succeeds when `disk_directory` is left at its default.
     fn does_not_break_when_constructed_using_default_disk_directory() {
-        let cache: RedbCache<u32, u32> =
-            RedbCache::builder(&format!("{}:disk-cache-test-default-dir", now_millis()))
-                // use the default disk directory
-                .build()
-                .unwrap();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name(format!("{}:disk-cache-test-default-dir", now_millis()))
+            // use the default disk directory
+            .build()
+            .unwrap();
 
         let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(
@@ -1624,7 +1680,8 @@ mod tests {
                 const CACHE_NAME: &str = "test-cache";
 
                 {
-                    let cache: RedbCache<u32, u32> = RedbCache::builder(CACHE_NAME)
+                    let cache: RedbCache<u32, u32> = RedbCache::builder()
+                        .name(CACHE_NAME)
                         .disk_directory(cache_tmp_dir.path())
                         .durable(set_durable) // WHAT'S BEING TESTED
                         .build()
@@ -1635,7 +1692,8 @@ mod tests {
                     // file is released before we re-open it below.
                 }
 
-                let recovered_cache: RedbCache<u32, u32> = RedbCache::builder(CACHE_NAME)
+                let recovered_cache: RedbCache<u32, u32> = RedbCache::builder()
+                    .name(CACHE_NAME)
                     .disk_directory(cache_tmp_dir.path())
                     .durable(set_durable)
                     .build()
@@ -1747,7 +1805,8 @@ mod tests {
         use crate::ConcurrentCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("test-cache-async")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_1_SEC)
             .build()
@@ -1794,7 +1853,8 @@ mod tests {
         use crate::ConcurrentCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("remove-entry-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("remove-entry-async")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -1825,7 +1885,8 @@ mod tests {
     #[test]
     fn cache_set_ref_round_trips() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("set-ref-roundtrip")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("set-ref-roundtrip")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1861,7 +1922,8 @@ mod tests {
     #[test]
     fn debug_smoke_exposes_non_secret_fields_only() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("debug-smoke")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("debug-smoke")
             .disk_directory(tmp_dir.path())
             .ttl_secs(60)
             .refresh_on_hit(true)
@@ -1899,7 +1961,8 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder("")
+                RedbCache::<u32, u32>::builder()
+                    .name("")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -1909,7 +1972,8 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder("bad/name")
+                RedbCache::<u32, u32>::builder()
+                    .name("bad/name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -1919,7 +1983,8 @@ mod tests {
 
         // ':' is allowed (established usage in module-path / timestamp-derived names).
         assert!(
-            RedbCache::<u32, u32>::builder("ok:name")
+            RedbCache::<u32, u32>::builder()
+                .name("ok:name")
                 .disk_directory(tmp_dir.path())
                 .build()
                 .is_ok(),
@@ -1928,7 +1993,8 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder("bad\\name")
+                RedbCache::<u32, u32>::builder()
+                    .name("bad\\name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -1938,7 +2004,8 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder("..")
+                RedbCache::<u32, u32>::builder()
+                    .name("..")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -1948,7 +2015,8 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder(".")
+                RedbCache::<u32, u32>::builder()
+                    .name(".")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -1958,7 +2026,8 @@ mod tests {
 
         // A valid name must still build successfully.
         assert!(
-            RedbCache::<u32, u32>::builder("valid-cache-name")
+            RedbCache::<u32, u32>::builder()
+                .name("valid-cache-name")
                 .disk_directory(tmp_dir.path())
                 .build()
                 .is_ok(),
@@ -1972,7 +2041,8 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder("bad\0name")
+                RedbCache::<u32, u32>::builder()
+                    .name("bad\0name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -1987,7 +2057,8 @@ mod tests {
         use crate::SerializeCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("set-ref-roundtrip-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("set-ref-roundtrip-async")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -2027,7 +2098,8 @@ mod tests {
         use crate::ConcurrentCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder("flush-test-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("flush-test-async")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();

@@ -92,7 +92,13 @@ mod ttl;
 mod ttl_sorted;
 mod unbound;
 
-use crate::time::{Duration, Instant};
+#[cfg(any(
+    feature = "time_stores",
+    feature = "disk_store",
+    feature = "redis_store"
+))]
+use crate::time::Duration;
+use crate::time::Instant;
 
 pub(super) type OnEvict<K, V> = std::sync::Arc<dyn Fn(&K, &V) + Send + Sync>;
 
@@ -109,11 +115,6 @@ pub enum BuildError {
         /// Human-readable reason.
         reason: &'static str,
     },
-    /// A zero TTL was supplied; TTL must be greater than zero.
-    InvalidTtl {
-        /// The invalid TTL value.
-        ttl: Duration,
-    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -122,9 +123,6 @@ impl std::fmt::Display for BuildError {
             BuildError::MissingRequired(field) => write!(f, "required field `{field}` was not set"),
             BuildError::InvalidValue { field, reason } => {
                 write!(f, "invalid value for field `{field}`: {reason}")
-            }
-            BuildError::InvalidTtl { ttl } => {
-                write!(f, "invalid ttl {ttl:?}: must be greater than zero")
             }
         }
     }
@@ -193,7 +191,10 @@ impl std::error::Error for CacheSetError {}
 ))]
 pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
     if ttl.is_zero() {
-        Err(BuildError::InvalidTtl { ttl })
+        Err(BuildError::InvalidValue {
+            field: "ttl",
+            reason: "must be greater than zero",
+        })
     } else {
         Ok(())
     }
@@ -392,7 +393,7 @@ where
     K: Hash + Eq + Clone + Send,
     S: std::hash::BuildHasher + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -411,7 +412,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -452,6 +453,7 @@ pub trait CacheEvict {
     /// behind an `Arc`/`static`, so they cannot offer `&mut self`. They implement
     /// [`ConcurrentCacheEvict`] (a `&self` counterpart of this trait) instead, and also expose an
     /// inherent `evict(&self)` method.
+    #[must_use]
     fn evict(&mut self) -> usize;
 }
 

@@ -63,6 +63,20 @@ struct OnceMacroArgs {
     sync_lock: Option<String>,
     #[darling(default)]
     unsync_reads: Option<bool>,
+    #[darling(default)]
+    result_fallback: Option<bool>,
+    #[darling(default)]
+    refresh: Option<bool>,
+    #[darling(default)]
+    max_size: Option<usize>,
+    #[darling(default)]
+    ty: Option<String>,
+    #[darling(default)]
+    create: Option<String>,
+    #[darling(default)]
+    key: Option<String>,
+    #[darling(default)]
+    convert: Option<String>,
 }
 
 fn default_sync_writes_buckets() -> usize {
@@ -76,6 +90,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
+    if let Err(e) = validate_force_refresh_is_string(&attr_args) {
+        return e.to_compile_error().into();
+    }
     let args = match OnceMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -224,6 +241,78 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         return syn::Error::new(
             fn_ident.span(),
             "`unsync_reads` is not supported on `#[once]`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Reject the remaining `#[cached]`-only attributes. `#[once]` stores a single
+    // shared value (not a keyed map), so these store-shaping / keying attributes do
+    // not apply. Intercept each with a friendly message instead of darling's generic
+    // "unknown field" error (mirrors `reject_cached_only_attrs` in
+    // `concurrent_cached.rs`).
+    if args.result_fallback.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`result_fallback` is not supported on `#[once]`; \
+             it returns the last cached `Ok` value from a keyed cache, but `#[once]` stores a \
+             single value and already returns the one cached `Ok` on subsequent calls",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.refresh.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`refresh` is not supported on `#[once]`; \
+             `refresh` renews a per-entry TTL on cache hit, but `#[once]` stores a single value \
+             and does not refresh on read - set `ttl`/`ttl_secs`/`ttl_millis` for time-based expiry",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.max_size.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`max_size` is not supported on `#[once]`; \
+             `#[once]` stores a single value, so there is no entry count to bound",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.ty.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`ty` is not supported on `#[once]`; \
+             `#[once]` manages its own single-value storage and does not take a custom store type",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.create.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`create` is not supported on `#[once]`; \
+             `#[once]` manages its own single-value storage and does not take a custom store \
+             constructor",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.key.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`key` is not supported on `#[once]`; \
+             `#[once]` stores a single value for all arguments and has no per-call cache key",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if args.convert.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`convert` is not supported on `#[once]`; \
+             `#[once]` stores a single value for all arguments and has no per-call cache key to convert",
         )
         .to_compile_error()
         .into();

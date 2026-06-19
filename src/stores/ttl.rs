@@ -142,7 +142,7 @@ impl<K, V> TtlCacheBuilder<K, V> {
     ///
     /// Returns [`BuildError`](super::BuildError) if `ttl` was not set or is zero
     /// ([`BuildError::MissingRequired`](super::BuildError::MissingRequired) /
-    /// [`BuildError::InvalidTtl`](super::BuildError::InvalidTtl)).
+    /// [`BuildError::InvalidValue`](super::BuildError::InvalidValue)).
     pub fn build(self) -> Result<TtlCache<K, V>, super::BuildError>
     where
         K: Hash + Eq,
@@ -222,6 +222,7 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
     }
 
     /// Evict expired values from the cache.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
         let ttl = self.ttl;
         let on_evict = &self.on_evict;
@@ -557,7 +558,7 @@ impl<K, V> CachedAsync<K, V> for TtlCache<K, V>
 where
     K: Hash + Eq + Clone + Send,
 {
-    fn async_get_or_set_with_mut<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -602,7 +603,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with_mut<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
