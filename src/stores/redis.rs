@@ -769,6 +769,10 @@ impl<K, V> ConcurrentCacheTtl for RedisCache<K, V> {
         if old.is_zero() { None } else { Some(old) }
     }
 
+    fn refresh_on_hit(&self) -> bool {
+        self.refresh.load(Ordering::Relaxed)
+    }
+
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
         self.refresh.swap(refresh, Ordering::Relaxed)
     }
@@ -1376,6 +1380,10 @@ mod async_redis {
             let old = *guard;
             *guard = Duration::ZERO;
             if old.is_zero() { None } else { Some(old) }
+        }
+
+        fn refresh_on_hit(&self) -> bool {
+            self.refresh.load(Ordering::Relaxed)
         }
 
         /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.

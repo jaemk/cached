@@ -948,6 +948,14 @@ impl<K: Hash + Eq + Ord, V> CacheTtl for TtlSortedCache<K, V> {
     fn unset_ttl(&mut self) -> Option<Duration> {
         None
     }
+    /// `TtlSortedCache` does not refresh entries on hit; always returns `false`.
+    fn refresh_on_hit(&self) -> bool {
+        false
+    }
+    /// `TtlSortedCache` does not support refresh-on-hit; this is a no-op and always returns `false`.
+    fn set_refresh_on_hit(&mut self, _refresh: bool) -> bool {
+        false
+    }
 }
 
 impl<K: Hash + Eq + Ord, V> CachedPeek<K, V> for TtlSortedCache<K, V> {

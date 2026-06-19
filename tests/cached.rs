@@ -5326,41 +5326,43 @@ mod redis_tests {
         cache.cache_clear().expect("clean up");
     }
 
-    // The moved `ConcurrentCacheTtl` impl on the sync Redis store does NOT override
-    // the `refresh_on_hit` getter, so the trait-level getter returns the defaulted
-    // `false` even after `set_refresh_on_hit(true)` swaps the internal AtomicBool.
-    // (The real flag is consulted internally on GET — see the refresh-on-hit raw-TTL
-    // tests above — but is not surfaced through the trait getter.) This pins the same
-    // intentional asymmetry the sharded stores have, so a future change to the trait
-    // getter default is a deliberate, test-visible decision rather than a silent drift.
+    // The `ConcurrentCacheTtl` impl on the sync Redis store now provides a truthful
+    // `refresh_on_hit` getter that reads the internal `AtomicBool` set by
+    // `set_refresh_on_hit`. Previously the getter relied on the trait default and
+    // always returned `false` even after `set_refresh_on_hit(true)` — a latent bug.
+    // Making the trait method required forces a real getter, so the trait-level value
+    // now reflects the setter through trait dispatch.
     #[test]
-    fn test_redis_refresh_on_hit_trait_getter_stays_default_false() {
+    fn test_redis_refresh_on_hit_trait_getter_reflects_setter() {
         let cache = RedisCache::<String, String>::builder()
-            .prefix("test_redis_refresh_getter_default")
+            .prefix("test_redis_refresh_getter_reflects_setter")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
             .expect("build cache");
 
-        // Trait getter default is false.
+        // Trait getter starts false (builder default).
         assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 
         // set_refresh_on_hit returns the previous flag (the AtomicBool swap value).
         let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
         assert!(!prev, "previous flag must be false");
 
-        // Trait getter still reports the default false (not overridden on this store).
+        // Trait getter now reports the value set via trait dispatch.
         assert!(
-            !ConcurrentCacheTtl::refresh_on_hit(&cache),
-            "trait-level refresh_on_hit getter intentionally stays default false"
+            ConcurrentCacheTtl::refresh_on_hit(&cache),
+            "trait-level refresh_on_hit getter must reflect set_refresh_on_hit(true)"
         );
 
-        // Round-trip: the swap still reports the real prior value (true) even though
-        // the getter does not expose it.
+        // Round-trip back to false: getter reflects it, swap reports the real prior value.
         let prev2 = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
         assert!(
             prev2,
             "set_refresh_on_hit must report the real prior flag (true)"
+        );
+        assert!(
+            !ConcurrentCacheTtl::refresh_on_hit(&cache),
+            "trait-level refresh_on_hit getter must reflect set_refresh_on_hit(false)"
         );
     }
 }

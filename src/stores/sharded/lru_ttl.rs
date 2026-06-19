@@ -468,6 +468,10 @@ where
         ShardedLruTtlCacheBase::unset_ttl(self)
     }
 
+    fn refresh_on_hit(&self) -> bool {
+        self.inner.refresh.load(Ordering::Relaxed)
+    }
+
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
         self.inner.refresh.swap(refresh, Ordering::Relaxed)
     }

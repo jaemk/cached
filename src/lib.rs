@@ -1341,14 +1341,10 @@ pub trait CacheTtl {
 
     /// Return `true` if cache hits refresh the TTL of the accessed entry.
     #[must_use]
-    fn refresh_on_hit(&self) -> bool {
-        false
-    }
+    fn refresh_on_hit(&self) -> bool;
 
     /// Set whether cache hits should refresh the TTL. Returns the previous value.
-    fn set_refresh_on_hit(&mut self, _refresh: bool) -> bool {
-        false
-    }
+    fn set_refresh_on_hit(&mut self, refresh: bool) -> bool;
 }
 
 #[cfg(feature = "async_core")]
@@ -1604,20 +1600,16 @@ pub trait ConcurrentCacheTtl {
     /// callable through a shared reference.
     fn unset_ttl(&self) -> Option<Duration>;
 
-    /// Return `true` if cache hits refresh the ttl of the accessed entry. Default: `false`.
+    /// Return `true` if cache hits refresh the ttl of the accessed entry.
     #[must_use]
-    fn refresh_on_hit(&self) -> bool {
-        false
-    }
+    fn refresh_on_hit(&self) -> bool;
 
     /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
     ///
     /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
     /// `AtomicBool`; `RedisCache` / `RedbCache` use interior mutability), so this is callable
     /// through a shared reference such as an `Arc` or a `LazyLock` static.
-    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-        false
-    }
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 }
 
 /// Cache operations on a store that manages its own synchronization (a shared,

@@ -927,9 +927,9 @@ fn try_set_alias_returns_cache_set_error() {
 
 // ── Item 5: refresh_on_hit getter on ConcurrentCacheTtl ──────────────────────
 
-/// `ConcurrentCacheTtl::refresh_on_hit` defaults to `false` on a TTL-capable
-/// concurrent store that does not override the getter (e.g. `ShardedTtlCache`,
-/// which tracks refresh state in an `AtomicBool` read via its inherent getter).
+/// `ConcurrentCacheTtl::refresh_on_hit` returns `false` on a freshly built
+/// TTL-capable concurrent store whose builder left refresh-on-hit disabled
+/// (e.g. `ShardedTtlCache`, which tracks refresh state in an `AtomicBool`).
 /// Non-TTL concurrent stores (`ShardedUnboundCache`, ...) do not implement
 /// `ConcurrentCacheTtl` at all, so they have no `refresh_on_hit` method.
 #[cfg(feature = "time_stores")]
@@ -947,10 +947,10 @@ fn concurrent_refresh_on_hit_default_false() {
 }
 
 /// On a TTL-capable sharded store, the `ConcurrentCacheTtl::set_refresh_on_hit` impl
-/// persists the flag in an `AtomicBool`; the store's inherent `refresh_on_hit()`
-/// reads it back. The trait-default `refresh_on_hit` returns `false` for stores
-/// that do not override it in the `ConcurrentCacheTtl` impl (sharded stores expose the
-/// getter as an inherent method instead).
+/// persists the flag in an `AtomicBool`, and the now-required
+/// `ConcurrentCacheTtl::refresh_on_hit` getter reads it back through trait dispatch.
+/// Previously the getter relied on the trait default and always returned `false`
+/// even after `set_refresh_on_hit(true)` — a latent bug now fixed by construction.
 #[cfg(feature = "time_stores")]
 #[test]
 fn concurrent_set_refresh_on_hit_updates_inner_state() {
@@ -962,29 +962,32 @@ fn concurrent_set_refresh_on_hit_updates_inner_state() {
         .build()
         .expect("build ShardedTtlCache");
 
-    // Trait default is false (no trait-impl override for the getter on this store).
+    // Starts false (builder default).
     assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 
     // `set_refresh_on_hit` returns the previous value (from the AtomicBool swap).
     let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
     assert!(!prev, "previous value must be false");
 
-    // The inherent `refresh_on_hit()` reads the AtomicBool - confirms the setter worked.
+    // The trait getter now reflects the setter through trait dispatch.
+    assert!(
+        ConcurrentCacheTtl::refresh_on_hit(&cache),
+        "trait getter must reflect set_refresh_on_hit(true)"
+    );
+    // The inherent `refresh_on_hit()` reads the same AtomicBool.
     assert!(cache.refresh_on_hit());
 
     // Disable via the trait method.
     let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
     assert!(prev, "previous value must be true");
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
     assert!(!cache.refresh_on_hit());
 }
 
 /// Async counterpart of `concurrent_set_refresh_on_hit_updates_inner_state`:
 /// `ConcurrentCacheTtl::set_refresh_on_hit` on `ShardedTtlCache` swaps the inner
-/// `AtomicBool` (returning the previous flag), and the store's inherent
-/// `refresh_on_hit()` reads it back. The trait-level `refresh_on_hit` getter is the
-/// defaulted `false` on this store (the impl does not override the getter), so the
-/// asymmetry between the real inherent state and the trait default is intentional
-/// and locked here.
+/// `AtomicBool` (returning the previous flag), and the now-required
+/// `ConcurrentCacheTtl::refresh_on_hit` getter reads it back through trait dispatch.
 #[cfg(all(feature = "time_stores", feature = "async"))]
 #[test]
 fn concurrent_async_set_refresh_on_hit_updates_inner_state() {
@@ -996,27 +999,58 @@ fn concurrent_async_set_refresh_on_hit_updates_inner_state() {
         .build()
         .expect("build ShardedTtlCache");
 
-    // Trait-level getter is the default false (no override on this store).
+    // Trait-level getter starts false (builder default).
     assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 
     // Setter swaps the AtomicBool and reports the previous value.
     let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
     assert!(!prev, "previous flag must be false");
 
-    // Inherent getter reflects the new state; trait default still reports false.
+    // Both the inherent and the trait getter reflect the new state.
     assert!(
         cache.refresh_on_hit(),
         "inherent getter must read the swapped flag"
     );
     assert!(
-        !ConcurrentCacheTtl::refresh_on_hit(&cache),
-        "trait-default getter intentionally stays false"
+        ConcurrentCacheTtl::refresh_on_hit(&cache),
+        "trait getter must reflect set_refresh_on_hit(true)"
     );
 
     // Round-trip back to false.
     let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
     assert!(prev, "previous flag must be true");
     assert!(!cache.refresh_on_hit());
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+}
+
+/// `ShardedLruTtlCache` is the second sharded TTL store with an overridden
+/// `set_refresh_on_hit`. Confirm its now-required `ConcurrentCacheTtl::refresh_on_hit`
+/// getter is truthful through trait dispatch (previously it returned the trait-default
+/// `false` regardless of the setter).
+#[cfg(feature = "time_stores")]
+#[test]
+fn concurrent_sharded_lru_ttl_refresh_on_hit_getter_reflects_setter() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCacheTtl, ShardedLruTtlCache};
+
+    let cache = ShardedLruTtlCache::<u32, u32>::builder()
+        .max_size(8)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build ShardedLruTtlCache");
+
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+    assert!(!prev, "previous flag must be false");
+    assert!(
+        ConcurrentCacheTtl::refresh_on_hit(&cache),
+        "trait getter must reflect set_refresh_on_hit(true)"
+    );
+
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+    assert!(prev, "previous flag must be true");
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 }
 
 // ── short remove/remove_entry aliases remain callable for-effect (no #[must_use]) ──

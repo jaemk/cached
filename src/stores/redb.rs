@@ -757,6 +757,10 @@ impl<K, V> ConcurrentCacheTtl for RedbCache<K, V> {
         self.ttl.lock().take()
     }
 
+    fn refresh_on_hit(&self) -> bool {
+        self.refresh.load(Ordering::Relaxed)
+    }
+
     fn set_refresh_on_hit(&self, refresh: bool) -> bool {
         self.refresh.swap(refresh, Ordering::Relaxed)
     }
