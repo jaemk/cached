@@ -13,7 +13,7 @@ Start a RESP3-capable redis (redis 6+, e.g. the `redis` image) if not already ru
     docker run --rm --name cached-csc-example -p 6379:6379 -d redis
 Run:
     CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
-        cargo run --example redis-client-side-cache-tokio --features "redis_async_cache,redis_tokio_native_tls,async_tokio_rt_multi_thread,proc_macro"
+        cargo run --example redis-client-side-cache-tokio --features "redis_async_cache,redis_tokio_native_tls,proc_macro"
 Cleanup:
     docker rm -f cached-csc-example
 */

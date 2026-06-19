@@ -317,7 +317,8 @@ where
 /// in its own write transaction, and write transactions on one `RedbCache` are serialized
 /// (only one commits at a time). Reads are MVCC: they run concurrently with each other and
 /// with a writer, so they never block. The async operations run the blocking redb work on a
-/// `spawn_blocking` thread, so concurrent async writers also queue behind the single writer.
+/// background thread (via [`blocking::unblock`]), so concurrent async writers also queue
+/// behind the single writer.
 ///
 /// This suits read-heavy caching. If a single `RedbCache` is written from many threads at
 /// once, write throughput is bounded by the serialized writer. To reduce that cost, spread
@@ -436,12 +437,11 @@ where
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 impl<K, V> RedbCache<K, V> {
     /// Async counterpart of [`flush`](RedbCache::flush): runs the durable (fsync)
-    /// commit on a `spawn_blocking` thread so it does not stall the async runtime.
+    /// commit on a background thread (via the [`blocking`] crate) so it does not
+    /// stall the async runtime.
     pub async fn async_flush(&self) -> Result<(), RedbCacheError> {
         let connection = self.connection.clone();
-        tokio::task::spawn_blocking(move || redb_flush(&connection))
-            .await
-            .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || redb_flush(&connection)).await
     }
 }
 
@@ -454,17 +454,6 @@ pub enum RedbCacheError {
     CacheDeserialization(#[from] rmp_serde::decode::Error),
     #[error("Error serializing cached value")]
     CacheSerialization(#[from] rmp_serde::encode::Error),
-    /// The blocking task used to run `redb` I/O off the async runtime was
-    /// cancelled or panicked. Only produced by the async
-    /// (`ConcurrentCachedAsync`) path.
-    ///
-    /// Effectively unreachable in normal operation: the blocking work is itself
-    /// fallible and returns the variants above, so this surfaces only if the
-    /// Tokio runtime aborts/cancels the blocking task (e.g. runtime shutdown).
-    /// The underlying `JoinError` is intentionally not carried, to keep
-    /// `tokio` out of this (sync-shared) public error type.
-    #[error("disk cache background task failed")]
-    BackgroundTaskFailed,
 }
 
 impl_from_redb!(
@@ -519,7 +508,7 @@ impl<'a, V> CachedDiskValueRef<'a, V> {
 // These free functions hold the single source of truth for the on-disk
 // behavior (TTL/refresh handling, serialization-error propagation, durability).
 // The synchronous `ConcurrentCached` impl calls them directly; the async
-// `ConcurrentCachedAsync` impl calls them inside `tokio::task::spawn_blocking` so
+// `ConcurrentCachedAsync` impl calls them inside `blocking::unblock` so
 // the blocking `redb` I/O does not stall the async runtime. Keeping one
 // implementation guarantees the sync and async paths stay behaviorally
 // identical.
@@ -837,28 +826,22 @@ where
 }
 
 /// Async disk cache. `redb` has no async API, so every operation is run on
-/// `tokio`'s blocking thread pool via [`tokio::task::spawn_blocking`] to avoid
-/// stalling the async runtime. Behavior is identical to the synchronous
+/// a background thread via [`blocking::unblock`] to avoid stalling the async
+/// runtime. This is runtime-agnostic: it works with any async executor (tokio,
+/// async-std, smol, etc.). Behavior is identical to the synchronous
 /// [`ConcurrentCached`] impl (they share the `disk_cache_*` helpers).
 ///
 /// Values need only be `Send`, **not `Sync`**: they are serialized before the
 /// work moves onto the blocking pool, so no `V` is held across the `.await`
-/// (only the owned serialized bytes / the `JoinHandle<Result<Option<V>, _>>`).
+/// (only the owned serialized bytes).
 /// Keys keep `Send + Sync` (the `&K` is borrowed across the await), consistent
 /// with the `RedisCache`/`AsyncRedisCache` async stores.
 ///
 /// Cancellation: dropping the returned future does **not** cancel the in-flight
-/// `spawn_blocking` `redb` operation — it runs to completion on the blocking
-/// pool (only the result is discarded). This is safe for a cache (`redb`
+/// blocking `redb` operation — it runs to completion on the background thread
+/// (only the result is discarded). This is safe for a cache (`redb`
 /// transactions are atomic, so no corruption), but a cancelled `cache_set`/
 /// `cache_remove` may still have taken effect on disk.
-///
-/// **Concurrency note:** each call spawns a new blocking task on tokio's blocking
-/// thread pool (default limit: 512 threads). Under high concurrency this pool can
-/// saturate, causing subsequent `spawn_blocking` calls to queue. If your workload
-/// issues many concurrent disk-cache operations, tune the pool with
-/// `tokio::runtime::Builder::max_blocking_threads` or consider an explicit
-/// rate-limiting layer above the cache.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 impl<K, V> crate::ConcurrentCachedAsync<K, V> for RedbCache<K, V>
@@ -874,11 +857,8 @@ where
             self.refresh.load(Ordering::Relaxed),
             self.durable,
         );
-        tokio::task::spawn_blocking(move || {
-            disk_cache_get::<V>(&connection, &key, ttl, refresh, durable)
-        })
-        .await
-        .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || disk_cache_get::<V>(&connection, &key, ttl, refresh, durable))
+            .await
     }
 
     async fn async_cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
@@ -886,31 +866,23 @@ where
         let key = key.to_string();
         let durable = self.durable;
         let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
-        tokio::task::spawn_blocking(move || {
-            disk_cache_set::<V>(&connection, &key, serialized, durable)
-        })
-        .await
-        .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable)).await
     }
 
     async fn async_cache_remove(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
         let (ttl, durable) = (*self.ttl.lock(), self.durable);
-        tokio::task::spawn_blocking(move || disk_cache_remove::<V>(&connection, &key, ttl, durable))
-            .await
-            .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || disk_cache_remove::<V>(&connection, &key, ttl, durable)).await
     }
 
     async fn async_cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
         let connection = self.connection.clone();
         let key_str = key.to_string();
         let durable = self.durable;
-        let v: Option<V> = tokio::task::spawn_blocking(move || {
-            disk_cache_remove_entry::<V>(&connection, &key_str, durable)
-        })
-        .await
-        .map_err(|_| RedbCacheError::BackgroundTaskFailed)??;
+        let v: Option<V> =
+            blocking::unblock(move || disk_cache_remove_entry::<V>(&connection, &key_str, durable))
+                .await?;
         Ok(v.map(|v| (key.clone(), v)))
     }
 
@@ -918,20 +890,16 @@ where
         let connection = self.connection.clone();
         let key = key.to_string();
         let durable = self.durable;
-        tokio::task::spawn_blocking(move || disk_cache_delete(&connection, &key, durable))
-            .await
-            .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || disk_cache_delete(&connection, &key, durable)).await
     }
 
     /// Async counterpart of [`ConcurrentCached::cache_clear`]: clears the
-    /// on-disk table off the async runtime via `spawn_blocking` (durability per
-    /// `durable`).
+    /// on-disk table off the async runtime via a background thread (durability
+    /// per `durable`).
     async fn async_cache_clear(&self) -> Result<(), RedbCacheError> {
         let connection = self.connection.clone();
         let durable = self.durable;
-        tokio::task::spawn_blocking(move || disk_cache_clear(&connection, durable))
-            .await
-            .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || disk_cache_clear(&connection, durable)).await
     }
 
     /// Async counterpart of [`ConcurrentCached::cache_reset`]. `RedbCache`
@@ -940,9 +908,7 @@ where
     async fn async_cache_reset(&self) -> Result<(), RedbCacheError> {
         let connection = self.connection.clone();
         let durable = self.durable;
-        tokio::task::spawn_blocking(move || disk_cache_clear(&connection, durable))
-            .await
-            .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+        blocking::unblock(move || disk_cache_clear(&connection, durable)).await
     }
 }
 
@@ -954,7 +920,7 @@ where
     V: Serialize + DeserializeOwned + Send + 'static,
 {
     /// Serializes from the borrowed `value` (no clone) before moving the bytes
-    /// onto the blocking pool. Async counterpart of
+    /// onto the background thread. Async counterpart of
     /// [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref).
     ///
     /// Serialization happens eagerly (before the returned future is awaited) so the
@@ -973,11 +939,8 @@ where
             .map_err(RedbCacheError::CacheSerialization);
         async move {
             let serialized = serialized?;
-            tokio::task::spawn_blocking(move || {
-                disk_cache_set::<V>(&connection, &key, serialized, durable)
-            })
-            .await
-            .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
+            blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable))
+                .await
         }
     }
 }
@@ -2150,5 +2113,43 @@ mod tests {
             cache.async_cache_get(&TEST_KEY).await.unwrap(),
             Some(TEST_VAL)
         );
+    }
+
+    /// Prove runtime-agnosticism: run async RedbCache operations under
+    /// `futures::executor::block_on` (a minimal single-threaded executor, no
+    /// tokio). The `blocking` crate uses its own thread pool, so the blocking
+    /// redb I/O executes correctly regardless of which async executor drives the
+    /// future.
+    #[cfg(feature = "async")]
+    #[test]
+    fn async_redb_cache_works_under_futures_block_on() {
+        use crate::ConcurrentCachedAsync;
+        use futures::executor::block_on;
+
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("futures-block-on-test")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .unwrap();
+
+        // set then get via a non-tokio executor
+        let prev = block_on(cache.async_cache_set(TEST_KEY, TEST_VAL)).unwrap();
+        assert_eq!(prev, None, "first set returns no prior value");
+        let got = block_on(cache.async_cache_get(&TEST_KEY)).unwrap();
+        assert_eq!(got, Some(TEST_VAL), "get returns the value that was set");
+
+        // remove via the non-tokio executor
+        let removed = block_on(cache.async_cache_remove(&TEST_KEY)).unwrap();
+        assert_eq!(
+            removed,
+            Some(TEST_VAL),
+            "remove returns the previously set value"
+        );
+        let after = block_on(cache.async_cache_get(&TEST_KEY)).unwrap();
+        assert_eq!(after, None, "get after remove returns None");
+
+        // async_flush also works
+        block_on(cache.async_flush()).expect("async_flush under futures::block_on should succeed");
     }
 }

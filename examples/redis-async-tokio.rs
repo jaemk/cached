@@ -9,7 +9,7 @@ Start redis if you don't already have one:
     docker run --rm --name async-cached-redis-example -p 6379:6379 -d redis
 Run:
     CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
-        cargo run --example redis-async-tokio --features "redis_tokio_native_tls,async_tokio_rt_multi_thread,proc_macro"
+        cargo run --example redis-async-tokio --features "redis_tokio_native_tls,proc_macro"
 Cleanup:
     docker rm -f async-cached-redis-example
 */

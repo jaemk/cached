@@ -3,7 +3,7 @@ Async memoization on the tokio runtime: `#[cached]` on `async fn`s, including
 `with_cached_flag = true` returning `cached::Return` for a fallible function.
 
 Run:
-    cargo run --example tokio --features "async_tokio_rt_multi_thread,proc_macro"
+    cargo run --example tokio --features "async,proc_macro"
 */
 
 use cached::macros::cached;

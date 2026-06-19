@@ -3353,11 +3353,7 @@ mod concurrent_cached_result_fallback_lru_ttl {
 }
 
 // Async path: `result_fallback = true` returns the last-known-good Ok value after TTL expiry.
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod concurrent_cached_result_fallback_async {
     use cached::macros::concurrent_cached;
     use cached::time::Duration;
@@ -3394,11 +3390,7 @@ mod concurrent_cached_result_fallback_async {
 
 // Async path: `result_fallback = true` with a non-Copy key — regression guard for
 // use-after-move in async codegen when arguments are cloned to form the cache key.
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod concurrent_cached_result_fallback_async_non_copy_key {
     use cached::macros::concurrent_cached;
     use cached::time::Duration;
@@ -3440,11 +3432,7 @@ mod concurrent_cached_result_fallback_async_non_copy_key {
 
 // Async path: `result_fallback = true` with size+ttl selects ShardedLruTtlCache; verify the
 // stale-ok path and metrics work identically on the async LRU-TTL store.
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod concurrent_cached_result_fallback_async_lru_ttl {
     use cached::macros::concurrent_cached;
     use cached::time::Duration;
@@ -3527,7 +3515,7 @@ mod concurrent_cached_cache_err {
 }
 
 // Async path uses `OnceCell<ShardedUnboundCache>`.
-#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "proc_macro", feature = "async"))]
 mod concurrent_cached_default_async {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3665,7 +3653,7 @@ mod concurrent_cached_option {
 }
 
 // Async `option = true` on the sharded default path.
-#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "proc_macro", feature = "async"))]
 mod concurrent_cached_async_option {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3733,7 +3721,7 @@ mod concurrent_cached_async_option {
 }
 
 // Async `with_cached_flag = true` on the sharded default path (plain and Result variants).
-#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "proc_macro", feature = "async"))]
 mod concurrent_cached_default_async_with_cached_flag {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6438,7 +6426,7 @@ fn test_ttl_sorted_cache_clone_cached() {
     assert!(!expired);
 }
 
-#[cfg(all(feature = "time_stores", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_ttl_sorted_cache_cached_async() {
     use cached::CachedAsync;
@@ -6457,7 +6445,7 @@ async fn test_ttl_sorted_cache_cached_async() {
     assert_eq!(*val2, 42);
 }
 
-#[cfg(feature = "async_tokio_rt_multi_thread")]
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_expiring_lru_cache_cached_async() {
     use cached::CachedAsync;
@@ -7258,11 +7246,7 @@ fn test_ttl_sorted_cache_try_size_limit() {
 
 // ── result_fallback async ─────────────────────────────────────────────────────
 
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod result_fallback_async_tests {
     use super::sleep;
     use cached::time::Duration;

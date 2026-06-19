@@ -26,8 +26,7 @@ default = ["proc_macro", "ahash", "time_stores"]
 proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
-async = ["async_core", "tokio"]
-async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
+async = ["async_core", "dep:async-lock", "dep:blocking"]
 redis_store = ["redis", "r2d2", "serde", "serde_json"]
 redis_connection_manager = ["redis_tokio", "redis/connection-manager"]
 redis_smol = [
@@ -106,9 +105,12 @@ optional = true
 version = "1.0"
 optional = true
 
-[dependencies.tokio]
+[dependencies.async-lock]
+version = "3"
+optional = true
+
+[dependencies.blocking]
 version = "1"
-features = ["macros", "time", "sync", "parking_lot", "rt"]
 optional = true
 
 [dependencies.web-time]
@@ -119,6 +121,11 @@ googletest = "0.14"
 tempfile = "3.10.1"
 trybuild = "1"
 criterion = "0.8"
+futures = "0.3"
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["macros", "time", "sync", "parking_lot", "rt", "rt-multi-thread"]
 
 [dev-dependencies.async-std]
 version = "1.6"
@@ -141,11 +148,11 @@ warnings = "deny"
 
 [[example]]
 name = "redis"
-required-features = ["redis_store", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_store", "proc_macro"]
 
 [[example]]
 name = "redis-async-tokio"
-required-features = ["redis_tokio_native_tls", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_tokio_native_tls", "proc_macro"]
 
 [[example]]
 name = "redis-async-async-std"
@@ -153,7 +160,7 @@ required-features = ["redis_smol_native_tls", "proc_macro"]
 
 [[example]]
 name = "tokio"
-required-features = ["async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["async", "proc_macro"]
 
 [[example]]
 name = "async_std"
@@ -165,7 +172,7 @@ required-features = ["proc_macro"]
 
 [[example]]
 name = "expiring_sized_cache"
-required-features = ["async_tokio_rt_multi_thread", "time_stores"]
+required-features = ["time_stores"]
 
 [[example]]
 name = "basic"
@@ -181,11 +188,11 @@ required-features = ["disk_store", "proc_macro"]
 
 [[example]]
 name = "disk_async"
-required-features = ["disk_store", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["disk_store", "async", "proc_macro"]
 
 [[example]]
 name = "redis-client-side-cache-tokio"
-required-features = ["redis_async_cache", "redis_tokio_native_tls", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_async_cache", "redis_tokio_native_tls", "proc_macro"]
 
 [[example]]
 name = "sharded"

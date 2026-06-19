@@ -1,14 +1,14 @@
 /*
 Synchronous Redis cache: `#[concurrent_cached(redis = true)]` and an explicit
 `ty = "RedisCache<..>"` + `create` store. The connection string is read from
-`CACHED_REDIS_CONNECTION_STRING`. (`main` is `#[tokio::main]`, hence the
-`async_tokio_rt_multi_thread` feature even though the cache itself is sync.)
+`CACHED_REDIS_CONNECTION_STRING`. (`main` is `#[tokio::main]`; tokio is a
+dev-dependency so it is always available for examples.)
 
 Start redis if you don't already have one:
     docker run --rm --name cached-redis-example -p 6379:6379 -d redis
 Run:
     CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
-        cargo run --example redis --features "redis_store,async_tokio_rt_multi_thread,proc_macro"
+        cargo run --example redis --features "redis_store,proc_macro"
 Cleanup:
     docker rm -f cached-redis-example
 */

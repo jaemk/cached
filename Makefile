@@ -216,20 +216,20 @@ tests/time-stores:
 	@echo "[$@]: Running tests (time_stores + proc_macro)..."
 	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores" --tests -- --nocapture
 
-# async + proc_macro + time_stores (tokio rt-multi-thread required for #[tokio::test])
+# async + proc_macro + time_stores (tokio in dev-deps supplies the test runtime)
 tests/async:
-	@echo "[$@]: Running tests (async_tokio_rt_multi_thread + proc_macro + time_stores)..."
-	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores,async_tokio_rt_multi_thread" --tests -- --nocapture
+	@echo "[$@]: Running tests (async + proc_macro + time_stores)..."
+	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores,async" --tests -- --nocapture
 
 # proc_macro + ahash (no time_stores)
 tests/ahash:
 	@echo "[$@]: Running tests (proc_macro + ahash, no time_stores)..."
 	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,ahash" --tests -- --nocapture
 
-# disk_store + proc_macro (+ async rt for async disk tests)
+# disk_store + proc_macro (+ async for async disk tests; tokio dev-dep supplies the test runtime)
 tests/disk-store:
-	@echo "[$@]: Running tests (disk_store + proc_macro + async_tokio_rt_multi_thread)..."
-	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,disk_store,async_tokio_rt_multi_thread" --tests -- --nocapture
+	@echo "[$@]: Running tests (disk_store + proc_macro + async)..."
+	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,disk_store,async" --tests -- --nocapture
 
 # disk_store + proc_macro (no async runtime)
 tests/disk-store-sync:
@@ -269,10 +269,10 @@ tests/redis-store: | docker/redis
 	@echo "[$@]: Running tests (redis_store + proc_macro)..."
 	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,redis_store" --tests -- --nocapture
 
-# Async Redis via Tokio with native-tls (rt-multi-thread for #[tokio::test])
+# Async Redis via Tokio with native-tls (tokio dev-dep supplies the test runtime)
 tests/redis-tokio: | docker/redis
-	@echo "[$@]: Running tests (redis_tokio_native_tls + proc_macro + time_stores + async_tokio_rt_multi_thread)..."
-	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores,redis_tokio_native_tls,async_tokio_rt_multi_thread" --tests -- --nocapture
+	@echo "[$@]: Running tests (redis_tokio_native_tls + proc_macro + time_stores)..."
+	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,time_stores,redis_tokio_native_tls" --tests -- --nocapture
 
 # Full all-features run
 tests/all-features: | docker/redis

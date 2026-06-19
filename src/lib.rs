@@ -62,8 +62,7 @@ collisions with the sync methods.
 - `proc_macro`: Include proc macros
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async_core`: Include runtime-agnostic async traits used by async cache stores
-- `async`: Include support for async functions and async cache stores using Tokio synchronization
-- `async_tokio_rt_multi_thread`: Enable `tokio`'s optional `rt-multi-thread` feature.
+- `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency)
 - `redis_store`: Include Redis cache store
 - `redis_smol`: Include async Redis support using `smol` (no TLS); implies `redis_store` and `async`
 - `redis_smol_native_tls`: `redis_smol` + TLS via `native-tls` (system TLS library)
@@ -644,9 +643,9 @@ pub use web_time as time;
 #[cfg(feature = "async")]
 #[doc(hidden)]
 pub mod async_sync {
-    pub use tokio::sync::Mutex;
-    pub use tokio::sync::OnceCell;
-    pub use tokio::sync::RwLock;
+    pub use async_lock::Mutex;
+    pub use async_lock::OnceCell;
+    pub use async_lock::RwLock;
 }
 
 #[doc(hidden)]

@@ -3,7 +3,7 @@
 limit, exercised by concurrent readers/writers on the tokio runtime.
 
 Run:
-    cargo run --example expiring_sized_cache --features "async_tokio_rt_multi_thread,time_stores"
+    cargo run --example expiring_sized_cache --features "time_stores"
 */
 
 use cached::CachedRead; // shared-borrow reads via `cache_get_read` (RwLockReadGuard)

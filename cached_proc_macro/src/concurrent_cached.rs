@@ -1276,7 +1276,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let make_static = |vis: &proc_macro2::TokenStream| {
         if asyncness.is_some() {
             quote! {
-                #vis static #cache_ident: #krate::async_sync::OnceCell<#cache_ty> = #krate::async_sync::OnceCell::const_new();
+                #vis static #cache_ident: #krate::async_sync::OnceCell<#cache_ty> = #krate::async_sync::OnceCell::new();
             }
         } else {
             quote! {
