@@ -4876,6 +4876,34 @@ mod redis_tests {
             );
         }
 
+        // `ConcurrentCacheTtl::refresh_on_hit` on AsyncRedisCache reads the real
+        // AtomicBool through trait dispatch (previously the trait default always
+        // returned false even after set_refresh_on_hit(true)).
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_refresh_on_hit_trait_getter_reflects_setter() {
+            use cached::ConcurrentCacheTtl;
+
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix("async_test_refresh_getter")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+
+            assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+            let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+            assert!(!prev, "previous flag must be false");
+            assert!(
+                ConcurrentCacheTtl::refresh_on_hit(&cache),
+                "trait getter must reflect set_refresh_on_hit(true)"
+            );
+            let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+            assert!(prev, "previous flag must be true");
+            assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+        }
+
         // ConcurrentCacheBase::cache_size / len / is_empty on the ASYNC Redis store
         // (called via the sync base methods, as the task specifies for async stores).
         // Like the sync Redis store, the count is structurally unknown, so all three

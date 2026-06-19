@@ -1053,6 +1053,39 @@ fn concurrent_sharded_lru_ttl_refresh_on_hit_getter_reflects_setter() {
     assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 }
 
+/// `RedbCache` (disk store) implements `ConcurrentCacheTtl` across both its sync and async
+/// surfaces. Confirm its now-required `refresh_on_hit` getter reads the real `AtomicBool`
+/// flag through trait dispatch (it shares the impl pattern with the redis stores, which
+/// previously returned the trait-default `false`). Server-free.
+#[cfg(feature = "disk_store")]
+#[test]
+fn concurrent_redb_refresh_on_hit_getter_reflects_setter() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCacheTtl, RedbCache};
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let cache: RedbCache<u32, u32> = RedbCache::builder()
+        .name("concurrent_redb_refresh_getter")
+        .disk_directory(dir.path())
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build RedbCache");
+
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+    assert!(!prev, "previous flag must be false");
+    assert!(
+        ConcurrentCacheTtl::refresh_on_hit(&cache),
+        "trait getter must reflect set_refresh_on_hit(true)"
+    );
+
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+    assert!(prev, "previous flag must be true");
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+}
+
 // ── short remove/remove_entry aliases remain callable for-effect (no #[must_use]) ──
 
 /// Item 12 locks an intentional asymmetry: `#[must_use]` is on `cache_remove` /
