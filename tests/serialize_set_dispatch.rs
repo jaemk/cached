@@ -41,11 +41,10 @@ fn counted_from_str(s: &str) -> Counted {
 
 mod stores {
     use super::{Counted, counted_from_str, counted_to_string};
-    use cached::{ConcurrentCached, SerializeCached};
+    use cached::{ConcurrentCacheBase, ConcurrentCached, SerializeCached};
     use std::collections::HashMap;
     use std::convert::Infallible;
     use std::sync::Mutex;
-    use std::time::Duration;
 
     pub struct SerStore {
         map: Mutex<HashMap<u32, String>>,
@@ -59,9 +58,11 @@ mod stores {
         }
     }
 
-    impl ConcurrentCached<u32, Counted> for SerStore {
+    impl ConcurrentCacheBase for SerStore {
         type Error = Infallible;
+    }
 
+    impl ConcurrentCached<u32, Counted> for SerStore {
         fn cache_get(&self, k: &u32) -> Result<Option<Counted>, Infallible> {
             let map = self.map.lock().unwrap();
             Ok(map.get(k).map(|s| counted_from_str(s)))
@@ -83,10 +84,6 @@ mod stores {
             Ok(map.remove_entry(k).map(|(k, s)| (k, counted_from_str(&s))))
         }
 
-        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-            false
-        }
-
         fn cache_clear(&self) -> Result<(), Infallible> {
             self.map.lock().unwrap().clear();
             Ok(())
@@ -94,10 +91,6 @@ mod stores {
 
         fn cache_reset(&self) -> Result<(), Infallible> {
             self.cache_clear()
-        }
-
-        fn ttl(&self) -> Option<Duration> {
-            None
         }
     }
 
@@ -129,9 +122,11 @@ mod stores {
         }
     }
 
-    impl ConcurrentCached<u32, Counted> for OwnedStore {
+    impl ConcurrentCacheBase for OwnedStore {
         type Error = Infallible;
+    }
 
+    impl ConcurrentCached<u32, Counted> for OwnedStore {
         fn cache_get(&self, k: &u32) -> Result<Option<Counted>, Infallible> {
             // Reading requires a Clone to return an owned value from the locked map.
             // We reset CLONES before each test and only care about the set-path clone.
@@ -154,10 +149,6 @@ mod stores {
             Ok(map.remove_entry(k))
         }
 
-        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-            false
-        }
-
         fn cache_clear(&self) -> Result<(), Infallible> {
             self.map.lock().unwrap().clear();
             Ok(())
@@ -165,10 +156,6 @@ mod stores {
 
         fn cache_reset(&self) -> Result<(), Infallible> {
             self.cache_clear()
-        }
-
-        fn ttl(&self) -> Option<Duration> {
-            None
         }
     }
 
@@ -293,12 +280,11 @@ mod clone_count_tests {
 
 #[cfg(feature = "async")]
 mod async_serialize_store {
-    use cached::{ConcurrentCachedAsync, SerializeCachedAsync};
+    use cached::{ConcurrentCacheBase, ConcurrentCachedAsync, SerializeCachedAsync};
     use std::collections::HashMap;
     use std::convert::Infallible;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     // Counts every Clone of AsyncVal, so the borrowed-vs-owned async arm is observable
     // the same way `CLONES` makes it observable for the sync path.
@@ -334,9 +320,11 @@ mod async_serialize_store {
         }
     }
 
-    impl ConcurrentCachedAsync<u32, AsyncVal> for AsyncSerStore {
+    impl ConcurrentCacheBase for AsyncSerStore {
         type Error = Infallible;
+    }
 
+    impl ConcurrentCachedAsync<u32, AsyncVal> for AsyncSerStore {
         fn async_cache_get(
             &self,
             k: &u32,
@@ -389,10 +377,6 @@ mod async_serialize_store {
             async move { Ok(result) }
         }
 
-        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-            false
-        }
-
         fn async_cache_clear(
             &self,
         ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
@@ -411,10 +395,6 @@ mod async_serialize_store {
         {
             self.map.lock().unwrap().clear();
             async move { Ok(()) }
-        }
-
-        fn ttl(&self) -> Option<Duration> {
-            None
         }
     }
 
@@ -451,9 +431,11 @@ mod async_serialize_store {
         }
     }
 
-    impl ConcurrentCachedAsync<u32, AsyncVal> for AsyncOwnedStore {
+    impl ConcurrentCacheBase for AsyncOwnedStore {
         type Error = Infallible;
+    }
 
+    impl ConcurrentCachedAsync<u32, AsyncVal> for AsyncOwnedStore {
         fn async_cache_get(
             &self,
             k: &u32,
@@ -506,10 +488,6 @@ mod async_serialize_store {
             async move { Ok(result) }
         }
 
-        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-            false
-        }
-
         fn async_cache_clear(
             &self,
         ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
@@ -528,10 +506,6 @@ mod async_serialize_store {
         {
             self.map.lock().unwrap().clear();
             async move { Ok(()) }
-        }
-
-        fn ttl(&self) -> Option<Duration> {
-            None
         }
     }
 

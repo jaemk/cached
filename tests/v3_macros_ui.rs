@@ -77,6 +77,10 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/cached_name_keyword.rs");
     // Item 11: `ShardHasher: Clone` supertrait - a non-Clone custom hasher is rejected.
     t.compile_fail("tests/ui/sharded_non_clone_shard_hasher.rs");
+    // Negative surface for the concurrent trait split: non-TTL sharded stores do not
+    // implement `ConcurrentCacheTtl`, so `set_ttl` does not exist on them even under
+    // the prelude glob.
+    t.compile_fail("tests/ui/sharded_unbound_no_set_ttl.rs");
     // Item 9: `#[cached]`-only attributes rejected on other macros
     t.compile_fail("tests/ui/once_sync_lock_unsupported.rs");
     t.compile_fail("tests/ui/once_unsync_reads_unsupported.rs");

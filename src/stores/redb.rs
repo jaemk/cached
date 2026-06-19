@@ -1,6 +1,6 @@
-use crate::ConcurrentCached;
 use crate::time::Duration;
 use crate::time::SystemTime;
+use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCached};
 use directories::BaseDirs;
 use parking_lot::Mutex;
 use redb::{Builder, Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
@@ -730,13 +730,43 @@ fn redb_flush(connection: &Database) -> Result<(), RedbCacheError> {
 /// `cache_get` can additionally surface a [`RedbCacheError::CacheSerialization`] when
 /// `refresh_on_hit` is enabled and re-serializing the just-read entry to rewrite its
 /// refreshed expiry fails.
+impl<K, V> ConcurrentCacheBase for RedbCache<K, V> {
+    type Error = RedbCacheError;
+}
+
+impl<K, V> ConcurrentCacheTtl for RedbCache<K, V> {
+    fn ttl(&self) -> Option<Duration> {
+        *self.ttl.lock()
+    }
+
+    /// Set the TTL applied to newly inserted entries, returning the previous TTL
+    /// (`None` if expiry was disabled).
+    ///
+    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: subsequent writes
+    /// store entries with no expiry. Existing entries keep the expiry they were written with.
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        let mut guard = self.ttl.lock();
+        if ttl.is_zero() {
+            guard.take()
+        } else {
+            guard.replace(ttl)
+        }
+    }
+
+    fn unset_ttl(&self) -> Option<Duration> {
+        self.ttl.lock().take()
+    }
+
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.refresh.swap(refresh, Ordering::Relaxed)
+    }
+}
+
 impl<K, V> ConcurrentCached<K, V> for RedbCache<K, V>
 where
     K: ToString + Clone,
     V: Serialize + DeserializeOwned,
 {
-    type Error = RedbCacheError;
-
     fn cache_get(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let ttl = *self.ttl.lock();
         let refresh = self.refresh.load(Ordering::Relaxed);
@@ -786,32 +816,6 @@ where
     fn cache_reset(&self) -> Result<(), RedbCacheError> {
         disk_cache_clear(&self.connection, self.durable)
     }
-
-    fn ttl(&self) -> Option<Duration> {
-        *self.ttl.lock()
-    }
-
-    /// Set the TTL applied to newly inserted entries, returning the previous TTL
-    /// (`None` if expiry was disabled).
-    ///
-    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: subsequent writes
-    /// store entries with no expiry. Existing entries keep the expiry they were written with.
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let mut guard = self.ttl.lock();
-        if ttl.is_zero() {
-            guard.take()
-        } else {
-            guard.replace(ttl)
-        }
-    }
-
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    fn unset_ttl(&self) -> Option<Duration> {
-        self.ttl.lock().take()
-    }
 }
 
 impl<K, V> crate::SerializeCached<K, V> for RedbCache<K, V>
@@ -858,8 +862,6 @@ where
     K: ToString + Clone + Send + Sync,
     V: Serialize + DeserializeOwned + Send + 'static,
 {
-    type Error = RedbCacheError;
-
     async fn async_cache_get(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
@@ -937,32 +939,6 @@ where
         tokio::task::spawn_blocking(move || disk_cache_clear(&connection, durable))
             .await
             .map_err(|_| RedbCacheError::BackgroundTaskFailed)?
-    }
-
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    fn ttl(&self) -> Option<Duration> {
-        *self.ttl.lock()
-    }
-
-    /// Set the TTL applied to newly inserted entries, returning the previous TTL
-    /// (`None` if expiry was disabled).
-    ///
-    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: subsequent writes
-    /// store entries with no expiry. Existing entries keep the expiry they were written with.
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let mut guard = self.ttl.lock();
-        if ttl.is_zero() {
-            guard.take()
-        } else {
-            guard.replace(ttl)
-        }
-    }
-
-    fn unset_ttl(&self) -> Option<Duration> {
-        self.ttl.lock().take()
     }
 }
 
@@ -1590,7 +1566,7 @@ mod tests {
         );
 
         let old_from_setting_lifespan =
-            ConcurrentCached::set_ttl(&cache, LIFE_SPAN_1_SEC).expect("error setting new ttl");
+            ConcurrentCacheTtl::set_ttl(&cache, LIFE_SPAN_1_SEC).expect("error setting new ttl");
         assert_that!(
             old_from_setting_lifespan,
             eq(LIFE_SPAN_2_SECS),
@@ -1616,7 +1592,7 @@ mod tests {
             "Getting an expired key-value should return None"
         );
 
-        ConcurrentCached::set_ttl(&cache, Duration::from_secs(10)).expect("error setting ttl");
+        ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(10)).expect("error setting ttl");
         assert_that!(
             cache.cache_set(TEST_KEY, TEST_VAL),
             ok(none()),

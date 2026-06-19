@@ -1,5 +1,5 @@
-use crate::ConcurrentCached;
 use crate::time::Duration;
+use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCached};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -735,13 +735,50 @@ impl<'a, V> CachedRedisValueRef<'a, V> {
     }
 }
 
+impl<K, V> ConcurrentCacheBase for RedisCache<K, V> {
+    type Error = RedisCacheError;
+}
+
+impl<K, V> ConcurrentCacheTtl for RedisCache<K, V> {
+    fn ttl(&self) -> Option<Duration> {
+        let ttl = *self.ttl.lock();
+        if ttl.is_zero() { None } else { Some(ttl) }
+    }
+
+    /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
+    /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
+    /// TTL was applied when they were originally inserted.
+    ///
+    /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
+    /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
+    /// until explicitly removed. Use [`try_set_ttl`](crate::ConcurrentCacheTtl::try_set_ttl) if you
+    /// want a zero TTL rejected instead.
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = ttl;
+        if old.is_zero() { None } else { Some(old) }
+    }
+
+    /// Disable expiry: subsequent `cache_set` writes store keys without a TTL (plain `SET`).
+    /// Returns the previous TTL, or `None` if expiry was already disabled.
+    fn unset_ttl(&self) -> Option<Duration> {
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = Duration::ZERO;
+        if old.is_zero() { None } else { Some(old) }
+    }
+
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.refresh.swap(refresh, Ordering::Relaxed)
+    }
+}
+
 impl<K, V> ConcurrentCached<K, V> for RedisCache<K, V>
 where
     K: Display + Clone,
     V: Serialize + DeserializeOwned,
 {
-    type Error = RedisCacheError;
-
     fn cache_get(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
         let mut conn = self.pool.get()?;
         let mut pipe = redis::pipe();
@@ -891,39 +928,6 @@ where
     fn cache_reset(&self) -> Result<(), RedisCacheError> {
         self.cache_clear()
     }
-
-    fn ttl(&self) -> Option<Duration> {
-        let ttl = *self.ttl.lock();
-        if ttl.is_zero() { None } else { Some(ttl) }
-    }
-
-    /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
-    /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
-    /// TTL was applied when they were originally inserted.
-    ///
-    /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
-    /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
-    /// until explicitly removed. Use [`try_set_ttl`](crate::CacheTtl::try_set_ttl) if you
-    /// want a zero TTL rejected instead.
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let mut guard = self.ttl.lock();
-        let old = *guard;
-        *guard = ttl;
-        if old.is_zero() { None } else { Some(old) }
-    }
-
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    /// Disable expiry: subsequent `cache_set` writes store keys without a TTL (plain `SET`).
-    /// Returns the previous TTL, or `None` if expiry was already disabled.
-    fn unset_ttl(&self) -> Option<Duration> {
-        let mut guard = self.ttl.lock();
-        let old = *guard;
-        *guard = Duration::ZERO;
-        if old.is_zero() { None } else { Some(old) }
-    }
 }
 
 impl<K, V> crate::SerializeCached<K, V> for RedisCache<K, V>
@@ -992,7 +996,7 @@ mod async_redis {
         DeserializeOwned, Display, ENV_KEY, PhantomData, RedisCacheBuildError, RedisCacheError,
         Serialize,
     };
-    use crate::ConcurrentCachedAsync;
+    use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCachedAsync};
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
 
@@ -1339,6 +1343,47 @@ mod async_redis {
         }
     }
 
+    impl<K, V> ConcurrentCacheBase for AsyncRedisCache<K, V> {
+        type Error = RedisCacheError;
+    }
+
+    impl<K, V> ConcurrentCacheTtl for AsyncRedisCache<K, V> {
+        /// Return the ttl of cached values (time to eviction), or `None` if expiry is disabled.
+        fn ttl(&self) -> Option<Duration> {
+            let ttl = *self.ttl.lock();
+            if ttl.is_zero() { None } else { Some(ttl) }
+        }
+
+        /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
+        /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
+        /// TTL was applied when they were originally inserted.
+        ///
+        /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
+        /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys
+        /// persist until explicitly removed. Use
+        /// [`try_set_ttl`](crate::ConcurrentCacheTtl::try_set_ttl) if you want a zero TTL rejected.
+        fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = ttl;
+            if old.is_zero() { None } else { Some(old) }
+        }
+
+        /// Disable expiry: subsequent `async_cache_set` writes store keys without a TTL
+        /// (plain `SET`). Returns the previous TTL, or `None` if expiry was already disabled.
+        fn unset_ttl(&self) -> Option<Duration> {
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = Duration::ZERO;
+            if old.is_zero() { None } else { Some(old) }
+        }
+
+        /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
+        fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+            self.refresh.swap(refresh, Ordering::Relaxed)
+        }
+    }
+
     impl<K, V> ConcurrentCachedAsync<K, V> for AsyncRedisCache<K, V>
     where
         // `V: Sync` not needed — values cross the async boundary by value, never
@@ -1346,8 +1391,6 @@ mod async_redis {
         K: Display + Clone + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
-        type Error = RedisCacheError;
-
         /// Get a cached value
         async fn async_cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
@@ -1502,41 +1545,6 @@ mod async_redis {
         async fn async_cache_reset(&self) -> Result<(), Self::Error> {
             self.async_cache_clear().await
         }
-
-        /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
-        fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-            self.refresh.swap(refresh, Ordering::Relaxed)
-        }
-
-        /// Return the ttl of cached values (time to eviction), or `None` if expiry is disabled.
-        fn ttl(&self) -> Option<Duration> {
-            let ttl = *self.ttl.lock();
-            if ttl.is_zero() { None } else { Some(ttl) }
-        }
-
-        /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
-        /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
-        /// TTL was applied when they were originally inserted.
-        ///
-        /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
-        /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys
-        /// persist until explicitly removed. Use
-        /// [`try_set_ttl`](crate::CacheTtl::try_set_ttl) if you want a zero TTL rejected.
-        fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-            let mut guard = self.ttl.lock();
-            let old = *guard;
-            *guard = ttl;
-            if old.is_zero() { None } else { Some(old) }
-        }
-
-        /// Disable expiry: subsequent `async_cache_set` writes store keys without a TTL
-        /// (plain `SET`). Returns the previous TTL, or `None` if expiry was already disabled.
-        fn unset_ttl(&self) -> Option<Duration> {
-            let mut guard = self.ttl.lock();
-            let old = *guard;
-            *guard = Duration::ZERO;
-            if old.is_zero() { None } else { Some(old) }
-        }
     }
 
     impl<K, V> crate::SerializeCachedAsync<K, V> for AsyncRedisCache<K, V>
@@ -1643,7 +1651,7 @@ mod async_redis {
             sleep(Duration::new(2, 500_000));
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
-            let old = ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(1)).unwrap();
+            let old = ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(1)).unwrap();
             assert_eq!(2, old.as_secs());
             assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
             assert!(c.async_cache_get(&1).await.unwrap().is_some());
@@ -1651,7 +1659,7 @@ mod async_redis {
             sleep(Duration::new(1, 600_000));
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
-            ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(10)).unwrap();
+            ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(10)).unwrap();
             assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
             assert!(c.async_cache_set(2, 100).await.unwrap().is_none());
             assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
@@ -1916,7 +1924,7 @@ mod tests {
         sleep(Duration::new(2, 500_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        let old = ConcurrentCached::set_ttl(&c, Duration::from_secs(1)).unwrap();
+        let old = ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(1)).unwrap();
         assert_eq!(2, old.as_secs());
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
@@ -1924,7 +1932,7 @@ mod tests {
         sleep(Duration::new(1, 600_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        ConcurrentCached::set_ttl(&c, Duration::from_secs(10)).unwrap();
+        ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(10)).unwrap();
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);

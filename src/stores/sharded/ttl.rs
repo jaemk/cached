@@ -30,7 +30,10 @@ use std::collections::HashMap;
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
-use crate::{CacheMetrics, ConcurrentCacheEvict, ConcurrentCached, ConcurrentCloneCached};
+use crate::{
+    CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached,
+    ConcurrentCloneCached,
+};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -387,7 +390,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedTtlCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -395,6 +398,40 @@ where
 {
     type Error = std::convert::Infallible;
 
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(Some(self.len()))
+    }
+}
+
+impl<K, V, H> ConcurrentCacheTtl for ShardedTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
+    fn ttl(&self) -> Option<Duration> {
+        self.ttl_duration()
+    }
+
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        ShardedTtlCacheBase::set_ttl(self, ttl)
+    }
+
+    fn unset_ttl(&self) -> Option<Duration> {
+        ShardedTtlCacheBase::unset_ttl(self)
+    }
+
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.inner.refresh.swap(refresh, Ordering::Relaxed)
+    }
+}
+
+impl<K, V, H> ConcurrentCached<K, V> for ShardedTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         if self.inner.refresh.load(Ordering::Relaxed) {
@@ -516,10 +553,6 @@ where
         Ok(removed.map(|(k, entry)| (k, entry.value)))
     }
 
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
     fn cache_clear(&self) -> Result<(), Self::Error> {
         self.clear();
         Ok(())
@@ -538,22 +571,6 @@ where
         self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
-
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.inner.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        ShardedTtlCacheBase::set_ttl(self, ttl)
-    }
-
-    fn unset_ttl(&self) -> Option<Duration> {
-        ShardedTtlCacheBase::unset_ttl(self)
-    }
 }
 
 #[cfg(feature = "async_core")]
@@ -563,8 +580,6 @@ where
     V: Clone + Send + Sync,
     H: ShardHasher<K>,
 {
-    type Error = std::convert::Infallible;
-
     async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
@@ -591,26 +606,6 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
-    }
-
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
-    fn set_refresh_on_hit(&self, b: bool) -> bool {
-        <Self as ConcurrentCached<K, V>>::set_refresh_on_hit(self, b)
-    }
-
-    fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        ShardedTtlCacheBase::set_ttl(self, ttl)
-    }
-
-    fn unset_ttl(&self) -> Option<Duration> {
-        ShardedTtlCacheBase::unset_ttl(self)
     }
 }
 

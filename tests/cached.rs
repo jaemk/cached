@@ -4372,8 +4372,10 @@ mod concurrent_cached_return_named_error {
             Self(std::sync::Mutex::new(std::collections::HashMap::new()))
         }
     }
-    impl cached::ConcurrentCached<String, String> for Store {
+    impl cached::ConcurrentCacheBase for Store {
         type Error = std::convert::Infallible;
+    }
+    impl cached::ConcurrentCached<String, String> for Store {
         fn cache_get(&self, k: &String) -> Result<Option<String>, Self::Error> {
             Ok(self.0.lock().unwrap().get(k).cloned())
         }
@@ -4385,9 +4387,6 @@ mod concurrent_cached_return_named_error {
         }
         fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
             Ok(self.0.lock().unwrap().remove_entry(k))
-        }
-        fn set_refresh_on_hit(&self, _r: bool) -> bool {
-            false
         }
         fn cache_clear(&self) -> Result<(), Self::Error> {
             self.0.lock().unwrap().clear();
@@ -4593,7 +4592,7 @@ mod redis_tests {
         #[cfg(feature = "redis_tokio")]
         #[tokio::test]
         async fn async_redis_set_ttl_zero_writes_key_without_expiry() {
-            use cached::ConcurrentCachedAsync;
+            use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync};
 
             let prefix = "async_test_set_ttl_zero_no_expiry";
             let cache = AsyncRedisCache::<String, String>::builder()
@@ -4630,9 +4629,9 @@ mod redis_tests {
             );
 
             // Disable expiry.
-            let prev = ConcurrentCachedAsync::set_ttl(&cache, Duration::ZERO);
+            let prev = ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
             assert_eq!(prev, Some(Duration::from_secs(30)));
-            assert_eq!(ConcurrentCachedAsync::ttl(&cache), None);
+            assert_eq!(ConcurrentCacheTtl::ttl(&cache), None);
 
             cache
                 .async_cache_set("k_persist".to_string(), "v".to_string())
@@ -4652,7 +4651,7 @@ mod redis_tests {
             );
 
             // Re-arm a real ttl.
-            ConcurrentCachedAsync::set_ttl(&cache, Duration::from_secs(30));
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(30));
             cache
                 .async_cache_set("k_rearm".to_string(), "v".to_string())
                 .await
@@ -4671,7 +4670,7 @@ mod redis_tests {
         #[cfg(feature = "redis_tokio")]
         #[tokio::test]
         async fn async_redis_set_ref_zero_ttl_writes_key_without_expiry() {
-            use cached::{ConcurrentCachedAsync, SerializeCachedAsync};
+            use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync, SerializeCachedAsync};
 
             let prefix = "async_test_set_ref_zero_ttl";
             let cache = AsyncRedisCache::<String, String>::builder()
@@ -4708,7 +4707,7 @@ mod redis_tests {
             );
 
             // Disable expiry: set_ref must write the key WITHOUT any expiry.
-            ConcurrentCachedAsync::set_ttl(&cache, Duration::ZERO);
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
             let prev2 = cache
                 .async_cache_set_ref(&"k_persist".to_string(), &"v".to_string())
                 .await
@@ -4728,7 +4727,7 @@ mod redis_tests {
             );
 
             // Re-arm a real ttl: set_ref resumes writing a TTL, and returns the prior value.
-            ConcurrentCachedAsync::set_ttl(&cache, Duration::from_secs(30));
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(30));
             let prev3 = cache
                 .async_cache_set_ref(&"k_persist".to_string(), &"v2".to_string())
                 .await
@@ -4751,7 +4750,7 @@ mod redis_tests {
         #[cfg(feature = "redis_tokio")]
         #[tokio::test]
         async fn async_redis_refresh_on_hit_disabled_then_reenabled_ttl() {
-            use cached::ConcurrentCachedAsync;
+            use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync};
 
             let prefix = "async_test_refresh_disabled_reenabled";
             let cache = AsyncRedisCache::<String, String>::builder()
@@ -4787,7 +4786,7 @@ mod redis_tests {
 
             // Disable expiry, refresh-on-hit GET: prior TTL must remain intact
             // (skip-EXPIRE: not renewed, not PERSISTed).
-            ConcurrentCachedAsync::set_ttl(&cache, Duration::ZERO);
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
             assert_eq!(
                 cache
                     .async_cache_get(&"k".to_string())
@@ -4816,7 +4815,7 @@ mod redis_tests {
                 -1,
                 "persistent key written under disabled ttl"
             );
-            ConcurrentCachedAsync::set_ttl(&cache, Duration::from_secs(50));
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(50));
             assert_eq!(
                 cache
                     .async_cache_get(&"p".to_string())
@@ -4831,10 +4830,101 @@ mod redis_tests {
 
             cache.async_cache_clear().await.expect("clean up");
         }
+
+        // The author flagged the non-zero `try_set_ttl` success path as untested on the
+        // async Redis store. `ConcurrentCacheTtl::try_set_ttl` is a defaulted method:
+        // zero -> Err(ZeroTtl) (no store mutation), non-zero -> Ok(prev) where `prev`
+        // is whatever `set_ttl` returned (the PRIOR ttl). This pins both arms on
+        // `AsyncRedisCache`, including that a rejected zero leaves the ttl untouched and
+        // that the returned prior value is correct across consecutive calls.
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_try_set_ttl_zero_and_nonzero() {
+            use cached::{ConcurrentCacheTtl, SetTtlError};
+
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix("async_test_try_set_ttl")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+
+            // Zero is rejected and the ttl is left untouched.
+            assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
+            assert_eq!(
+                ConcurrentCacheTtl::ttl(&cache),
+                Some(Duration::from_secs(30)),
+                "rejected try_set_ttl must not change the ttl"
+            );
+
+            // Non-zero succeeds and returns the PRIOR ttl (the build ttl).
+            assert_eq!(
+                cache.try_set_ttl(Duration::from_secs(60)),
+                Ok(Some(Duration::from_secs(30))),
+                "non-zero try_set_ttl must return the previous ttl"
+            );
+            assert_eq!(
+                ConcurrentCacheTtl::ttl(&cache),
+                Some(Duration::from_secs(60))
+            );
+
+            // A second non-zero try_set_ttl returns the value just installed.
+            assert_eq!(
+                cache.try_set_ttl(Duration::from_secs(10)),
+                Ok(Some(Duration::from_secs(60)))
+            );
+        }
+
+        // ConcurrentCacheBase::cache_size / len / is_empty on the ASYNC Redis store
+        // (called via the sync base methods, as the task specifies for async stores).
+        // Like the sync Redis store, the count is structurally unknown, so all three
+        // must answer Ok(None) — never Ok(Some(0)) / Ok(Some(true)).
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_cache_size_len_is_empty_unknown() {
+            use cached::{ConcurrentCacheBase, ConcurrentCachedAsync};
+
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix("async_test_cache_size_unknown")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            // RedisCacheError does not implement PartialEq; unwrap and compare payloads.
+            assert_eq!(
+                ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+                None
+            );
+            assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+            assert_eq!(
+                ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+                None
+            );
+
+            cache
+                .async_cache_set("k".to_string(), "v".to_string())
+                .await
+                .expect("set k");
+            assert_eq!(
+                ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+                None
+            );
+            assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+            assert_eq!(
+                ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+                None
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
     }
 
     // Requires a live Redis server (provided by CI).
-    use cached::{ConcurrentCached, SerializeCached};
+    use cached::{ConcurrentCacheTtl, ConcurrentCached, SerializeCached};
 
     #[test]
     fn test_redis_cache_clear_scoped() {
@@ -5150,6 +5240,128 @@ mod redis_tests {
         );
 
         cache.cache_clear().expect("clean up");
+    }
+
+    // Behavior parity for the moved `ConcurrentCacheTtl` knobs on the SYNC Redis store.
+    // The author covered `set_ttl(0)`/`unset_ttl` (the disable paths) with raw-TTL
+    // probes, but not the plain non-zero round-trip: `ttl()` reflects the build ttl,
+    // `set_ttl(nonzero)` returns the PRIOR ttl and updates the live value, and
+    // `unset_ttl()` returns the prior ttl and resolves `ttl()` to None. A regression in
+    // the moved getter/setter would be caught here without inspecting raw Redis state.
+    #[test]
+    fn test_redis_set_ttl_nonzero_round_trip() {
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_set_ttl_nonzero_round_trip")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+
+        // ttl() reflects the configured build ttl.
+        assert_eq!(cache.ttl(), Some(Duration::from_secs(30)));
+
+        // set_ttl(nonzero) returns the PREVIOUS ttl and installs the new one.
+        let prev = cache.set_ttl(Duration::from_secs(60));
+        assert_eq!(prev, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), Some(Duration::from_secs(60)));
+
+        // A second set_ttl returns the value just installed.
+        let prev2 = cache.set_ttl(Duration::from_secs(10));
+        assert_eq!(prev2, Some(Duration::from_secs(60)));
+
+        // unset_ttl returns the prior ttl and disables expiry (ttl -> None).
+        let prev3 = cache.unset_ttl();
+        assert_eq!(prev3, Some(Duration::from_secs(10)));
+        assert_eq!(cache.ttl(), None);
+
+        // unset_ttl on an already-disabled store returns None.
+        assert_eq!(cache.unset_ttl(), None);
+    }
+
+    // ConcurrentCacheBase::cache_size / len / is_empty on the SYNC Redis store.
+    // The author noted `cache_size() == Ok(None)` was only asserted for `RedbCache`.
+    // RedisCache cannot answer its own entry count cheaply (a server-side DBSIZE/SCAN
+    // over a shared keyspace), so it must return Ok(None) — and the `len`/`is_empty`
+    // defaults must forward through (len -> cache_size, is_empty -> None map). This
+    // holds even with live entries present, since the size is structurally unknown.
+    #[test]
+    fn test_redis_cache_size_len_is_empty_unknown() {
+        use cached::ConcurrentCacheBase;
+
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_redis_cache_size_unknown")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Empty store: size is still structurally unknown (None), NOT Some(0).
+        // RedisCacheError does not implement PartialEq, so unwrap and compare payloads.
+        assert_eq!(
+            ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+            None
+        );
+        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(
+            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            None,
+            "unknown size must map to is_empty == None, not Some(true)"
+        );
+
+        // With a live entry, the answer is still None (no implicit DBSIZE/SCAN).
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        assert_eq!(
+            ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+            None
+        );
+        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(
+            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            None
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // The moved `ConcurrentCacheTtl` impl on the sync Redis store does NOT override
+    // the `refresh_on_hit` getter, so the trait-level getter returns the defaulted
+    // `false` even after `set_refresh_on_hit(true)` swaps the internal AtomicBool.
+    // (The real flag is consulted internally on GET — see the refresh-on-hit raw-TTL
+    // tests above — but is not surfaced through the trait getter.) This pins the same
+    // intentional asymmetry the sharded stores have, so a future change to the trait
+    // getter default is a deliberate, test-visible decision rather than a silent drift.
+    #[test]
+    fn test_redis_refresh_on_hit_trait_getter_stays_default_false() {
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_redis_refresh_getter_default")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+
+        // Trait getter default is false.
+        assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+
+        // set_refresh_on_hit returns the previous flag (the AtomicBool swap value).
+        let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+        assert!(!prev, "previous flag must be false");
+
+        // Trait getter still reports the default false (not overridden on this store).
+        assert!(
+            !ConcurrentCacheTtl::refresh_on_hit(&cache),
+            "trait-level refresh_on_hit getter intentionally stays default false"
+        );
+
+        // Round-trip: the swap still reports the real prior value (true) even though
+        // the getter does not expose it.
+        let prev2 = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+        assert!(
+            prev2,
+            "set_refresh_on_hit must report the real prior flag (true)"
+        );
     }
 }
 
@@ -6849,8 +7061,10 @@ mod generic_where_tests {
         }
     }
 
-    impl cached::ConcurrentCached<String, String> for TestStore {
+    impl cached::ConcurrentCacheBase for TestStore {
         type Error = std::convert::Infallible;
+    }
+    impl cached::ConcurrentCached<String, String> for TestStore {
         fn cache_get(&self, k: &String) -> Result<Option<String>, Self::Error> {
             Ok(self.inner.lock().unwrap().get(k).cloned())
         }
@@ -6862,9 +7076,6 @@ mod generic_where_tests {
         }
         fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
             Ok(self.inner.lock().unwrap().remove_entry(k))
-        }
-        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-            false
         }
         fn cache_clear(&self) -> Result<(), Self::Error> {
             self.inner.lock().unwrap().clear();

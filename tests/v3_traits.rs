@@ -442,7 +442,7 @@ mod try_set_ttl_tests {
 // ── len / is_empty on ConcurrentCached (Tier3) ────────────────────────────────
 
 mod concurrent_len_is_empty {
-    use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
+    use cached::{ConcurrentCacheBase, ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 
     /// `len` and `is_empty` on ShardedUnboundCache agree with the number of
     /// inserted entries. Uses fully-qualified syntax because the sharded base types
@@ -455,23 +455,23 @@ mod concurrent_len_is_empty {
             .expect("build ShardedUnboundCache");
 
         // Empty initially.
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
 
         cache.cache_set(1, 10).unwrap();
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(false)));
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
 
         cache.cache_set(2, 20).unwrap();
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
 
         cache.cache_remove(&1).unwrap();
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(1)));
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
 
         cache.cache_clear().unwrap();
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
     }
 
     /// `len` and `is_empty` on ShardedLruCache.
@@ -482,19 +482,19 @@ mod concurrent_len_is_empty {
             .build()
             .expect("build ShardedLruCache");
 
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
 
         cache.cache_set(42, 99).unwrap();
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(1)));
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
 
         cache.cache_set(43, 100).unwrap();
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
 
         cache.cache_reset().unwrap();
-        assert_eq!(ConcurrentCached::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCached::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -504,7 +504,7 @@ mod concurrent_len_is_empty {
 mod concurrent_len_is_empty_async {
     #[cfg(feature = "time_stores")]
     use cached::ShardedTtlCache;
-    use cached::{ConcurrentCachedAsync, ShardedUnboundCache};
+    use cached::{ConcurrentCacheBase, ConcurrentCachedAsync, ShardedUnboundCache};
 
     /// Async `len`/`is_empty` on ShardedUnboundCache track the live entry count.
     /// Fully-qualified syntax is required because the concrete sharded type has
@@ -516,25 +516,25 @@ mod concurrent_len_is_empty_async {
             .build()
             .expect("build ShardedUnboundCache");
 
-        assert_eq!(ConcurrentCachedAsync::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCachedAsync::is_empty(&cache), Ok(Some(false)));
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
 
         ConcurrentCachedAsync::async_cache_clear(&cache)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCachedAsync::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
     }
 
     /// Async `len`/`is_empty` on ShardedTtlCache, exercising the time-bounded store.
@@ -548,8 +548,8 @@ mod concurrent_len_is_empty_async {
             .build()
             .expect("build ShardedTtlCache");
 
-        assert_eq!(ConcurrentCachedAsync::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
             .await
@@ -557,14 +557,14 @@ mod concurrent_len_is_empty_async {
         ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(2)));
-        assert_eq!(ConcurrentCachedAsync::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
 
         ConcurrentCachedAsync::async_cache_reset(&cache)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCachedAsync::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCachedAsync::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -925,30 +925,37 @@ fn try_set_alias_returns_cache_set_error() {
     assert_eq!(result.unwrap(), None);
 }
 
-// ── Item 5: refresh_on_hit getter on ConcurrentCached ────────────────────────
+// ── Item 5: refresh_on_hit getter on ConcurrentCacheTtl ──────────────────────
 
-/// `ConcurrentCached::refresh_on_hit` defaults to `false` on stores that have
-/// no TTL (e.g. `ShardedUnboundCache`).
+/// `ConcurrentCacheTtl::refresh_on_hit` defaults to `false` on a TTL-capable
+/// concurrent store that does not override the getter (e.g. `ShardedTtlCache`,
+/// which tracks refresh state in an `AtomicBool` read via its inherent getter).
+/// Non-TTL concurrent stores (`ShardedUnboundCache`, ...) do not implement
+/// `ConcurrentCacheTtl` at all, so they have no `refresh_on_hit` method.
+#[cfg(feature = "time_stores")]
 #[test]
 fn concurrent_refresh_on_hit_default_false() {
-    use cached::{ConcurrentCached, ShardedUnboundCache};
+    use cached::time::Duration;
+    use cached::{ConcurrentCacheTtl, ShardedTtlCache};
 
-    let cache: ShardedUnboundCache<u32, u32> =
-        ShardedUnboundCache::builder().build().expect("build");
+    let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build");
 
-    assert!(!ConcurrentCached::refresh_on_hit(&cache));
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 }
 
-/// On a TTL-capable sharded store, the `ConcurrentCached::set_refresh_on_hit` impl
+/// On a TTL-capable sharded store, the `ConcurrentCacheTtl::set_refresh_on_hit` impl
 /// persists the flag in an `AtomicBool`; the store's inherent `refresh_on_hit()`
 /// reads it back. The trait-default `refresh_on_hit` returns `false` for stores
-/// that do not override it in the `ConcurrentCached` impl (sharded stores expose the
+/// that do not override it in the `ConcurrentCacheTtl` impl (sharded stores expose the
 /// getter as an inherent method instead).
 #[cfg(feature = "time_stores")]
 #[test]
 fn concurrent_set_refresh_on_hit_updates_inner_state() {
     use cached::time::Duration;
-    use cached::{ConcurrentCached, ShardedTtlCache};
+    use cached::{ConcurrentCacheTtl, ShardedTtlCache};
 
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -956,33 +963,33 @@ fn concurrent_set_refresh_on_hit_updates_inner_state() {
         .expect("build ShardedTtlCache");
 
     // Trait default is false (no trait-impl override for the getter on this store).
-    assert!(!ConcurrentCached::refresh_on_hit(&cache));
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 
     // `set_refresh_on_hit` returns the previous value (from the AtomicBool swap).
-    let prev = ConcurrentCached::set_refresh_on_hit(&cache, true);
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
     assert!(!prev, "previous value must be false");
 
     // The inherent `refresh_on_hit()` reads the AtomicBool - confirms the setter worked.
     assert!(cache.refresh_on_hit());
 
     // Disable via the trait method.
-    let prev = ConcurrentCached::set_refresh_on_hit(&cache, false);
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
     assert!(prev, "previous value must be true");
     assert!(!cache.refresh_on_hit());
 }
 
 /// Async counterpart of `concurrent_set_refresh_on_hit_updates_inner_state`:
-/// `ConcurrentCachedAsync::set_refresh_on_hit` on `ShardedTtlCache` swaps the inner
+/// `ConcurrentCacheTtl::set_refresh_on_hit` on `ShardedTtlCache` swaps the inner
 /// `AtomicBool` (returning the previous flag), and the store's inherent
 /// `refresh_on_hit()` reads it back. The trait-level `refresh_on_hit` getter is the
-/// defaulted `false` on this store (neither trait overrides the getter), so the
+/// defaulted `false` on this store (the impl does not override the getter), so the
 /// asymmetry between the real inherent state and the trait default is intentional
 /// and locked here.
 #[cfg(all(feature = "time_stores", feature = "async"))]
 #[test]
 fn concurrent_async_set_refresh_on_hit_updates_inner_state() {
     use cached::time::Duration;
-    use cached::{ConcurrentCachedAsync, ShardedTtlCache};
+    use cached::{ConcurrentCacheTtl, ShardedTtlCache};
 
     let cache = ShardedTtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -990,10 +997,10 @@ fn concurrent_async_set_refresh_on_hit_updates_inner_state() {
         .expect("build ShardedTtlCache");
 
     // Trait-level getter is the default false (no override on this store).
-    assert!(!ConcurrentCachedAsync::refresh_on_hit(&cache));
+    assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
 
     // Setter swaps the AtomicBool and reports the previous value.
-    let prev = ConcurrentCachedAsync::set_refresh_on_hit(&cache, true);
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
     assert!(!prev, "previous flag must be false");
 
     // Inherent getter reflects the new state; trait default still reports false.
@@ -1002,12 +1009,12 @@ fn concurrent_async_set_refresh_on_hit_updates_inner_state() {
         "inherent getter must read the swapped flag"
     );
     assert!(
-        !ConcurrentCachedAsync::refresh_on_hit(&cache),
+        !ConcurrentCacheTtl::refresh_on_hit(&cache),
         "trait-default getter intentionally stays false"
     );
 
     // Round-trip back to false.
-    let prev = ConcurrentCachedAsync::set_refresh_on_hit(&cache, false);
+    let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
     assert!(prev, "previous flag must be true");
     assert!(!cache.refresh_on_hit());
 }
@@ -1313,7 +1320,7 @@ fn lru_ttl_cache_metrics_via_public_api() {
 #[cfg(feature = "time_stores")]
 mod sharded_set_ttl_zero {
     use cached::time::Duration;
-    use cached::{ConcurrentCached, ShardedLruTtlCache, ShardedTtlCache};
+    use cached::{ConcurrentCacheTtl, ConcurrentCached, ShardedLruTtlCache, ShardedTtlCache};
 
     #[test]
     fn sharded_ttl_inherent_set_ttl_zero_disables_expiry() {
@@ -1343,8 +1350,8 @@ mod sharded_set_ttl_zero {
             .build()
             .expect("build ShardedTtlCache");
 
-        // The `ConcurrentCached::set_ttl` delegation must not panic either.
-        let prev = ConcurrentCached::set_ttl(&cache, Duration::ZERO);
+        // The `ConcurrentCacheTtl::set_ttl` delegation must not panic either.
+        let prev = ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
         assert_eq!(prev, Some(Duration::from_secs(60)));
 
         cache.cache_set(2, 20).unwrap();
@@ -1375,7 +1382,7 @@ mod sharded_set_ttl_zero {
             .build()
             .expect("build ShardedLruTtlCache");
 
-        let prev = ConcurrentCached::set_ttl(&cache, Duration::ZERO);
+        let prev = ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
         assert_eq!(prev, Some(Duration::from_secs(60)));
 
         cache.cache_set(2, 20).unwrap();
@@ -1465,4 +1472,241 @@ fn redis_builder_missing_required_is_server_free_error() {
         ),
         "expected Build(MissingRequired(\"ttl\"))"
     );
+}
+
+// ── Regression: ConcurrentCached / ConcurrentCachedAsync method-name collision ─
+//
+// Before the trait split, both `ConcurrentCached` and `ConcurrentCachedAsync`
+// declared identical synchronous helpers (`cache_size`, `len`, `is_empty`, `ttl`,
+// `set_ttl`, `unset_ttl`, `refresh_on_hit`, `set_refresh_on_hit`). On a store that
+// implements BOTH traits (`RedbCache`, every `Sharded*` store), calling one of
+// those helpers through method syntax with both traits in scope (as the prelude
+// glob brings them) produced `error[E0034]: multiple applicable items in scope`.
+//
+// After hoisting introspection onto `ConcurrentCacheBase` and the global-TTL
+// controls onto `ConcurrentCacheTtl`, each helper lives on exactly one trait, so
+// these calls resolve unambiguously without fully-qualified syntax. This module
+// glob-imports the prelude (both concurrent traits + the two new bases) and calls
+// the previously-colliding methods on `RedbCache` and a sharded TTL store.
+#[cfg(all(feature = "disk_store", feature = "time_stores"))]
+mod concurrent_trait_split_no_collision {
+    // Glob-import brings ConcurrentCached, ConcurrentCachedAsync, ConcurrentCacheBase,
+    // and ConcurrentCacheTtl all into scope simultaneously -- the exact condition
+    // that used to trigger E0034 on the shared helpers.
+    use cached::prelude::*;
+    use cached::time::Duration;
+    use cached::{
+        RedbCache, SetTtlError, ShardedLruTtlCache, ShardedTtlCache, ShardedUnboundCache,
+    };
+
+    // RedbCache implements BOTH ConcurrentCached and ConcurrentCachedAsync.
+    #[test]
+    fn redb_shared_helpers_resolve_without_fully_qualified_syntax() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cache: RedbCache<String, u32> = RedbCache::builder()
+            .name("collision-probe")
+            .disk_directory(dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build RedbCache");
+
+        // cache_size lives on ConcurrentCacheBase (single impl) -- no E0034.
+        assert_eq!(cache.cache_size().expect("cache_size"), None);
+        assert_eq!(cache.len().expect("len"), None);
+        assert_eq!(cache.is_empty().expect("is_empty"), None);
+
+        // set_ttl / ttl / unset_ttl live on ConcurrentCacheTtl -- no E0034 even with
+        // both ConcurrentCached and ConcurrentCachedAsync in scope.
+        assert_eq!(cache.ttl(), Some(Duration::from_secs(60)));
+        let prev = cache.set_ttl(Duration::from_secs(30));
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+        let prev2 = cache.unset_ttl();
+        assert_eq!(prev2, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), None);
+
+        // The IO ops still work (cache_set/cache_get on ConcurrentCached).
+        assert_eq!(cache.cache_set("k".to_string(), 7).expect("set"), None);
+        assert_eq!(cache.cache_get(&"k".to_string()).expect("get"), Some(7));
+    }
+
+    // A sharded TTL store also implements both concurrent traits.
+    #[test]
+    fn sharded_ttl_shared_helpers_resolve_without_fully_qualified_syntax() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        // cache_size on ConcurrentCacheBase is unambiguous through the trait even
+        // though the sharded store also has an inherent `len`/`is_empty`.
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+
+        cache.cache_set(1, 10).expect("infallible");
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
+
+        // set_ttl / unset_ttl on ConcurrentCacheTtl, called via plain method syntax.
+        let prev = cache.set_ttl(Duration::from_secs(30));
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+        assert_eq!(cache.unset_ttl(), Some(Duration::from_secs(30)));
+    }
+
+    // ConcurrentCacheTtl::try_set_ttl rejects a zero Duration with SetTtlError::ZeroTtl
+    // on a concurrent TTL store (mirrors the single-owner CacheTtl::try_set_ttl).
+    #[test]
+    fn concurrent_try_set_ttl_zero_is_rejected() {
+        let redb_dir = tempfile::TempDir::new().expect("temp dir");
+        let redb: RedbCache<String, u32> = RedbCache::builder()
+            .name("try-set-ttl-zero")
+            .disk_directory(redb_dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build RedbCache");
+        assert_eq!(
+            redb.try_set_ttl(Duration::ZERO),
+            Err(SetTtlError::ZeroTtl),
+            "try_set_ttl(ZERO) must reject without disabling expiry"
+        );
+        // The ttl is untouched after a rejected try_set_ttl.
+        assert_eq!(redb.ttl(), Some(Duration::from_secs(60)));
+        // A non-zero try_set_ttl succeeds and returns the previous value.
+        assert_eq!(
+            redb.try_set_ttl(Duration::from_secs(10)),
+            Ok(Some(Duration::from_secs(60)))
+        );
+
+        let sharded: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+        assert_eq!(
+            sharded.try_set_ttl(Duration::ZERO),
+            Err(SetTtlError::ZeroTtl)
+        );
+
+        let lru_ttl: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(8)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedLruTtlCache");
+        assert_eq!(
+            lru_ttl.try_set_ttl(Duration::ZERO),
+            Err(SetTtlError::ZeroTtl)
+        );
+    }
+
+    // Non-TTL sharded stores intentionally do NOT implement ConcurrentCacheTtl, but
+    // their ConcurrentCacheBase introspection is still reachable through the prelude
+    // glob without collision.
+    #[test]
+    fn non_ttl_sharded_store_base_helpers_resolve() {
+        let cache: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        cache.cache_set(1, 10).expect("infallible");
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
+    }
+
+    // The author's collision regression coverage is all `#[test]` (sync context).
+    // The original E0034 was a name-resolution failure, which is identical in an
+    // async fn body, but the failure mode that matters in async code is calling the
+    // `ConcurrentCacheTtl`/`ConcurrentCacheBase` helpers via plain method syntax
+    // *alongside* the `async_cache_*` IO ops with both concurrent traits in scope.
+    // This `#[tokio::test]` exercises exactly that on `RedbCache` (implements BOTH
+    // ConcurrentCached and ConcurrentCachedAsync): `set_ttl`/`cache_size`/`unset_ttl`
+    // resolve unqualified inside an async fn and interleave with `.await`ed IO with no
+    // ambiguity. If a future refactor reintroduced the duplicated helpers on both
+    // concurrent traits, this would fail to compile under the prelude glob.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn redb_shared_helpers_resolve_unqualified_in_async_context() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cache: RedbCache<String, u32> = RedbCache::builder()
+            .name("collision-probe-async")
+            .disk_directory(dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build RedbCache");
+
+        // ConcurrentCacheBase::cache_size via plain method syntax in an async fn.
+        // RedbCache reports an unknown size (Ok(None)).
+        assert_eq!(cache.cache_size().expect("cache_size"), None);
+
+        // ConcurrentCacheTtl::set_ttl via plain method syntax, interleaved with
+        // `async_cache_*` IO ops from ConcurrentCachedAsync.
+        assert_eq!(cache.ttl(), Some(Duration::from_secs(60)));
+        let prev = cache.set_ttl(Duration::from_secs(30));
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+
+        // Async IO op resolves unambiguously alongside the sync helpers.
+        let set_prev = cache
+            .async_cache_set("k".to_string(), 7)
+            .await
+            .expect("async_cache_set");
+        assert_eq!(set_prev, None);
+        assert_eq!(
+            cache.async_cache_get(&"k".to_string()).await.expect("get"),
+            Some(7)
+        );
+
+        // unset_ttl (ConcurrentCacheTtl) resolves unqualified after the await.
+        let prev2 = cache.unset_ttl();
+        assert_eq!(prev2, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), None);
+
+        // try_set_ttl default (ConcurrentCacheTtl) still rejects zero in async code.
+        assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
+    }
+}
+
+// ── cache_size/len/is_empty defaults on Ok(None) stores (ConcurrentCacheBase) ──
+//
+// The author asserted `cache_size() == Ok(None)` only on `RedbCache`, and the
+// `len`/`is_empty` checks only on stores that report a real size (sharded). This
+// module pins the *default delegation* on a store whose `cache_size` is `Ok(None)`:
+// `len` must forward to `cache_size` (so also `Ok(None)`) and `is_empty` must map
+// `None` through to `Ok(None)` rather than fabricating a bool. A regression that
+// made `is_empty` return `Ok(Some(true))` for an unknown size would be caught here.
+#[cfg(feature = "disk_store")]
+mod concurrent_base_unknown_size_defaults {
+    use cached::time::Duration;
+    use cached::{ConcurrentCacheBase, ConcurrentCached, RedbCache};
+
+    #[test]
+    fn redb_len_and_is_empty_default_to_unknown() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cache: RedbCache<String, u32> = RedbCache::builder()
+            .name("unknown-size-defaults")
+            .disk_directory(dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build RedbCache");
+
+        // cache_size is unknown for redb (O(n) scan avoided). RedbCacheError does not
+        // implement PartialEq, so unwrap the Ok and compare the Option payload.
+        assert_eq!(
+            ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+            None
+        );
+
+        // len delegates to cache_size -> also None.
+        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+
+        // is_empty maps an unknown size through to None (NOT Some(true)).
+        assert_eq!(
+            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            None
+        );
+
+        // The defaults stay None even after a real write: redb still won't scan.
+        ConcurrentCached::cache_set(&cache, "k".to_string(), 1).expect("infallible set");
+        assert_eq!(
+            ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+            None
+        );
+        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(
+            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            None
+        );
+    }
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, ConcurrentCached, ConcurrentCloneCached, Expires};
+use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached, ConcurrentCloneCached, Expires};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -295,7 +295,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedExpiringCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -303,6 +303,17 @@ where
 {
     type Error = std::convert::Infallible;
 
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(Some(self.len()))
+    }
+}
+
+impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone + Expires,
+    H: ShardHasher<K>,
+{
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         // Expiry check — try with a read lock first to allow read concurrency on hits.
@@ -387,10 +398,6 @@ where
         Ok(removed)
     }
 
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
     fn cache_clear(&self) -> Result<(), Self::Error> {
         self.clear();
         Ok(())
@@ -409,11 +416,6 @@ where
         self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
-
-    /// No-op: this store uses value-defined expiry, not a refreshable TTL. Always returns `false`.
-    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-        false
-    }
 }
 
 #[cfg(feature = "async_core")]
@@ -423,8 +425,6 @@ where
     V: Clone + Expires + Send + Sync,
     H: ShardHasher<K>,
 {
-    type Error = std::convert::Infallible;
-
     async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
@@ -451,14 +451,6 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
-    }
-
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
-    fn set_refresh_on_hit(&self, b: bool) -> bool {
-        <Self as ConcurrentCached<K, V>>::set_refresh_on_hit(self, b)
     }
 }
 

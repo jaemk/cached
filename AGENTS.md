@@ -93,9 +93,11 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `CloneCached<K,V>` | `cache_get_with_expiry_status` for timed caches returning owned values |
 | `CacheEvict` | `evict() -> usize` to sweep expired entries; fires `on_evict` |
 | `Expires` | Implemented by values in `ExpiringLruCache`; provides `is_expired()` |
-| `ConcurrentCached<K,V>` | Self-synchronizing cache with a shared `&self` API (Redis, Disk) |
-| `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache |
-| `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on timed stores |
+| `ConcurrentCacheBase` | Shared base of both concurrent traits: owns `type Error` + `cache_size`/`len`/`is_empty` |
+| `ConcurrentCached<K,V>` | Self-synchronizing cache with a shared `&self` API (Redis, Disk); supertrait `ConcurrentCacheBase` |
+| `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache; supertrait `ConcurrentCacheBase` |
+| `ConcurrentCacheTtl` | `&self` `ttl()`/`set_ttl()`/`unset_ttl()`/`try_set_ttl()`/`refresh_on_hit()` on concurrent TTL stores |
+| `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on single-owner timed stores |
 
 **`CacheMetrics`**: Snapshot struct returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `entry_count: usize`, `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
 

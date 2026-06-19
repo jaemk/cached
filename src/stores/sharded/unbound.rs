@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, ConcurrentCached};
+use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -251,7 +251,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedUnboundCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedUnboundCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -259,6 +259,17 @@ where
 {
     type Error = std::convert::Infallible;
 
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(Some(self.len()))
+    }
+}
+
+impl<K, V, H> ConcurrentCached<K, V> for ShardedUnboundCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let guard = shard.lock.read();
@@ -294,10 +305,6 @@ where
         Ok(removed)
     }
 
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
     fn cache_clear(&self) -> Result<(), Self::Error> {
         self.clear();
         Ok(())
@@ -315,10 +322,6 @@ where
         }
         Ok(())
     }
-
-    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-        false
-    }
 }
 
 #[cfg(feature = "async_core")]
@@ -328,8 +331,6 @@ where
     V: Clone + Send + Sync,
     H: ShardHasher<K>,
 {
-    type Error = std::convert::Infallible;
-
     async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
@@ -356,14 +357,6 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
-    }
-
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
-    fn set_refresh_on_hit(&self, b: bool) -> bool {
-        <Self as ConcurrentCached<K, V>>::set_refresh_on_hit(self, b)
     }
 }
 
