@@ -1264,11 +1264,11 @@ pub trait CloneCached<K, V> {
 /// ```rust
 /// # #[cfg(feature = "time_stores")]
 /// # {
-/// use cached::{ConcurrentCached, ConcurrentCloneCached, ShardedTtlCache};
+/// use cached::{ConcurrentCloneCached, ShardedTtlCache};
 /// use cached::time::Duration;
 ///
 /// let c = ShardedTtlCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
-/// c.set("k".to_string(), 1_i32).expect("infallible ShardedTtlCache set");
+/// c.set("k".to_string(), 1_i32);
 /// assert_eq!(c.cache_get_with_expiry_status(&"k".to_string()), (Some(1_i32), false)); // live
 /// assert_eq!(c.cache_get_with_expiry_status(&"x".to_string()), (None, false));        // absent
 /// // a present-but-expired entry yields (Some(v), true)
@@ -1758,17 +1758,17 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// # Example
     ///
     /// ```rust
-    /// use cached::{ConcurrentCached, ShardedUnboundCache};
+    /// use cached::ShardedUnboundCache;
     ///
     /// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::builder().build().unwrap();
-    /// cache.set("key".to_string(), 42).expect("ShardedUnboundCache is infallible");
+    /// cache.set("key".to_string(), 42);
     ///
     /// // remove_entry always returns Some when the key was present.
-    /// let entry = cache.remove_entry(&"key".to_string()).expect("ShardedUnboundCache is infallible");
+    /// let entry = cache.remove_entry(&"key".to_string());
     /// assert_eq!(entry, Some(("key".to_string(), 42)));
     ///
     /// // Returns None only when the key was never present.
-    /// assert_eq!(cache.remove_entry(&"missing".to_string()).expect("ShardedUnboundCache is infallible"), None);
+    /// assert_eq!(cache.remove_entry(&"missing".to_string()), None);
     /// ```
     fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error>;
 

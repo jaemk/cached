@@ -3804,15 +3804,32 @@ mod sharded_send_sync_typecheck {
 
 #[test]
 fn concurrent_cached_trait_short_aliases_work() {
+    // The concrete type's inherent `get`/`set`/`remove`/`delete` now return unwrapped values.
+    // Use the `cache_`-prefixed trait methods (or fully-qualified path) to access the
+    // `Result`-returning trait surface.
     use cached::{ConcurrentCached, ShardedUnboundCache};
 
     let cache = ShardedUnboundCache::<String, u32>::builder()
         .build()
         .unwrap();
-    assert_eq!(cache.set("a".to_string(), 1).unwrap(), None);
-    assert_eq!(cache.get(&"a".to_string()).unwrap(), Some(1));
-    assert_eq!(cache.remove(&"a".to_string()).unwrap(), Some(1));
-    assert!(!cache.delete(&"a".to_string()).unwrap());
+
+    // Inherent methods — return unwrapped values directly.
+    assert_eq!(cache.set("a".to_string(), 1), None);
+    assert_eq!(cache.get(&"a".to_string()), Some(1));
+    assert_eq!(cache.remove(&"a".to_string()), Some(1));
+    assert!(!cache.delete(&"a".to_string()));
+
+    // Trait methods via fully-qualified path — still return Result.
+    cache.set("b".to_string(), 2);
+    assert_eq!(
+        ConcurrentCached::cache_get(&cache, &"b".to_string()).unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        ConcurrentCached::cache_remove(&cache, &"b".to_string()).unwrap(),
+        Some(2)
+    );
+    assert!(!ConcurrentCached::cache_delete(&cache, &"b".to_string()).unwrap());
 }
 
 // `cache_clear_with_on_evict` without a callback delegates to `clear()` and does NOT

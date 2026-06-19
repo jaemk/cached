@@ -27,7 +27,7 @@ Run:
 */
 
 use cached::macros::concurrent_cached;
-use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
+use cached::{ShardedLruCache, ShardedUnboundCache};
 use std::thread;
 
 // Bare default: ShardedUnboundCache (unbounded, no TTL)
@@ -133,34 +133,33 @@ fn main() {
         h.join().expect("thread panicked");
     }
 
-    // Inspect the cache directly via the short alias `get`. The `ConcurrentCached`
-    // trait must be in scope. The async trait's operations are `async_`-prefixed:
+    // Inspect the cache directly via the inherent `get` method — returns `Option<V>` directly,
+    // no `.expect("infallible")` needed. The async trait's operations are `async_`-prefixed:
     // `COMPUTE.async_cache_get(&7).await` - the async trait provides no short alias,
     // so `async_cache_get` is the only spelling available there.
     {
-        let val = COMPUTE.get(&7).expect("infallible");
+        let val = COMPUTE.get(&7);
         assert_eq!(val, Some(49));
         println!("get(7) = {val:?}");
     }
 
-    // Build a ShardedUnboundCache manually and use it without a macro
+    // Build a ShardedUnboundCache manually and use it without a macro.
+    // The inherent `get`/`set`/`remove` methods return unwrapped values directly.
     let cache: ShardedUnboundCache<u32, String> = ShardedUnboundCache::builder().build().unwrap();
-    cache.set(1, "hello".to_string()).expect("infallible");
-    cache.set(2, "world".to_string()).expect("infallible");
-    assert_eq!(cache.get(&1).expect("infallible").as_deref(), Some("hello"));
-    println!(
-        "manual ShardedUnboundCache: {:?}",
-        cache.get(&1).expect("infallible")
-    );
+    cache.set(1, "hello".to_string());
+    cache.set(2, "world".to_string());
+    assert_eq!(cache.get(&1).as_deref(), Some("hello"));
+    println!("manual ShardedUnboundCache: {:?}", cache.get(&1));
 
-    // ShardedLruCache with explicit shard count
+    // ShardedLruCache with explicit shard count.
+    // Inherent `set`/`get` return unwrapped values.
     let lru: ShardedLruCache<u32, u32> = ShardedLruCache::builder()
         .max_size(256)
         .shards(8)
         .build()
         .expect("valid config");
     for i in 0..256u32 {
-        lru.set(i, i * 2).expect("infallible");
+        lru.set(i, i * 2);
     }
     println!("ShardedLruCache len = {}", lru.len());
     println!("ShardedLruCache shard_sizes = {:?}", lru.shard_sizes());

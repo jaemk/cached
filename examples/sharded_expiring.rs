@@ -101,7 +101,8 @@ fn main() {
         h.join().expect("thread panicked");
     }
 
-    // 4. Direct Manual construction and usage (without macro)
+    // 4. Direct Manual construction and usage (without macro).
+    // The inherent `set`/`get` methods return unwrapped values directly.
     println!("\n--- Manual Store Construction ---");
     let cache: ShardedExpiringCache<u32, Session> =
         ShardedExpiringCache::builder().build().unwrap();
@@ -109,9 +110,9 @@ fn main() {
         user_id: 100,
         expired: already_expired.clone(), // starts expired
     };
-    cached::ConcurrentCached::set(&cache, 100, s_manual).expect("infallible");
+    cache.set(100, s_manual);
 
-    let val = cached::ConcurrentCached::get(&cache, &100).expect("infallible");
+    let val = cache.get(&100);
     assert!(
         val.is_none(),
         "Expired manual entry should be filtered out on get"
@@ -132,8 +133,8 @@ fn main() {
         expired: Arc::new(AtomicBool::new(false)),
     };
     println!("Caching session for user_id {}", live_manual.user_id);
-    cached::ConcurrentCached::set(&lru, 200, live_manual).expect("infallible");
-    let val_lru = cached::ConcurrentCached::get(&lru, &200).expect("infallible");
+    lru.set(200, live_manual);
+    let val_lru = lru.get(&200);
     assert!(val_lru.is_some(), "Live manual entry should be present");
     println!(
         "Manual ShardedExpiringLruCache lookup for live entry: {:?}",

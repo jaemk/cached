@@ -127,17 +127,17 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedUnboundCacheBase<
     /// what you want.
     ///
     /// ```rust
-    /// use cached::{ConcurrentCached, ShardedUnboundCache};
+    /// use cached::ShardedUnboundCache;
     ///
     /// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::new();
-    /// cache.set("k".to_string(), 1).expect("ShardedUnboundCache operations are infallible");
+    /// cache.set("k".to_string(), 1);
     ///
     /// let shared = cache.clone();     // Arc clone — same backing store
     /// let deep   = cache.deep_clone(); // independent snapshot
     ///
-    /// cache.set("k".to_string(), 2).expect("ShardedUnboundCache operations are infallible");
-    /// assert_eq!(shared.get(&"k".to_string()).expect("ShardedUnboundCache operations are infallible"), Some(2)); // sees update
-    /// assert_eq!(deep.get(&"k".to_string()).expect("ShardedUnboundCache operations are infallible"),   Some(1)); // snapshot unchanged
+    /// cache.set("k".to_string(), 2);
+    /// assert_eq!(shared.get(&"k".to_string()), Some(2)); // sees update
+    /// assert_eq!(deep.get(&"k".to_string()),   Some(1)); // snapshot unchanged
     /// ```
     #[must_use]
     pub fn deep_clone(&self) -> Self {
@@ -166,6 +166,58 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedUnboundCacheBase<
                 on_evict: self.inner.on_evict.clone(),
             }),
         }
+    }
+}
+
+impl<K, V, H: ShardHasher<K>> ShardedUnboundCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+{
+    /// Retrieve a cached value, returning `None` on a miss.
+    ///
+    /// This is the infallible ergonomic API for the concrete type. Generic code over
+    /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
+    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
+    /// method is in scope.
+    #[must_use]
+    pub fn get(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_get(self, k).unwrap()
+    }
+
+    /// Insert a key-value pair and return the previous value, if any.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn set(&self, k: K, v: V) -> Option<V> {
+        ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Remove a cached value and return it if the entry was live.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_remove(self, k).unwrap()
+    }
+
+    /// Remove a cached entry and return the stored key and value, if present.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
+        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    }
+
+    /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn delete(&self, k: &K) -> bool {
+        ConcurrentCached::cache_delete(self, k).unwrap()
+    }
+
+    /// Remove all entries from every shard and reset metrics.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn reset(&self) {
+        ConcurrentCached::cache_reset(self).unwrap()
     }
 }
 
@@ -508,6 +560,7 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
 
     #[test]
@@ -813,5 +866,91 @@ mod tests {
         SyncConcurrentCached::cache_set(&c, 1u32, 10u32).expect("insert must succeed");
         assert!(SyncConcurrentCached::cache_delete(&c, &1u32).expect("cache_delete must succeed"));
         assert!(!SyncConcurrentCached::cache_delete(&c, &1u32).expect("cache_delete must succeed"));
+    }
+
+    // --- Inherent infallible method tests ---
+
+    #[test]
+    fn inherent_get_returns_option_not_result() {
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        // Return type is Option<V> -- no .unwrap() or ? needed.
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, None);
+        c.set(1, 42);
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, Some(42));
+    }
+
+    #[test]
+    fn inherent_set_returns_previous_value() {
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        // First insert returns None (no prior value).
+        let prev: Option<u32> = c.set(1, 10);
+        assert_eq!(prev, None);
+        // Overwrite returns the old value.
+        let prev: Option<u32> = c.set(1, 20);
+        assert_eq!(prev, Some(10));
+        assert_eq!(c.get(&1), Some(20));
+    }
+
+    #[test]
+    fn inherent_remove_returns_prior_value() {
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        c.set(1, 99);
+        let v: Option<u32> = c.remove(&1);
+        assert_eq!(v, Some(99));
+        // Absent key returns None.
+        assert_eq!(c.remove(&1), None);
+        assert_eq!(c.get(&1), None);
+    }
+
+    #[test]
+    fn inherent_remove_entry_returns_key_and_value() {
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        c.set(7, 77);
+        let pair: Option<(u32, u32)> = c.remove_entry(&7);
+        assert_eq!(pair, Some((7, 77)));
+        // Absent key returns None.
+        assert_eq!(c.remove_entry(&7), None);
+    }
+
+    #[test]
+    fn inherent_delete_returns_bool() {
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        c.set(1, 10);
+        let removed: bool = c.delete(&1);
+        assert!(removed);
+        let removed: bool = c.delete(&1);
+        assert!(!removed);
+    }
+
+    #[test]
+    fn inherent_reset_clears_and_resets_metrics() {
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        c.set(1, 1);
+        c.set(2, 2);
+        let _ = c.get(&1);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.metrics().hits, Some(1));
+        c.reset();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        assert_eq!(c.metrics().hits, Some(0));
+    }
+
+    #[test]
+    fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
+        // Verify that generic code over ConcurrentCached still works via the trait path
+        // even though the inherent `get`/`set`/`remove` methods shadow the trait aliases.
+        fn use_trait<C>(cache: &C, k: u32, v: u32)
+        where
+            C: SyncConcurrentCached<u32, u32>,
+        {
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_set(cache, k, v);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_get(cache, &k);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_remove(cache, &k);
+        }
+        let c = ShardedUnboundCache::<u32, u32>::new();
+        use_trait(&c, 1, 100);
     }
 }

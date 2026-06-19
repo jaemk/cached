@@ -230,6 +230,58 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedLruTtlCacheBase<K
 impl<K, V, H: ShardHasher<K>> ShardedLruTtlCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
+    V: Clone,
+{
+    /// Retrieve a cached value, returning `None` on a miss or if the entry has expired.
+    ///
+    /// This is the infallible ergonomic API for the concrete type. Generic code over
+    /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
+    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
+    /// method is in scope.
+    #[must_use]
+    pub fn get(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_get(self, k).unwrap()
+    }
+
+    /// Insert a key-value pair and return the previous value, if any.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn set(&self, k: K, v: V) -> Option<V> {
+        ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Remove a cached value and return it if the entry was live.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_remove(self, k).unwrap()
+    }
+
+    /// Remove a cached entry and return the stored key and value, if present.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
+        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    }
+
+    /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn delete(&self, k: &K) -> bool {
+        ConcurrentCached::cache_delete(self, k).unwrap()
+    }
+
+    /// Remove all entries from every shard and reset metrics.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn reset(&self) {
+        ConcurrentCached::cache_reset(self).unwrap()
+    }
+}
+
+impl<K, V, H: ShardHasher<K>> ShardedLruTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone,
 {
     /// Return aggregate metrics across all shards. Evictions include LRU
     /// capacity evictions (per-shard), TTL-expiry evictions, and explicit
@@ -1156,6 +1208,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
     use crate::ConcurrentCloneCached;
 
@@ -2026,5 +2079,112 @@ mod tests {
             expired2,
             "peek must not renew TTL; entry must now be expired"
         );
+    }
+
+    // --- Inherent infallible method tests ---
+
+    #[test]
+    fn inherent_get_returns_option_not_result() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, None);
+        c.set(1, 42);
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, Some(42));
+    }
+
+    #[test]
+    fn inherent_set_returns_previous_value() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let prev: Option<u32> = c.set(1, 10);
+        assert_eq!(prev, None);
+        let prev: Option<u32> = c.set(1, 20);
+        assert_eq!(prev, Some(10));
+        assert_eq!(c.get(&1), Some(20));
+    }
+
+    #[test]
+    fn inherent_remove_returns_prior_value() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(1, 99);
+        let v: Option<u32> = c.remove(&1);
+        assert_eq!(v, Some(99));
+        assert_eq!(c.remove(&1), None);
+        assert_eq!(c.get(&1), None);
+    }
+
+    #[test]
+    fn inherent_remove_entry_returns_key_and_value() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(7, 77);
+        let pair: Option<(u32, u32)> = c.remove_entry(&7);
+        assert_eq!(pair, Some((7, 77)));
+        assert_eq!(c.remove_entry(&7), None);
+    }
+
+    #[test]
+    fn inherent_delete_returns_bool() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(1, 10);
+        let removed: bool = c.delete(&1);
+        assert!(removed);
+        let removed: bool = c.delete(&1);
+        assert!(!removed);
+    }
+
+    #[test]
+    fn inherent_reset_clears_and_resets_metrics() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(1, 1);
+        c.set(2, 2);
+        let _ = c.get(&1);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.metrics().hits, Some(1));
+        c.reset();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        assert_eq!(c.metrics().hits, Some(0));
+    }
+
+    #[test]
+    fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
+        fn use_trait<C>(cache: &C, k: u32, v: u32)
+        where
+            C: SyncConcurrentCached<u32, u32>,
+        {
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_set(cache, k, v);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_get(cache, &k);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_remove(cache, &k);
+        }
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        use_trait(&c, 1, 100);
     }
 }

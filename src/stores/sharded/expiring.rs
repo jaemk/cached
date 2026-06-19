@@ -169,6 +169,58 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
 impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
 where
     K: Hash + Eq,
+    V: Clone + Expires,
+{
+    /// Retrieve a cached value, returning `None` on a miss or if the entry has expired.
+    ///
+    /// This is the infallible ergonomic API for the concrete type. Generic code over
+    /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
+    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
+    /// method is in scope.
+    #[must_use]
+    pub fn get(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_get(self, k).unwrap()
+    }
+
+    /// Insert a key-value pair and return the previous value, if any.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn set(&self, k: K, v: V) -> Option<V> {
+        ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Remove a cached value and return it if the entry was live.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_remove(self, k).unwrap()
+    }
+
+    /// Remove a cached entry and return the stored key and value, if present.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
+        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    }
+
+    /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn delete(&self, k: &K) -> bool {
+        ConcurrentCached::cache_delete(self, k).unwrap()
+    }
+
+    /// Remove all entries from every shard and reset metrics.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn reset(&self) {
+        ConcurrentCached::cache_reset(self).unwrap()
+    }
+}
+
+impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
+where
+    K: Hash + Eq,
     V: Expires,
 {
     /// Return aggregate metrics across all shards.
@@ -663,6 +715,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
     use crate::ConcurrentCloneCached;
 
@@ -1271,5 +1324,130 @@ mod tests {
             "entry must still be present after expired peek"
         );
         assert!(expired2, "entry must still be expired after peek");
+    }
+
+    // --- Inherent infallible method tests ---
+
+    #[test]
+    fn inherent_get_returns_option_not_result() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        let v: Option<Val> = c.get(&1);
+        assert!(v.is_none());
+        c.set(
+            1,
+            Val {
+                v: 42,
+                expired: false,
+            },
+        );
+        let v: Option<Val> = c.get(&1);
+        assert_eq!(v.map(|x| x.v), Some(42));
+    }
+
+    #[test]
+    fn inherent_get_returns_none_for_expired() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            1,
+            Val {
+                v: 99,
+                expired: true,
+            },
+        );
+        // Expired entries are filtered out by get.
+        let v: Option<Val> = c.get(&1);
+        assert!(
+            v.is_none(),
+            "expired entry must return None from inherent get"
+        );
+    }
+
+    #[test]
+    fn inherent_set_returns_previous_value() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        let prev: Option<Val> = c.set(
+            1,
+            Val {
+                v: 10,
+                expired: false,
+            },
+        );
+        assert!(prev.is_none());
+        let prev: Option<Val> = c.set(
+            1,
+            Val {
+                v: 20,
+                expired: false,
+            },
+        );
+        assert_eq!(prev.map(|x| x.v), Some(10));
+        assert_eq!(c.get(&1).map(|x| x.v), Some(20));
+    }
+
+    #[test]
+    fn inherent_remove_returns_prior_live_value() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            1,
+            Val {
+                v: 99,
+                expired: false,
+            },
+        );
+        let v: Option<Val> = c.remove(&1);
+        assert_eq!(v.map(|x| x.v), Some(99));
+        assert!(c.remove(&1).is_none());
+    }
+
+    #[test]
+    fn inherent_remove_entry_returns_key_and_value() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            7,
+            Val {
+                v: 77,
+                expired: false,
+            },
+        );
+        let pair: Option<(u32, Val)> = c.remove_entry(&7);
+        assert_eq!(pair.map(|(k, v)| (k, v.v)), Some((7, 77)));
+        assert!(c.remove_entry(&7).is_none());
+    }
+
+    #[test]
+    fn inherent_delete_returns_bool() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            1,
+            Val {
+                v: 10,
+                expired: false,
+            },
+        );
+        let removed: bool = c.delete(&1);
+        assert!(removed);
+        let removed: bool = c.delete(&1);
+        assert!(!removed);
+    }
+
+    #[test]
+    fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
+        fn use_trait<C>(cache: &C, k: u32, v: Val)
+        where
+            C: SyncConcurrentCached<u32, Val>,
+        {
+            let _: Result<Option<Val>, _> = ConcurrentCached::cache_set(cache, k, v);
+            let _: Result<Option<Val>, _> = ConcurrentCached::cache_get(cache, &k);
+            let _: Result<Option<Val>, _> = ConcurrentCached::cache_remove(cache, &k);
+        }
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        use_trait(
+            &c,
+            1,
+            Val {
+                v: 42,
+                expired: false,
+            },
+        );
     }
 }
