@@ -270,6 +270,8 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
+    type Error = super::CacheSetError;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

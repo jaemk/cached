@@ -73,6 +73,8 @@ impl<K: Hash + Eq, V> MyCache<K, V> {
     }
 }
 impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

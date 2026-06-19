@@ -182,6 +182,8 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
 }
 
 impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

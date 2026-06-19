@@ -735,6 +735,8 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
 }
 
 impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
+    type Error = TtlSortedCacheError;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -787,10 +789,8 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
         self.insert(key, value).unwrap_or(None)
     }
 
-    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, crate::stores::CacheSetError> {
-        self.insert(k, v).map_err(|e| match e {
-            TtlSortedCacheError::TimeBounds => crate::stores::CacheSetError::TimeBounds,
-        })
+    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, TtlSortedCacheError> {
+        self.insert(k, v)
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {

@@ -491,6 +491,8 @@ impl<K: Hash + Eq + Clone, V> LruTtlCache<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruTtlCache<K, V> {
+    type Error = super::CacheSetError;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

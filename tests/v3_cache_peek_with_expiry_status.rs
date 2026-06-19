@@ -345,6 +345,8 @@ struct PlainPeekStore {
 }
 
 impl Cached<i32, i32> for PlainPeekStore {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&i32>
     where
         i32: std::borrow::Borrow<Q>,

@@ -251,6 +251,8 @@ impl<K: Hash + Eq, V: Expires> Default for ExpiringCache<K, V> {
 }
 
 impl<K: Hash + Eq, V: Expires> Cached<K, V> for ExpiringCache<K, V> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

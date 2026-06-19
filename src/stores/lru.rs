@@ -666,6 +666,8 @@ where
 }
 
 impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruCache<K, V> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,

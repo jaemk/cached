@@ -167,8 +167,11 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
-/// Error returned by [`Cached::cache_try_set`] when an entry
-/// cannot be stored - currently only when computing the entry's expiry `Instant` overflows.
+/// Error returned by [`TtlCache`](crate::stores::TtlCache) and
+/// [`LruTtlCache`](crate::stores::LruTtlCache) via [`Cached::cache_try_set`] when
+/// an entry cannot be stored - currently only when computing the entry's expiry
+/// `Instant` overflows. [`TtlSortedCache`](crate::stores::TtlSortedCache) uses its own
+/// [`TtlSortedCacheError`] type instead.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheSetError {
@@ -303,6 +306,8 @@ where
     K: Hash + Eq,
     S: std::hash::BuildHasher + Default,
 {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

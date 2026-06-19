@@ -301,6 +301,8 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
 
 // https://docs.rs/cached/latest/cached/trait.Cached.html
 impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,

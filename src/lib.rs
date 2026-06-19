@@ -709,6 +709,16 @@ pub mod prelude {
 /// assert_eq!(v2, Some(&"another value".to_string()));
 /// ```
 pub trait Cached<K, V> {
+    // ── Associated types ──────────────────────────────────────────────────
+
+    /// The error type returned by [`cache_try_set`](Cached::cache_try_set).
+    ///
+    /// Use [`std::convert::Infallible`] for stores where insertion can never fail.
+    /// TTL-capable stores that may overflow `Instant` bounds use their own error type
+    /// (e.g. [`CacheSetError`](crate::stores::CacheSetError),
+    /// [`TtlSortedCacheError`](crate::stores::TtlSortedCacheError)).
+    type Error;
+
     // ── Core required methods (stores implement these) ────────────────────
 
     /// Attempt to retrieve a cached value.
@@ -740,8 +750,12 @@ pub trait Cached<K, V> {
 
     /// Fallible variant of [`Self::cache_set`]. Returns `Err` if the store cannot accept the entry
     /// (e.g. the TTL duration overflows `Instant` bounds). The default implementation is
-    /// infallible and delegates to [`Self::cache_set`].
-    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, crate::stores::CacheSetError> {
+    /// infallible and delegates to [`Self::cache_set`]; it always returns `Ok`.
+    ///
+    /// The error type is the associated [`Self::Error`]. Infallible stores set
+    /// `type Error = std::convert::Infallible`, while TTL-capable stores set it to
+    /// their concrete error type (e.g. [`CacheSetError`](crate::stores::CacheSetError)).
+    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         Ok(self.cache_set(k, v))
     }
 
@@ -924,7 +938,7 @@ pub trait Cached<K, V> {
     }
 
     /// Fallible insert. Delegates to [`cache_try_set`](Cached::cache_try_set).
-    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, crate::stores::CacheSetError> {
+    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         self.cache_try_set(k, v)
     }
 
