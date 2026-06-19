@@ -2265,6 +2265,28 @@ fn test_cached_unquoted_convert_compiles_and_caches() {
     assert_eq!(UNQUOTED_CONVERT_CALLS.load(Ordering::SeqCst), 1);
 }
 
+// Unquoted `create`: a bare expression (previously panicked the macro) and a
+// single-expression block (previously tripped `unused_braces` in value position)
+// must both compile and cache. The example `kitchen_sink` is the `-D warnings`
+// regression guard for the lint; this guards the parse/cache behavior.
+#[cached(ty = "cached::UnboundCache<u32, u32>", create = cached::UnboundCache::new())]
+fn unquoted_create_bare(x: u32) -> u32 {
+    x + 1
+}
+
+#[cached(ty = "cached::UnboundCache<u32, u32>", create = { cached::UnboundCache::new() })]
+fn unquoted_create_block(x: u32) -> u32 {
+    x + 1
+}
+
+#[test]
+fn test_cached_unquoted_create_forms_compile_and_cache() {
+    assert_eq!(unquoted_create_bare(1), 2);
+    assert_eq!(unquoted_create_bare(1), 2); // cache hit
+    assert_eq!(unquoted_create_block(1), 2);
+    assert_eq!(unquoted_create_block(1), 2); // cache hit
+}
+
 // Legacy quoted `convert = "{ n + 1 }"` must still work.
 static QUOTED_CONVERT_CALLS: AtomicUsize = AtomicUsize::new(0);
 

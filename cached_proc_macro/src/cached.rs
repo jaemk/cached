@@ -643,9 +643,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 };
 
-                let cache_create = expr_to_block(create_expr.clone());
+                let cache_create = expr_value_tokens(create_expr);
 
-                (quote! { #ty }, quote! { #cache_create })
+                (quote! { #ty }, cache_create)
             }
             (None, false, Some(_), None, _) => {
                 return syn::Error::new(fn_ident.span(), "`ty` requires `create` to also be set")

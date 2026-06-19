@@ -558,6 +558,27 @@ pub(super) fn expr_to_block(expr: syn::Expr) -> Block {
     }
 }
 
+/// Emit an attribute expression for *value/argument* position (e.g. `create`,
+/// `cache_prefix_block`, which expand into `Lock::new(<here>)` / `.prefix(<here>)`).
+///
+/// A single-expression block (`{ Store::builder()...build().unwrap() }`, the natural
+/// unquoted spelling, or the parsed legacy quoted form) is unwrapped to its inner
+/// expression so the generated code is `Lock::new(Store::builder()...)` rather than
+/// `Lock::new({ Store::builder()... })` (which trips `unused_braces` under `-D warnings`).
+/// Bare expressions are emitted directly; multi-statement blocks are kept as-is (the
+/// braces are load-bearing and `unused_braces` does not flag them).
+pub(super) fn expr_value_tokens(expr: &syn::Expr) -> TokenStream2 {
+    if let syn::Expr::Block(eb) = expr
+        && eb.attrs.is_empty()
+        && eb.label.is_none()
+        && eb.block.stmts.len() == 1
+        && let syn::Stmt::Expr(inner, None) = &eb.block.stmts[0]
+    {
+        return quote! { #inner };
+    }
+    quote! { #expr }
+}
+
 /// Build the `force_refresh` guard token that wraps a cached-hit early return.
 ///
 /// `force_refresh` is an opt-in boolean expression block over the function args,

@@ -1410,17 +1410,15 @@ fn get_redis_cache_type_and_create(
     let cache_create = match &args.create {
         Some(create_expr) => {
             check_create_conflicts(args, cache_ident.span())?;
-            let cache_create = expr_to_block(create_expr.clone());
-            quote! { #cache_create }
+            expr_value_tokens(create_expr)
         }
         None => {
             if let Some(ttl_dur) = ttl_duration {
                 let cache_prefix_block: proc_macro2::TokenStream = if let Some(cp_expr) =
                     &args.cache_prefix_block
                 {
-                    // User supplied a `cache_prefix_block` expression; extract it as a block.
-                    let block = expr_to_block(cp_expr.clone());
-                    quote! { #block }
+                    // User supplied a `cache_prefix_block` expression.
+                    expr_value_tokens(cp_expr)
                 } else {
                     // Runtime key-prefix string: NOT a path into the `cached`
                     // crate, so it is intentionally left as the literal
@@ -1475,8 +1473,7 @@ fn get_disk_cache_type_and_create(
     let cache_create = match &args.create {
         Some(create_expr) => {
             check_create_conflicts(args, fn_ident.span())?;
-            let cache_create = expr_to_block(create_expr.clone());
-            quote! { #cache_create }
+            expr_value_tokens(create_expr)
         }
         None => {
             let create = quote! {
@@ -1708,8 +1705,7 @@ fn get_custom_cache_type_and_create(
     let cache_create = match &args.create {
         Some(create_expr) => {
             check_create_conflicts(args, fn_ident.span())?;
-            let cache_create = expr_to_block(create_expr.clone());
-            quote! { #cache_create }
+            expr_value_tokens(create_expr)
         }
         None => {
             return Err(syn::Error::new(
