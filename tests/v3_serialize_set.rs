@@ -9,7 +9,7 @@
 //! autoref shim, including custom `ty`/`create` stores like `RedbCache`. The `*_custom_redb`
 //! test exercises that path.
 
-#![cfg(all(feature = "disk_store", feature = "proc_macro"))]
+#![cfg(all(feature = "redb_store", feature = "proc_macro"))]
 
 use cached::RedbCache;
 use cached::macros::concurrent_cached;

@@ -77,8 +77,7 @@ collisions with the sync methods.
   but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_async_cache`: Enable Redis client-side caching over RESP3 for async Redis caches.
   Implies `redis_tokio`, `async`, and `redis_store`, but does not enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
-- `redis_ahash`: Enable the optional `ahash` feature of `redis`
-- `disk_store`: Include disk cache store
+- `redb_store`: Include disk cache store
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, `#[concurrent_cached(ttl_millis = ...)]`, `#[once(ttl_secs = ...)]`, `#[once(ttl = ...)]`, or `#[once(ttl_millis = ...)]` on the default in-memory path.
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
@@ -628,8 +627,8 @@ pub use stores::{
     ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder,
     TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder,
 };
-#[cfg(feature = "disk_store")]
-#[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
+#[cfg(feature = "redb_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
 pub use stores::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]

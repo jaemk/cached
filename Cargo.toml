@@ -44,8 +44,7 @@ redis_tokio = [
 redis_tokio_native_tls = ["redis_tokio", "redis/tokio-native-tls-comp"]
 redis_tokio_rustls = ["redis_tokio", "redis/tokio-rustls-comp"]
 redis_async_cache = ["redis_store", "async", "redis_tokio", "redis/cache-aio"]
-redis_ahash = ["redis_store", "redis/ahash"]
-disk_store = ["redb", "serde", "rmp-serde", "directories"]
+redb_store = ["redb", "serde", "rmp-serde", "directories"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
@@ -184,11 +183,11 @@ required-features = ["time_stores", "proc_macro"]
 
 [[example]]
 name = "disk"
-required-features = ["disk_store", "proc_macro"]
+required-features = ["redb_store", "proc_macro"]
 
 [[example]]
 name = "disk_async"
-required-features = ["disk_store", "async", "proc_macro"]
+required-features = ["redb_store", "async", "proc_macro"]
 
 [[example]]
 name = "redis-client-side-cache-tokio"

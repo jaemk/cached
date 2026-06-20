@@ -2345,7 +2345,7 @@ fn test_cached_unquoted_force_refresh_compiles_and_works() {
 // Use Box<dyn Error> as the error type: its From<RedbCacheError> impl is
 // unambiguous because the blanket `From<E: Error> for Box<dyn Error>` is the
 // only applicable conversion.
-#[cfg(all(feature = "disk_store", feature = "proc_macro"))]
+#[cfg(all(feature = "redb_store", feature = "proc_macro"))]
 mod disk_no_map_error_tests {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};

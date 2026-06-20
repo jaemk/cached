@@ -3,7 +3,7 @@ Synchronous on-disk cache: `#[concurrent_cached(disk = true)]` backed by `redb`.
 Default cache files live under $system_cache_dir/<exe>_cached_disk_cache/.
 
 Run:
-    cargo run --example disk --features "disk_store,proc_macro"
+    cargo run --example disk --features "redb_store,proc_macro"
 */
 
 use cached::macros::concurrent_cached;

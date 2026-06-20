@@ -2440,7 +2440,7 @@ mod async_tests {
     }
 }
 
-#[cfg(all(feature = "disk_store", feature = "proc_macro"))]
+#[cfg(all(feature = "redb_store", feature = "proc_macro"))]
 mod disk_tests {
     use super::*;
     use cached::RedbCache;
@@ -5835,7 +5835,7 @@ fn test_fallible_builders_return_build_error() {
     );
 }
 
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 #[test]
 fn redb_cache_builder_zero_ttl_validation() {
     // `RedbCache` rejects a zero TTL at build time.

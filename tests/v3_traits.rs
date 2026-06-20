@@ -308,17 +308,17 @@ mod try_set_ttl_tests {
     /// disabling routes — `set_ttl(0)` and `unset_ttl()` — so callers who want a
     /// zero rejected (rather than interpreted as "disable expiry") opt in explicitly.
     ///
-    /// `TtlSortedCache` is out of scope for the v3 zero-ttl-disables change: on that
-    /// store a zero ttl still means "expire immediately". This helper documents that
-    /// behavior so the `try_set_ttl` guard is still meaningfully motivated there.
-    fn assert_zero_ttl_silently_breaks<C: Cached<u32, u32> + CacheTtl>(cache: &mut C) {
-        // Force the broken state via the panic-free set_ttl, then prove it is broken.
+    /// As of the v3 zero-ttl-disables change, `TtlSortedCache` is now consistent with
+    /// `TtlCache` / `LruTtlCache`: a bypassed `set_ttl(0)` disables expiry for future
+    /// inserts (the entry never expires) rather than expiring it immediately.
+    fn assert_zero_ttl_disables_expiry<C: Cached<u32, u32> + CacheTtl>(cache: &mut C) {
+        // Force zero TTL via the panic-free set_ttl, then prove the entry survives.
         let _ = cache.set_ttl(Duration::ZERO);
         cache.cache_set(7, 70);
         assert_eq!(
             cache.cache_get(&7),
-            None,
-            "a zero ttl must make a just-inserted entry read back as expired/absent",
+            Some(&70),
+            "a zero ttl must disable expiry so a just-inserted entry survives",
         );
     }
 
@@ -407,12 +407,13 @@ mod try_set_ttl_tests {
         cache.cache_set(1, 10);
         assert_eq!(cache.cache_get(&1), Some(&10));
 
-        // TtlSortedCache is unchanged: a bypassed set_ttl(ZERO) still breaks reads.
-        let mut broken = TtlSortedCache::<u32, u32>::builder()
+        // TtlSortedCache now matches the other TTL stores: a bypassed set_ttl(ZERO)
+        // disables expiry for future inserts (the entry never expires).
+        let mut disabled = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(10))
             .build()
             .expect("build TtlSortedCache");
-        assert_zero_ttl_silently_breaks(&mut broken);
+        assert_zero_ttl_disables_expiry(&mut disabled);
     }
 
     /// `SetTtlError` is a well-formed std error type: it is `Debug`, implements
@@ -644,7 +645,7 @@ mod concurrent_clone_cached_peek {
     }
 }
 
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 mod redb_serialize_cached {
     use cached::stores::RedbCache;
     use cached::time::Duration;
@@ -730,7 +731,7 @@ mod redb_serialize_cached {
     }
 }
 
-#[cfg(all(feature = "disk_store", feature = "async"))]
+#[cfg(all(feature = "redb_store", feature = "async"))]
 mod redb_serialize_cached_async {
     use cached::stores::RedbCache;
     use cached::{ConcurrentCachedAsync, SerializeCachedAsync};
@@ -1163,7 +1164,7 @@ fn concurrent_sharded_lru_ttl_refresh_on_hit_getter_reflects_setter() {
 /// surfaces. Confirm its now-required `refresh_on_hit` getter reads the real `AtomicBool`
 /// flag through trait dispatch (it shares the impl pattern with the redis stores, which
 /// previously returned the trait-default `false`). Server-free.
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 #[test]
 fn concurrent_redb_refresh_on_hit_getter_reflects_setter() {
     use cached::time::Duration;
@@ -1612,7 +1613,7 @@ mod sharded_set_ttl_zero {
 // (`prefix`/`ttl` for redis, `name` for redb) are required setters. A `build()`
 // with a required field unset must return `BuildError::MissingRequired(...)`
 // WITHOUT attempting any IO/connection, so these tests need no live server.
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 #[test]
 fn redb_builder_missing_name_is_server_free_error() {
     use cached::{BuildError, RedbCache, RedbCacheBuildError};
@@ -1672,7 +1673,7 @@ fn redis_builder_missing_required_is_server_free_error() {
 // these calls resolve unambiguously without fully-qualified syntax. This module
 // glob-imports the prelude (both concurrent traits + the two new bases) and calls
 // the previously-colliding methods on `RedbCache` and a sharded TTL store.
-#[cfg(all(feature = "disk_store", feature = "time_stores"))]
+#[cfg(all(feature = "redb_store", feature = "time_stores"))]
 mod concurrent_trait_split_no_collision {
     // Glob-import brings ConcurrentCached, ConcurrentCachedAsync, ConcurrentCacheBase,
     // and ConcurrentCacheTtl all into scope simultaneously -- the exact condition
@@ -1850,7 +1851,7 @@ mod concurrent_trait_split_no_collision {
 // `len` must forward to `cache_size` (so also `Ok(None)`) and `is_empty` must map
 // `None` through to `Ok(None)` rather than fabricating a bool. A regression that
 // made `is_empty` return `Ok(Some(true))` for an unknown size would be caught here.
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 mod concurrent_base_unknown_size_defaults {
     use cached::time::Duration;
     use cached::{ConcurrentCacheBase, ConcurrentCached, RedbCache};

@@ -4,7 +4,7 @@ on an `async fn` runs the blocking I/O on a background thread via the `blocking`
 crate -- it never stalls the async runtime and works with any executor.
 
 Run:
-    cargo run --example disk_async --features "disk_store,async,proc_macro"
+    cargo run --example disk_async --features "redb_store,async,proc_macro"
 */
 
 use cached::macros::concurrent_cached;

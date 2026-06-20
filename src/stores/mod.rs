@@ -81,7 +81,7 @@ mod expiring_lru;
 mod lru;
 #[cfg(feature = "time_stores")]
 mod lru_ttl;
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 mod redb;
 #[cfg(feature = "redis_store")]
 mod redis;
@@ -94,7 +94,7 @@ mod unbound;
 
 #[cfg(any(
     feature = "time_stores",
-    feature = "disk_store",
+    feature = "redb_store",
     feature = "redis_store"
 ))]
 use crate::time::Duration;
@@ -172,6 +172,16 @@ impl std::error::Error for SetTtlError {}
 /// [`TtlSortedCache`](crate::stores::TtlSortedCache) via [`Cached::cache_try_set`] when
 /// an entry cannot be stored - currently only when computing the entry's expiry
 /// `Instant` overflows.
+///
+/// The pre-2.0 `TtlSortedCacheError` was removed in favor of this unified type; the
+/// following must not compile (guards against the old error type being reintroduced):
+///
+/// ```compile_fail
+/// use cached::stores::TtlSortedCacheError;
+/// ```
+/// ```compile_fail
+/// let _ = cached::TtlSortedCacheError::TimeBounds;
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheSetError {
@@ -190,7 +200,7 @@ impl std::error::Error for CacheSetError {}
 /// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
 #[cfg(any(
     feature = "time_stores",
-    feature = "disk_store",
+    feature = "redb_store",
     feature = "redis_store"
 ))]
 pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), BuildError> {
@@ -233,8 +243,8 @@ impl<V: Clone> Clone for TimedEntry<V> {
     }
 }
 
-#[cfg(feature = "disk_store")]
-#[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
+#[cfg(feature = "redb_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
 pub use crate::stores::redb::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
