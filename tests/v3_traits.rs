@@ -841,14 +841,14 @@ fn cache_try_set_default_is_infallible() {
     assert_eq!(result.unwrap(), Some(10));
 }
 
-/// `TtlSortedCache::cache_try_set` returns `Err(TtlSortedCacheError::TimeBounds)` when
+/// `TtlSortedCache::cache_try_set` returns `Err(CacheSetError::TimeBounds)` when
 /// the computed expiry `Instant` would overflow. With a normally-representable TTL
 /// it succeeds and returns the previous value.
 #[cfg(feature = "time_stores")]
 #[test]
 fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
     use cached::time::Duration;
-    use cached::{Cached, TtlSortedCache, TtlSortedCacheError};
+    use cached::{CacheSetError, Cached, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -856,15 +856,15 @@ fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
         .expect("build TtlSortedCache");
 
     // A normal insert via cache_try_set must succeed and return the previous value.
-    let result: Result<Option<u32>, TtlSortedCacheError> = cache.cache_try_set(1, 42);
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 42);
     assert_eq!(result.unwrap(), None);
 
     // A second insert returns the previous value.
-    let result: Result<Option<u32>, TtlSortedCacheError> = cache.cache_try_set(1, 99);
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 99);
     assert_eq!(result.unwrap(), Some(42));
 }
 
-/// `TtlSortedCache::cache_try_set` returns `Err(TtlSortedCacheError::TimeBounds)` when
+/// `TtlSortedCache::cache_try_set` returns `Err(CacheSetError::TimeBounds)` when
 /// the configured ttl makes the computed expiry `Instant` overflow.
 ///
 /// The overflow is triggered deterministically and portably: the public default ttl
@@ -874,21 +874,22 @@ fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
 /// (no real `Instant` is anywhere near `Duration::MAX` from the epoch). The fallible
 /// `cache_try_set` path uses `TtlOverflow::Error`, so it must report the overflow rather
 /// than silently saturating or panicking, and the cache must be left unmutated.
-/// The associated `type Error = TtlSortedCacheError` surfaces it directly without mapping.
+/// The associated `type Error = CacheSetError` surfaces it directly without mapping
+/// (TtlSortedCache now shares the unified error type with TtlCache / LruTtlCache).
 #[cfg(feature = "time_stores")]
 #[test]
 fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
     use cached::time::Duration;
-    use cached::{Cached, TtlSortedCache, TtlSortedCacheError};
+    use cached::{CacheSetError, Cached, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::MAX)
         .build()
         .expect("Duration::MAX is non-zero so build() must succeed");
 
-    let result: Result<Option<u32>, TtlSortedCacheError> = cache.cache_try_set(1, 42);
+    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 42);
     assert!(
-        matches!(result, Err(TtlSortedCacheError::TimeBounds)),
+        matches!(result, Err(CacheSetError::TimeBounds)),
         "near-MAX ttl must overflow Instant and surface TimeBounds, got {result:?}"
     );
 
@@ -901,9 +902,9 @@ fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
     );
 
     // The ergonomic alias surfaces the same error.
-    let via_alias: Result<Option<u32>, TtlSortedCacheError> = cache.try_set(2, 7);
+    let via_alias: Result<Option<u32>, CacheSetError> = cache.try_set(2, 7);
     assert!(
-        matches!(via_alias, Err(TtlSortedCacheError::TimeBounds)),
+        matches!(via_alias, Err(CacheSetError::TimeBounds)),
         "try_set alias must also surface TimeBounds, got {via_alias:?}"
     );
     assert_eq!(cache.cache_size(), 0);
@@ -913,16 +914,16 @@ fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
 /// same `Result<Option<V>, Self::Error>` type.
 #[cfg(feature = "time_stores")]
 #[test]
-fn try_set_alias_returns_ttl_sorted_cache_error() {
+fn try_set_alias_returns_cache_set_error_for_ttl_sorted_cache() {
     use cached::time::Duration;
-    use cached::{Cached, TtlSortedCache, TtlSortedCacheError};
+    use cached::{CacheSetError, Cached, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .expect("build TtlSortedCache");
 
-    let result: Result<Option<u32>, TtlSortedCacheError> = cache.try_set(1, 7);
+    let result: Result<Option<u32>, CacheSetError> = cache.try_set(1, 7);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), None);
 }
@@ -999,13 +1000,13 @@ fn cached_error_associated_type_cache_set_error_for_lru_ttl_cache() {
     assert_eq!(r.unwrap(), None);
 }
 
-/// `TtlSortedCache` sets `type Error = TtlSortedCacheError`, surfacing its own error
-/// type directly from `cache_try_set` -- no mapping to `CacheSetError` required.
+/// `TtlSortedCache` sets `type Error = CacheSetError` (unified with `TtlCache` /
+/// `LruTtlCache`), surfacing a shared error type from `cache_try_set`.
 #[cfg(feature = "time_stores")]
 #[test]
-fn cached_error_associated_type_ttl_sorted_cache_error_for_ttl_sorted_cache() {
+fn cached_error_associated_type_cache_set_error_for_ttl_sorted_cache() {
     use cached::time::Duration;
-    use cached::{Cached, TtlSortedCache, TtlSortedCacheError};
+    use cached::{CacheSetError, Cached, TtlSortedCache};
 
     // Normal TTL: succeeds.
     let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
@@ -1013,18 +1014,18 @@ fn cached_error_associated_type_ttl_sorted_cache_error_for_ttl_sorted_cache() {
         .build()
         .expect("build TtlSortedCache");
 
-    let r: Result<Option<u32>, TtlSortedCacheError> = cache.cache_try_set(1, 55);
+    let r: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 55);
     assert_eq!(r.unwrap(), None);
 
-    // Near-MAX TTL: returns Err(TtlSortedCacheError::TimeBounds) directly.
+    // Near-MAX TTL: returns Err(CacheSetError::TimeBounds) directly.
     let mut overflow: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
         .ttl(Duration::MAX)
         .build()
         .expect("Duration::MAX is non-zero");
 
-    let r2: Result<Option<u32>, TtlSortedCacheError> = overflow.cache_try_set(1, 55);
+    let r2: Result<Option<u32>, CacheSetError> = overflow.cache_try_set(1, 55);
     assert!(
-        matches!(r2, Err(TtlSortedCacheError::TimeBounds)),
+        matches!(r2, Err(CacheSetError::TimeBounds)),
         "expected TimeBounds, got {r2:?}"
     );
     assert_eq!(overflow.cache_size(), 0, "failed try_set must not insert");

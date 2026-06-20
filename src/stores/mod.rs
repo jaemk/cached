@@ -167,11 +167,11 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
-/// Error returned by [`TtlCache`](crate::stores::TtlCache) and
-/// [`LruTtlCache`](crate::stores::LruTtlCache) via [`Cached::cache_try_set`] when
+/// Error returned by [`TtlCache`](crate::stores::TtlCache),
+/// [`LruTtlCache`](crate::stores::LruTtlCache), and
+/// [`TtlSortedCache`](crate::stores::TtlSortedCache) via [`Cached::cache_try_set`] when
 /// an entry cannot be stored - currently only when computing the entry's expiry
-/// `Instant` overflows. [`TtlSortedCache`](crate::stores::TtlSortedCache) uses its own
-/// [`TtlSortedCacheError`] type instead.
+/// `Instant` overflows.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheSetError {
@@ -252,7 +252,7 @@ pub use lru_ttl::{HasEvict, LruTtlCache, LruTtlCacheBuilder, NoEvict};
 pub use ttl::{TtlCache, TtlCacheBuilder};
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder, TtlSortedCacheError};
+pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder};
 pub use unbound::{UnboundCache, UnboundCacheBuilder};
 
 pub use sharded::{

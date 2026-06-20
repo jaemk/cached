@@ -66,37 +66,39 @@ impl<T> Borrow<T> for CacheArc<T> {
     }
 }
 
-/// Error type returned by [`TtlSortedCache`] operations
-/// (e.g. [`Cached::cache_try_set`](crate::Cached::cache_try_set)).
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TtlSortedCacheError {
-    /// Calculating expiration `Instant`s resulted in a
-    /// value outside of `Instant`s internal bounds
-    TimeBounds,
-}
-
-impl std::fmt::Display for TtlSortedCacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TtlSortedCacheError::TimeBounds => f.write_str("ttl is outside Instant bounds"),
-        }
-    }
-}
-
-impl std::error::Error for TtlSortedCacheError {}
-
-/// A timestamped key to allow identifying key ranges
-#[derive(Hash, Eq, PartialEq, Ord, PartialOrd)]
+/// A timestamped key to allow identifying key ranges.
+///
+/// `expiry` is `Option<Instant>`: `None` means "never expires" and sorts as GREATER
+/// than any `Some(instant)` so that never-expiring entries appear last in the
+/// expiry-ordered BTreeSet (evicted last under size pressure, never swept by TTL).
+/// Rust's default `Option` ordering would put `None` first (least), so we implement
+/// a custom `Ord` / `PartialOrd` that reverses that.
+#[derive(Hash, Eq, PartialEq)]
 struct Stamped<K> {
-    // note: the field order matters here since the derived ord traits
-    //       generate lexicographic ordering based on the top-to-bottom
-    //       declaration order
-    expiry: Instant,
+    expiry: Option<Instant>,
 
     // wrapped in an option so it's easy to generate
     // a range bound containing None
     key: Option<CacheArc<K>>,
+}
+
+impl<K: Ord> Ord for Stamped<K> {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // Compare expiries: None (never-expires) sorts GREATEST.
+        let expiry_ord = match (&self.expiry, &other.expiry) {
+            (None, None) => CmpOrdering::Equal,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (Some(_), None) => CmpOrdering::Less,
+            (Some(a), Some(b)) => a.cmp(b),
+        };
+        expiry_ord.then_with(|| self.key.cmp(&other.key))
+    }
+}
+
+impl<K: Ord> PartialOrd for Stamped<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl<K> Clone for Stamped<K> {
@@ -109,14 +111,21 @@ impl<K> Clone for Stamped<K> {
 }
 
 impl<K> Stamped<K> {
+    /// Build a sentinel `Stamped` for use as a BTreeSet range bound.
+    /// Only `Some(expiry)` bounds are used for expiry-sweep ranges; never-expiring
+    /// entries (`None`) sort beyond all `Some(_)` values and are excluded automatically.
     fn bound(expiry: Instant) -> Stamped<K> {
-        Stamped { expiry, key: None }
+        Stamped {
+            expiry: Some(expiry),
+            key: None,
+        }
     }
 }
 
-/// A timestamped value to allow re-building a timestamped key
+/// A timestamped value to allow re-building a timestamped key.
+/// `expiry` is `None` when the entry never expires (TTL was zero at insert time).
 struct Entry<K, V> {
-    expiry: Instant,
+    expiry: Option<Instant>,
     key: CacheArc<K>,
     value: V,
 }
@@ -130,7 +139,7 @@ impl<K, V> Entry<K, V> {
     }
 
     fn is_expired(&self) -> bool {
-        self.expiry < Instant::now()
+        self.expiry.is_some_and(|e| e < Instant::now())
     }
 }
 
@@ -147,7 +156,7 @@ impl<K, V: Clone> Clone for Entry<K, V> {
 /// Policy for [`TtlSortedCache::insert_inner`] when `now + ttl` overflows `Instant`.
 #[derive(Clone, Copy)]
 enum TtlOverflow {
-    /// Return [`TtlSortedCacheError::TimeBounds`] without mutating the cache.
+    /// Return [`super::CacheSetError::TimeBounds`] without mutating the cache.
     Error,
     /// Saturate the expiry to "now" (immediately stale) and still store the entry.
     SaturateNow,
@@ -534,7 +543,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     }
 
     /// Insert k/v pair without running eviction logic. See `.insert_ttl_evict`
-    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, TtlSortedCacheError> {
+    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, super::CacheSetError> {
         self.insert_ttl_evict(key, value, None, false)
     }
 
@@ -544,7 +553,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
         key: K,
         value: V,
         ttl: Duration,
-    ) -> Result<Option<V>, TtlSortedCacheError> {
+    ) -> Result<Option<V>, super::CacheSetError> {
         self.insert_ttl_evict(key, value, Some(ttl), false)
     }
 
@@ -554,7 +563,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
         key: K,
         value: V,
         evict: bool,
-    ) -> Result<Option<V>, TtlSortedCacheError> {
+    ) -> Result<Option<V>, super::CacheSetError> {
         self.insert_ttl_evict(key, value, None, evict)
     }
 
@@ -568,7 +577,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
         value: V,
         ttl: Option<Duration>,
         evict: bool,
-    ) -> Result<Option<V>, TtlSortedCacheError> {
+    ) -> Result<Option<V>, super::CacheSetError> {
         self.insert_inner(key, value, ttl, evict, TtlOverflow::Error, false)
     }
 
@@ -578,13 +587,18 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     /// `on_overflow` selects what happens in the (practically unreachable) case where
     /// `now + ttl` exceeds `Instant`'s representable range — a TTL on the order of
     /// hundreds of years:
-    /// - [`TtlOverflow::Error`]: return [`TtlSortedCacheError::TimeBounds`] before any mutation
+    /// - [`TtlOverflow::Error`]: return [`super::CacheSetError::TimeBounds`] before any mutation
     ///   (used by the fallible public API).
     /// - [`TtlOverflow::SaturateNow`]: store the entry with an already-elapsed expiry
     ///   so the value is still retained (and returnable by reference) but is treated as
     ///   immediately stale. Size-limit enforcement is skipped in this branch so the
     ///   just-inserted entry cannot be the one evicted, which lets the infallible
     ///   `get_or_set` paths return `&mut V` without a fallible re-lookup.
+    ///
+    /// When the effective TTL (explicit `ttl` arg or `self.ttl`) is zero, the entry is
+    /// stored with `expiry = None` (never expires) rather than being given an immediate
+    /// expiry. Zero TTL means "disable expiry" for new inserts, consistent with the other
+    /// TTL stores. In this case `overflowed` is always `false`.
     fn insert_inner(
         &mut self,
         key: K,
@@ -593,15 +607,22 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
         evict: bool,
         on_overflow: TtlOverflow,
         skip_size_eviction: bool,
-    ) -> Result<Option<V>, TtlSortedCacheError> {
+    ) -> Result<Option<V>, super::CacheSetError> {
         let arc_key = CacheArc::new(key.clone());
-        let now = Instant::now();
-        let (expiry, overflowed) = match now.checked_add(ttl.unwrap_or(self.ttl)) {
-            Some(expiry) => (expiry, false),
-            None => match on_overflow {
-                TtlOverflow::Error => return Err(TtlSortedCacheError::TimeBounds),
-                TtlOverflow::SaturateNow => (now, true),
-            },
+        let effective_ttl = ttl.unwrap_or(self.ttl);
+
+        // A zero TTL means "never expires": store expiry = None.
+        let (expiry, overflowed) = if effective_ttl.is_zero() {
+            (None, false)
+        } else {
+            let now = Instant::now();
+            match now.checked_add(effective_ttl) {
+                Some(t) => (Some(t), false),
+                None => match on_overflow {
+                    TtlOverflow::Error => return Err(super::CacheSetError::TimeBounds),
+                    TtlOverflow::SaturateNow => (Some(now), true),
+                },
+            }
         };
 
         let new_stamped = Stamped {
@@ -735,7 +756,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
 }
 
 impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
-    type Error = TtlSortedCacheError;
+    type Error = super::CacheSetError;
 
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
@@ -789,7 +810,7 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
         self.insert(key, value).unwrap_or(None)
     }
 
-    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, TtlSortedCacheError> {
+    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, super::CacheSetError> {
         self.insert(k, v)
     }
 
@@ -928,24 +949,33 @@ impl<K: Hash + Eq + Ord, V> CachedIter<K, V> for TtlSortedCache<K, V> {
 }
 
 impl<K: Hash + Eq + Ord, V> CacheTtl for TtlSortedCache<K, V> {
-    /// Always returns `Some` - `TtlSortedCache` is expiry-ordered and always has an
-    /// active TTL (it has no disabled state, so this never returns `None`).
+    /// Returns `Some(ttl)` — the currently configured TTL duration.
+    ///
+    /// When `ttl` is `Duration::ZERO`, entries inserted while zero is set never expire
+    /// (they are stored with `expiry = None`). This method still reports `Some(Duration::ZERO)`
+    /// in that case so callers can observe the configured value.
     fn ttl(&self) -> Option<Duration> {
         Some(self.ttl)
     }
-    /// Set the global TTL, returning the previous value.
+    /// Set the global TTL for future inserts, returning the previous value.
     ///
-    /// Unlike the other TTL stores, `TtlSortedCache` is ordered by expiry and cannot
-    /// disable expiry, so a zero `Duration` is **not** treated as "disable" here: it is
-    /// stored as-is and makes entries expire immediately. To retain entries effectively
-    /// forever, pass a large TTL or use an unordered store (`UnboundCache`/`LruCache`).
+    /// A zero `Duration` disables expiry for **future** inserts: entries inserted while the TTL
+    /// is zero are stored with `expiry = None` and never expire. Pre-existing entries keep their
+    /// original expiry and still expire on schedule. This is consistent with the other TTL stores
+    /// (`TtlCache`, `LruTtlCache`). To restore expiry, call `set_ttl` with a non-zero duration.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let prev = self.ttl;
         self.ttl = ttl;
         Some(prev)
     }
-    /// `TtlSortedCache` always requires a TTL; calling `unset_ttl` is a no-op and always returns `None`.
+    /// Disable expiry for future inserts by setting the TTL to `Duration::ZERO`.
+    ///
+    /// Equivalent to `set_ttl(Duration::ZERO)`: entries inserted after this call never expire.
+    /// Pre-existing entries keep their original expiry. Returns `None` (no "previous unset" state
+    /// to restore; use `ttl()` to capture the previous value before calling `unset_ttl` if
+    /// needed).
     fn unset_ttl(&mut self) -> Option<Duration> {
+        self.ttl = Duration::ZERO;
         None
     }
     /// `TtlSortedCache` does not refresh entries on hit; always returns `false`.
@@ -1108,12 +1138,26 @@ mod test {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn error_is_clone_eq() {
-        use crate::stores::TtlSortedCacheError;
-        assert_eq!(
-            TtlSortedCacheError::TimeBounds,
-            TtlSortedCacheError::TimeBounds.clone()
-        );
+    fn ttl_sorted_cache_set_error_is_clone_eq() {
+        // TtlSortedCache now uses CacheSetError (unified with TtlCache / LruTtlCache).
+        use crate::stores::CacheSetError;
+        assert_eq!(CacheSetError::TimeBounds, CacheSetError::TimeBounds.clone());
+    }
+
+    #[test]
+    fn ttl_sorted_cache_try_set_returns_cache_set_error_on_overflow() {
+        // insert_ttl with a Duration that would overflow Instant bounds must return
+        // CacheSetError::TimeBounds (no longer TtlSortedCacheError).
+        use crate::stores::CacheSetError;
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // Duration::MAX overflows Instant::now().checked_add -> None -> Error branch.
+        let result = cache.insert_ttl(1u32, 42u32, Duration::MAX);
+        assert_eq!(result, Err(CacheSetError::TimeBounds));
+        // The cache must not be mutated on error.
+        assert_eq!(cache.cache_size(), 0);
     }
 
     #[derive(Clone, Debug)]
@@ -1276,11 +1320,15 @@ mod test {
             .build()
             .expect("cache should build");
 
+        // Use a very short but non-zero TTL (zero now means "never expires").
         cache
-            .insert_ttl("expired", 10, Duration::from_nanos(0))
+            .insert_ttl("expired", 10, Duration::from_millis(1))
             .unwrap();
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.keys.len(), 1);
+
+        // Wait for the TTL to elapse before querying.
+        std::thread::sleep(std::time::Duration::from_millis(20));
 
         assert_eq!(cache.cache_get(&"expired"), None);
 
@@ -1306,11 +1354,15 @@ mod test {
             .build()
             .expect("cache should build");
 
+        // Use a very short but non-zero TTL (zero now means "never expires").
         cache
-            .insert_ttl("expired-mut", 20, Duration::from_nanos(0))
+            .insert_ttl("expired-mut", 20, Duration::from_millis(1))
             .unwrap();
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.keys.len(), 1);
+
+        // Wait for the TTL to elapse before querying.
+        std::thread::sleep(std::time::Duration::from_millis(20));
 
         assert_eq!(cache.cache_get_mut(&"expired-mut"), None);
 
@@ -1847,5 +1899,147 @@ mod test {
             1,
             "cache_remove_entry must increment evictions for present key only"
         );
+    }
+
+    // ── Item 3: set_ttl(0) = "never expires" behavioral tests ─────────────
+
+    /// Zero TTL at insert time means entries NEVER expire (not "expire immediately").
+    #[test]
+    fn set_ttl_zero_entries_never_expire() {
+        use crate::CacheTtl;
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        // Switch to zero TTL before inserting.
+        cache.set_ttl(Duration::ZERO);
+        cache.cache_set(1u32, 10u32);
+        // Wait well past the original 50ms TTL.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Entry must still be present (never expires).
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "entry inserted with zero TTL must never expire"
+        );
+        // ttl() still reports the configured value.
+        assert_eq!(CacheTtl::ttl(&cache), Some(Duration::ZERO));
+    }
+
+    /// Switching set_ttl to zero only affects entries inserted AFTER the change.
+    /// Pre-existing finite-expiry entries still expire on their original schedule.
+    #[test]
+    fn set_ttl_zero_only_affects_future_inserts() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(80))
+            .build()
+            .unwrap();
+        // Insert with the current finite TTL.
+        cache.cache_set(1u32, 100u32);
+        // Switch to zero TTL (never-expires) for future inserts.
+        cache.set_ttl(Duration::ZERO);
+        cache.cache_set(2u32, 200u32);
+        // Wait past the finite TTL for key 1.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Key 1 (finite TTL) must be expired.
+        assert_eq!(
+            cache.cache_get(&1u32),
+            None,
+            "pre-existing finite-TTL entry must expire"
+        );
+        // Key 2 (inserted with zero TTL = never expires) must still be present.
+        assert_eq!(
+            cache.cache_get(&2u32),
+            Some(&200u32),
+            "entry inserted with zero TTL must never expire"
+        );
+    }
+
+    /// Under size pressure, never-expiring entries (None expiry) are evicted LAST —
+    /// after all finite-expiry entries have been dropped.
+    #[test]
+    fn set_ttl_zero_never_expire_entries_evicted_last_under_size_pressure() {
+        // Build with max_size = 2.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(10))
+            .max_size(2)
+            .build()
+            .unwrap();
+
+        // Insert one never-expiring entry.
+        cache.set_ttl(Duration::ZERO);
+        cache.cache_set(1u32, 10u32);
+
+        // Insert two finite-TTL entries (these must be evicted before the never-expiring one).
+        cache.set_ttl(Duration::from_millis(500));
+        cache.cache_set(2u32, 20u32);
+        cache.cache_set(3u32, 30u32);
+        // At this point the cache has 3 entries and max_size = 2; key 1 (never-expiring, None
+        // expiry, sorts greatest) must be the survivor along with the later finite entry.
+        // Actually, retain_latest evicts the soonest-expiring first: key 2 and key 3 have
+        // Some(expiry) and key 1 has None (greatest). So one of key 2/3 was evicted, and
+        // key 1 (never-expires) survives.
+        assert_eq!(cache.cache_size(), 2, "max_size must be enforced");
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "never-expiring entry must survive size eviction"
+        );
+
+        // Now insert one more to push out the remaining finite-expiry entry.
+        cache.cache_set(4u32, 40u32);
+        assert_eq!(cache.cache_size(), 2);
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "never-expiring entry must still survive"
+        );
+    }
+
+    /// unset_ttl is equivalent to set_ttl(Duration::ZERO): future inserts never expire.
+    #[test]
+    fn unset_ttl_makes_future_inserts_never_expire() {
+        use crate::CacheTtl;
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        cache.unset_ttl();
+        assert_eq!(
+            CacheTtl::ttl(&cache),
+            Some(Duration::ZERO),
+            "unset_ttl sets internal ttl to zero"
+        );
+        cache.cache_set(1u32, 99u32);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&99u32),
+            "entry inserted after unset_ttl must never expire"
+        );
+    }
+
+    /// Evict must not sweep never-expiring (None expiry) entries.
+    #[test]
+    fn evict_does_not_remove_never_expiring_entries() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        // Insert a finite-TTL entry.
+        cache.cache_set(1u32, 10u32);
+        // Switch to zero TTL and insert a never-expiring entry.
+        cache.set_ttl(Duration::ZERO);
+        cache.cache_set(2u32, 20u32);
+        // Wait for the finite entry to expire.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let evicted = cache.evict();
+        // Only the finite-TTL entry should be swept.
+        assert_eq!(
+            evicted, 1,
+            "evict must sweep only expired finite-TTL entries"
+        );
+        assert_eq!(cache.cache_size(), 1, "never-expiring entry must remain");
+        assert_eq!(cache.cache_get(&2u32), Some(&20u32));
     }
 }

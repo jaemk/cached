@@ -626,7 +626,7 @@ pub use stores::{HasEvict, NoEvict};
 pub use stores::{
     LruTtlCache, LruTtlCacheBuilder, ShardedLruTtlCache, ShardedLruTtlCacheBase,
     ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder,
-    TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder, TtlSortedCacheError,
+    TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder,
 };
 #[cfg(feature = "disk_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "disk_store")))]
@@ -717,9 +717,8 @@ pub trait Cached<K, V> {
     /// The error type returned by [`cache_try_set`](Cached::cache_try_set).
     ///
     /// Use [`std::convert::Infallible`] for stores where insertion can never fail.
-    /// TTL-capable stores that may overflow `Instant` bounds use their own error type
-    /// (e.g. [`CacheSetError`](crate::stores::CacheSetError),
-    /// [`TtlSortedCacheError`](crate::stores::TtlSortedCacheError)).
+    /// TTL-capable stores that may overflow `Instant` bounds use
+    /// [`CacheSetError`](crate::stores::CacheSetError).
     type Error;
 
     // ── Core required methods (stores implement these) ────────────────────
@@ -757,7 +756,7 @@ pub trait Cached<K, V> {
     ///
     /// The error type is the associated [`Self::Error`]. Infallible stores set
     /// `type Error = std::convert::Infallible`, while TTL-capable stores set it to
-    /// their concrete error type (e.g. [`CacheSetError`](crate::stores::CacheSetError)).
+    /// [`CacheSetError`](crate::stores::CacheSetError).
     fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         Ok(self.cache_set(k, v))
     }
@@ -1331,12 +1330,9 @@ pub trait CacheTtl {
     /// Set the TTL for newly inserted entries, returning the previous value (or `None`
     /// if expiry was disabled).
     ///
-    /// A zero `ttl` disables expiry on stores that support a disabled state — it is then
-    /// exactly equivalent to [`unset_ttl`](Self::unset_ttl), and subsequently inserted
-    /// entries never expire. Expiry-ordered stores that always require a TTL
-    /// (notably [`TtlSortedCache`]) cannot disable expiry; they
-    /// store a zero `ttl` as-is, making entries expire immediately (see that store's own
-    /// `set_ttl` docs). Use [`try_set_ttl`](Self::try_set_ttl) if you want a zero `ttl`
+    /// A zero `ttl` disables expiry: subsequently inserted entries never expire. This is
+    /// equivalent to [`unset_ttl`](Self::unset_ttl). Pre-existing entries keep their
+    /// original expiry. Use [`try_set_ttl`](Self::try_set_ttl) if you want a zero `ttl`
     /// rejected instead.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration>;
 
@@ -1463,7 +1459,10 @@ pub trait CachedAsync<K, V> {
     ///
     /// Defaults to calling the synchronous [`Cached::cache_get`] implementation. Stores can
     /// override to provide a truly async path.
-    fn get_async<'a, Q>(&'a mut self, k: &'a Q) -> impl Future<Output = Option<&'a V>> + Send + 'a
+    fn async_cache_get<'a, Q>(
+        &'a mut self,
+        k: &'a Q,
+    ) -> impl Future<Output = Option<&'a V>> + Send + 'a
     where
         Self: Cached<K, V> + Send,
         K: std::borrow::Borrow<Q> + 'a,
@@ -1476,7 +1475,7 @@ pub trait CachedAsync<K, V> {
     /// Insert a key-value pair asynchronously.
     ///
     /// Defaults to calling the synchronous [`Cached::cache_set`] implementation.
-    fn set_async(&mut self, k: K, v: V) -> impl Future<Output = Option<V>> + Send
+    fn async_cache_set(&mut self, k: K, v: V) -> impl Future<Output = Option<V>> + Send
     where
         Self: Cached<K, V> + Send,
         K: Send,
@@ -1488,7 +1487,10 @@ pub trait CachedAsync<K, V> {
     /// Remove a cached value asynchronously.
     ///
     /// Defaults to calling the synchronous [`Cached::cache_remove`] implementation.
-    fn remove_async<'a, Q>(&'a mut self, k: &'a Q) -> impl Future<Output = Option<V>> + Send + 'a
+    fn async_cache_remove<'a, Q>(
+        &'a mut self,
+        k: &'a Q,
+    ) -> impl Future<Output = Option<V>> + Send + 'a
     where
         Self: Cached<K, V> + Send,
         K: std::borrow::Borrow<Q> + 'a,
@@ -1501,7 +1503,7 @@ pub trait CachedAsync<K, V> {
     /// Remove all entries asynchronously.
     ///
     /// Defaults to calling the synchronous [`Cached::cache_clear`] implementation.
-    fn clear_async(&mut self) -> impl Future<Output = ()> + Send
+    fn async_cache_clear(&mut self) -> impl Future<Output = ()> + Send
     where
         Self: Cached<K, V> + Send,
     {
@@ -2247,3 +2249,64 @@ pub mod __set_dispatch_async {
 // bring your own lock or use a macro (`#[cached]`/`#[once]` generate the lock).
 // `ConcurrentCached`/`ConcurrentCachedAsync` is the contract for stores that
 // manage their own synchronization (`RedisCache`, `RedbCache`).
+
+#[cfg(all(test, feature = "async"))]
+mod cached_async_rename_tests {
+    //! Tests that the four renamed `CachedAsync` default methods exist and behave correctly.
+    //! These tests fail if the old names (`get_async`, `set_async`, etc.) are used instead,
+    //! because the new names (`async_cache_get`, `async_cache_set`, etc.) are what the trait
+    //! now declares.
+
+    use crate::{Cached, CachedAsync, UnboundCache};
+
+    /// Call all four renamed default methods on an in-memory `UnboundCache` and verify
+    /// that `async_cache_get`, `async_cache_set`, `async_cache_remove`, and
+    /// `async_cache_clear` behave like their synchronous counterparts.
+    #[tokio::test]
+    async fn async_cache_get_set_remove_clear_behavioral() {
+        let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
+
+        // async_cache_set inserts a value and returns None (no previous entry).
+        let prev = cache.async_cache_set("a".to_string(), 1u32).await;
+        assert_eq!(prev, None, "async_cache_set: first insert returns None");
+
+        // async_cache_set on existing key returns the old value.
+        let prev = cache.async_cache_set("a".to_string(), 2u32).await;
+        assert_eq!(
+            prev,
+            Some(1u32),
+            "async_cache_set: overwrite returns old value"
+        );
+
+        // async_cache_get returns the current value.
+        let got = cache.async_cache_get("a").await;
+        assert_eq!(got, Some(&2u32), "async_cache_get: hit returns Some");
+
+        // async_cache_get on a missing key returns None.
+        let missing = cache.async_cache_get("z").await;
+        assert_eq!(missing, None, "async_cache_get: miss returns None");
+
+        // async_cache_remove removes and returns the value.
+        let removed = cache.async_cache_remove("a").await;
+        assert_eq!(
+            removed,
+            Some(2u32),
+            "async_cache_remove: returns removed value"
+        );
+
+        // The entry is gone after removal.
+        let gone = cache.async_cache_get("a").await;
+        assert_eq!(gone, None, "async_cache_get: after removal returns None");
+
+        // async_cache_clear removes all entries.
+        cache.async_cache_set("x".to_string(), 10u32).await;
+        cache.async_cache_set("y".to_string(), 20u32).await;
+        assert_eq!(cache.cache_size(), 2);
+        cache.async_cache_clear().await;
+        assert_eq!(
+            cache.cache_size(),
+            0,
+            "async_cache_clear: empties the cache"
+        );
+    }
+}
