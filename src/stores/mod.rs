@@ -105,7 +105,7 @@ pub(super) type OnEvict<K, V> = std::sync::Arc<dyn Fn(&K, &V) + Send + Sync>;
 
 /// Error returned by cache builder `build()` methods.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
     /// A required field was not supplied to the builder.
     MissingRequired(&'static str),
@@ -529,5 +529,157 @@ mod tests {
     fn cache_set_error_is_clone_eq() {
         // Parity with `SetMaxSizeError`/`SetTtlError`, which already derive these.
         assert_eq!(CacheSetError::TimeBounds, CacheSetError::TimeBounds.clone());
+    }
+
+    // Compile-time assertion: BuildError must implement Clone + PartialEq + Eq.
+    fn _assert_build_error_bounds<T: Clone + PartialEq + Eq>() {}
+    fn _check_build_error() {
+        _assert_build_error_bounds::<BuildError>();
+    }
+
+    #[test]
+    fn build_error_clone_partial_eq_eq() {
+        // Two equal MissingRequired values compare equal and survive a clone round-trip.
+        let a = BuildError::MissingRequired("ttl");
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        // Two equal InvalidValue values compare equal and survive a clone round-trip.
+        let c = BuildError::InvalidValue {
+            field: "max_size",
+            reason: "must be greater than zero",
+        };
+        let d = c.clone();
+        assert_eq!(c, d);
+
+        // Different variants are not equal.
+        assert_ne!(
+            BuildError::MissingRequired("ttl"),
+            BuildError::InvalidValue {
+                field: "ttl",
+                reason: "must be greater than zero",
+            },
+        );
+
+        // Different field names inside the same variant are not equal.
+        assert_ne!(
+            BuildError::MissingRequired("ttl"),
+            BuildError::MissingRequired("max_size"),
+        );
+    }
+
+    // The author's `build_error_clone_partial_eq_eq` exercises clone/eq on both
+    // variants, a cross-variant `assert_ne!`, and differing fields *within*
+    // `MissingRequired`. The remaining derived-PartialEq paths for the struct
+    // variant `InvalidValue` were not checked: equality must depend on BOTH the
+    // `field` and the `reason` field. These would not fail to compile if the
+    // derive were reverted (the wrapper enums prove `BuildError` already had a
+    // hand-rolled `Debug`), so each comparison below is value-level and bites if
+    // the `PartialEq`/`Eq`/`Clone` derive is removed.
+    #[test]
+    fn build_error_invalid_value_field_discriminates() {
+        // Same `reason`, different `field` => not equal.
+        assert_ne!(
+            BuildError::InvalidValue {
+                field: "max_size",
+                reason: "must be greater than zero",
+            },
+            BuildError::InvalidValue {
+                field: "ttl",
+                reason: "must be greater than zero",
+            },
+        );
+
+        // Same `field`, different `reason` => not equal.
+        assert_ne!(
+            BuildError::InvalidValue {
+                field: "max_size",
+                reason: "must be greater than zero",
+            },
+            BuildError::InvalidValue {
+                field: "max_size",
+                reason: "allocation failed",
+            },
+        );
+
+        // Fully equal struct variants compare equal (and the clone matches).
+        let a = BuildError::InvalidValue {
+            field: "max_size",
+            reason: "must be greater than zero",
+        };
+        assert_eq!(a, a.clone());
+    }
+
+    // The consumer-facing point of the derive: a real builder failure can be
+    // compared with `assert_eq!`/matched, and cloned. `LruCacheBuilder::build`
+    // is feature-free and produces both `BuildError` variants directly.
+    #[test]
+    fn lru_build_error_is_comparable_and_cloneable() {
+        // Missing required field.
+        let missing = LruCache::<i32, i32>::builder().build().unwrap_err();
+        assert_eq!(missing, BuildError::MissingRequired("max_size"));
+        // assert_eq! over a clone of a real builder error.
+        assert_eq!(missing, missing.clone());
+
+        // Invalid value (zero capacity).
+        let invalid = LruCache::<i32, i32>::builder()
+            .max_size(0)
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            invalid,
+            BuildError::InvalidValue {
+                field: "max_size",
+                reason: "must be greater than zero",
+            }
+        );
+
+        // The two real failures are distinct.
+        assert_ne!(missing, invalid);
+    }
+
+    // Wrapper enums (RedisCacheBuildError / RedbCacheBuildError) INTENTIONALLY do
+    // NOT derive Clone/PartialEq/Eq (their other variants wrap non-Clone/Eq
+    // errors). Assert only that the config path still surfaces the embedded
+    // `BuildError` and that Debug/Display work. These tests need a live service
+    // only past the field validation, which the builders run first, so no
+    // network/disk is touched.
+    #[cfg(feature = "redis_store")]
+    #[test]
+    fn redis_build_error_wraps_build_error_without_clone_eq() {
+        // No prefix set => Build(BuildError::MissingRequired("prefix")) before any IO.
+        let err = RedisCacheBuilder::<String, u32>::new().build().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RedisCacheBuildError::Build(BuildError::MissingRequired("prefix"))
+            ),
+            "expected Build(MissingRequired(\"prefix\")), got {err:?}"
+        );
+        // Debug and Display are available on the wrapper (transparent to BuildError).
+        assert!(!format!("{err:?}").is_empty());
+        assert_eq!(
+            err.to_string(),
+            BuildError::MissingRequired("prefix").to_string()
+        );
+    }
+
+    #[cfg(feature = "redb_store")]
+    #[test]
+    fn redb_build_error_wraps_build_error_without_clone_eq() {
+        // No name set => Build(BuildError::MissingRequired("name")) before any IO.
+        let err = RedbCacheBuilder::<String, u32>::new().build().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RedbCacheBuildError::Build(BuildError::MissingRequired("name"))
+            ),
+            "expected Build(MissingRequired(\"name\")), got {err:?}"
+        );
+        assert!(!format!("{err:?}").is_empty());
+        assert_eq!(
+            err.to_string(),
+            BuildError::MissingRequired("name").to_string()
+        );
     }
 }
