@@ -39,7 +39,23 @@ use {super::CachedAsync, std::future::Future};
 /// ```
 pub trait Expires {
     /// `is_expired` returns whether the value has expired.
+    ///
+    /// This is the authoritative liveness check: callers must use `is_expired` to
+    /// decide whether a cached value may be returned, not `expires_at`.
     fn is_expired(&self) -> bool;
+
+    /// Returns the [`std::time::Instant`] at which this value expires, or `None` if the
+    /// expiry instant is unknown or not tracked by this type.
+    ///
+    /// The default implementation returns `None`. Override this in types that record a
+    /// concrete deadline to enable observability (logging, metrics) and to allow callers
+    /// to extend or compare deadlines without re-computing them.
+    ///
+    /// `is_expired()` remains the authoritative liveness check; `expires_at` is advisory
+    /// and must not be used as a substitute for `is_expired`.
+    fn expires_at(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
 
 /// LRU-bounded cache with per-value expiry.
@@ -1252,5 +1268,49 @@ mod tests {
             ExpiringLruCache::builder().max_size(4).build().unwrap();
         assert_eq!(empty1, empty2);
         assert_ne!(empty1, a);
+    }
+
+    // --- expires_at tests ---
+
+    /// A type that overrides `expires_at` to return a concrete deadline.
+    struct TimedValue {
+        deadline: std::time::Instant,
+    }
+
+    impl Expires for TimedValue {
+        fn is_expired(&self) -> bool {
+            std::time::Instant::now() >= self.deadline
+        }
+
+        fn expires_at(&self) -> Option<std::time::Instant> {
+            Some(self.deadline)
+        }
+    }
+
+    #[test]
+    fn expires_at_default_returns_none() {
+        // ExpiredU8 does not override expires_at, so the default must return None.
+        let v: ExpiredU8 = 5;
+        assert_eq!(
+            v.expires_at(),
+            None,
+            "default expires_at must return None for types that do not track a deadline"
+        );
+    }
+
+    #[test]
+    fn expires_at_override_returns_some_instant() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let v = TimedValue { deadline };
+        assert_eq!(
+            v.expires_at(),
+            Some(deadline),
+            "expires_at must return the overridden deadline when the impl provides one"
+        );
+        // Confirm is_expired is not confused: a future deadline is not yet expired.
+        assert!(
+            !v.is_expired(),
+            "a value whose deadline is in the future must not be expired"
+        );
     }
 }
