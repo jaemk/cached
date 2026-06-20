@@ -2042,4 +2042,275 @@ mod test {
         assert_eq!(cache.cache_size(), 1, "never-expiring entry must remain");
         assert_eq!(cache.cache_get(&2u32), Some(&20u32));
     }
+
+    /// `insert_ttl` called with an EXPLICIT `Duration::ZERO` (not the cache-level
+    /// `set_ttl`) must store `expiry = None` (never expires), not `Some(now)`
+    /// (immediate). The cache's default TTL stays finite the whole time.
+    #[test]
+    fn insert_ttl_explicit_zero_never_expires() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        // Explicit zero TTL on this one entry — default ttl remains 20ms.
+        cache.insert_ttl(1u32, 10u32, Duration::ZERO).unwrap();
+        // The entry's internal expiry must be None (never), not Some(now).
+        assert!(
+            cache
+                .map
+                .get(&1u32)
+                .expect("entry present")
+                .expiry
+                .is_none(),
+            "explicit Duration::ZERO must store expiry = None (never expires)"
+        );
+        // Wait far past the default 20ms TTL.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "entry inserted with explicit zero TTL must never expire"
+        );
+        // A sibling inserted with the finite default TTL must still expire.
+        cache.cache_set(2u32, 20u32);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(
+            cache.cache_get(&2u32),
+            None,
+            "finite-TTL sibling must expire"
+        );
+        assert_eq!(cache.cache_get(&1u32), Some(&10u32));
+    }
+
+    /// `insert_ttl_evict` with explicit `Duration::ZERO` also stores `None`,
+    /// and the never-expiring entry is not swept by the eviction pass it triggers.
+    #[test]
+    fn insert_ttl_evict_explicit_zero_never_expires_and_survives_evict() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(10))
+            .build()
+            .unwrap();
+        // A finite, soon-to-expire entry.
+        cache.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        // Insert a never-expiring entry AND run the eviction pass in the same call.
+        cache
+            .insert_ttl_evict(2u32, 20u32, Some(Duration::ZERO), true)
+            .unwrap();
+        assert!(
+            cache
+                .map
+                .get(&2u32)
+                .expect("entry present")
+                .expiry
+                .is_none(),
+            "explicit zero TTL must be None"
+        );
+        // The expired finite entry was swept; the never-expiring one survives.
+        assert_eq!(cache.cache_get(&1u32), None, "expired entry swept by evict");
+        assert_eq!(
+            cache.cache_get(&2u32),
+            Some(&20u32),
+            "never-expiring entry must survive its own evict pass"
+        );
+    }
+
+    /// `retain_latest` over a MIX of never-expires (`None`) and finite (`Some`) entries:
+    /// finite entries are popped first (soonest-expiry order); `None` entries are retained
+    /// last regardless of insertion order. Verified across several `count` values.
+    #[test]
+    fn retain_latest_keeps_never_expiring_entries_last() {
+        // Insertion order deliberately interleaves never/finite to prove that ordering,
+        // not insertion order, decides eviction.
+        fn fresh() -> TtlSortedCache<u32, u32> {
+            let mut cache = TtlSortedCache::<u32, u32>::builder()
+                .ttl(Duration::from_secs(60))
+                .build()
+                .unwrap();
+            // finite (soonest)
+            cache.set_ttl(Duration::from_millis(100));
+            cache.cache_set(1u32, 10u32);
+            // never
+            cache.set_ttl(Duration::ZERO);
+            cache.cache_set(2u32, 20u32);
+            // finite (later than key 1)
+            cache.set_ttl(Duration::from_secs(60));
+            cache.cache_set(3u32, 30u32);
+            // never
+            cache.set_ttl(Duration::ZERO);
+            cache.cache_set(4u32, 40u32);
+            cache
+        }
+
+        // count = 2: the two finite entries (1, 3) are dropped, both nevers (2, 4) kept.
+        let mut cache = fresh();
+        let dropped = cache.retain_latest(2, false);
+        assert_eq!(dropped, 2);
+        assert_eq!(cache.cache_get(&1u32), None, "soonest finite dropped");
+        assert_eq!(cache.cache_get(&3u32), None, "later finite dropped");
+        assert_eq!(cache.cache_get(&2u32), Some(&20u32), "never-expires kept");
+        assert_eq!(cache.cache_get(&4u32), Some(&40u32), "never-expires kept");
+
+        // count = 3: only the soonest finite (key 1) is dropped; key 3 and both nevers kept.
+        let mut cache = fresh();
+        let dropped = cache.retain_latest(3, false);
+        assert_eq!(dropped, 1);
+        assert_eq!(cache.cache_get(&1u32), None, "soonest finite dropped first");
+        assert_eq!(cache.cache_get(&3u32), Some(&30u32));
+        assert_eq!(cache.cache_get(&2u32), Some(&20u32));
+        assert_eq!(cache.cache_get(&4u32), Some(&40u32));
+
+        // count = 1: both finite dropped, then ONE never must be dropped. The surviving
+        // entry must be a never-expires entry (key 2 or key 4), never a finite one.
+        let mut cache = fresh();
+        let dropped = cache.retain_latest(1, false);
+        assert_eq!(dropped, 3);
+        assert_eq!(cache.cache_size(), 1);
+        assert_eq!(cache.cache_get(&1u32), None);
+        assert_eq!(cache.cache_get(&3u32), None);
+        let survivor_is_never =
+            cache.cache_get(&2u32).is_some() || cache.cache_get(&4u32).is_some();
+        assert!(
+            survivor_is_never,
+            "the last-retained entry must be a never-expires entry, not a finite one"
+        );
+
+        // count = 0: everything dropped.
+        let mut cache = fresh();
+        let dropped = cache.retain_latest(0, false);
+        assert_eq!(dropped, 4);
+        assert_eq!(cache.cache_size(), 0);
+    }
+
+    /// Max-size eviction with never-expires and finite entries interleaved in insertion
+    /// order: finite entries are always evicted before never-expires entries, regardless
+    /// of when the never-expires entries were inserted.
+    #[test]
+    fn max_size_eviction_evicts_finite_before_never_interleaved() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(3)
+            .build()
+            .unwrap();
+        // Insert a never-expires entry FIRST (oldest by insertion order).
+        cache.set_ttl(Duration::ZERO);
+        cache.cache_set(1u32, 10u32);
+        // Then finite entries.
+        cache.set_ttl(Duration::from_secs(30));
+        cache.cache_set(2u32, 20u32);
+        cache.cache_set(3u32, 30u32);
+        assert_eq!(cache.cache_size(), 3);
+        // A 4th finite insert exceeds max_size=3 -> evict the soonest-expiring (a finite one).
+        cache.cache_set(4u32, 40u32);
+        assert_eq!(cache.cache_size(), 3);
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "the oldest-inserted never-expires entry must not be evicted"
+        );
+        // The evicted one must be a finite entry (key 2 was the soonest of the finites).
+        assert_eq!(cache.cache_get(&2u32), None, "soonest finite evicted");
+        // Push more finite inserts; the never-expires entry must keep surviving.
+        cache.cache_set(5u32, 50u32);
+        cache.cache_set(6u32, 60u32);
+        assert_eq!(cache.cache_size(), 3);
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "never-expires entry survives repeated finite-driven eviction"
+        );
+    }
+
+    /// `cache_get_or_set_with` when the cache TTL is zero: the just-inserted entry is
+    /// retrievable immediately and never expires (stored with expiry = None).
+    #[test]
+    fn get_or_set_with_zero_ttl_inserts_never_expiring_entry() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(10))
+            .build()
+            .unwrap();
+        cache.set_ttl(Duration::ZERO);
+        // Miss path computes and inserts; value retrievable immediately.
+        let v = cache.cache_get_or_set_with(1u32, || 42u32);
+        assert_eq!(*v, 42);
+        assert!(
+            cache
+                .map
+                .get(&1u32)
+                .expect("entry present")
+                .expiry
+                .is_none(),
+            "zero-ttl get_or_set must store expiry = None"
+        );
+        // Persists well past the former 10ms TTL.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&42u32),
+            "zero-ttl get_or_set entry must never expire"
+        );
+        // Hit path: closure must not run.
+        let v = cache.cache_get_or_set_with(1u32, || 999u32);
+        assert_eq!(*v, 42, "existing never-expiring entry returned on hit");
+    }
+
+    /// `cache_try_get_or_set_with` when the cache TTL is zero: same contract via the
+    /// fallible path. The entry is retrievable immediately and never expires.
+    #[test]
+    fn try_get_or_set_with_zero_ttl_inserts_never_expiring_entry() {
+        let mut cache = TtlSortedCache::<&str, u32>::builder()
+            .ttl(Duration::from_millis(10))
+            .build()
+            .unwrap();
+        cache.set_ttl(Duration::ZERO);
+        let v: &u32 = cache
+            .cache_try_get_or_set_with("k", || Ok::<u32, ()>(7))
+            .unwrap();
+        assert_eq!(*v, 7);
+        assert!(
+            cache.map.get("k").expect("entry present").expiry.is_none(),
+            "zero-ttl try_get_or_set must store expiry = None"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(
+            cache.cache_get("k"),
+            Some(&7u32),
+            "zero-ttl try_get_or_set entry must never expire"
+        );
+    }
+
+    /// The four renamed single-owner `CachedAsync` default methods, exercised on a real
+    /// `TtlSortedCache` (not only `UnboundCache`). Confirms the rename works on a store
+    /// whose `cache_get`/`cache_set`/`cache_remove`/`cache_clear` carry TTL semantics.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_methods_on_ttl_sorted_cache() {
+        use crate::CachedAsync;
+        let mut cache: TtlSortedCache<String, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let prev = cache.async_cache_set("a".to_string(), 1u32).await;
+        assert_eq!(prev, None, "first insert returns None");
+
+        let prev = cache.async_cache_set("a".to_string(), 2u32).await;
+        assert_eq!(prev, Some(1u32), "overwrite returns previous value");
+
+        let got = cache.async_cache_get("a").await;
+        assert_eq!(got, Some(&2u32), "async_cache_get hit");
+
+        let missing = cache.async_cache_get("z").await;
+        assert_eq!(missing, None, "async_cache_get miss");
+
+        let removed = cache.async_cache_remove("a").await;
+        assert_eq!(removed, Some(2u32), "async_cache_remove returns value");
+        assert_eq!(cache.async_cache_get("a").await, None, "gone after remove");
+
+        cache.async_cache_set("x".to_string(), 10u32).await;
+        cache.async_cache_set("y".to_string(), 20u32).await;
+        assert_eq!(cache.cache_size(), 2);
+        cache.async_cache_clear().await;
+        assert_eq!(cache.cache_size(), 0, "async_cache_clear empties cache");
+    }
 }

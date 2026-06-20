@@ -1313,4 +1313,112 @@ mod tests {
             "a value whose deadline is in the future must not be expired"
         );
     }
+
+    /// `is_expired` is the authoritative liveness check; `expires_at` is advisory only.
+    /// This type deliberately reports a deadline that is already in the past while
+    /// claiming to be live. A correct cache must consult `is_expired` (live), NOT
+    /// `expires_at` (past), and therefore keep the entry.
+    struct LiveDespitePastDeadline {
+        past: std::time::Instant,
+    }
+
+    impl Expires for LiveDespitePastDeadline {
+        fn is_expired(&self) -> bool {
+            // Authoritative: always live, regardless of the advisory deadline below.
+            false
+        }
+
+        fn expires_at(&self) -> Option<std::time::Instant> {
+            // Advisory: a deadline in the past. Must not be used for liveness.
+            Some(self.past)
+        }
+    }
+
+    #[test]
+    fn expires_at_past_does_not_override_is_expired_for_value() {
+        // Sanity at the value level: the two methods disagree on purpose.
+        let v = LiveDespitePastDeadline {
+            past: std::time::Instant::now() - std::time::Duration::from_secs(3600),
+        };
+        assert!(
+            !v.is_expired(),
+            "is_expired is authoritative and reports the value as live"
+        );
+        let reported = v.expires_at().expect("override returns Some");
+        assert!(
+            reported < std::time::Instant::now(),
+            "expires_at advisory deadline is in the past"
+        );
+    }
+
+    #[test]
+    fn cache_keeps_entry_with_past_expires_at_but_live_is_expired() {
+        // Contract: the cache must decide liveness from is_expired, not expires_at.
+        // The stored value's expires_at is in the past, but is_expired() == false,
+        // so the entry must be returned as a live hit and survive in the cache.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let mut c: ExpiringLruCache<u8, LiveDespitePastDeadline> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, LiveDespitePastDeadline { past });
+
+        // get must treat it as a live hit (is_expired() == false).
+        assert!(
+            c.cache_get(&1u8).is_some(),
+            "entry whose is_expired() is false must be returned even if expires_at is in the past"
+        );
+        assert_eq!(c.cache_hits(), Some(1), "the access must count as a hit");
+        assert_eq!(
+            c.cache_misses(),
+            Some(0),
+            "an entry the cache treats as live must not register a miss"
+        );
+        assert_eq!(c.cache_size(), 1, "the live entry must remain in the cache");
+
+        // evict() must also consult is_expired, not expires_at: nothing is removed.
+        assert_eq!(
+            c.evict(),
+            0,
+            "evict must not remove an entry whose is_expired() is false"
+        );
+        assert_eq!(c.cache_size(), 1);
+
+        // peek and iter must likewise keep it.
+        assert!(
+            c.cache_peek(&1u8).is_some(),
+            "peek must surface the live entry"
+        );
+        let keys: Vec<u8> = c.iter().map(|(&k, _)| k).collect();
+        assert_eq!(keys, vec![1], "iter must include the live entry");
+    }
+
+    /// A type that provides ONLY `is_expired`, relying on the trait default for
+    /// `expires_at`. The fact that this compiles and is usable as a cache value is
+    /// the contract: adding `expires_at` did not break impls that omit it.
+    struct OnlyIsExpired(bool);
+
+    impl Expires for OnlyIsExpired {
+        fn is_expired(&self) -> bool {
+            self.0
+        }
+        // expires_at intentionally not provided — exercises the default impl.
+    }
+
+    #[test]
+    fn impl_with_only_is_expired_compiles_and_defaults_expires_at_to_none() {
+        let live = OnlyIsExpired(false);
+        assert!(!live.is_expired());
+        assert_eq!(
+            live.expires_at(),
+            None,
+            "an impl omitting expires_at must inherit the None default"
+        );
+
+        // And it works as a cache value type end to end.
+        let mut c: ExpiringLruCache<u8, OnlyIsExpired> =
+            ExpiringLruCache::builder().max_size(2).build().unwrap();
+        c.cache_set(1, OnlyIsExpired(false)); // live
+        c.cache_set(2, OnlyIsExpired(true)); // expired
+        assert!(c.cache_get(&1u8).is_some(), "live entry returned");
+        assert!(c.cache_get(&2u8).is_none(), "expired entry not returned");
+    }
 }

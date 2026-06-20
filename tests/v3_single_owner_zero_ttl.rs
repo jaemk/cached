@@ -518,14 +518,15 @@ fn single_owner_try_set_ttl_rejects_zero_but_set_ttl_disables() {
     assert_eq!(l.ttl(), None);
 }
 
-// gap 6: TtlSortedCache is intentionally OUT OF SCOPE. Its `ttl()` reports the
-// raw configured duration (never None), `set_ttl` always returns `Some(prev)`,
-// `unset_ttl` is a no-op returning None, and `set_ttl(0)` does NOT disable
-// expiry (it silently breaks reads). Guard that the zero-as-disabled semantic
-// was NOT accidentally extended to it.
+// gap 6: As of the v3 zero-ttl-disables change, TtlSortedCache is now IN SCOPE and
+// consistent with TtlCache / LruTtlCache: a zero ttl disables expiry for future
+// inserts (entries never expire). Its `ttl()` still reports the raw configured
+// duration (Some(ZERO), never resolved to None like the per-entry stores), and
+// `set_ttl` always returns `Some(prev)`. `unset_ttl` now sets the ttl to zero and
+// returns None. Guard the new never-expires semantic.
 
 #[test]
-fn ttl_sorted_cache_zero_is_not_disabled() {
+fn ttl_sorted_cache_zero_disables_expiry() {
     use cached::TtlSortedCache;
     let mut c = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -549,21 +550,30 @@ fn ttl_sorted_cache_zero_is_not_disabled() {
         "TtlSortedCache ttl() must report the raw zero, NOT resolve it to None"
     );
 
-    // unset_ttl is a no-op returning None and does not change the stored ttl.
+    // unset_ttl sets the stored ttl to zero and returns None.
     assert_eq!(
         CacheTtl::unset_ttl(&mut c),
         None,
-        "unset_ttl is a no-op on TtlSortedCache"
+        "unset_ttl returns None on TtlSortedCache"
     );
-    assert_eq!(CacheTtl::ttl(&c), Some(Duration::ZERO));
+    assert_eq!(
+        CacheTtl::ttl(&c),
+        Some(Duration::ZERO),
+        "unset_ttl leaves the ttl at zero (disabled)"
+    );
 
-    // set_ttl(0) does NOT disable expiry: a freshly inserted entry is treated as
-    // already expired (the out-of-scope, unchanged breakage that motivates
-    // try_set_ttl on this store).
+    // set_ttl(0) disables expiry for future inserts: a freshly inserted entry is
+    // stored with no expiry and is retrievable indefinitely.
     c.cache_set(1, 10);
     assert_eq!(
         c.cache_get(&1),
-        None,
-        "TtlSortedCache with a zero ttl must NOT keep entries live (out of scope)"
+        Some(&10),
+        "TtlSortedCache with a zero ttl must keep just-inserted entries live (never expires)"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(
+        c.cache_get(&1),
+        Some(&10),
+        "the entry must persist (never expires) under zero ttl"
     );
 }

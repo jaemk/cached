@@ -173,7 +173,7 @@ impl std::error::Error for SetTtlError {}
 /// an entry cannot be stored - currently only when computing the entry's expiry
 /// `Instant` overflows.
 ///
-/// The pre-2.0 `TtlSortedCacheError` was removed in favor of this unified type; the
+/// The separate `TtlSortedCacheError` type was removed in favor of this unified type; the
 /// following must not compile (guards against the old error type being reintroduced):
 ///
 /// ```compile_fail
