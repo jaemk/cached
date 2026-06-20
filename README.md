@@ -54,10 +54,11 @@ The short aliases are the preferred spelling. Use the `cache_`-prefixed names wh
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has the
-`get_or_set_with` family (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`, and
-their `_mut` variants). Neither trait has a short alias; the `async_` prefix already prevents
-collisions with the sync methods.
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
+`async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
+`async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
+the `async_` prefix already prevents collisions with the sync methods.
 
 **Features**
 
@@ -78,8 +79,7 @@ collisions with the sync methods.
   but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
 - `redis_async_cache`: Enable Redis client-side caching over RESP3 for async Redis caches.
   Implies `redis_tokio`, `async`, and `redis_store`, but does not enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
-- `redis_ahash`: Enable the optional `ahash` feature of `redis`
-- `disk_store`: Include disk cache store
+- `redb_store`: Include disk cache store
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, `#[concurrent_cached(ttl_millis = ...)]`, `#[once(ttl_secs = ...)]`, `#[once(ttl = ...)]`, or `#[once(ttl_millis = ...)]` on the default in-memory path.
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).

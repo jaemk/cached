@@ -53,10 +53,11 @@ The short aliases are the preferred spelling. Use the `cache_`-prefixed names wh
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has the
-`get_or_set_with` family (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`, and
-their `_mut` variants). Neither trait has a short alias; the `async_` prefix already prevents
-collisions with the sync methods.
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
+`async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
+`async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
+the `async_` prefix already prevents collisions with the sync methods.
 
 **Features**
 
@@ -690,10 +691,11 @@ pub mod prelude {
 /// alias would collide with another in-scope trait's method of the same name (for example, your
 /// type also implements a trait with its own `get`).
 /// Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-/// `async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has the
-/// `get_or_set_with` family (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`,
-/// and their `_mut` variants). Neither trait has a short alias; the `async_` prefix already
-/// prevents collisions with the sync methods.
+/// `async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has
+/// `async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
+/// `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
+/// `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short
+/// alias; the `async_` prefix already prevents collisions with the sync methods.
 ///
 /// ```rust
 /// use cached::{Cached, UnboundCache};

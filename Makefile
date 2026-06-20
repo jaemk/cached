@@ -123,8 +123,8 @@ help: ## List all supported Make targets
 			tests/time-stores) desc="Run tests with proc_macro and time_stores" ;; \
 			tests/async) desc="Run async tests with proc_macro and time_stores" ;; \
 			tests/ahash) desc="Run tests with proc_macro and ahash (no time_stores)" ;; \
-			tests/disk-store) desc="Run disk_store tests with proc_macro and async runtime" ;; \
-			tests/disk-store-sync) desc="Run disk_store tests with proc_macro (no async runtime)" ;; \
+			tests/disk-store) desc="Run redb_store tests with proc_macro and async runtime" ;; \
+			tests/disk-store-sync) desc="Run redb_store tests with proc_macro (no async runtime)" ;; \
 			tests/redis) desc="Run all Redis-backed test targets" ;; \
 			tests/redis-connection-manager) desc="Check standalone redis_connection_manager feature compilation" ;; \
 			tests/redis-async-cache) desc="Check standalone redis_async_cache feature compilation" ;; \
@@ -226,15 +226,15 @@ tests/ahash:
 	@echo "[$@]: Running tests (proc_macro + ahash, no time_stores)..."
 	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,ahash" --tests -- --nocapture
 
-# disk_store + proc_macro (+ async for async disk tests; tokio dev-dep supplies the test runtime)
+# redb_store + proc_macro (+ async for async disk tests; tokio dev-dep supplies the test runtime)
 tests/disk-store:
-	@echo "[$@]: Running tests (disk_store + proc_macro + async)..."
-	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,disk_store,async" --tests -- --nocapture
+	@echo "[$@]: Running tests (redb_store + proc_macro + async)..."
+	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,redb_store,async" --tests -- --nocapture
 
-# disk_store + proc_macro (no async runtime)
+# redb_store + proc_macro (no async runtime)
 tests/disk-store-sync:
-	@echo "[$@]: Running tests (disk_store + proc_macro, no async)..."
-	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,disk_store" --tests -- --nocapture
+	@echo "[$@]: Running tests (redb_store + proc_macro, no async)..."
+	$(CARGO_COMMAND) test --no-default-features --features "proc_macro,redb_store" --tests -- --nocapture
 
 # Redis targets. The runtime targets (redis-store, redis-tokio, all-features)
 # each take an order-only `| docker/redis` prerequisite so the container is
