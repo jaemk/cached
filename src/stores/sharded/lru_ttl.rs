@@ -181,6 +181,8 @@ where
     }
 
     /// Compute the expiry instant for a new or refreshed entry given the current TTL.
+    /// TTL is clamped to u64::MAX nanos (~584 years), so `checked_add` overflow is
+    /// practically unreachable; if it does overflow, the entry becomes never-expires (`None`).
     fn compute_expires_at(&self, now: Instant) -> Option<Instant> {
         let nanos = self.inner.ttl_nanos.load(Ordering::Relaxed);
         if nanos == 0 {

@@ -321,7 +321,7 @@ use std::thread::sleep;
 use cached::time::Duration;
 use cached::macros::cached;
 
-/// Run a background thread to continuously refresh every key of a cache
+/// Run a background thread to continuously refresh a specific cache key
 #[cached(key = "String", convert = r#"{ String::from(a) }"#)]
 fn keyed(a: &str) -> usize {
     a.len()
@@ -331,7 +331,7 @@ pub fn main() {
         loop {
             sleep(Duration::from_secs(60));
             // keyed_prime_cache bypasses the cache and forces a fresh computation
-            // for any key you supply.
+            // for the given key.
             keyed_prime_cache("hello");
         }
     });

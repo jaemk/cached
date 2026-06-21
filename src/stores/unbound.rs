@@ -301,13 +301,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
         self.store.clear();
     }
     fn cache_reset(&mut self) {
-        // For the generic-hasher case, we cannot cheaply rebuild the store with the same
-        // hasher without storing the hasher separately. The default impl clears all entries
-        // and resets metrics. Callers needing the memory reclaim of a fresh store should
-        // use `cache_clear` + `cache_reset_metrics` on custom-hasher caches.
-        //
-        // For the default-hasher alias (UnboundCache<K,V>), the inherent impl below
-        // overrides this with a full store replacement.
+        // Clear all entries and shrink capacity back toward the initial hint.
+        // This single generic impl applies to all hasher types `S`; there is no
+        // inherent override or specialization for any particular hasher.
+        // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
         self.store.clear();
         self.store.shrink_to(self.initial_capacity.unwrap_or(0));
         self.cache_reset_metrics();
@@ -326,18 +323,6 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
         Some(self.misses.load())
     }
 }
-
-// Provide a proper `cache_reset` for the default-hasher alias that replaces the store.
-// The generic blanket above calls shrink_to which is close but not identical.
-// We use an inherent method approach: the trait's `cache_reset` on the blanket impl
-// is the best we can do for S != DefaultHashBuilder. For S = DefaultHashBuilder,
-// the behavior is the same as before via the blanket.
-//
-// To preserve the old reset behavior exactly (replaces store with fresh allocation),
-// we specialize via an inherent method that the Cached impl delegates to.
-// But Rust has no specialization. Instead, keep the blanket's shrink_to approach
-// for all S, which is functionally equivalent: after reset the cache is empty and
-// the capacity hint is honored. The test assertions have been updated accordingly.
 
 impl<K: Hash + Eq, V, S: BuildHasher> CachedIter<K, V> for UnboundCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
