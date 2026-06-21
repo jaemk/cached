@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -48,12 +48,12 @@ redb_store = ["redb", "serde", "rmp-serde", "directories"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
-version = "2.0.0"
+version = "3.0.0-rc.1"
 path = "cached_proc_macro"
 optional = true
 
 [dependencies.cached_proc_macro_types]
-version = "1.0.0"
+version = "3.0.0-rc.1"
 path = "cached_proc_macro_types"
 optional = true
 
