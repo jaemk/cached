@@ -53,8 +53,18 @@ Every synchronous cache operation has a short alias (`get`/`set`/`remove`/`clear
 The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short alias
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
+
+The short alias methods live on the extension traits `CachedExt` (for `Cached` stores) and
+`ConcurrentCachedExt` (for `ConcurrentCached` stores). These extension traits have blanket
+implementations for every type that implements `Cached` / `ConcurrentCached`, so the short
+names are always available when the extension trait is in scope. The simplest way to get them
+is `use cached::prelude::*;`, which re-exports both extension traits. Alternatively, import them
+directly: `use cached::{Cached, CachedExt};`. Custom store implementations only need to
+implement the `cache_`-prefixed required methods on the core trait; the short aliases come
+for free via the blanket extension trait impl.
+
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...; `CachedAsync` has
 `async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
 `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
@@ -194,9 +204,18 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedUnboundCache is infallible")`).
 - `Cached::get` (and its `cache_get` alias) requires mutable access because some
   stores update recency, expiration timestamps, or metrics during reads.
+- **`len` / `size` vs `iter` vs `evict` contract for timed and expiring stores:**
+  `len()` (and `cache_size()`, `is_empty()`) return the raw stored entry count without
+  scanning for expiry. On lazy-eviction stores (`TtlCache`, `LruTtlCache`,
+  `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`, and their sharded equivalents)
+  this count may include entries that have expired but not yet been swept, so
+  `len()` can be greater than `iter().count()`. `iter()` (from [`CachedIter`]) omits
+  expired entries from the yielded view but does not remove them from the store - it
+  stays `&self`. Call `evict()` (via [`CacheEvict`] for single-owner stores or
+  [`ConcurrentCacheEvict`] for sharded stores) to physically remove expired entries,
+  reclaim memory, and obtain an accurate live count.
 - Expired values can remain allocated until a mutating operation, `evict`, or
-  store-specific cleanup removes them. Methods such as `len` may include expired values
-  unless a store documents otherwise.
+  store-specific cleanup removes them.
 - `cache_remove` fires the `on_evict` callback (if set) and counts as an eviction for
   every successful removal, across all stores that track evictions. `ShardedUnboundCache` is the
   exception: it has no evictions counter and always returns `None` from
@@ -283,7 +302,7 @@ For concurrent (multi-thread, no external lock) use, the sharded equivalents [`S
 > `max_size` bound.
 
 ```rust
-use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
+use cached::{CachedExt, Expires, ExpiringCache, ExpiringLruCache};
 use cached::time::{Duration, Instant};
 
 #[derive(Clone)]
