@@ -1,7 +1,9 @@
 # Changelog
 
 ## [Unreleased]
-> Staged for the next major release (not yet cut). See the [unreleased migration guide](docs/migrations/2.0-to-unreleased.md).
+
+## [3.0.0-rc.1] - 2026-06-21
+> First 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-unreleased.md).
 
 ### Breaking Changes
 
