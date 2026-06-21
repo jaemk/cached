@@ -59,8 +59,11 @@ macro_rules! impl_from_redb {
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedbCacheBuildError {
-    #[error("Storage connection error")]
-    Connection(#[from] redb::Error),
+    #[error("Storage error")]
+    Storage {
+        #[from]
+        source: redb::Error,
+    },
     #[error(transparent)]
     Build(#[from] super::BuildError),
     #[error("I/O error preparing the disk cache directory")]
@@ -242,7 +245,7 @@ where
     ///   (`/` or `\`), contains a NUL byte, or is the path-traversal component `.` or `..`.
     /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
     /// - `Io`: the cache directory could not be created.
-    /// - `Connection`: the redb database file could not be opened or initialized.
+    /// - `Storage`: the redb database file could not be opened or initialized.
     pub fn build(self) -> Result<RedbCache<K, V>, RedbCacheBuildError> {
         let cache_name = self
             .cache_name
@@ -390,7 +393,14 @@ where
             let table = rtxn.open_table(TABLE)?;
             for item in table.iter()? {
                 let (key, value) = item?;
-                let cached = rmp_serde::from_slice::<CachedDiskValue<V>>(value.value())?;
+                let raw = value.value();
+                let cached =
+                    rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
+                        RedbCacheError::CacheDeserialization {
+                            source,
+                            cached_value: raw.to_vec(),
+                        }
+                    })?;
                 if let Some(ttl) = ttl
                     && now
                         .duration_since(cached.created_at)
@@ -449,11 +459,21 @@ impl<K, V> RedbCache<K, V> {
 #[derive(Error, Debug)]
 pub enum RedbCacheError {
     #[error("Storage error")]
-    Storage(#[from] redb::Error),
+    Storage {
+        #[from]
+        source: redb::Error,
+    },
     #[error("Error deserializing cached value")]
-    CacheDeserialization(#[from] rmp_serde::decode::Error),
+    CacheDeserialization {
+        #[source]
+        source: rmp_serde::decode::Error,
+        cached_value: Vec<u8>,
+    },
     #[error("Error serializing cached value")]
-    CacheSerialization(#[from] rmp_serde::encode::Error),
+    CacheSerialization {
+        #[from]
+        source: rmp_serde::encode::Error,
+    },
 }
 
 impl_from_redb!(
@@ -548,7 +568,13 @@ where
             return Ok(None);
         };
         // Deserialize before the guard/table/txn are dropped.
-        rmp_serde::from_slice::<CachedDiskValue<V>>(guard.value())?
+        let raw = guard.value();
+        rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
+            RedbCacheError::CacheDeserialization {
+                source,
+                cached_value: raw.to_vec(),
+            }
+        })?
     };
 
     if let Some(ttl) = ttl {
@@ -936,7 +962,7 @@ where
         let durable = self.durable;
         // Serialize eagerly; defer any error into the future.
         let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
-            .map_err(RedbCacheError::CacheSerialization);
+            .map_err(|source| RedbCacheError::CacheSerialization { source });
         async move {
             let serialized = serialized?;
             blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable))
@@ -1134,7 +1160,7 @@ mod tests {
 
         assert!(matches!(
             cache.cache_get(&TEST_KEY),
-            Err(RedbCacheError::CacheSerialization(_))
+            Err(RedbCacheError::CacheSerialization { .. })
         ));
     }
 
@@ -1150,7 +1176,7 @@ mod tests {
 
         assert!(matches!(
             cache.cache_get(&TEST_KEY),
-            Err(RedbCacheError::CacheDeserialization(_))
+            Err(RedbCacheError::CacheDeserialization { .. })
         ));
         assert!(raw_get(&cache, &TEST_KEY.to_string()).is_some());
     }
@@ -1359,7 +1385,7 @@ mod tests {
 
         assert!(matches!(
             cache.remove_expired_entries(),
-            Err(RedbCacheError::CacheDeserialization(_))
+            Err(RedbCacheError::CacheDeserialization { .. })
         ));
     }
 
@@ -2151,5 +2177,153 @@ mod tests {
 
         // async_flush also works
         block_on(cache.async_flush()).expect("async_flush under futures::block_on should succeed");
+    }
+
+    // ── Error variant shape and naming tests ─────────────────────────────────
+    //
+    // These tests assert the renamed/reshaped variants introduced in item 0005:
+    // - `RedbCacheBuildError::Storage` (renamed from `Connection`)
+    // - struct variants with named fields on both error enums
+    // - `CacheDeserialization::cached_value` carries the raw bytes that failed
+    //   to decode
+
+    /// `RedbCacheBuildError::Storage` (renamed from `Connection`) is produced
+    /// by build-time redb failures. Its Display no longer says "connection".
+    #[test]
+    fn build_error_storage_variant_name_and_display() {
+        // Construct the variant directly to verify the field name compiles.
+        let err = RedbCacheBuildError::Storage {
+            source: redb::Error::Io(std::io::Error::other("synthetic redb io error")),
+        };
+        let display = err.to_string();
+        // Must say "storage" (case-insensitive).
+        assert!(
+            display.to_lowercase().contains("storage"),
+            "Storage variant display must mention storage: {display}"
+        );
+        // Must NOT say "connection" (the old, misleading word).
+        assert!(
+            !display.to_lowercase().contains("connection"),
+            "Storage variant display must not mention connection: {display}"
+        );
+    }
+
+    /// `RedbCacheError::CacheDeserialization` is a struct variant. The
+    /// `cached_value` field carries the exact bytes that failed to decode,
+    /// and `source` holds the underlying decode error.
+    #[test]
+    fn cache_get_decode_error_carries_raw_bytes() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("decode-error-carries-bytes")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .expect("error building disk cache");
+        let corrupt: Vec<u8> = vec![0xc1, 0xc1, 0xc1];
+        raw_insert(&cache, &TEST_KEY.to_string(), corrupt.clone());
+
+        match cache.cache_get(&TEST_KEY) {
+            Err(RedbCacheError::CacheDeserialization {
+                cached_value,
+                source: _,
+            }) => {
+                assert_eq!(
+                    cached_value, corrupt,
+                    "cached_value must carry the exact bytes that failed to decode"
+                );
+            }
+            other => panic!("expected CacheDeserialization, got {other:?}"),
+        }
+        // Entry must still be present (cache_get does not remove on decode error).
+        assert!(raw_get(&cache, &TEST_KEY.to_string()).is_some());
+    }
+
+    /// `RedbCacheError::CacheDeserialization` from `remove_expired_entries`
+    /// also carries the raw bytes via the `cached_value` field.
+    #[test]
+    fn remove_expired_entries_decode_error_carries_raw_bytes() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("sweep-decode-error-bytes")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(1))
+            .build()
+            .expect("error building disk cache");
+        let corrupt: Vec<u8> = vec![0xc1, 0xc1, 0xc1];
+        raw_insert(&cache, &TEST_KEY.to_string(), corrupt.clone());
+
+        match cache.remove_expired_entries() {
+            Err(RedbCacheError::CacheDeserialization {
+                cached_value,
+                source: _,
+            }) => {
+                assert_eq!(
+                    cached_value, corrupt,
+                    "cached_value must carry the exact bytes that failed to decode"
+                );
+            }
+            other => panic!("expected CacheDeserialization, got {other:?}"),
+        }
+    }
+
+    /// `RedbCacheError::CacheSerialization` is a struct variant with a `source`
+    /// field. Verify that the variant can be constructed and matched with named
+    /// fields (not a bare tuple wildcard).
+    #[test]
+    fn cache_serialization_error_is_struct_variant() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> = RedbCache::builder()
+            .name("ser-error-struct-variant")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(10))
+            .refresh_on_hit(true)
+            .build()
+            .expect("error building disk cache");
+        let fixture = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
+        raw_insert(
+            &cache,
+            &TEST_KEY.to_string(),
+            rmp_serde::to_vec(&fixture).expect("error serializing fixture"),
+        );
+
+        match cache.cache_get(&TEST_KEY) {
+            Err(RedbCacheError::CacheSerialization { source: _ }) => {}
+            other => panic!("expected CacheSerialization, got {other:?}"),
+        }
+    }
+
+    /// `std::error::Error::source()` on `RedbCacheError::CacheDeserialization`
+    /// must return the underlying decode error.
+    #[test]
+    fn cache_deserialization_error_source_is_wired() {
+        use std::error::Error;
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("deser-source-wired")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .expect("error building disk cache");
+        raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
+
+        let err = cache
+            .cache_get(&TEST_KEY)
+            .expect_err("expected a decode error");
+        assert!(
+            err.source().is_some(),
+            "CacheDeserialization must expose its inner error via source()"
+        );
+    }
+
+    /// `RedbCacheBuildError::Storage`'s `source` field is wired as the
+    /// `std::error::Error::source()` of the wrapper.
+    #[test]
+    fn build_error_storage_source_is_wired() {
+        use std::error::Error;
+        let inner = redb::Error::Io(std::io::Error::other("synthetic redb io error"));
+        let err = RedbCacheBuildError::Storage { source: inner };
+        assert!(
+            err.source().is_some(),
+            "RedbCacheBuildError::Storage must expose its inner error via source()"
+        );
     }
 }
