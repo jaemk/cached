@@ -4,7 +4,7 @@ Full tests of macro-defined functions
 
 #[cfg(feature = "time_stores")]
 use cached::time::Duration;
-use cached::{Cached, LruCache, UnboundCache};
+use cached::{Cached, CachedExt, LruCache, UnboundCache};
 use cached::{Expires, ExpiringLruCache};
 #[cfg(feature = "proc_macro")]
 use cached::{macros::cached, macros::once};
@@ -7771,5 +7771,343 @@ mod async_cache_store_tests {
             .async_cache_get_or_set_with(1, || async { "hello".to_string() })
             .await;
         assert_eq!(val, "hello");
+    }
+}
+
+// --- len / iter / evict contract tests (spec 0002) ---
+//
+// These tests assert the documented contract:
+//   - `len()` returns the raw stored count; on lazy-eviction stores it may include
+//     expired-but-not-yet-swept entries.
+//   - `iter().count()` omits expired entries but does not remove them.
+//   - `evict()` physically removes expired entries; afterwards `len()` reflects only
+//     live entries.
+
+#[cfg(feature = "time_stores")]
+mod len_iter_evict_contract {
+    use cached::time::Duration;
+    use cached::{CachedExt, CachedIter, LruTtlCache, TtlCache, TtlSortedCache};
+
+    /// TtlCache: an expired entry is visible in `len()` but omitted from `iter()`;
+    /// `evict()` removes it so `len()` drops to the live count.
+    #[test]
+    fn ttl_cache_len_iter_evict() {
+        let mut cache: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        // Wait for entries to expire.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // len() counts both expired entries - no eviction scan.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        // iter() omits expired entries without removing them.
+        assert_eq!(
+            cache.iter().count(),
+            0,
+            "iter().count() must omit expired entries"
+        );
+
+        // len() is still 2 because iter() did not remove anything.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must remain unchanged after iter() - iter does not remove entries"
+        );
+
+        // evict() physically removes the expired entries.
+        let removed = cache.evict();
+        assert_eq!(
+            removed, 2,
+            "evict() must return the number of removed entries"
+        );
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// LruTtlCache: same contract as TtlCache.
+    #[test]
+    fn lru_ttl_cache_len_iter_evict() {
+        let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(10)
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            0,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// TtlSortedCache: same contract.
+    #[test]
+    fn ttl_sorted_cache_len_iter_evict() {
+        let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            0,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+}
+
+mod len_iter_evict_contract_expiring {
+    use cached::{CachedExt, CachedIter, Expires, ExpiringCache, ExpiringLruCache};
+
+    #[derive(Clone)]
+    struct Val {
+        expired: bool,
+    }
+
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    /// ExpiringCache: a value that reports `is_expired() == true` is visible in `len()`
+    /// but omitted from `iter()`; `evict()` removes it.
+    #[test]
+    fn expiring_cache_len_iter_evict() {
+        let mut cache: ExpiringCache<u32, Val> = ExpiringCache::builder().build().unwrap();
+        cache.set(1, Val { expired: false }); // live
+        cache.set(2, Val { expired: true }); // already expired
+
+        // Both entries are stored; len() reports 2.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        // iter() omits the expired entry without removing it.
+        assert_eq!(
+            cache.iter().count(),
+            1,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        // evict() removes the one expired entry.
+        let removed = cache.evict();
+        assert_eq!(removed, 1, "evict() must return count of removed entries");
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            1,
+            "iter().count() must match len() after evict()"
+        );
+    }
+
+    /// ExpiringLruCache: same contract.
+    #[test]
+    fn expiring_lru_cache_len_iter_evict() {
+        let mut cache: ExpiringLruCache<u32, Val> =
+            ExpiringLruCache::builder().max_size(10).build().unwrap();
+        cache.set(1, Val { expired: false });
+        cache.set(2, Val { expired: true });
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            1,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        let removed = cache.evict();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+}
+
+#[cfg(feature = "time_stores")]
+mod len_iter_evict_contract_sharded {
+    use cached::time::Duration;
+    use cached::{ShardedLruTtlCache, ShardedTtlCache};
+
+    /// ShardedTtlCache: `len()` on the inherent method may count expired-but-unswept
+    /// entries; `evict()` removes them and the inherent `len()` then drops to the live count.
+    #[test]
+    fn sharded_ttl_cache_len_evict() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Inherent len() counts all stored entries regardless of expiry.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2, "evict() must return count of removed entries");
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// ShardedLruTtlCache: same contract.
+    #[test]
+    fn sharded_lru_ttl_cache_len_evict() {
+        let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(10)
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+}
+
+mod len_iter_evict_contract_sharded_expiring {
+    use cached::{Expires, ShardedExpiringCache, ShardedExpiringLruCache};
+
+    #[derive(Clone)]
+    struct Val {
+        expired: bool,
+    }
+
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    /// ShardedExpiringCache: `len()` counts expired-but-unswept entries; `evict()` removes them.
+    #[test]
+    fn sharded_expiring_cache_len_evict() {
+        let cache: ShardedExpiringCache<u32, Val> =
+            ShardedExpiringCache::builder().build().unwrap();
+        cache.set(1, Val { expired: false });
+        cache.set(2, Val { expired: true });
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 1, "evict() must remove only expired entries");
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// ShardedExpiringLruCache: same contract.
+    #[test]
+    fn sharded_expiring_lru_cache_len_evict() {
+        let cache: ShardedExpiringLruCache<u32, Val> = ShardedExpiringLruCache::builder()
+            .max_size(10)
+            .build()
+            .unwrap();
+        cache.set(1, Val { expired: false });
+        cache.set(2, Val { expired: true });
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
     }
 }

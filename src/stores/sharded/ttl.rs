@@ -68,6 +68,11 @@ struct TtlInner<K, V, H> {
 /// read hits acquire an exclusive **write lock** to update the entry's TTL timestamp — the same
 /// trade-off as LRU variants. Disable `refresh_on_hit` if read-lock scalability is a priority.
 ///
+/// **`len` / `evict` contract**: `len()` (the inherent method) returns the raw stored entry
+/// count across all shards and may include expired-but-not-yet-swept entries. Call `evict()`
+/// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
+/// entries and obtain an accurate live count. Sharded stores do not implement `CachedIter`.
+///
 /// This is a type alias for `ShardedTtlCacheBase<K, V, DefaultShardHasher>`.
 /// To use a custom shard hasher, call [`ShardedTtlCache::builder()`] and then
 /// [`hasher`](ShardedTtlCacheBuilder::hasher), which yields a `ShardedTtlCacheBase<K, V, H>`
@@ -462,6 +467,30 @@ where
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        Some(self.inner.evictions.load(Ordering::Relaxed))
     }
 }
 
@@ -970,11 +999,11 @@ mod tests {
     fn new_returns_ready_cache_respecting_ttl() {
         let c = ShardedTtlCache::<u32, u32>::new(Duration::from_millis(10));
         assert_eq!(c.ttl(), Some(Duration::from_millis(10)));
-        assert_eq!(SyncConcurrentCached::set(&c, 1, 100).unwrap(), None);
-        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(100));
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(100));
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(
-            SyncConcurrentCached::get(&c, &1).unwrap(),
+            SyncConcurrentCached::cache_get(&c, &1).unwrap(),
             None,
             "entry must expire after ttl"
         );

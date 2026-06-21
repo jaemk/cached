@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cached::macros::{cached, once};
 use cached::stores::ExpiringCache;
 use cached::time::{Duration, Instant};
-use cached::{Cached, Expires, ExpiringLruCache};
+use cached::{CachedExt, Expires, ExpiringLruCache};
 
 static CALL_N: AtomicU64 = AtomicU64::new(0);
 

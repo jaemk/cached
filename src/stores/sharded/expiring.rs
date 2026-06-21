@@ -45,6 +45,12 @@ struct ExpiringInner<K, V, H> {
 /// **Note**: reads return owned values cloned from under the shard lock, so `V` must
 /// implement `Clone` (in addition to `Expires`).
 ///
+/// **`len` / `evict` contract**: `len()` (the inherent method) returns the raw stored entry
+/// count across all shards and may include expired-but-not-yet-swept entries. Call `evict()`
+/// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
+/// entries, reclaim memory, and obtain an accurate live count. Sharded stores do not implement
+/// `CachedIter`.
+///
 /// This is a type alias for `ShardedExpiringCacheBase<K, V, DefaultShardHasher>`.
 /// To use a custom shard hasher, call [`ShardedExpiringCache::builder()`] and then
 /// [`hasher`](ShardedExpiringCacheBuilder::hasher), which yields a
@@ -357,6 +363,30 @@ where
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        Some(self.inner.evictions.load(Ordering::Relaxed))
     }
 }
 
@@ -717,6 +747,7 @@ mod tests {
     use super::*;
     use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
+    use crate::ConcurrentCachedExt as SyncConcurrentCachedExt;
     use crate::ConcurrentCloneCached;
 
     #[derive(Clone)]
@@ -734,7 +765,7 @@ mod tests {
     fn new_returns_ready_cache() {
         let c = ShardedExpiringCache::<u32, Val>::new();
         assert_eq!(
-            SyncConcurrentCached::set(
+            SyncConcurrentCachedExt::set(
                 &c,
                 1,
                 Val {
@@ -747,11 +778,11 @@ mod tests {
             None
         );
         assert_eq!(
-            SyncConcurrentCached::get(&c, &1).unwrap().map(|v| v.v),
+            SyncConcurrentCachedExt::get(&c, &1).unwrap().map(|v| v.v),
             Some(10)
         );
         // Expired values are not returned.
-        SyncConcurrentCached::set(
+        SyncConcurrentCachedExt::set(
             &c,
             2,
             Val {
@@ -760,7 +791,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(SyncConcurrentCached::get(&c, &2).unwrap().is_none());
+        assert!(SyncConcurrentCachedExt::get(&c, &2).unwrap().is_none());
     }
 
     #[test]

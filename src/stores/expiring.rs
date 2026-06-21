@@ -1,6 +1,6 @@
-use super::{CacheEvict, Cached, Expires, UnboundCache};
+use super::{CacheEvict, Cached, DefaultHashBuilder, Expires, UnboundCache};
 use crate::{CachedIter, CachedPeek, CloneCached};
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,6 +18,11 @@ use {super::CachedAsync, std::collections::hash_map::Entry, std::future::Future}
 /// When using the `#[cached]` proc macro, `expires = true` automatically selects this store
 /// (or `ExpiringLruCache` when `size` is also specified).
 ///
+/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
+/// from the view but does not remove them. Call `evict()` (via [`CacheEvict`](crate::CacheEvict))
+/// to physically remove expired entries, reclaim memory, and obtain an accurate live count.
+///
 /// ## Memory note
 ///
 /// `ExpiringCache` is **unbounded** and only removes expired entries when the same key is
@@ -27,7 +32,7 @@ use {super::CachedAsync, std::collections::hash_map::Entry, std::future::Future}
 /// with a `size` bound to cap memory usage automatically.
 ///
 /// ```rust
-/// use cached::{Cached, Expires, ExpiringCache};
+/// use cached::{CachedExt, Expires, ExpiringCache};
 ///
 /// struct Token {
 ///     #[allow(dead_code)]
@@ -46,15 +51,15 @@ use {super::CachedAsync, std::collections::hash_map::Entry, std::future::Future}
 /// ```
 ///
 /// Note: This cache is in-memory only.
-pub struct ExpiringCache<K: Hash + Eq, V: Expires> {
-    pub(super) store: UnboundCache<K, V>,
+pub struct ExpiringCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
+    pub(super) store: UnboundCache<K, V, S>,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
     pub(super) evictions: AtomicU64,
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K: Hash + Eq, V: Expires> std::fmt::Debug for ExpiringCache<K, V> {
+impl<K: Hash + Eq, V: Expires, S> std::fmt::Debug for ExpiringCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExpiringCache")
             .field("hits", &self.hits.load(Ordering::Relaxed))
@@ -68,27 +73,30 @@ impl<K: Hash + Eq, V: Expires> std::fmt::Debug for ExpiringCache<K, V> {
 /// Two `ExpiringCache` values are equal when their stored entries are equal.
 /// Metrics (hits, misses, evictions) and the `on_evict` callback are not
 /// part of the comparison.
-impl<K, V> PartialEq for ExpiringCache<K, V>
+impl<K, V, S> PartialEq for ExpiringCache<K, V, S>
 where
     K: Hash + Eq,
     V: Expires + PartialEq,
+    S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
         self.store == other.store
     }
 }
 
-impl<K, V> Eq for ExpiringCache<K, V>
+impl<K, V, S> Eq for ExpiringCache<K, V, S>
 where
     K: Hash + Eq,
     V: Expires + Eq,
+    S: BuildHasher,
 {
 }
 
-impl<K, V> Clone for ExpiringCache<K, V>
+impl<K, V, S> Clone for ExpiringCache<K, V, S>
 where
     K: Clone + Hash + Eq,
     V: Expires + Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -104,25 +112,27 @@ where
 /// Builder for [`ExpiringCache`].
 ///
 /// Note: there is intentionally **no `.ttl()` setter**. An `ExpiringCache` has no global
-/// expiry duration — each value decides when it is expired via the [`Expires`] trait. For a
+/// expiry duration -- each value decides when it is expired via the [`Expires`] trait. For a
 /// single global TTL applied to every entry, use [`TtlCache`](crate::stores::TtlCache) or
 /// [`LruTtlCache`](crate::stores::LruTtlCache) instead.
 #[doc(alias = "ttl")]
-pub struct ExpiringCacheBuilder<K, V: Expires> {
+pub struct ExpiringCacheBuilder<K, V: Expires, S = DefaultHashBuilder> {
     capacity: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V: Expires> Default for ExpiringCacheBuilder<K, V> {
+impl<K, V: Expires> Default for ExpiringCacheBuilder<K, V, DefaultHashBuilder> {
     fn default() -> Self {
         Self {
             capacity: None,
             on_evict: None,
+            hasher: super::new_default_hash_builder(),
         }
     }
 }
 
-impl<K, V: Expires> ExpiringCacheBuilder<K, V> {
+impl<K, V: Expires, S> ExpiringCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional).
     #[must_use]
     pub fn capacity(mut self, capacity: usize) -> Self {
@@ -149,6 +159,37 @@ impl<K, V: Expires> ExpiringCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used to hash keys in the internal `UnboundCache`. Calling this method
+    /// changes the builder's type parameter so `build()` returns an `ExpiringCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::{Expires, ExpiringCache};
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// struct Val(bool);
+    /// impl Expires for Val { fn is_expired(&self) -> bool { self.0 } }
+    ///
+    /// let mut cache = ExpiringCache::<u32, Val>::builder()
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, Val(false));
+    /// assert!(cache.cache_get(&1).is_some());
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> ExpiringCacheBuilder<K, V, S2> {
+        ExpiringCacheBuilder {
+            capacity: self.capacity,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// `ExpiringCache` has no required fields and this call never fails.
@@ -156,16 +197,21 @@ impl<K, V: Expires> ExpiringCacheBuilder<K, V> {
     /// # Errors
     ///
     /// This method currently never returns an error.
-    pub fn build(self) -> Result<ExpiringCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<ExpiringCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq,
+        S: BuildHasher,
     {
         let store = match self.capacity {
             Some(cap) => UnboundCache::builder()
                 .capacity(cap)
+                .hasher(self.hasher)
                 .build()
                 .expect("infallible"),
-            None => UnboundCache::builder().build().expect("infallible"),
+            None => UnboundCache::builder()
+                .hasher(self.hasher)
+                .build()
+                .expect("infallible"),
         };
         Ok(ExpiringCache {
             store,
@@ -194,7 +240,9 @@ impl<K: Hash + Eq, V: Expires> ExpiringCache<K, V> {
     pub fn builder() -> ExpiringCacheBuilder<K, V> {
         ExpiringCacheBuilder::default()
     }
+}
 
+impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     /// Evict all expired entries from the cache.
     ///
     /// Returns the number of entries removed. Fires the `on_evict` callback for each
@@ -244,13 +292,13 @@ impl<K: Hash + Eq, V: Expires> ExpiringCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V: Expires> Default for ExpiringCache<K, V> {
+impl<K: Hash + Eq, V: Expires> Default for ExpiringCache<K, V, DefaultHashBuilder> {
     fn default() -> Self {
         Self::builder().build().expect("infallible")
     }
 }
 
-impl<K: Hash + Eq, V: Expires> Cached<K, V> for ExpiringCache<K, V> {
+impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K, V, S> {
     type Error = std::convert::Infallible;
 
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
@@ -430,7 +478,7 @@ impl<K: Hash + Eq, V: Expires> Cached<K, V> for ExpiringCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V: Expires> CachedIter<K, V> for ExpiringCache<K, V> {
+impl<K: Hash + Eq, V: Expires, S: BuildHasher> CachedIter<K, V> for ExpiringCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
@@ -443,7 +491,7 @@ impl<K: Hash + Eq, V: Expires> CachedIter<K, V> for ExpiringCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V: Expires> CachedPeek<K, V> for ExpiringCache<K, V> {
+impl<K: Hash + Eq, V: Expires, S: BuildHasher> CachedPeek<K, V> for ExpiringCache<K, V, S> {
     fn cache_peek<Q>(&self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -460,10 +508,11 @@ impl<K: Hash + Eq, V: Expires> CachedPeek<K, V> for ExpiringCache<K, V> {
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for ExpiringCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for ExpiringCache<K, V, S>
 where
     K: Hash + Eq + Send,
     V: Expires + Send,
+    S: BuildHasher + Send,
 {
     fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
@@ -539,7 +588,9 @@ where
     }
 }
 
-impl<K: Hash + Eq, V: Expires + Clone> CloneCached<K, V> for ExpiringCache<K, V> {
+impl<K: Hash + Eq, V: Expires + Clone, S: BuildHasher + Clone> CloneCached<K, V>
+    for ExpiringCache<K, V, S>
+{
     // Unlike `cache_get`, this intentionally leaves an expired entry in the map so the
     // `result_fallback` path can clone and return it as a stale-but-present value on `Err`.
     // The entry remains visible via `cache_size()` and `CachedIter` until the next
@@ -584,7 +635,7 @@ impl<K: Hash + Eq, V: Expires + Clone> CloneCached<K, V> for ExpiringCache<K, V>
     }
 }
 
-impl<K: std::hash::Hash + Eq, V: Expires> CacheEvict for ExpiringCache<K, V> {
+impl<K: std::hash::Hash + Eq, V: Expires, S: BuildHasher> CacheEvict for ExpiringCache<K, V, S> {
     fn evict(&mut self) -> usize {
         ExpiringCache::evict(self)
     }
@@ -593,7 +644,7 @@ impl<K: std::hash::Hash + Eq, V: Expires> CacheEvict for ExpiringCache<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Cached;
+    use crate::{Cached, CachedExt};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct ExpiredU8(pub u8);

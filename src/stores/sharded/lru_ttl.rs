@@ -81,6 +81,11 @@ struct LruTtlInner<K, V, H> {
 /// **Note**: Setting an `on_evict` callback transitions the builder to requiring `'static` bounds
 /// on `K` and `V` due to internal closure wrapping. If you have non-`'static` keys or values,
 /// do not configure an `on_evict` callback.
+///
+/// **`len` / `evict` contract**: `len()` (the inherent method) returns the raw stored entry
+/// count across all shards and may include expired-but-not-yet-swept entries. Call `evict()`
+/// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
+/// entries and obtain an accurate live count. Sharded stores do not implement `CachedIter`.
 pub type ShardedLruTtlCache<K, V> = ShardedLruTtlCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedLruTtlCache`] with a generic shard hasher `H`.
@@ -508,6 +513,41 @@ where
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_capacity(&self) -> Option<usize> {
+        Some(self.inner.total_capacity)
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        let mut lru_evictions = 0u64;
+        for shard in self.inner.shards.iter() {
+            let guard = shard.lock.read();
+            if let Some(e) = Cached::cache_evictions(&*guard) {
+                lru_evictions += e;
+            }
+        }
+        Some(lru_evictions + self.inner.non_capacity_evictions.load(Ordering::Relaxed))
     }
 }
 
@@ -1222,22 +1262,22 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(c.ttl(), Some(Duration::from_millis(10)));
-        SyncConcurrentCached::set(&c, 1, 10).unwrap();
-        SyncConcurrentCached::set(&c, 2, 20).unwrap();
-        SyncConcurrentCached::set(&c, 3, 30).unwrap(); // evicts LRU (1)
+        SyncConcurrentCached::cache_set(&c, 1, 10).unwrap();
+        SyncConcurrentCached::cache_set(&c, 2, 20).unwrap();
+        SyncConcurrentCached::cache_set(&c, 3, 30).unwrap(); // evicts LRU (1)
         assert_eq!(c.len(), 2);
-        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), None);
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(
-            SyncConcurrentCached::get(&c, &2).unwrap(),
+            SyncConcurrentCached::cache_get(&c, &2).unwrap(),
             None,
             "entry must expire after ttl"
         );
 
         // Inherent `new` returns a ready cache too.
         let c2 = ShardedLruTtlCache::<u32, u32>::new(64, Duration::from_secs(60));
-        assert_eq!(SyncConcurrentCached::set(&c2, 1, 100).unwrap(), None);
-        assert_eq!(SyncConcurrentCached::get(&c2, &1).unwrap(), Some(100));
+        assert_eq!(SyncConcurrentCached::cache_set(&c2, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c2, &1).unwrap(), Some(100));
 
         // `new(N, ttl)` must forward N to the builder — capacity must equal the builder path.
         let ttl = Duration::from_secs(60);

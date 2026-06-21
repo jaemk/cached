@@ -881,7 +881,7 @@ fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
 #[test]
 fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, TtlSortedCache};
+    use cached::{CacheSetError, Cached, CachedExt, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::MAX)
@@ -917,7 +917,7 @@ fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
 #[test]
 fn try_set_alias_returns_cache_set_error_for_ttl_sorted_cache() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, TtlSortedCache};
+    use cached::{CacheSetError, CachedExt, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -935,7 +935,7 @@ fn try_set_alias_returns_cache_set_error_for_ttl_sorted_cache() {
 /// `cache_try_set` always returns `Ok` and the result is unwrappable without matching.
 #[test]
 fn cached_error_associated_type_infallible_for_unbound_cache() {
-    use cached::{Cached, UnboundCache};
+    use cached::{Cached, CachedExt, UnboundCache};
 
     let mut cache: UnboundCache<u32, u32> =
         UnboundCache::builder().build().expect("build UnboundCache");
@@ -1203,7 +1203,7 @@ fn concurrent_redb_refresh_on_hit_getter_reflects_setter() {
 /// and CI runs `clippy --tests -- -D warnings`, so this is an enforced gate.
 #[test]
 fn short_remove_aliases_callable_for_effect() {
-    use cached::{Cached, UnboundCache};
+    use cached::{Cached, CachedExt, UnboundCache};
 
     let mut cache: UnboundCache<u32, u32> =
         UnboundCache::builder().build().expect("build UnboundCache");
@@ -1296,16 +1296,16 @@ fn concurrent_cache_get_or_set_with_factory_runs_once() {
 /// The ergonomic alias `get_or_set_with` delegates to `cache_get_or_set_with`.
 #[test]
 fn concurrent_get_or_set_with_alias() {
-    use cached::{ConcurrentCached, ShardedUnboundCache};
+    use cached::{ConcurrentCachedExt, ShardedUnboundCache};
 
     let cache: ShardedUnboundCache<u32, u32> =
         ShardedUnboundCache::builder().build().expect("build");
 
-    let v = ConcurrentCached::get_or_set_with(&cache, 10, || 99).expect("infallible");
+    let v = ConcurrentCachedExt::get_or_set_with(&cache, 10, || 99).expect("infallible");
     assert_eq!(v, 99);
 
     // Hit path via alias.
-    let v2 = ConcurrentCached::get_or_set_with(&cache, 10, || panic!("must not be called"))
+    let v2 = ConcurrentCachedExt::get_or_set_with(&cache, 10, || panic!("must not be called"))
         .expect("infallible");
     assert_eq!(v2, 99);
 }
@@ -1892,6 +1892,268 @@ mod concurrent_base_unknown_size_defaults {
         assert_eq!(
             ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
             None
+        );
+    }
+}
+
+// ── Spec 0012: concurrent metric accessors via ConcurrentCacheBase bound ──────
+//
+// Verifies that cache_hits, cache_misses, cache_capacity, cache_evictions, and
+// metrics() are accessible on sharded stores via a generic ConcurrentCacheBase
+// bound and that values are correctly aggregated across shards.
+mod concurrent_metrics_via_base_trait {
+    use cached::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached};
+
+    fn assert_metrics_available<S>(store: &S)
+    where
+        S: ConcurrentCacheBase,
+    {
+        let _ = store.cache_hits();
+        let _ = store.cache_misses();
+        let _ = store.cache_capacity();
+        let _ = store.cache_evictions();
+        let _m: CacheMetrics = store.metrics();
+    }
+
+    #[test]
+    fn sharded_unbound_cache_metrics_via_base_bound() {
+        use cached::ShardedUnboundCache;
+        let cache: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::builder()
+            .shards(4)
+            .build()
+            .expect("build");
+
+        // Reachable via the generic bound before any operations.
+        assert_metrics_available(&cache);
+        assert_eq!(cache.cache_hits(), Some(0));
+        assert_eq!(cache.cache_misses(), Some(0));
+
+        // Populate the cache and verify hit/miss counts aggregate across shards.
+        ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible");
+        let _ = ConcurrentCached::cache_get(&cache, &1).expect("infallible"); // hit
+        let _ = ConcurrentCached::cache_get(&cache, &2).expect("infallible"); // miss
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+        // Unbounded cache has no capacity or evictions.
+        assert_eq!(cache.cache_capacity(), None);
+        assert_eq!(cache.cache_evictions(), None);
+
+        let m = cache.metrics();
+        assert_eq!(m.hits, Some(1));
+        assert_eq!(m.misses, Some(1));
+        assert_eq!(m.evictions, None);
+        assert_eq!(m.entry_count, 1);
+        assert_eq!(m.capacity, None);
+    }
+
+    #[test]
+    fn sharded_lru_cache_metrics_via_base_bound() {
+        use cached::ShardedLruCache;
+        // Use per_shard_max_size to get a predictable total_capacity.
+        let cache: ShardedLruCache<u32, u32> = ShardedLruCache::builder()
+            .shards(2)
+            .per_shard_max_size(8)
+            .build()
+            .expect("build");
+
+        assert_metrics_available(&cache);
+        // total_capacity = shards * per_shard_max_size = 2 * 8 = 16.
+        assert_eq!(cache.cache_capacity(), Some(16));
+
+        ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible");
+        let _ = ConcurrentCached::cache_get(&cache, &1); // hit
+        let _ = ConcurrentCached::cache_get(&cache, &9); // miss
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+
+        let m = cache.metrics();
+        assert_eq!(m.hits, Some(1));
+        assert_eq!(m.misses, Some(1));
+        assert_eq!(m.capacity, Some(16));
+    }
+
+    #[cfg(feature = "time_stores")]
+    #[test]
+    fn sharded_ttl_cache_metrics_via_base_bound() {
+        use cached::ShardedTtlCache;
+        use cached::time::Duration;
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .shards(2)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build");
+
+        assert_metrics_available(&cache);
+        ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible");
+        let _ = ConcurrentCached::cache_get(&cache, &1); // hit
+        let _ = ConcurrentCached::cache_get(&cache, &9); // miss
+        assert_eq!(cache.cache_hits(), Some(1));
+        assert_eq!(cache.cache_misses(), Some(1));
+    }
+}
+
+// ── Spec 0008: CachedExt and ConcurrentCachedExt blanket extension traits ────
+//
+// Verifies that:
+// - CachedExt short aliases work when only CachedExt is in scope (not Cached).
+// - ConcurrentCachedExt short aliases work when only ConcurrentCachedExt is in scope.
+// - Generic code using CachedExt<K,V> bounds works with any Cached<K,V> store.
+// - Generic code using ConcurrentCachedExt<K,V> bounds works with any ConcurrentCached<K,V> store.
+mod extension_trait_blanket_impls {
+    // Only CachedExt in scope, not Cached -- short names must resolve unambiguously.
+    #[test]
+    fn cached_ext_short_aliases_without_cached_in_scope() {
+        use cached::{CachedExt, UnboundCache};
+
+        let mut cache: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();
+
+        // set / get / remove / delete / clear / len / is_empty work via CachedExt alone.
+        assert_eq!(cache.set(1, 10), None);
+        assert_eq!(cache.get(&1), Some(&10));
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
+        assert_eq!(cache.remove(&1), Some(10));
+        assert!(cache.is_empty());
+
+        cache.set(2, 20);
+        assert!(cache.delete(&2));
+        assert!(!cache.delete(&2));
+
+        cache.set(3, 30);
+        assert!(cache.contains(&3));
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    // Generic function with a CachedExt bound -- must compile and work at runtime.
+    fn fill_and_drain<K, V, C>(cache: &mut C, key: K, val: V) -> Option<V>
+    where
+        K: std::hash::Hash + Eq + Clone,
+        V: Clone + PartialEq + std::fmt::Debug,
+        C: cached::CachedExt<K, V>,
+    {
+        // Use fully-qualified syntax to avoid ambiguity: both Cached and CachedExt
+        // provide set/get/remove as defaults or blanket impls.
+        cached::CachedExt::set(cache, key.clone(), val.clone());
+        assert_eq!(cached::CachedExt::get(cache, &key), Some(&val));
+        cached::CachedExt::remove(cache, &key)
+    }
+
+    #[test]
+    fn cached_ext_generic_bound_works() {
+        use cached::UnboundCache;
+        let mut c: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();
+        let removed = fill_and_drain(&mut c, 42u32, 100u32);
+        assert_eq!(removed, Some(100));
+    }
+
+    // hits/misses/metrics accessible via CachedExt alone.
+    #[test]
+    fn cached_ext_metrics_via_ext_trait_only() {
+        use cached::{CachedExt, UnboundCache};
+
+        let mut cache: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();
+        cache.set(1, 10);
+        let _ = cache.get(&1); // hit
+        let _ = cache.get(&2); // miss
+        assert_eq!(cache.hits(), Some(1));
+        assert_eq!(cache.misses(), Some(1));
+        let m = cache.metrics();
+        assert_eq!(m.hits, Some(1));
+        assert_eq!(m.misses, Some(1));
+        assert_eq!(m.entry_count, 1);
+    }
+
+    // Only ConcurrentCachedExt in scope, not ConcurrentCached.
+    #[test]
+    fn concurrent_cached_ext_short_aliases_without_concurrent_cached_in_scope() {
+        use cached::{ConcurrentCachedExt, ShardedUnboundCache};
+
+        let cache: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+
+        // Use fully-qualified syntax for trait version (sharded stores have inherent
+        // get/set that shadow the trait method in method-call syntax).
+        assert_eq!(
+            ConcurrentCachedExt::set(&cache, 1u32, 10u32).expect("infallible"),
+            None
+        );
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &1u32).expect("infallible"),
+            Some(10)
+        );
+        assert_eq!(
+            ConcurrentCachedExt::remove(&cache, &1u32).expect("infallible"),
+            Some(10)
+        );
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &1u32).expect("infallible"),
+            None
+        );
+    }
+
+    // Generic function with a ConcurrentCachedExt bound.
+    fn concurrent_fill<K, V, C>(cache: &C, key: K, val: V) -> Option<V>
+    where
+        K: std::hash::Hash + Eq + Clone,
+        V: Clone,
+        C: cached::ConcurrentCachedExt<K, V>,
+        C::Error: std::fmt::Debug,
+    {
+        cached::ConcurrentCachedExt::set(cache, key.clone(), val).expect("infallible");
+        cached::ConcurrentCachedExt::remove(cache, &key).expect("infallible")
+    }
+
+    #[test]
+    fn concurrent_cached_ext_generic_bound_works() {
+        use cached::ShardedUnboundCache;
+        let cache: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+        let removed = concurrent_fill(&cache, 7u32, 99u32);
+        assert_eq!(removed, Some(99));
+    }
+
+    // get_or_set_with is available via ConcurrentCachedExt.
+    #[test]
+    fn concurrent_cached_ext_get_or_set_with_works() {
+        use cached::{ConcurrentCachedExt, ShardedUnboundCache};
+
+        let cache: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+        let v = cache.get_or_set_with(10, || 99).expect("infallible");
+        assert_eq!(v, 99);
+        // Second call must hit and not invoke the factory.
+        let v2 = cache
+            .get_or_set_with(10, || panic!("factory must not run on hit"))
+            .expect("infallible");
+        assert_eq!(v2, 99);
+    }
+
+    // Short aliases reachable via `use cached::prelude::*` without a separate `use cached::CachedExt`.
+    // Both `Cached` and `CachedExt` are exported through the prelude; their short-alias methods
+    // must be unambiguous (no E0034) when both are in scope.
+    #[test]
+    fn short_aliases_reachable_via_prelude() {
+        use cached::prelude::*;
+        // Store types are NOT in the prelude; import them explicitly.
+        use cached::{ShardedUnboundCache, UnboundCache};
+
+        // Sync store: `prelude::*` brings in both `Cached` and `CachedExt`; the short aliases
+        // must resolve without E0034 ambiguity.
+        let mut cache: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();
+        assert_eq!(cache.set(1, 10), None);
+        assert_eq!(cache.get(&1), Some(&10));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.hits(), Some(1));
+        assert_eq!(cache.misses(), Some(0));
+
+        // Concurrent store: ConcurrentCachedExt aliases must also be reachable via prelude.
+        let cc: ShardedUnboundCache<u32, u32> =
+            ShardedUnboundCache::builder().build().expect("build");
+        ConcurrentCachedExt::set(&cc, 42u32, 99u32).expect("infallible");
+        assert_eq!(
+            ConcurrentCachedExt::get(&cc, &42u32).expect("infallible"),
+            Some(99)
         );
     }
 }

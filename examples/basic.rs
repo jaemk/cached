@@ -22,9 +22,9 @@ fn slow_fn(n: u32) -> String {
 }
 
 /// Remove a specific entry from the `slow_fn` cache.
-/// `Cached` must be in scope to call `remove`.
+/// `CachedExt` must be in scope to call `remove`.
 fn invalidate_slow_fn(n: u32) {
-    use cached::Cached;
+    use cached::CachedExt;
     // `.0` accesses the inner lock of the (lock, key-buckets) tuple produced by
     // the default `sync_writes = "by_key"` mode.
     SLOW_FN.0.write().remove(&n);
@@ -49,7 +49,7 @@ pub fn main() {
 
     // Inspect the cache
     {
-        use cached::Cached; // must be in scope to access cache
+        use cached::CachedExt; // must be in scope to access short aliases
 
         println!("[cached] ** Cache info **");
         let cache = SLOW_FN.0.read();
@@ -64,7 +64,7 @@ pub fn main() {
     println!("[cached] Invalidating entry for n=10...");
     invalidate_slow_fn(10);
     {
-        use cached::Cached;
+        use cached::CachedExt;
         let mut cache = SLOW_FN.0.write();
         // Entry for 10 is gone; the recursive sub-entries (0 through 9) are still present.
         let present = cache.get(&10).is_some();

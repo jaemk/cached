@@ -94,7 +94,7 @@ async fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
-    use cached::ConcurrentCached;
+    use cached::ConcurrentCachedExt;
     CACHED_SLEEP_SECS.remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();

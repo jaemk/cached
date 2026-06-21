@@ -8,7 +8,7 @@ Run:
 */
 
 use cached::macros::cached;
-use cached::{Cached, LruCache, UnboundCache};
+use cached::{Cached, CachedExt, LruCache, UnboundCache};
 use std::cmp::Eq;
 use std::collections::HashMap;
 use std::hash::Hash;

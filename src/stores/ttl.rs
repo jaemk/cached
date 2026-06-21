@@ -1,13 +1,7 @@
 use crate::time::Duration;
 use crate::time::Instant;
 use std::cmp::Eq;
-use std::hash::Hash;
-
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 
 use std::collections::{HashMap, hash_map::Entry};
 
@@ -16,7 +10,7 @@ use {super::CachedAsync, std::future::Future};
 
 use crate::{CachedIter, CachedPeek, CloneCached};
 
-use super::{CacheEvict, Cached, TimedEntry};
+use super::{CacheEvict, Cached, DefaultHashBuilder, TimedEntry};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,8 +20,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// evicted if expired at time of retrieval.
 ///
 /// Note: This cache is in-memory only
-pub struct TtlCache<K, V> {
-    pub(super) store: HashMap<K, TimedEntry<V>, RandomState>,
+///
+/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
+/// from the view but does not remove them. Call `evict()` (via [`CacheEvict`](crate::CacheEvict))
+/// to physically remove expired entries and obtain an accurate live count.
+///
+/// The optional type parameter `S` selects the hash builder. It defaults to
+/// [`DefaultHashBuilder`] (ahash when the `ahash` feature is enabled, otherwise
+/// `std::collections::hash_map::RandomState`). Supply a custom `S` via
+/// [`TtlCacheBuilder::hasher`] to use a different hasher.
+pub struct TtlCache<K, V, S = DefaultHashBuilder> {
+    pub(super) store: HashMap<K, TimedEntry<V>, S>,
     pub(super) ttl: Duration,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
@@ -37,7 +41,7 @@ pub struct TtlCache<K, V> {
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K, V> std::fmt::Debug for TtlCache<K, V> {
+impl<K, V, S> std::fmt::Debug for TtlCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TtlCache")
             .field("ttl", &self.ttl)
@@ -51,10 +55,11 @@ impl<K, V> std::fmt::Debug for TtlCache<K, V> {
     }
 }
 
-impl<K, V> Clone for TtlCache<K, V>
+impl<K, V, S> Clone for TtlCache<K, V, S>
 where
     K: Clone + Hash + Eq,
     V: Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -71,15 +76,28 @@ where
 }
 
 /// Builder for [`TtlCache`].
-pub struct TtlCacheBuilder<K, V> {
+pub struct TtlCacheBuilder<K, V, S = DefaultHashBuilder> {
     ttl: Option<Duration>,
     capacity: Option<usize>,
     refresh: bool,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V> TtlCacheBuilder<K, V> {
-    /// Set the TTL for cache entries. Required — `build()` returns
+impl<K, V> Default for TtlCacheBuilder<K, V, DefaultHashBuilder> {
+    fn default() -> Self {
+        Self {
+            ttl: None,
+            capacity: None,
+            refresh: false,
+            on_evict: None,
+            hasher: super::new_default_hash_builder(),
+        }
+    }
+}
+
+impl<K, V, S> TtlCacheBuilder<K, V, S> {
+    /// Set the TTL for cache entries. Required -- `build()` returns
     /// `Err(BuildError::MissingRequired("ttl"))` if not set.
     ///
     /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
@@ -136,6 +154,37 @@ impl<K, V> TtlCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used to hash keys in the internal `HashMap`. Calling this method
+    /// changes the builder's type parameter so `build()` returns a `TtlCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::TtlCache;
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// let mut cache = TtlCache::<u32, u32>::builder()
+    ///     .ttl_secs(60)
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, 100);
+    /// assert_eq!(cache.cache_get(&1), Some(&100));
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> TtlCacheBuilder<K, V, S2> {
+        TtlCacheBuilder {
+            ttl: self.ttl,
+            capacity: self.capacity,
+            refresh: self.refresh,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// # Errors
@@ -143,14 +192,19 @@ impl<K, V> TtlCacheBuilder<K, V> {
     /// Returns [`BuildError`](super::BuildError) if `ttl` was not set or is zero
     /// ([`BuildError::MissingRequired`](super::BuildError::MissingRequired) /
     /// [`BuildError::InvalidValue`](super::BuildError::InvalidValue)).
-    pub fn build(self) -> Result<TtlCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<TtlCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq,
+        S: BuildHasher,
     {
         let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
         super::validate_ttl(ttl)?;
+        let store = match self.capacity {
+            Some(cap) => HashMap::with_capacity_and_hasher(cap, self.hasher),
+            None => HashMap::with_hasher(self.hasher),
+        };
         Ok(TtlCache {
-            store: TtlCache::<K, V>::new_store(self.capacity),
+            store,
             ttl,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -183,14 +237,11 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
     /// Return a builder for constructing a [`TtlCache`].
     #[must_use]
     pub fn builder() -> TtlCacheBuilder<K, V> {
-        TtlCacheBuilder {
-            ttl: None,
-            capacity: None,
-            refresh: false,
-            on_evict: None,
-        }
+        TtlCacheBuilder::default()
     }
+}
 
+impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
     /// `true` if the entry is still live.
     /// `expires_at = None` means the entry never expires (TTL was disabled at insert time).
     #[inline]
@@ -213,13 +264,6 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
                 .map(Some)
                 .ok_or(super::CacheSetError::TimeBounds)
         }
-    }
-
-    fn new_store(capacity: Option<usize>) -> HashMap<K, TimedEntry<V>, RandomState> {
-        capacity.map_or_else(
-            || HashMap::with_hasher(RandomState::new()),
-            |cap| HashMap::with_capacity_and_hasher(cap, RandomState::new()),
-        )
     }
 
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
@@ -269,7 +313,7 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
     type Error = super::CacheSetError;
 
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
@@ -320,7 +364,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
                     .flatten()
                     .or(entry.expires_at);
             }
-            // SAFETY: same as `cache_get` — entry is not moved between obtaining
+            // SAFETY: same as `cache_get` -- entry is not moved between obtaining
             // the pointer and returning, and `&mut self` prevents concurrent access.
             let ptr = &mut entry.value as *mut V;
             return Some(unsafe { &mut *ptr });
@@ -510,7 +554,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
     }
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
-        self.store = Self::new_store(self.initial_capacity);
+        // We use clear + shrink_to rather than rebuilding so we don't need S: Clone.
+        self.store.clear();
+        self.store.shrink_to(self.initial_capacity.unwrap_or(0));
         self.cache_reset_metrics();
     }
     fn cache_size(&self) -> usize {
@@ -527,7 +573,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedIter<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedIter<K, V> for TtlCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
@@ -543,7 +589,7 @@ impl<K: Hash + Eq, V> CachedIter<K, V> for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedPeek<K, V> for TtlCache<K, V, S> {
     fn cache_peek<Q>(&self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -558,7 +604,7 @@ impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> crate::CacheTtl for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> crate::CacheTtl for TtlCache<K, V, S> {
     fn ttl(&self) -> Option<Duration> {
         // A zero TTL means expiry is disabled.
         if self.ttl.is_zero() {
@@ -567,7 +613,7 @@ impl<K: Hash + Eq, V> crate::CacheTtl for TtlCache<K, V> {
             Some(self.ttl)
         }
     }
-    /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
+    /// A zero `ttl` disables expiry -- exactly equivalent to `unset_ttl`.
     /// Returns the previous TTL, or `None` if expiry was already disabled.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
@@ -589,7 +635,9 @@ impl<K: Hash + Eq, V> crate::CacheTtl for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
+    for TtlCache<K, V, S>
+{
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
@@ -639,9 +687,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TtlCache<K, V> {
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for TtlCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for TtlCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
+    S: BuildHasher + Send,
 {
     fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
@@ -754,7 +803,7 @@ where
     }
 }
 
-impl<K: std::hash::Hash + Eq + Clone, V> CacheEvict for TtlCache<K, V> {
+impl<K: std::hash::Hash + Eq + Clone, V, S: BuildHasher> CacheEvict for TtlCache<K, V, S> {
     fn evict(&mut self) -> usize {
         TtlCache::evict(self)
     }
@@ -1023,12 +1072,60 @@ mod tests {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before = c.cache_evictions().expect("evictions are always tracked");
-        let _ = c.cache_remove_entry(&1u32); // expired but present — must increment
-        let _ = c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32); // expired but present -- must increment
+        let _ = c.cache_remove_entry(&999u32); // absent -- must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,
             "cache_remove_entry must increment evictions for present key only"
         );
+    }
+
+    // --- custom hasher tests ---
+
+    #[test]
+    fn custom_hasher_get_set_round_trip() {
+        use std::collections::hash_map::RandomState;
+        let mut c = TtlCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), Some(&200));
+        assert_eq!(c.cache_hits(), Some(2));
+        assert_eq!(c.cache_misses(), Some(0));
+        assert_eq!(c.cache_get(&99), None);
+        assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn default_constructor_still_works() {
+        let mut c: TtlCache<u32, u32> = TtlCache::new(crate::time::Duration::from_secs(60));
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+
+        let mut b = TtlCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .build()
+            .unwrap();
+        b.cache_set(2, 20);
+        assert_eq!(b.cache_get(&2), Some(&20));
+    }
+
+    #[test]
+    fn custom_hasher_respects_ttl_expiry() {
+        use std::collections::hash_map::RandomState;
+        let mut c = TtlCache::<u32, u32>::builder()
+            .ttl(crate::time::Duration::from_millis(50))
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
     }
 }

@@ -48,6 +48,11 @@ struct ExpiringLruInner<K, V, H> {
 /// **Note**: Setting an `on_evict` callback requires the callback itself to be `'static` because
 /// the cache stores it behind an `Arc<dyn Fn(&K, &V) + Send + Sync>`. This does not add `'static`
 /// bounds to `K` or `V`.
+///
+/// **`len` / `evict` contract**: `len()` (the inherent method) returns the raw stored entry
+/// count across all shards and may include expired-but-not-yet-swept entries. Call `evict()`
+/// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
+/// entries and obtain an accurate live count. Sharded stores do not implement `CachedIter`.
 pub type ShardedExpiringLruCache<K, V> = ShardedExpiringLruCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedExpiringLruCache`] with a generic shard hasher `H`.
@@ -358,6 +363,41 @@ where
 
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_capacity(&self) -> Option<usize> {
+        Some(self.inner.total_capacity)
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        let mut inner_evictions = 0u64;
+        for shard in self.inner.shards.iter() {
+            let guard = shard.lock.read();
+            if let Some(e) = Cached::cache_evictions(&*guard) {
+                inner_evictions += e;
+            }
+        }
+        Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed))
     }
 }
 
@@ -902,7 +942,7 @@ mod tests {
             .max_size(2)
             .build()
             .unwrap();
-        SyncConcurrentCached::set(
+        SyncConcurrentCached::cache_set(
             &c,
             1,
             Val {
@@ -912,10 +952,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            SyncConcurrentCached::get(&c, &1).unwrap().map(|v| v.v),
+            SyncConcurrentCached::cache_get(&c, &1)
+                .unwrap()
+                .map(|v| v.v),
             Some(10)
         );
-        SyncConcurrentCached::set(
+        SyncConcurrentCached::cache_set(
             &c,
             2,
             Val {
@@ -924,7 +966,7 @@ mod tests {
             },
         )
         .unwrap();
-        SyncConcurrentCached::set(
+        SyncConcurrentCached::cache_set(
             &c,
             3,
             Val {
@@ -934,11 +976,11 @@ mod tests {
         )
         .unwrap(); // evicts LRU (1)
         assert_eq!(c.len(), 2);
-        assert!(SyncConcurrentCached::get(&c, &1).unwrap().is_none());
+        assert!(SyncConcurrentCached::cache_get(&c, &1).unwrap().is_none());
 
         // Inherent `new` returns a ready cache too.
         let c2 = ShardedExpiringLruCache::<u32, Val>::new(64);
-        SyncConcurrentCached::set(
+        SyncConcurrentCached::cache_set(
             &c2,
             1,
             Val {
@@ -948,7 +990,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            SyncConcurrentCached::get(&c2, &1).unwrap().map(|v| v.v),
+            SyncConcurrentCached::cache_get(&c2, &1)
+                .unwrap()
+                .map(|v| v.v),
             Some(1)
         );
 

@@ -6,6 +6,7 @@ Run:
     cargo run --example disk --features "redb_store,proc_macro"
 */
 
+use cached::ConcurrentCachedExt;
 use cached::macros::concurrent_cached;
 use cached::time::Duration;
 use std::io;
@@ -59,7 +60,6 @@ fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
-    use cached::ConcurrentCached;
     CACHED_SLEEP_SECS.remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();

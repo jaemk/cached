@@ -345,6 +345,41 @@ where
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
     }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_capacity(&self) -> Option<usize> {
+        Some(self.inner.total_capacity)
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        let mut evictions = 0u64;
+        for shard in self.inner.shards.iter() {
+            let guard = shard.lock.read();
+            if let Some(e) = guard.cache_evictions() {
+                evictions += e;
+            }
+        }
+        Some(evictions)
+    }
 }
 
 impl<K, V, H> ConcurrentCached<K, V> for ShardedLruCacheBase<K, V, H>
@@ -707,17 +742,17 @@ mod tests {
             .max_size(2)
             .build()
             .unwrap();
-        assert_eq!(SyncConcurrentCached::set(&c, 1, 10).unwrap(), None);
-        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(10));
-        SyncConcurrentCached::set(&c, 2, 20).unwrap();
-        SyncConcurrentCached::set(&c, 3, 30).unwrap(); // evicts LRU (1)
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 10).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(10));
+        SyncConcurrentCached::cache_set(&c, 2, 20).unwrap();
+        SyncConcurrentCached::cache_set(&c, 3, 30).unwrap(); // evicts LRU (1)
         assert_eq!(c.len(), 2);
-        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), None);
 
         // The inherent `new` constructor returns a ready cache too.
         let c2 = ShardedLruCache::<u32, u32>::new(64);
-        assert_eq!(SyncConcurrentCached::set(&c2, 1, 100).unwrap(), None);
-        assert_eq!(SyncConcurrentCached::get(&c2, &1).unwrap(), Some(100));
+        assert_eq!(SyncConcurrentCached::cache_set(&c2, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c2, &1).unwrap(), Some(100));
 
         // `new(N)` must forward N to the builder — capacity must equal the builder path.
         assert_eq!(

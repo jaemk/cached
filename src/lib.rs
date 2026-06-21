@@ -52,8 +52,18 @@ Every synchronous cache operation has a short alias (`get`/`set`/`remove`/`clear
 The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short alias
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
+
+The short alias methods live on the extension traits `CachedExt` (for `Cached` stores) and
+`ConcurrentCachedExt` (for `ConcurrentCached` stores). These extension traits have blanket
+implementations for every type that implements `Cached` / `ConcurrentCached`, so the short
+names are always available when the extension trait is in scope. The simplest way to get them
+is `use cached::prelude::*;`, which re-exports both extension traits. Alternatively, import them
+directly: `use cached::{Cached, CachedExt};`. Custom store implementations only need to
+implement the `cache_`-prefixed required methods on the core trait; the short aliases come
+for free via the blanket extension trait impl.
+
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has
+`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...; `CachedAsync` has
 `async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
 `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
@@ -193,9 +203,18 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedUnboundCache is infallible")`).
 - `Cached::get` (and its `cache_get` alias) requires mutable access because some
   stores update recency, expiration timestamps, or metrics during reads.
+- **`len` / `size` vs `iter` vs `evict` contract for timed and expiring stores:**
+  `len()` (and `cache_size()`, `is_empty()`) return the raw stored entry count without
+  scanning for expiry. On lazy-eviction stores (`TtlCache`, `LruTtlCache`,
+  `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`, and their sharded equivalents)
+  this count may include entries that have expired but not yet been swept, so
+  `len()` can be greater than `iter().count()`. `iter()` (from [`CachedIter`]) omits
+  expired entries from the yielded view but does not remove them from the store - it
+  stays `&self`. Call `evict()` (via [`CacheEvict`] for single-owner stores or
+  [`ConcurrentCacheEvict`] for sharded stores) to physically remove expired entries,
+  reclaim memory, and obtain an accurate live count.
 - Expired values can remain allocated until a mutating operation, `evict`, or
-  store-specific cleanup removes them. Methods such as `len` may include expired values
-  unless a store documents otherwise.
+  store-specific cleanup removes them.
 - `cache_remove` fires the `on_evict` callback (if set) and counts as an eviction for
   every successful removal, across all stores that track evictions. `ShardedUnboundCache` is the
   exception: it has no evictions counter and always returns `None` from
@@ -283,7 +302,7 @@ For concurrent (multi-thread, no external lock) use, the sharded equivalents [`S
 > `max_size` bound.
 
 ```rust
-use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
+use cached::{CachedExt, Expires, ExpiringCache, ExpiringLruCache};
 use cached::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -610,13 +629,13 @@ use std::future::Future;
 )]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
-    BuildError, CacheEvict, CacheSetError, ConcurrentCacheEvict, DefaultShardHasher, Expires,
-    ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache, ExpiringLruCacheBuilder, LruCache,
-    LruCacheBuilder, SetMaxSizeError, SetTtlError, ShardHasher, ShardedExpiringCache,
-    ShardedExpiringCacheBase, ShardedExpiringCacheBuilder, ShardedExpiringLruCache,
-    ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder, ShardedLruCache,
-    ShardedLruCacheBase, ShardedLruCacheBuilder, ShardedUnboundCache, ShardedUnboundCacheBase,
-    ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
+    BuildError, CacheEvict, CacheSetError, ConcurrentCacheEvict, DefaultHashBuilder,
+    DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
+    ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, SetMaxSizeError, SetTtlError, ShardHasher,
+    ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
+    ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
+    ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder, ShardedUnboundCache,
+    ShardedUnboundCacheBase, ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "time_stores")]
 #[doc(hidden)]
@@ -669,9 +688,9 @@ pub mod sync_sync {
 /// avoid name clashes. Import those directly (e.g. `use cached::ShardedUnboundCache;`).
 pub mod prelude {
     pub use crate::{
-        CacheEvict, Cached, CachedIter, CachedPeek, CachedRead, CloneCached, ConcurrentCacheBase,
-        ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached, ConcurrentCloneCached, Expires,
-        SerializeCached,
+        CacheEvict, Cached, CachedExt, CachedIter, CachedPeek, CachedRead, CloneCached,
+        ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached,
+        ConcurrentCachedExt, ConcurrentCloneCached, Expires, SerializeCached,
     };
 
     #[cfg(feature = "time_stores")]
@@ -683,34 +702,38 @@ pub mod prelude {
     pub use crate::{CachedAsync, ConcurrentCachedAsync, SerializeCachedAsync};
 }
 
-/// Cache operations
+/// Core cache operations for single-owner (non-concurrent) stores.
 ///
-/// Every synchronous operation has a short alias (`get`/`set`/`remove`/`clear`/`len`/...) and a
-/// `cache_`-prefixed form (`cache_get`/`cache_set`/`cache_remove`/`cache_clear`/`cache_size`/...).
-/// The short aliases are the preferred spelling. Use the `cache_`-prefixed names when a short
-/// alias would collide with another in-scope trait's method of the same name (for example, your
-/// type also implements a trait with its own `get`).
-/// Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-/// `async_cache_get`, `async_cache_set`, `async_cache_remove`, …; `CachedAsync` has
-/// `async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
-/// `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
-/// `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short
-/// alias; the `async_` prefix already prevents collisions with the sync methods.
+/// The `cache_`-prefixed methods are the required core: stores implement only these.
+/// Short aliases (`get`/`set`/`remove`/`clear`/`len`/...) are provided by the blanket
+/// extension trait [`CachedExt`], which is automatically implemented for any type that
+/// implements `Cached`. Bring the short names into scope with
+/// `use cached::prelude::*;` or `use cached::CachedExt;`.
+///
+/// The async traits (`CachedAsync`, `ConcurrentCachedAsync`) use the `async_cache_*` spelling
+/// (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) so they never collide
+/// with these synchronous methods. The async traits have no short aliases.
+///
+/// Via `CachedExt` (short names):
+///
+/// ```rust
+/// use cached::{CachedExt, UnboundCache};
+///
+/// let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
+/// cache.set("key".to_string(), "owned value".to_string());
+/// let v = cache.get("key");
+/// assert_eq!(v, Some(&"owned value".to_string()));
+/// ```
+///
+/// Via `Cached` directly (`cache_*` prefix, use when only `Cached` is in scope):
 ///
 /// ```rust
 /// use cached::{Cached, UnboundCache};
 ///
 /// let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
-///
-/// // Preferred short alias:
-/// cache.set("key".to_string(), "owned value".to_string());
-/// let borrowed_cache_value = cache.get("key");
-/// assert_eq!(borrowed_cache_value, Some(&"owned value".to_string()));
-///
-/// // Full cache_*-prefixed form (use when a short alias would collide):
-/// cache.cache_set("key2".to_string(), "another value".to_string());
-/// let v2 = cache.cache_get("key2");
-/// assert_eq!(v2, Some(&"another value".to_string()));
+/// cache.cache_set("key".to_string(), "owned value".to_string());
+/// let v = cache.cache_get("key");
+/// assert_eq!(v, Some(&"owned value".to_string()));
 /// ```
 pub trait Cached<K, V> {
     // ── Associated types ──────────────────────────────────────────────────
@@ -730,7 +753,7 @@ pub trait Cached<K, V> {
     /// or metrics during reads.
     ///
     /// ```rust
-    /// # use cached::{Cached, UnboundCache};
+    /// # use cached::{CachedExt, UnboundCache};
     /// # let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
     /// # cache.set("key".to_string(), "owned value".to_string());
     /// let v1 = cache.get("key").map(String::clone);
@@ -817,7 +840,7 @@ pub trait Cached<K, V> {
     /// the stored key back (relevant when `K`'s `Eq` ignores some fields).
     ///
     /// ```rust
-    /// # use cached::{Cached, UnboundCache};
+    /// # use cached::{CachedExt, UnboundCache};
     /// # let mut cache: UnboundCache<String, String> = UnboundCache::builder().build().unwrap();
     /// # cache.set("k1".to_string(), "v1".to_string());
     /// # cache.set("k2".to_string(), "v2".to_string());
@@ -851,10 +874,9 @@ pub trait Cached<K, V> {
     /// use cached::{Cached, UnboundCache};
     ///
     /// let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
-    /// cache.set("key".to_string(), 42);
+    /// cache.cache_set("key".to_string(), 42);
     ///
     /// // cache_remove_entry returns Some even for the key that was just inserted.
-    /// // (keeping cache_remove_entry name here as a representative cache_*-prefixed example)
     /// let entry = cache.cache_remove_entry("key");
     /// assert_eq!(entry, Some(("key".to_string(), 42)));
     ///
@@ -879,8 +901,12 @@ pub trait Cached<K, V> {
 
     /// Return the number of entries currently in the cache.
     ///
-    /// For stores with TTL-based expiry, this count may include entries that have expired
-    /// but not yet been evicted (lazy eviction).
+    /// This is a cheap read of the stored entry count: no expiry scan is performed.
+    /// On lazy-eviction stores (`TtlCache`, `LruTtlCache`, `TtlSortedCache`,
+    /// `ExpiringCache`, `ExpiringLruCache`, and their sharded equivalents), the count
+    /// may include entries that have expired but not yet been swept. As a result,
+    /// `cache_size()` (and the `len()` alias) can exceed `iter().count()`.
+    /// Call `evict()` first if you need an accurate count of live entries.
     #[must_use]
     fn cache_size(&self) -> usize;
 
@@ -907,8 +933,60 @@ pub trait Cached<K, V> {
         None
     }
 
-    // ── Ergonomic aliases (new preferred API) ────────────────────────────
+    /// Delete a cached entry without returning it. Returns `true` if an entry was
+    /// physically deleted (including expired entries), `false` if the key was absent.
+    ///
+    /// Unlike [`cache_remove`](Cached::cache_remove), this returns `true` even when the
+    /// deleted entry was already expired.
+    fn cache_delete<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_remove_entry(k).is_some()
+    }
 
+    /// Return the number of times a value was evicted from the cache.
+    #[must_use]
+    fn cache_evictions(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Short-alias extension for [`Cached`] stores.
+///
+/// Every type that implements `Cached<K, V>` automatically implements this trait through a blanket
+/// impl. The methods here are ergonomic short names that delegate to the `cache_`-prefixed core
+/// methods on `Cached`. Import this trait (or `use cached::prelude::*;`) to bring the short names
+/// into scope:
+///
+/// ```rust
+/// use cached::{CachedExt, UnboundCache};
+///
+/// let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
+/// cache.set("key".to_string(), 42);
+/// assert_eq!(cache.get("key"), Some(&42u32));
+/// assert!(cache.delete("key"));
+/// assert!(!cache.delete("key"));
+/// ```
+///
+/// When you need a short name that would collide with another trait's method, or when
+/// only `Cached` is in scope, use the `cache_`-prefixed form:
+///
+/// ```rust
+/// use cached::{Cached, UnboundCache};
+///
+/// let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
+/// cache.cache_set("key".to_string(), 42);
+/// assert_eq!(cache.cache_get("key"), Some(&42u32));
+/// ```
+///
+/// Custom store implementations do **not** implement this trait directly. Only implement the
+/// core `Cached` trait; this extension is provided automatically via the blanket impl.
+///
+/// Note: `shards()` and `shard_sizes()` on the sharded stores are inherent-only - they are
+/// sharding-specific introspection not part of the generic cache trait surface.
+pub trait CachedExt<K, V>: Cached<K, V> {
     /// Retrieve a cached value. Delegates to [`cache_get`](Cached::cache_get).
     ///
     /// # Mutability
@@ -921,45 +999,30 @@ pub trait Cached<K, V> {
     fn get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        self.cache_get(k)
-    }
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Retrieve a cached value with mutable access. Delegates to [`cache_get_mut`](Cached::cache_get_mut).
     fn get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        self.cache_get_mut(k)
-    }
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Insert a key-value pair and return the previous value. Delegates to [`cache_set`](Cached::cache_set).
-    fn set(&mut self, k: K, v: V) -> Option<V> {
-        self.cache_set(k, v)
-    }
+    fn set(&mut self, k: K, v: V) -> Option<V>;
 
     /// Fallible insert. Delegates to [`cache_try_set`](Cached::cache_try_set).
-    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
-        self.cache_try_set(k, v)
-    }
+    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error>;
 
     /// Get or insert a key-value pair. Delegates to [`cache_get_or_set_with`](Cached::cache_get_or_set_with).
-    fn get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &V {
-        self.cache_get_or_set_with(key, f)
-    }
+    fn get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &V;
 
     /// Get or insert a key-value pair, returning a mutable reference. Delegates to
     /// [`cache_get_or_set_with_mut`](Cached::cache_get_or_set_with_mut).
-    fn get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
-        self.cache_get_or_set_with_mut(key, f)
-    }
+    fn get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V;
 
-    /// Get or insert a key-value pair with error handling. Delegates to [`cache_try_get_or_set_with`](Cached::cache_try_get_or_set_with).
-    fn try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(&mut self, k: K, f: F) -> Result<&V, E> {
-        self.cache_try_get_or_set_with(k, f)
-    }
+    /// Get or insert a key-value pair with error handling. Delegates to
+    /// [`cache_try_get_or_set_with`](Cached::cache_try_get_or_set_with).
+    fn try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(&mut self, k: K, f: F) -> Result<&V, E>;
 
     /// Get or insert a key-value pair with error handling, returning a mutable reference.
     /// Delegates to [`cache_try_get_or_set_with_mut`](Cached::cache_try_get_or_set_with_mut).
@@ -967,51 +1030,20 @@ pub trait Cached<K, V> {
         &mut self,
         k: K,
         f: F,
-    ) -> Result<&mut V, E> {
-        self.cache_try_get_or_set_with_mut(k, f)
-    }
+    ) -> Result<&mut V, E>;
 
     /// Remove a cached value. Delegates to [`cache_remove`](Cached::cache_remove).
     fn remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        self.cache_remove(k)
-    }
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Remove a cached entry, returning the stored key and value. Delegates to
     /// [`cache_remove_entry`](Cached::cache_remove_entry).
     fn remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        self.cache_remove_entry(k)
-    }
-
-    /// Delete a cached entry without returning it. Returns `true` if an entry was
-    /// physically deleted (including expired entries), `false` if the key was absent.
-    ///
-    /// Unlike [`cache_remove`](Cached::cache_remove), this returns `true` even when the
-    /// deleted entry was already expired. Delegates to
-    /// [`cache_remove_entry`](Cached::cache_remove_entry).
-    ///
-    /// ```rust
-    /// use cached::{Cached, UnboundCache};
-    ///
-    /// let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
-    /// cache.set("key".to_string(), 42);
-    /// assert!(cache.delete("key"));    // present -- returns true
-    /// assert!(!cache.delete("key"));   // already gone -- returns false
-    /// ```
-    fn cache_delete<Q>(&mut self, k: &Q) -> bool
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        self.cache_remove_entry(k).is_some()
-    }
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Delete a cached entry without returning it. Returns `true` if an entry was
     /// physically deleted (including expired entries). Delegates to
@@ -1019,10 +1051,7 @@ pub trait Cached<K, V> {
     fn delete<Q>(&mut self, k: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        self.cache_delete(k)
-    }
+        Q: std::hash::Hash + Eq + ?Sized;
 
     /// Return `true` if the cache contains a value for the given key.
     ///
@@ -1032,42 +1061,141 @@ pub trait Cached<K, V> {
     fn contains<Q>(&mut self, k: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized;
+
+    /// Remove all entries, keeping allocated memory for reuse. Delegates to
+    /// [`cache_clear`](Cached::cache_clear).
+    fn clear(&mut self);
+
+    /// Return the number of entries currently in the cache. Delegates to
+    /// [`cache_size`](Cached::cache_size).
+    ///
+    /// On lazy-eviction stores this count may include expired-but-not-yet-swept entries.
+    /// Use `evict()` (via [`CacheEvict`](crate::CacheEvict)) before calling `len()` if
+    /// you need an accurate count of live entries.
+    #[must_use]
+    fn len(&self) -> usize;
+
+    /// Return `true` if the cache contains no entries. Delegates to
+    /// [`cache_size`](Cached::cache_size).
+    ///
+    /// On lazy-eviction stores an expired-but-not-yet-swept entry causes this to return
+    /// `false` even when no live entries remain.
+    #[must_use]
+    fn is_empty(&self) -> bool;
+
+    /// Return the number of cache hits, if tracked. Delegates to
+    /// [`cache_hits`](Cached::cache_hits).
+    #[must_use]
+    fn hits(&self) -> Option<u64>;
+
+    /// Return the number of cache misses, if tracked. Delegates to
+    /// [`cache_misses`](Cached::cache_misses).
+    #[must_use]
+    fn misses(&self) -> Option<u64>;
+
+    /// Return a snapshot of cache metrics.
+    #[must_use]
+    fn metrics(&self) -> CacheMetrics;
+}
+
+impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
+    fn get<Q>(&mut self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.get(k).is_some()
+        self.cache_get(k)
     }
 
-    /// Remove all entries, keeping allocated memory for reuse. Delegates to [`cache_clear`](Cached::cache_clear).
+    fn get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_get_mut(k)
+    }
+
+    fn set(&mut self, k: K, v: V) -> Option<V> {
+        self.cache_set(k, v)
+    }
+
+    fn try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+        self.cache_try_set(k, v)
+    }
+
+    fn get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &V {
+        self.cache_get_or_set_with(key, f)
+    }
+
+    fn get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+        self.cache_get_or_set_with_mut(key, f)
+    }
+
+    fn try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(&mut self, k: K, f: F) -> Result<&V, E> {
+        self.cache_try_get_or_set_with(k, f)
+    }
+
+    fn try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
+        &mut self,
+        k: K,
+        f: F,
+    ) -> Result<&mut V, E> {
+        self.cache_try_get_or_set_with_mut(k, f)
+    }
+
+    fn remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_remove(k)
+    }
+
+    fn remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_remove_entry(k)
+    }
+
+    fn delete<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_delete(k)
+    }
+
+    fn contains<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_get(k).is_some()
+    }
+
     fn clear(&mut self) {
         self.cache_clear()
     }
 
-    /// Return the number of entries currently in the cache. Delegates to [`cache_size`](Cached::cache_size).
-    #[must_use]
     fn len(&self) -> usize {
         self.cache_size()
     }
 
-    /// Return `true` if the cache contains no entries.
-    #[must_use]
     fn is_empty(&self) -> bool {
         self.cache_size() == 0
     }
 
-    /// Return the number of cache hits, if tracked.
-    #[must_use]
     fn hits(&self) -> Option<u64> {
         self.cache_hits()
     }
 
-    /// Return the number of cache misses, if tracked.
-    #[must_use]
     fn misses(&self) -> Option<u64> {
         self.cache_misses()
     }
 
-    /// Return a snapshot of cache metrics.
-    #[must_use]
     fn metrics(&self) -> CacheMetrics {
         CacheMetrics {
             hits: self.cache_hits(),
@@ -1077,19 +1205,25 @@ pub trait Cached<K, V> {
             capacity: self.cache_capacity(),
         }
     }
-
-    /// Return the number of times a value was evicted from the cache.
-    #[must_use]
-    fn cache_evictions(&self) -> Option<u64> {
-        None
-    }
 }
 
 /// Iteration over cache contents for stores that can expose borrowed entries.
 ///
-/// Timed stores may omit expired entries from these iterators without eagerly removing them.
+/// **Contract for timed and expiring stores**: `iter()` (and `keys()`, `values()`) omit
+/// expired entries from the yielded view but do **not** remove them from the store. The
+/// receiver is `&self`, so no mutation occurs during iteration. As a result,
+/// `iter().count()` may be less than `len()` when expired-but-not-yet-swept entries are
+/// present. Call `evict()` (via [`CacheEvict`](crate::CacheEvict)) to physically remove
+/// expired entries and reclaim memory.
+///
+/// Sharded stores (`Sharded*`) do not implement this trait; they are internally
+/// synchronized and cannot expose borrowed references through `&self` iteration.
+/// Use `ConcurrentCacheEvict::evict` on sharded stores to sweep expired entries.
 pub trait CachedIter<K, V> {
     /// Return an iterator over the key-value pairs in the cache.
+    ///
+    /// On timed/expiring stores, expired entries are omitted from the iterator without
+    /// being removed. The returned count may be less than `len()`.
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         Self: Sized,
@@ -1187,7 +1321,7 @@ pub trait CachedRead<K, V>: CachedPeek<K, V> {
 /// ```rust
 /// # #[cfg(feature = "time_stores")]
 /// # {
-/// use cached::{Cached, CloneCached, TtlCache};
+/// use cached::{CachedExt, CloneCached, TtlCache};
 /// use cached::time::Duration;
 ///
 /// let mut c = TtlCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
@@ -1470,7 +1604,7 @@ pub trait CachedAsync<K, V> {
         Q: std::hash::Hash + Eq + ?Sized + Sync,
         V: 'a,
     {
-        async move { self.get(k) }
+        async move { self.cache_get(k) }
     }
 
     /// Insert a key-value pair asynchronously.
@@ -1482,7 +1616,7 @@ pub trait CachedAsync<K, V> {
         K: Send,
         V: Send,
     {
-        async move { self.set(k, v) }
+        async move { self.cache_set(k, v) }
     }
 
     /// Remove a cached value asynchronously.
@@ -1498,7 +1632,7 @@ pub trait CachedAsync<K, V> {
         Q: std::hash::Hash + Eq + ?Sized + Sync,
         V: 'a,
     {
-        async move { self.remove(k) }
+        async move { self.cache_remove(k) }
     }
 
     /// Remove all entries asynchronously.
@@ -1508,7 +1642,7 @@ pub trait CachedAsync<K, V> {
     where
         Self: Cached<K, V> + Send,
     {
-        async move { self.clear() }
+        async move { self.cache_clear() }
     }
 }
 
@@ -1516,15 +1650,20 @@ pub trait CachedAsync<K, V> {
 ///
 /// [`ConcurrentCached`] and [`ConcurrentCachedAsync`] both extend this trait, which owns the
 /// associated [`Error`](Self::Error) type and the cheap introspection methods
-/// ([`cache_size`](Self::cache_size), [`len`](Self::len), [`is_empty`](Self::is_empty)). Hoisting
-/// these into a single base means a store that implements *both* concurrent traits declares them
-/// once and can call them through a shared reference without a "multiple applicable items in
-/// scope" ambiguity (the concurrent analogue of how the single-owner [`Cached`] core is shared by
-/// the sync and async single-owner traits).
+/// ([`cache_size`](Self::cache_size), [`len`](Self::len), [`is_empty`](Self::is_empty),
+/// [`cache_hits`](Self::cache_hits), [`cache_misses`](Self::cache_misses),
+/// [`cache_capacity`](Self::cache_capacity), [`cache_evictions`](Self::cache_evictions),
+/// and [`metrics`](Self::metrics)). Hoisting these into a single base means a store that
+/// implements both concurrent traits declares them once and can call them through a shared
+/// reference without ambiguity.
+///
+/// The metric accessors mirror those on [`Cached`]/[`CachedExt`] for the non-concurrent family.
+/// The sharded in-memory stores override them to aggregate across all shards; external stores
+/// (Redis, Redb) leave the defaults, which return `None` / an empty `CacheMetrics`.
 ///
 /// Implementors do not normally name this trait directly: implementing [`ConcurrentCached`] or
 /// [`ConcurrentCachedAsync`] requires a `ConcurrentCacheBase` impl, which is where the
-/// `type Error` and any `cache_size`/`len`/`is_empty` overrides live.
+/// `type Error` and any `cache_size`/metric overrides live.
 pub trait ConcurrentCacheBase {
     /// The error type returned by fallible cache operations.
     type Error;
@@ -1569,6 +1708,75 @@ pub trait ConcurrentCacheBase {
     /// takes priority; use `ConcurrentCacheBase::is_empty(&store)` to call this trait method.
     fn is_empty(&self) -> Result<Option<bool>, Self::Error> {
         Ok(self.cache_size()?.map(|n| n == 0))
+    }
+
+    /// Return the number of times a cached value was successfully retrieved, if tracked.
+    ///
+    /// The sharded in-memory stores track per-shard hit counters and sum them here.
+    /// External stores (Redis, Redb) do not track hits and return `None`.
+    ///
+    /// This mirrors [`Cached::cache_hits`] on the non-concurrent family.
+    #[must_use]
+    fn cache_hits(&self) -> Option<u64> {
+        None
+    }
+
+    /// Return the number of times a cached value was not found, if tracked.
+    ///
+    /// The sharded in-memory stores track per-shard miss counters and sum them here.
+    /// External stores (Redis, Redb) do not track misses and return `None`.
+    ///
+    /// This mirrors [`Cached::cache_misses`] on the non-concurrent family.
+    #[must_use]
+    fn cache_misses(&self) -> Option<u64> {
+        None
+    }
+
+    /// Return the cache capacity, if bounded.
+    ///
+    /// Bounded stores (e.g. `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`)
+    /// return `Some(total_capacity)`; unbounded stores return `None`.
+    ///
+    /// This mirrors [`Cached::cache_capacity`] on the non-concurrent family.
+    #[must_use]
+    fn cache_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    /// Return the number of entries evicted from the cache, if tracked.
+    ///
+    /// Stores that track evictions (bounded stores and expiry-capable stores) return
+    /// `Some(count)`. Unbounded stores without expiry (e.g. `ShardedUnboundCache`)
+    /// return `None`.
+    ///
+    /// This mirrors [`Cached::cache_evictions`] on the non-concurrent family.
+    #[must_use]
+    fn cache_evictions(&self) -> Option<u64> {
+        None
+    }
+
+    /// Return a snapshot of cache metrics.
+    ///
+    /// Aggregates hits, misses, evictions, entry count, and capacity across all shards (for
+    /// sharded stores). The sharded stores also expose an inherent `metrics()` method that
+    /// returns the same `CacheMetrics` without needing this trait in scope; this trait
+    /// method exists so generic code over a `ConcurrentCacheBase` bound can read metrics
+    /// uniformly.
+    ///
+    /// Note: `shards()` and `shard_sizes()` are inherent-only on the sharded stores - they
+    /// are sharding-specific and not part of the generic concurrent base trait.
+    ///
+    /// This mirrors the default [`CachedExt::metrics`] on the non-concurrent family.
+    #[must_use]
+    fn metrics(&self) -> CacheMetrics {
+        let entry_count = self.cache_size().ok().flatten().unwrap_or(0);
+        CacheMetrics {
+            hits: self.cache_hits(),
+            misses: self.cache_misses(),
+            evictions: self.cache_evictions(),
+            entry_count,
+            capacity: self.cache_capacity(),
+        }
     }
 }
 
@@ -1639,7 +1847,7 @@ pub trait ConcurrentCacheTtl {
 /// recommends in place of the removed `InMemoryAdapter`):
 ///
 /// ```rust
-/// use cached::{ConcurrentCacheBase, ConcurrentCached};
+/// use cached::{ConcurrentCacheBase, ConcurrentCached, ConcurrentCachedExt};
 /// use std::collections::HashMap;
 /// use std::sync::Mutex;
 ///
@@ -1764,7 +1972,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// # Example
     ///
     /// ```rust
-    /// use cached::ShardedUnboundCache;
+    /// use cached::{ConcurrentCached, ConcurrentCachedExt, ShardedUnboundCache};
     ///
     /// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::builder().build().unwrap();
     /// cache.set("key".to_string(), 42);
@@ -1791,36 +1999,6 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// Should return `Self::Error` if the operation fails
     fn cache_delete(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_remove_entry(k).map(|removed| removed.is_some())
-    }
-
-    /// Retrieve a cached value. Delegates to [`cache_get`](ConcurrentCached::cache_get).
-    #[inline]
-    fn get(&self, k: &K) -> Result<Option<V>, Self::Error> {
-        self.cache_get(k)
-    }
-
-    /// Insert a key-value pair and return the previous value. Delegates to [`cache_set`](ConcurrentCached::cache_set).
-    #[inline]
-    fn set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
-        self.cache_set(k, v)
-    }
-
-    /// Remove a cached value and return it. Delegates to [`cache_remove`](ConcurrentCached::cache_remove).
-    #[inline]
-    fn remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
-        self.cache_remove(k)
-    }
-
-    /// Remove a cached entry and return the stored key and value. Delegates to [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
-    #[inline]
-    fn remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
-        self.cache_remove_entry(k)
-    }
-
-    /// Delete a cached value without returning it. Delegates to [`cache_delete`](ConcurrentCached::cache_delete).
-    #[inline]
-    fn delete(&self, k: &K) -> Result<bool, Self::Error> {
-        self.cache_delete(k)
     }
 
     /// Remove all cached entries while preserving capacity allocation and metrics.
@@ -1886,8 +2064,79 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
         self.cache_set(k, v.clone())?;
         Ok(v)
     }
+}
 
-    /// Ergonomic alias for [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with).
+/// Short-alias extension for [`ConcurrentCached`] stores.
+///
+/// Every type that implements `ConcurrentCached<K, V>` automatically implements this trait
+/// through a blanket impl. The methods here are ergonomic short names that delegate to the
+/// `cache_`-prefixed core methods on `ConcurrentCached`. Import this trait (or
+/// `use cached::prelude::*;`) to bring the short names into scope:
+///
+/// ```rust
+/// use cached::{ConcurrentCachedExt, ShardedUnboundCache};
+///
+/// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::builder().build().unwrap();
+/// // Inherent get/set take priority over trait methods on sharded stores;
+/// // use fully-qualified syntax for the trait version.
+/// ConcurrentCachedExt::set(&cache, "key".to_string(), 42).unwrap();
+/// assert_eq!(ConcurrentCachedExt::get(&cache, &"key".to_string()).unwrap(), Some(42));
+/// ConcurrentCachedExt::remove(&cache, &"key".to_string()).unwrap();
+/// ```
+///
+/// Note: for the sharded in-memory stores, the inherent `get`/`set`/`remove`/`delete` methods
+/// (returning unwrapped `Option`/`bool` rather than `Result`) take priority at the call site
+/// over these trait methods. Use fully-qualified syntax
+/// (`ConcurrentCachedExt::get(&store, &k)`) or the `cache_`-prefixed form
+/// (`ConcurrentCached::cache_get`) to explicitly call the trait version.
+pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
+    /// Retrieve a cached value. Delegates to [`cache_get`](ConcurrentCached::cache_get).
+    fn get(&self, k: &K) -> Result<Option<V>, Self::Error>;
+
+    /// Insert a key-value pair and return the previous value. Delegates to
+    /// [`cache_set`](ConcurrentCached::cache_set).
+    fn set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
+
+    /// Remove a cached value and return it. Delegates to
+    /// [`cache_remove`](ConcurrentCached::cache_remove).
+    fn remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
+
+    /// Remove a cached entry and return the stored key and value. Delegates to
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    fn remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error>;
+
+    /// Delete a cached value without returning it. Delegates to
+    /// [`cache_delete`](ConcurrentCached::cache_delete).
+    fn delete(&self, k: &K) -> Result<bool, Self::Error>;
+
+    /// Return the cached value for `k`, or compute and store `f()`. Delegates to
+    /// [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with).
+    fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
+    where
+        V: Clone;
+}
+
+impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
+    fn get(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        self.cache_get(k)
+    }
+
+    fn set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
+        self.cache_set(k, v)
+    }
+
+    fn remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        self.cache_remove(k)
+    }
+
+    fn remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
+        self.cache_remove_entry(k)
+    }
+
+    fn delete(&self, k: &K) -> Result<bool, Self::Error> {
+        self.cache_delete(k)
+    }
+
     fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
     where
         V: Clone,

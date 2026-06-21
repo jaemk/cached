@@ -5,6 +5,66 @@ use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+/// Default hash builder for non-sharded in-memory stores.
+///
+/// Resolves to `ahash::RandomState` when the `ahash` feature is enabled,
+/// and to `std::collections::hash_map::RandomState` otherwise. This
+/// matches the behavior prior to the introduction of the `S` type parameter,
+/// so existing code that does not name the hasher is unaffected.
+///
+/// # Example
+///
+/// Use the default hasher (no change required for existing code):
+///
+/// ```rust
+/// use cached::{Cached, UnboundCache};
+///
+/// let mut cache: UnboundCache<u32, u32> = UnboundCache::new();
+/// cache.cache_set(1, 100);
+/// assert_eq!(cache.cache_get(&1), Some(&100));
+/// ```
+///
+/// Use a custom hasher via the builder's `.hasher()` method:
+///
+/// ```rust
+/// use cached::{Cached, UnboundCache, DefaultHashBuilder};
+/// use std::collections::hash_map::RandomState;
+///
+/// let mut cache = UnboundCache::<u32, u32>::builder()
+///     .hasher(RandomState::new())
+///     .build()
+///     .unwrap();
+/// cache.cache_set(1, 100);
+/// assert_eq!(cache.cache_get(&1), Some(&100));
+/// ```
+#[cfg(feature = "ahash")]
+pub type DefaultHashBuilder = ahash::RandomState;
+
+/// Default hash builder for non-sharded in-memory stores.
+///
+/// Resolves to `ahash::RandomState` when the `ahash` feature is enabled,
+/// and to `std::collections::hash_map::RandomState` otherwise. This
+/// matches the behavior prior to the introduction of the `S` type parameter,
+/// so existing code that does not name the hasher is unaffected.
+#[cfg(not(feature = "ahash"))]
+pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
+
+/// Construct a fresh [`DefaultHashBuilder`].
+///
+/// Abstracts over `ahash::RandomState::new()` vs `std::collections::hash_map::RandomState::new()`
+/// since `ahash::RandomState` does not implement `Default`.
+#[inline]
+pub(super) fn new_default_hash_builder() -> DefaultHashBuilder {
+    #[cfg(feature = "ahash")]
+    {
+        ahash::RandomState::new()
+    }
+    #[cfg(not(feature = "ahash"))]
+    {
+        std::collections::hash_map::RandomState::new()
+    }
+}
+
 const STRIPE_COUNT: usize = 16;
 
 #[repr(align(128))]
@@ -463,15 +523,22 @@ where
 /// Implementors remove all entries that are past their expiry from the store and
 /// invoke the `on_evict` callback (if configured) for each removed entry.
 ///
+/// `evict()` is the explicit way to physically remove expired entries, reclaim
+/// memory, and obtain an accurate live count. After calling `evict()`, `len()`
+/// reflects only live entries. Without it, `len()` may count expired-but-not-yet-swept
+/// entries while `iter().count()` omits them - the two can differ on any lazy-eviction
+/// store.
+///
 /// This trait is for in-memory stores with infallible expiration checks. IO-backed
 /// stores expose their own APIs because sweeping can fail: `RedbCache` uses
 /// `remove_expired_entries`, while Redis relies on server-side key expiry.
 pub trait CacheEvict {
-    /// Remove all expired entries from the cache, returning the number removed.
+    /// Physically remove all expired entries from the cache and return the count removed.
     ///
-    /// Fires the `on_evict` callback and increments `cache_evictions()` for each removed entry.
-    /// Hit/miss metrics are not affected; call [`cache_reset_metrics`](crate::Cached::cache_reset_metrics)
-    /// separately if needed.
+    /// After this call, `len()` reflects only live entries. Fires the `on_evict` callback
+    /// and increments `cache_evictions()` for each removed entry. Hit/miss metrics are not
+    /// affected; call [`cache_reset_metrics`](crate::Cached::cache_reset_metrics) separately
+    /// if needed.
     ///
     /// **Note for sharded in-memory stores**: these are internally synchronized and normally held
     /// behind an `Arc`/`static`, so they cannot offer `&mut self`. They implement
@@ -486,9 +553,17 @@ pub trait CacheEvict {
 /// Sharded in-memory stores are normally held behind an `Arc`/`static`, so they
 /// cannot offer the `&mut self` [`CacheEvict::evict`]. This trait provides the same
 /// operation through a shared reference.
+///
+/// `evict()` is the explicit way to physically remove expired entries, reclaim
+/// memory, and obtain an accurate live count on the sharded expiry-capable stores
+/// (`ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`,
+/// `ShardedExpiringLruCache`). After calling `evict()`, `len()` (the inherent method)
+/// reflects only live entries.
 pub trait ConcurrentCacheEvict {
-    /// Remove all expired entries, returning the number removed. Fires `on_evict`
-    /// and increments `cache_evictions()` for each removed entry.
+    /// Physically remove all expired entries across all shards and return the count removed.
+    ///
+    /// After this call, `len()` (the inherent method on sharded stores) reflects only live
+    /// entries. Fires `on_evict` and increments `cache_evictions()` for each removed entry.
     #[must_use]
     fn evict(&self) -> usize;
 }

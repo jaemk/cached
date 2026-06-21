@@ -314,6 +314,26 @@ where
     fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
         Ok(Some(self.len()))
     }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
 }
 
 impl<K, V, H> ConcurrentCached<K, V> for ShardedUnboundCacheBase<K, V, H>
@@ -566,8 +586,8 @@ mod tests {
     #[test]
     fn new_returns_ready_cache() {
         let c = ShardedUnboundCache::<u32, u32>::new();
-        assert_eq!(SyncConcurrentCached::set(&c, 1, 100).unwrap(), None);
-        assert_eq!(SyncConcurrentCached::get(&c, &1).unwrap(), Some(100));
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(100));
         assert_eq!(c.len(), 1);
     }
 

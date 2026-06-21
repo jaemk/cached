@@ -2,22 +2,16 @@ use crate::time::Duration;
 use crate::time::Instant;
 use crate::{CacheEvict, CacheTtl, Cached, CachedIter, CachedPeek, CachedRead, CloneCached};
 
-use super::StripedCounter;
+use super::{DefaultHashBuilder, StripedCounter};
 use std::borrow::Borrow;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeSet;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
-
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
 
 use std::collections::HashMap;
 
@@ -171,9 +165,14 @@ enum TtlOverflow {
 /// To accomplish this, there are a few trade-offs:
 ///  - Maximum cache size logic cannot support "LRU", instead dropping the next value to expire
 ///  - Cache keys must implement `Ord`
-///  - The cache's size, reported by `.len` is only guaranteed to be accurate immediately
-///    after a call to either `.evict` or `.retain_latest`
 ///  - Eviction must be explicitly requested, either on its own or while inserting
+///
+/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// and may include expired-but-not-yet-swept entries - it is only guaranteed to be
+/// accurate immediately after a call to `evict()` or `retain_latest()`. `iter()` omits
+/// expired entries from the view but does not remove them. Call `evict()` (via
+/// [`CacheEvict`](crate::CacheEvict)) to physically remove expired entries and obtain
+/// an accurate live count.
 ///
 /// `cache_get_or_set_with` returns `&V` (a shared reference), not `&mut V`.
 /// Binding it as `&mut V` is a compile error; use
@@ -192,14 +191,14 @@ enum TtlOverflow {
 /// let _: &mut u32 = cache.cache_get_or_set_with(1, || 2);
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub struct TtlSortedCache<K, V> {
+pub struct TtlSortedCache<K, V, S = DefaultHashBuilder> {
     // a minimum instant to compare ranges against since
     // all keys must logically expire after the creation
     // of the cache
     min_instant: Instant,
 
     // k/v where entry contains corresponds to an ordered value in `keys`
-    map: HashMap<K, Entry<K, V>, RandomState>,
+    map: HashMap<K, Entry<K, V>, S>,
 
     // ordered in ascending expiration `Instant`s
     // to support retaining/evicting without full traversal
@@ -213,7 +212,7 @@ pub struct TtlSortedCache<K, V> {
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K, V> std::fmt::Debug for TtlSortedCache<K, V> {
+impl<K, V, S> std::fmt::Debug for TtlSortedCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TtlSortedCache")
             .field("ttl", &self.ttl)
@@ -226,10 +225,11 @@ impl<K, V> std::fmt::Debug for TtlSortedCache<K, V> {
     }
 }
 
-impl<K, V> Clone for TtlSortedCache<K, V>
+impl<K, V, S> Clone for TtlSortedCache<K, V, S>
 where
     K: Clone + Hash + Eq + Ord,
     V: Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -248,14 +248,27 @@ where
 
 /// Builder for [`TtlSortedCache`].
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub struct TtlSortedCacheBuilder<K, V> {
+pub struct TtlSortedCacheBuilder<K, V, S = DefaultHashBuilder> {
     size: Option<usize>,
     capacity: Option<usize>,
     ttl: Option<Duration>,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V> TtlSortedCacheBuilder<K, V> {
+impl<K, V> Default for TtlSortedCacheBuilder<K, V, DefaultHashBuilder> {
+    fn default() -> Self {
+        Self {
+            size: None,
+            capacity: None,
+            ttl: None,
+            on_evict: None,
+            hasher: super::new_default_hash_builder(),
+        }
+    }
+}
+
+impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
     /// Set the maximum number of entries (eviction bound). When the cache exceeds this
     /// limit, the next-to-expire entries are evicted until it is within bounds. Unlike
     /// [`capacity`](Self::capacity), this is a hard cap on entry count, not a preallocation
@@ -331,14 +344,47 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used to hash keys in the internal `HashMap`. Calling this method
+    /// changes the builder's type parameter so `build()` returns a `TtlSortedCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::stores::TtlSortedCache;
+    /// use cached::time::Duration;
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// let mut cache = TtlSortedCache::<u32, u32>::builder()
+    ///     .ttl_secs(60)
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, 100);
+    /// assert_eq!(cache.cache_get(&1), Some(&100));
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> TtlSortedCacheBuilder<K, V, S2> {
+        TtlSortedCacheBuilder {
+            size: self.size,
+            capacity: self.capacity,
+            ttl: self.ttl,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// # Errors
     ///
     /// Returns [`BuildError`](super::BuildError) if `ttl` is not set or is zero, or if `size` is `0`.
-    pub fn build(self) -> Result<TtlSortedCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<TtlSortedCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq + Ord + Clone,
+        S: BuildHasher,
     {
         let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
         super::validate_ttl(ttl)?;
@@ -350,7 +396,7 @@ impl<K, V> TtlSortedCacheBuilder<K, V> {
         }
         let mut cache = TtlSortedCache {
             min_instant: Instant::now(),
-            map: HashMap::with_hasher(RandomState::new()),
+            map: HashMap::with_hasher(self.hasher),
             keys: BTreeSet::new(),
             ttl,
             size_limit: self.size,
@@ -397,14 +443,11 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     /// Return a builder for constructing an [`TtlSortedCache`].
     #[must_use]
     pub fn builder() -> TtlSortedCacheBuilder<K, V> {
-        TtlSortedCacheBuilder {
-            size: None,
-            capacity: None,
-            ttl: None,
-            on_evict: None,
-        }
+        TtlSortedCacheBuilder::default()
     }
+}
 
+impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Set the maximum number of entries. When reached, the next entries to expire are evicted.
     /// Returns the previous value if one was set.
     ///
@@ -755,7 +798,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
+impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCache<K, V, S> {
     type Error = super::CacheSetError;
 
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
@@ -895,7 +938,9 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
 
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
-        self.map = HashMap::with_hasher(RandomState::new());
+        // Use clear + shrink_to to avoid needing S: Clone to rebuild the HashMap.
+        self.map.clear();
+        self.map.shrink_to(0);
         self.keys = BTreeSet::new();
         self.min_instant = Instant::now();
         self.cache_reset_metrics();
@@ -932,7 +977,7 @@ impl<K: Hash + Eq + Ord + Clone, V> Cached<K, V> for TtlSortedCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Ord, V> CachedIter<K, V> for TtlSortedCache<K, V> {
+impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedIter<K, V> for TtlSortedCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
@@ -948,7 +993,7 @@ impl<K: Hash + Eq + Ord, V> CachedIter<K, V> for TtlSortedCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Ord, V> CacheTtl for TtlSortedCache<K, V> {
+impl<K: Hash + Eq + Ord, V, S: BuildHasher> CacheTtl for TtlSortedCache<K, V, S> {
     /// Returns `Some(ttl)` — the currently configured TTL duration.
     ///
     /// When `ttl` is `Duration::ZERO`, entries inserted while zero is set never expire
@@ -988,7 +1033,7 @@ impl<K: Hash + Eq + Ord, V> CacheTtl for TtlSortedCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Ord, V> CachedPeek<K, V> for TtlSortedCache<K, V> {
+impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedPeek<K, V> for TtlSortedCache<K, V, S> {
     fn cache_peek<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -1004,7 +1049,7 @@ impl<K: Hash + Eq + Ord, V> CachedPeek<K, V> for TtlSortedCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Ord, V> CachedRead<K, V> for TtlSortedCache<K, V> {
+impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedRead<K, V> for TtlSortedCache<K, V, S> {
     fn cache_get_read<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -1020,7 +1065,9 @@ impl<K: Hash + Eq + Ord, V> CachedRead<K, V> for TtlSortedCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Ord + Clone, V: Clone> CloneCached<K, V> for TtlSortedCache<K, V> {
+impl<K: Hash + Eq + Ord + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
+    for TtlSortedCache<K, V, S>
+{
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
     where
         K: Borrow<Q>,
@@ -1062,10 +1109,11 @@ impl<K: Hash + Eq + Ord + Clone, V: Clone> CloneCached<K, V> for TtlSortedCache<
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for TtlSortedCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for TtlSortedCache<K, V, S>
 where
     K: Hash + Eq + Ord + Clone + Send + Sync,
     V: Send,
+    S: BuildHasher + Send,
 {
     fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
@@ -1121,7 +1169,9 @@ where
     }
 }
 
-impl<K: std::hash::Hash + Eq + Ord + Clone, V> CacheEvict for TtlSortedCache<K, V> {
+impl<K: std::hash::Hash + Eq + Ord + Clone, V, S: BuildHasher> CacheEvict
+    for TtlSortedCache<K, V, S>
+{
     fn evict(&mut self) -> usize {
         TtlSortedCache::evict(self)
     }
@@ -1131,7 +1181,7 @@ impl<K: std::hash::Hash + Eq + Ord + Clone, V> CacheEvict for TtlSortedCache<K, 
 mod test {
     use crate::stores::TtlSortedCache;
     use crate::time::Duration;
-    use crate::{Cached, CachedRead};
+    use crate::{Cached, CachedExt, CachedRead};
     use std::cmp::Ordering as CmpOrdering;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
@@ -2312,5 +2362,50 @@ mod test {
         assert_eq!(cache.cache_size(), 2);
         cache.async_cache_clear().await;
         assert_eq!(cache.cache_size(), 0, "async_cache_clear empties cache");
+    }
+
+    // --- custom hasher tests ---
+
+    #[test]
+    fn custom_hasher_get_set_round_trip() {
+        use crate::stores::Cached;
+        use std::collections::hash_map::RandomState;
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), Some(&200));
+        assert_eq!(c.cache_hits(), Some(2));
+        assert_eq!(c.cache_misses(), Some(0));
+        assert_eq!(c.cache_get(&99), None);
+        assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn default_constructor_still_works() {
+        use crate::stores::Cached;
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::new(Duration::from_secs(60));
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+    }
+
+    #[test]
+    fn custom_hasher_respects_ttl_expiry() {
+        use crate::stores::Cached;
+        use std::collections::hash_map::RandomState;
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(50))
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // After TTL, entry should expire (lazy removal on cache_get).
+        assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
     }
 }
