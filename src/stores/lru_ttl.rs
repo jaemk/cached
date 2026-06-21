@@ -165,7 +165,7 @@ impl<K, V, E, S> LruTtlCacheBuilder<K, V, E, S> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::LruTtlCache;
+    /// use cached::{Cached, LruTtlCache};
     /// use cached::time::Duration;
     /// use std::collections::hash_map::RandomState;
     ///

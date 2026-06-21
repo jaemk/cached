@@ -190,7 +190,7 @@ impl<K, V: Expires, S> ExpiringLruCacheBuilder<K, V, S> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::{Expires, ExpiringLruCache};
+    /// use cached::{Cached, Expires, ExpiringLruCache};
     /// use std::collections::hash_map::RandomState;
     ///
     /// struct Val(bool);

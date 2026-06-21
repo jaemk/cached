@@ -162,7 +162,7 @@ impl<K, V, S> TtlCacheBuilder<K, V, S> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::TtlCache;
+    /// use cached::{Cached, TtlCache};
     /// use std::collections::hash_map::RandomState;
     ///
     /// let mut cache = TtlCache::<u32, u32>::builder()

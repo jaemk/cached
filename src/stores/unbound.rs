@@ -123,7 +123,7 @@ impl<K, V, S> UnboundCacheBuilder<K, V, S> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::UnboundCache;
+    /// use cached::{Cached, UnboundCache};
     /// use std::collections::hash_map::RandomState;
     ///
     /// let mut cache = UnboundCache::<u32, u32>::builder()

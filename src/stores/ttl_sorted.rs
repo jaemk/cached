@@ -352,7 +352,7 @@ impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::stores::TtlSortedCache;
+    /// use cached::{Cached, stores::TtlSortedCache};
     /// use cached::time::Duration;
     /// use std::collections::hash_map::RandomState;
     ///

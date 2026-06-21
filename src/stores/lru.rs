@@ -145,7 +145,7 @@ impl<K, V, S> LruCacheBuilder<K, V, S> {
     /// # Example
     ///
     /// ```rust
-    /// use cached::LruCache;
+    /// use cached::{Cached, LruCache};
     /// use std::collections::hash_map::RandomState;
     ///
     /// let mut cache = LruCache::<u32, u32>::builder()
