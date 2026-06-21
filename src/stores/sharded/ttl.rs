@@ -2,6 +2,24 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// Encode a TTL into the `ttl_nanos` atomic. A zero duration encodes as `0`
+/// (expiry disabled / no expiry).
+#[inline]
+fn encode_ttl(ttl: Duration) -> u64 {
+    ttl.as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// Decode the `ttl_nanos` atomic into an optional TTL. `0` means expiry is
+/// disabled (entries never expire), so it decodes to `None`.
+#[inline]
+fn decode_ttl(nanos: u64) -> Option<Duration> {
+    if nanos == 0 {
+        None
+    } else {
+        Some(Duration::from_nanos(nanos))
+    }
+}
+
 #[cfg(feature = "ahash")]
 use ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
@@ -12,7 +30,10 @@ use std::collections::HashMap;
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
-use crate::{CacheMetrics, ConcurrentCacheEvict, ConcurrentCached, ConcurrentCloneCached};
+use crate::{
+    CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached,
+    ConcurrentCloneCached,
+};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -27,7 +48,9 @@ struct TtlInner<K, V, H> {
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
-    /// TTL in nanoseconds; 0 means disabled.
+    /// TTL in nanoseconds, or `0` to mean expiry is disabled (entries never expire).
+    /// A zero stored value is the single sentinel for "no expiry"; there is no separate
+    /// `ttl_set` flag. `unset_ttl`/`set_ttl(0)` store `0`; `set_ttl(nonzero)` stores the ttl.
     ttl_nanos: AtomicU64,
     refresh: AtomicBool,
     evictions: AtomicU64,
@@ -45,9 +68,15 @@ struct TtlInner<K, V, H> {
 /// read hits acquire an exclusive **write lock** to update the entry's TTL timestamp — the same
 /// trade-off as LRU variants. Disable `refresh_on_hit` if read-lock scalability is a priority.
 ///
+/// **`len` / `evict` contract**: `len()` (the inherent method) returns the raw stored entry
+/// count across all shards and may include expired-but-not-yet-swept entries. Call `evict()`
+/// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
+/// entries and obtain an accurate live count. Sharded stores do not implement `CachedIter`.
+///
 /// This is a type alias for `ShardedTtlCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, construct a [`ShardedTtlCacheBase`] directly via
-/// [`ShardedTtlCacheBase::builder()`].
+/// To use a custom shard hasher, call [`ShardedTtlCache::builder()`] and then
+/// [`hasher`](ShardedTtlCacheBuilder::hasher), which yields a `ShardedTtlCacheBase<K, V, H>`
+/// over your hasher.
 pub type ShardedTtlCache<K, V> = ShardedTtlCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedTtlCache`] with a generic shard hasher `H`.
@@ -66,16 +95,57 @@ impl<K, V, H> Clone for ShardedTtlCacheBase<K, V, H> {
 
 impl<K, V, H> std::fmt::Debug for ShardedTtlCacheBase<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let nanos = self.inner.ttl_nanos.load(Ordering::Relaxed);
-        let ttl = if nanos == 0 {
-            None
-        } else {
-            Some(Duration::from_nanos(nanos))
-        };
+        let ttl = self.ttl_duration_impl();
         f.debug_struct("ShardedTtlCache")
             .field("shards", &self.inner.shards.len())
             .field("ttl", &ttl)
             .finish_non_exhaustive()
+    }
+}
+
+impl<K, V, H> ShardedTtlCacheBase<K, V, H> {
+    /// Resolve the currently configured TTL, independent of hasher bounds.
+    ///
+    /// Returns `None` when expiry is disabled (entries never expire), otherwise
+    /// `Some(ttl)`.
+    #[inline]
+    fn ttl_duration_impl(&self) -> Option<Duration> {
+        decode_ttl(self.inner.ttl_nanos.load(Ordering::Relaxed))
+    }
+}
+
+impl<K, V> ShardedTtlCacheBase<K, V, DefaultShardHasher>
+where
+    K: Hash + Eq,
+{
+    /// Construct a ready-to-use [`ShardedTtlCache`] with the given `ttl`, the
+    /// [`DefaultShardHasher`], and a default shard count.
+    ///
+    /// For a custom hasher, shard count, `refresh_on_hit`, or `on_evict`, use
+    /// [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` is zero. Use [`builder`](Self::builder) with
+    /// [`build`](ShardedTtlCacheBuilder::build) to handle a zero TTL without panicking.
+    #[must_use]
+    pub fn new(ttl: Duration) -> ShardedTtlCache<K, V> {
+        Self::builder()
+            .ttl(ttl)
+            .build()
+            .expect("ShardedTtlCache::new requires a non-zero ttl")
+    }
+
+    /// Return a builder for constructing a [`ShardedTtlCache`].
+    ///
+    /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
+    /// [`hasher`](ShardedTtlCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedTtlCacheBase` over that hasher.
+    /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
+    /// introduced via `hasher`, never a `ShardedTtlCacheBase::<_, _, H>` turbofish.
+    #[must_use]
+    pub fn builder() -> ShardedTtlCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedTtlCacheBuilder::default()
     }
 }
 
@@ -84,14 +154,6 @@ where
     K: Hash + Eq,
     H: ShardHasher<K>,
 {
-    /// Return a builder for constructing a [`ShardedTtlCacheBase`].
-    ///
-    /// Always returns a builder with the [`DefaultShardHasher`], regardless of the `H` type
-    /// parameter on `Self`. Call `.hasher(h)` on the builder to use a custom hasher.
-    pub fn builder() -> ShardedTtlCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedTtlCacheBuilder::default()
-    }
-
     #[inline]
     fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>> {
         let h = self.inner.hasher.shard_hash(k);
@@ -100,24 +162,33 @@ where
 
     #[inline]
     fn ttl_duration(&self) -> Option<Duration> {
-        let nanos = self.inner.ttl_nanos.load(Ordering::Relaxed);
-        if nanos == 0 {
-            None
-        } else {
-            Some(Duration::from_nanos(nanos))
-        }
+        self.ttl_duration_impl()
     }
 
     #[inline]
     fn is_expired(&self, entry: &TimedEntry<V>) -> bool {
-        match self.ttl_duration() {
+        // `expires_at = None` means never-expires (TTL was disabled at insert time).
+        match entry.expires_at {
             None => false,
-            Some(ttl) => entry.instant.elapsed() >= ttl,
+            Some(t) => Instant::now() >= t,
+        }
+    }
+
+    /// Compute the expiry instant for a new or refreshed entry given the current TTL.
+    /// TTL is clamped to u64::MAX nanos (~584 years), so `checked_add` overflow is
+    /// practically unreachable; if it does overflow, the entry becomes never-expires (`None`).
+    fn compute_expires_at(&self, now: Instant) -> Option<Instant> {
+        let nanos = self.inner.ttl_nanos.load(Ordering::Relaxed);
+        if nanos == 0 {
+            None
+        } else {
+            let ttl = Duration::from_nanos(nanos);
+            now.checked_add(ttl)
         }
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedTtlCacheBase<K, V, H> {
+impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedTtlCacheBase<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
@@ -151,6 +222,58 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedTtlCacheB
                 evictions: AtomicU64::new(self.inner.evictions.load(Ordering::Relaxed)),
             }),
         }
+    }
+}
+
+impl<K, V, H: ShardHasher<K>> ShardedTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+{
+    /// Retrieve a cached value, returning `None` on a miss or if the entry has expired.
+    ///
+    /// This is the infallible ergonomic API for the concrete type. Generic code over
+    /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
+    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
+    /// method is in scope.
+    #[must_use]
+    pub fn get(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_get(self, k).unwrap()
+    }
+
+    /// Insert a key-value pair and return the previous value, if any.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn set(&self, k: K, v: V) -> Option<V> {
+        ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Remove a cached value and return it if the entry was live.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_remove(self, k).unwrap()
+    }
+
+    /// Remove a cached entry and return the stored key and value, if present.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
+        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    }
+
+    /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn delete(&self, k: &K) -> bool {
+        ConcurrentCached::cache_delete(self, k).unwrap()
+    }
+
+    /// Remove all entries from every shard and reset metrics.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn reset(&self) {
+        ConcurrentCached::cache_reset(self).unwrap()
     }
 }
 
@@ -248,10 +371,6 @@ where
     where
         K: Clone,
     {
-        let ttl = match self.ttl_duration() {
-            None => return 0,
-            Some(t) => t,
-        };
         let mut total = 0;
         let now = Instant::now();
         for shard in self.inner.shards.iter() {
@@ -259,7 +378,9 @@ where
                 let mut guard = shard.lock.write();
                 let expired_keys: Vec<K> = guard
                     .iter()
-                    .filter(|(_, e)| now.saturating_duration_since(e.instant) >= ttl)
+                    // An entry is expired when expires_at is Some(t) and now >= t.
+                    // None means never-expires.
+                    .filter(|(_, e)| e.expires_at.is_some_and(|t| now >= t))
                     .map(|(k, _)| k.clone())
                     .collect();
                 let mut removed = Vec::new();
@@ -299,33 +420,20 @@ where
     /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
     /// nanoseconds (~584 years). In practice this limit is never reached.
     ///
-    /// # Panics
-    ///
-    /// Panics if `ttl` is zero — use [`unset_ttl`](Self::unset_ttl) to disable expiry.
+    /// A zero `ttl` disables expiry — it is exactly equivalent to
+    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
     pub fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        assert!(
-            !ttl.is_zero(),
-            "TTL must be non-zero; use unset_ttl() to disable expiry"
-        );
-        let prev = self.inner.ttl_nanos.swap(
-            ttl.as_nanos().min(u64::MAX as u128) as u64,
-            Ordering::Relaxed,
-        );
-        if prev == 0 {
-            None
-        } else {
-            Some(Duration::from_nanos(prev))
-        }
+        let prev = self
+            .inner
+            .ttl_nanos
+            .swap(encode_ttl(ttl), Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     /// Remove the TTL (entries never expire after this point).
     pub fn unset_ttl(&self) -> Option<Duration> {
         let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
-        if prev == 0 {
-            None
-        } else {
-            Some(Duration::from_nanos(prev))
-        }
+        decode_ttl(prev)
     }
 
     /// Set whether cache hits refresh the TTL of the accessed entry,
@@ -351,7 +459,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedTtlCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -359,13 +467,76 @@ where
 {
     type Error = std::convert::Infallible;
 
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        Some(self.inner.evictions.load(Ordering::Relaxed))
+    }
+}
+
+impl<K, V, H> ConcurrentCacheTtl for ShardedTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
+    fn ttl(&self) -> Option<Duration> {
+        self.ttl_duration()
+    }
+
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        ShardedTtlCacheBase::set_ttl(self, ttl)
+    }
+
+    fn unset_ttl(&self) -> Option<Duration> {
+        ShardedTtlCacheBase::unset_ttl(self)
+    }
+
+    fn refresh_on_hit(&self) -> bool {
+        self.inner.refresh.load(Ordering::Relaxed)
+    }
+
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.inner.refresh.swap(refresh, Ordering::Relaxed)
+    }
+}
+
+impl<K, V, H> ConcurrentCached<K, V> for ShardedTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         if self.inner.refresh.load(Ordering::Relaxed) {
             let mut guard = shard.lock.write();
             match guard.get_mut(k) {
                 Some(entry) if !self.is_expired(entry) => {
-                    entry.instant = Instant::now();
+                    let now = Instant::now();
+                    entry.expires_at = self.compute_expires_at(now).or(entry.expires_at);
                     let value = Some(entry.value.clone());
                     drop(guard);
                     shard.hits.fetch_add(1, Ordering::Relaxed);
@@ -442,8 +613,10 @@ where
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
+        let now = Instant::now();
+        let expires_at = self.compute_expires_at(now);
         let new_entry = TimedEntry {
-            instant: Instant::now(),
+            expires_at,
             value: v,
         };
         let old = shard.lock.write().insert(k, new_entry);
@@ -458,7 +631,8 @@ where
             if let Some(cb) = &self.inner.on_evict {
                 cb(&stored_k, &entry.value);
             }
-            if self.is_expired(&entry) {
+            // expired = Some(t) and now >= t; None (never-expires) or now < t -> live
+            if entry.expires_at.is_some_and(|t| Instant::now() >= t) {
                 Ok(None)
             } else {
                 Ok(Some(entry.value))
@@ -480,10 +654,6 @@ where
         Ok(removed.map(|(k, entry)| (k, entry.value)))
     }
 
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
     fn cache_clear(&self) -> Result<(), Self::Error> {
         self.clear();
         Ok(())
@@ -502,22 +672,6 @@ where
         self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
-
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.inner.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        ShardedTtlCacheBase::set_ttl(self, ttl)
-    }
-
-    fn unset_ttl(&self) -> Option<Duration> {
-        ShardedTtlCacheBase::unset_ttl(self)
-    }
 }
 
 #[cfg(feature = "async_core")]
@@ -527,8 +681,6 @@ where
     V: Clone + Send + Sync,
     H: ShardHasher<K>,
 {
-    type Error = std::convert::Infallible;
-
     async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
@@ -555,26 +707,6 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
-    }
-
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
-    fn set_refresh_on_hit(&self, b: bool) -> bool {
-        <Self as ConcurrentCached<K, V>>::set_refresh_on_hit(self, b)
-    }
-
-    fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        ShardedTtlCacheBase::set_ttl(self, ttl)
-    }
-
-    fn unset_ttl(&self) -> Option<Duration> {
-        ShardedTtlCacheBase::unset_ttl(self)
     }
 }
 
@@ -608,10 +740,30 @@ impl<K, V> Default for ShardedTtlCacheBuilder<K, V, DefaultShardHasher> {
 
 impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// Set the TTL for cache entries. Required.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    /// Set the TTL for cache entries in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Set the TTL for cache entries in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Set the number of shards (rounded up to the next power of two).
@@ -636,6 +788,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedTtlCacheBuilder<K, V, H2> {
         ShardedTtlCacheBuilder {
@@ -673,8 +826,9 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// # Errors
     ///
     /// Returns [`BuildError::MissingRequired`] if `ttl` was not set,
-    /// [`BuildError::InvalidTtl`] if the TTL is zero, or [`BuildError`] if the
+    /// [`BuildError::InvalidValue`] if the TTL is zero, or [`BuildError`] if the
     /// shard count overflows.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedTtlCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq,
@@ -696,7 +850,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
                     .hasher
                     .expect("hasher is always initialized via Default or .hasher()"),
                 on_evict: self.on_evict,
-                ttl_nanos: AtomicU64::new(ttl.as_nanos().min(u64::MAX as u128) as u64),
+                ttl_nanos: AtomicU64::new(encode_ttl(ttl)),
                 refresh: AtomicBool::new(self.refresh),
                 evictions: AtomicU64::new(0),
             }),
@@ -735,18 +889,16 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         let new_cache = self
             .build()
             .unwrap_or_else(|e| panic!("ShardedTtlCache build failed: {e}"));
-        let existing_ttl = existing.ttl_duration();
+        let _existing_ttl = existing.ttl_duration();
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, TimedEntry<V>)> = {
                 let guard = shard.lock.read();
+                let now = Instant::now();
                 guard
                     .iter()
                     .filter(|(_, entry)| {
-                        // Skip entries that are already expired per the existing cache's TTL.
-                        match existing_ttl {
-                            None => true,
-                            Some(ttl) => entry.instant.elapsed() < ttl,
-                        }
+                        // Skip entries that are already expired per their per-entry expires_at.
+                        entry.expires_at.is_none_or(|t| now < t)
                     })
                     .map(|(k, e)| (k.clone(), e.clone()))
                     .collect()
@@ -772,7 +924,7 @@ where
     fn cache_get_with_expiry_status(&self, k: &K) -> (Option<V>, bool) {
         let shard = self.shard_of(k);
         if self.inner.refresh.load(Ordering::Relaxed) {
-            // Refresh-on-hit path: write lock needed to update the entry's TTL timestamp.
+            // Refresh-on-hit path: write lock needed to update the entry's expires_at.
             let mut guard = shard.lock.write();
             match guard.get_mut(k) {
                 None => {
@@ -784,7 +936,8 @@ where
                     let expired = self.is_expired(entry);
                     let value = entry.value.clone();
                     if !expired {
-                        entry.instant = Instant::now();
+                        let now = Instant::now();
+                        entry.expires_at = self.compute_expires_at(now).or(entry.expires_at);
                     }
                     drop(guard);
                     if expired {
@@ -820,13 +973,83 @@ where
             }
         }
     }
+
+    /// Non-renewing read: takes only a read lock, never updates the TTL timestamp, the
+    /// hits/misses counters, or removes the entry. Returns `(Some(v), expired)` for a present
+    /// entry (expired or not) or `(None, false)` when absent.
+    fn cache_peek_with_expiry_status(&self, k: &K) -> (Option<V>, bool) {
+        let shard = self.shard_of(k);
+        let guard = shard.lock.read();
+        match guard.get(k) {
+            None => (None, false),
+            Some(entry) => {
+                let expired = self.is_expired(entry);
+                (Some(entry.value.clone()), expired)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
     use crate::ConcurrentCloneCached;
+
+    #[test]
+    fn new_returns_ready_cache_respecting_ttl() {
+        let c = ShardedTtlCache::<u32, u32>::new(Duration::from_millis(10));
+        assert_eq!(c.ttl(), Some(Duration::from_millis(10)));
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1).unwrap(),
+            None,
+            "entry must expire after ttl"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero ttl")]
+    fn new_zero_ttl_panics() {
+        let _c = ShardedTtlCache::<u32, u32>::new(Duration::ZERO);
+    }
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl_secs(7)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_secs(7)));
+
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl_millis(250)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        // ttl(secs=10) then ttl_secs(5) -> 5s
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(10))
+            .ttl_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_secs(5)));
+
+        // ttl_secs then ttl_millis -> the millis value
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl_secs(10)
+            .ttl_millis(500)
+            .build()
+            .unwrap();
+        assert_eq!(c.ttl(), Some(Duration::from_millis(500)));
+    }
 
     #[test]
     fn basic_get_set_remove() {
@@ -963,8 +1186,11 @@ mod tests {
             .ttl(Duration::from_nanos(0))
             .build();
         assert!(
-            matches!(err, Err(crate::stores::BuildError::InvalidTtl { .. })),
-            "expected InvalidTtl, got {err:?}",
+            matches!(
+                err,
+                Err(crate::stores::BuildError::InvalidValue { field: "ttl", .. })
+            ),
+            "expected InvalidValue, got {err:?}",
         );
     }
 
@@ -1218,5 +1444,225 @@ mod tests {
             expired2,
             "entry must still be expired on second expiry-status call"
         );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_no_side_effects() {
+        // Build a 1-shard cache so metrics are not split across shards, making
+        // counter captures exact.
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(&c, 1u32, 42u32).expect("insert must succeed");
+
+        // Capture counters before any peek.
+        let before = c.metrics();
+
+        // Live key: expect (Some(42), false).
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(42), "live peek must return the value");
+        assert!(!expired, "live peek must report expired=false");
+
+        // Absent key: expect (None, false).
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &999u32);
+        assert!(val2.is_none(), "absent peek must return None");
+        assert!(!expired2, "absent peek must report expired=false");
+
+        // Counters must be unchanged.
+        let after = c.metrics();
+        assert_eq!(after.hits, before.hits, "peek must not increment hits");
+        assert_eq!(
+            after.misses, before.misses,
+            "peek must not increment misses"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "peek must not increment evictions"
+        );
+        // Entry must still be present.
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1u32).expect("cache_get must succeed"),
+            Some(42),
+            "entry must still be present after peek"
+        );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_stale_entry_no_side_effects() {
+        // Insert an entry with a very short TTL, let it expire, then peek it.
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_millis(10))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(&c, 1u32, 77u32).expect("insert must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let before = c.metrics();
+
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(77), "expired peek must return the stale value");
+        assert!(expired, "expired peek must report expired=true");
+
+        // Counters must be unchanged.
+        let after = c.metrics();
+        assert_eq!(
+            after.hits, before.hits,
+            "expired peek must not increment hits"
+        );
+        assert_eq!(
+            after.misses, before.misses,
+            "expired peek must not increment misses"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "expired peek must not increment evictions"
+        );
+
+        // Entry must NOT have been removed by the peek.
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val2,
+            Some(77),
+            "entry must still be present after expired peek"
+        );
+        assert!(expired2, "entry must still be expired after peek");
+    }
+
+    #[test]
+    fn peek_with_expiry_status_does_not_renew_ttl_under_refresh_on_hit() {
+        // peek must not extend the TTL even when refresh_on_hit is enabled.
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .refresh_on_hit(true)
+            .ttl(Duration::from_millis(10))
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(&c, 1u32, 42u32).expect("insert must succeed");
+
+        // Entry is live; peek must return the value and report not-expired.
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val, Some(42), "live peek must return the value");
+        assert!(!expired, "live peek must report expired=false");
+
+        // Wait past the original TTL.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // If peek had renewed the TTL the entry would still be live; it must not have.
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val2,
+            Some(42),
+            "post-sleep peek must still return the value"
+        );
+        assert!(
+            expired2,
+            "peek must not renew TTL; entry must now be expired"
+        );
+    }
+
+    // --- Inherent infallible method tests ---
+
+    #[test]
+    fn inherent_get_returns_option_not_result() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, None);
+        c.set(1, 42);
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, Some(42));
+    }
+
+    #[test]
+    fn inherent_set_returns_previous_value() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let prev: Option<u32> = c.set(1, 10);
+        assert_eq!(prev, None);
+        let prev: Option<u32> = c.set(1, 20);
+        assert_eq!(prev, Some(10));
+        assert_eq!(c.get(&1), Some(20));
+    }
+
+    #[test]
+    fn inherent_remove_returns_prior_value() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(1, 99);
+        let v: Option<u32> = c.remove(&1);
+        assert_eq!(v, Some(99));
+        assert_eq!(c.remove(&1), None);
+        assert_eq!(c.get(&1), None);
+    }
+
+    #[test]
+    fn inherent_remove_entry_returns_key_and_value() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(7, 77);
+        let pair: Option<(u32, u32)> = c.remove_entry(&7);
+        assert_eq!(pair, Some((7, 77)));
+        assert_eq!(c.remove_entry(&7), None);
+    }
+
+    #[test]
+    fn inherent_delete_returns_bool() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(1, 10);
+        let removed: bool = c.delete(&1);
+        assert!(removed);
+        let removed: bool = c.delete(&1);
+        assert!(!removed);
+    }
+
+    #[test]
+    fn inherent_reset_clears_and_resets_metrics() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set(1, 1);
+        c.set(2, 2);
+        let _ = c.get(&1);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.metrics().hits, Some(1));
+        c.reset();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        assert_eq!(c.metrics().hits, Some(0));
+    }
+
+    #[test]
+    fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
+        fn use_trait<C>(cache: &C, k: u32, v: u32)
+        where
+            C: SyncConcurrentCached<u32, u32>,
+        {
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_set(cache, k, v);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_get(cache, &k);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_remove(cache, &k);
+        }
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        use_trait(&c, 1, 100);
     }
 }

@@ -1,0 +1,5 @@
+error[E0599]: no method named `set_ttl` found for struct `ShardedUnboundCacheBase<K, V, H>` in the current scope
+  --> tests/ui/sharded_unbound_no_set_ttl.rs:16:19
+   |
+16 |     let _ = cache.set_ttl(Duration::from_secs(60));
+   |                   ^^^^^^^ method not found in `ShardedUnboundCacheBase<u32, u32>`

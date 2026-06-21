@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, ConcurrentCached, ConcurrentCloneCached, Expires};
+use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached, ConcurrentCloneCached, Expires};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -45,9 +45,16 @@ struct ExpiringInner<K, V, H> {
 /// **Note**: reads return owned values cloned from under the shard lock, so `V` must
 /// implement `Clone` (in addition to `Expires`).
 ///
+/// **`len` / `evict` contract**: `len()` (the inherent method) returns the raw stored entry
+/// count across all shards and may include expired-but-not-yet-swept entries. Call `evict()`
+/// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
+/// entries, reclaim memory, and obtain an accurate live count. Sharded stores do not implement
+/// `CachedIter`.
+///
 /// This is a type alias for `ShardedExpiringCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, construct a [`ShardedExpiringCacheBase`] directly via
-/// [`ShardedExpiringCacheBase::builder()`].
+/// To use a custom shard hasher, call [`ShardedExpiringCache::builder()`] and then
+/// [`hasher`](ShardedExpiringCacheBuilder::hasher), which yields a
+/// `ShardedExpiringCacheBase<K, V, H>` over your hasher.
 pub type ShardedExpiringCache<K, V> = ShardedExpiringCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedExpiringCache`] with a generic shard hasher `H`.
@@ -73,20 +80,42 @@ impl<K, V, H> std::fmt::Debug for ShardedExpiringCacheBase<K, V, H> {
     }
 }
 
+impl<K, V> ShardedExpiringCacheBase<K, V, DefaultShardHasher>
+where
+    K: Hash + Eq,
+    V: Expires,
+{
+    /// Construct a ready-to-use [`ShardedExpiringCache`] with the [`DefaultShardHasher`]
+    /// and a default shard count.
+    ///
+    /// `ShardedExpiringCache` has no required configuration, so this never fails. For a
+    /// custom hasher, shard count, or `on_evict`, use [`builder`](Self::builder).
+    #[must_use]
+    pub fn new() -> ShardedExpiringCache<K, V> {
+        Self::builder()
+            .build()
+            .expect("ShardedExpiringCache default build is infallible")
+    }
+
+    /// Return a builder for constructing a [`ShardedExpiringCache`].
+    ///
+    /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
+    /// [`hasher`](ShardedExpiringCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedExpiringCacheBase` over that
+    /// hasher. `new` and `builder` exist only on the default-hasher alias, so a custom hasher is
+    /// always introduced via `hasher`, never a `ShardedExpiringCacheBase::<_, _, H>` turbofish.
+    #[must_use]
+    pub fn builder() -> ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedExpiringCacheBuilder::default()
+    }
+}
+
 impl<K, V, H> ShardedExpiringCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Expires,
     H: ShardHasher<K>,
 {
-    /// Return a builder for constructing a [`ShardedExpiringCacheBase`].
-    ///
-    /// Always returns a builder with [`DefaultShardHasher`], regardless of the `H` type parameter
-    /// on `Self`. Call `.hasher(h)` on the builder to use a custom hasher.
-    pub fn builder() -> ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedExpiringCacheBuilder::default()
-    }
-
     #[inline]
     fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, RandomState>>> {
         let h = self.inner.hasher.shard_hash(k);
@@ -106,7 +135,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K> + Clone>
+impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
     ShardedExpiringCacheBase<K, V, H>
 {
     /// Return an independent deep copy of this cache — entries and metrics are
@@ -140,6 +169,58 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K> + Clone>
                 evictions: AtomicU64::new(self.inner.evictions.load(Ordering::Relaxed)),
             }),
         }
+    }
+}
+
+impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone + Expires,
+{
+    /// Retrieve a cached value, returning `None` on a miss or if the entry has expired.
+    ///
+    /// This is the infallible ergonomic API for the concrete type. Generic code over
+    /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
+    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
+    /// method is in scope.
+    #[must_use]
+    pub fn get(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_get(self, k).unwrap()
+    }
+
+    /// Insert a key-value pair and return the previous value, if any.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn set(&self, k: K, v: V) -> Option<V> {
+        ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Remove a cached value and return it if the entry was live.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_remove(self, k).unwrap()
+    }
+
+    /// Remove a cached entry and return the stored key and value, if present.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
+        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    }
+
+    /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn delete(&self, k: &K) -> bool {
+        ConcurrentCached::cache_delete(self, k).unwrap()
+    }
+
+    /// Remove all entries from every shard and reset metrics.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn reset(&self) {
+        ConcurrentCached::cache_reset(self).unwrap()
     }
 }
 
@@ -272,7 +353,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedExpiringCacheBase<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -280,6 +361,41 @@ where
 {
     type Error = std::convert::Infallible;
 
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        Some(self.inner.evictions.load(Ordering::Relaxed))
+    }
+}
+
+impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone + Expires,
+    H: ShardHasher<K>,
+{
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         // Expiry check — try with a read lock first to allow read concurrency on hits.
@@ -364,10 +480,6 @@ where
         Ok(removed)
     }
 
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
     fn cache_clear(&self) -> Result<(), Self::Error> {
         self.clear();
         Ok(())
@@ -386,11 +498,6 @@ where
         self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
-
-    /// No-op: this store uses value-defined expiry, not a refreshable TTL. Always returns `false`.
-    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-        false
-    }
 }
 
 #[cfg(feature = "async_core")]
@@ -400,8 +507,6 @@ where
     V: Clone + Expires + Send + Sync,
     H: ShardHasher<K>,
 {
-    type Error = std::convert::Infallible;
-
     async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
@@ -428,14 +533,6 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
-    }
-
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
-    fn set_refresh_on_hit(&self, b: bool) -> bool {
-        <Self as ConcurrentCached<K, V>>::set_refresh_on_hit(self, b)
     }
 }
 
@@ -494,6 +591,7 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedExpiringCacheBuilder<K, V, H2> {
         ShardedExpiringCacheBuilder {
@@ -570,6 +668,7 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
     ///
     /// Returns [`BuildError`] if the `shards` count is zero or overflows when rounded
     /// up to the next power of two.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedExpiringCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq,
@@ -626,12 +725,29 @@ where
             }
         }
     }
+
+    /// Non-renewing read: takes only a read lock, never touches the hits/misses counters or
+    /// removes the entry. Returns `(Some(v), expired)` for a present entry (expired or not) or
+    /// `(None, false)` when absent.
+    fn cache_peek_with_expiry_status(&self, k: &K) -> (Option<V>, bool) {
+        let shard = self.shard_of(k);
+        let guard = shard.lock.read();
+        match guard.get(k) {
+            None => (None, false),
+            Some(v) => {
+                let expired = v.is_expired();
+                (Some(v.clone()), expired)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
+    use crate::ConcurrentCachedExt as SyncConcurrentCachedExt;
     use crate::ConcurrentCloneCached;
 
     #[derive(Clone)]
@@ -643,6 +759,39 @@ mod tests {
         fn is_expired(&self) -> bool {
             self.expired
         }
+    }
+
+    #[test]
+    fn new_returns_ready_cache() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        assert_eq!(
+            SyncConcurrentCachedExt::set(
+                &c,
+                1,
+                Val {
+                    v: 10,
+                    expired: false
+                }
+            )
+            .unwrap()
+            .map(|v| v.v),
+            None
+        );
+        assert_eq!(
+            SyncConcurrentCachedExt::get(&c, &1).unwrap().map(|v| v.v),
+            Some(10)
+        );
+        // Expired values are not returned.
+        SyncConcurrentCachedExt::set(
+            &c,
+            2,
+            Val {
+                v: 20,
+                expired: true,
+            },
+        )
+        .unwrap();
+        assert!(SyncConcurrentCachedExt::get(&c, &2).unwrap().is_none());
     }
 
     #[test]
@@ -1096,6 +1245,240 @@ mod tests {
         assert!(
             result2.1,
             "entry must still be expired on second expiry-status call"
+        );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_no_side_effects() {
+        // shards(1) makes counter captures exact.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(
+            &c,
+            1u32,
+            Val {
+                v: 42,
+                expired: false,
+            },
+        )
+        .expect("insert must succeed");
+
+        // Capture counters before any peek.
+        let before = c.metrics();
+
+        // Live key: expect (Some(v), false).
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val.map(|x| x.v),
+            Some(42),
+            "live peek must return the value"
+        );
+        assert!(!expired, "live peek must report expired=false");
+
+        // Absent key: expect (None, false).
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &999u32);
+        assert!(val2.is_none(), "absent peek must return None");
+        assert!(!expired2, "absent peek must report expired=false");
+
+        // Counters must be unchanged.
+        let after = c.metrics();
+        assert_eq!(after.hits, before.hits, "peek must not increment hits");
+        assert_eq!(
+            after.misses, before.misses,
+            "peek must not increment misses"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "peek must not increment evictions"
+        );
+
+        // Entry must still be present.
+        assert!(
+            SyncConcurrentCached::cache_get(&c, &1u32)
+                .expect("cache_get must succeed")
+                .is_some(),
+            "entry must still be present after peek"
+        );
+    }
+
+    #[test]
+    fn peek_with_expiry_status_stale_entry_no_side_effects() {
+        // Use Val with expired=true to simulate a stale entry without sleeping.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .build()
+            .unwrap();
+
+        SyncConcurrentCached::cache_set(
+            &c,
+            1u32,
+            Val {
+                v: 77,
+                expired: true,
+            },
+        )
+        .expect("insert must succeed");
+
+        let before = c.metrics();
+
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val.map(|x| x.v),
+            Some(77),
+            "expired peek must return the stale value"
+        );
+        assert!(expired, "expired peek must report expired=true");
+
+        // Counters must be unchanged.
+        let after = c.metrics();
+        assert_eq!(
+            after.hits, before.hits,
+            "expired peek must not increment hits"
+        );
+        assert_eq!(
+            after.misses, before.misses,
+            "expired peek must not increment misses"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "expired peek must not increment evictions"
+        );
+
+        // Entry must NOT have been removed by the peek.
+        let (val2, expired2) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(
+            val2.map(|x| x.v),
+            Some(77),
+            "entry must still be present after expired peek"
+        );
+        assert!(expired2, "entry must still be expired after peek");
+    }
+
+    // --- Inherent infallible method tests ---
+
+    #[test]
+    fn inherent_get_returns_option_not_result() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        let v: Option<Val> = c.get(&1);
+        assert!(v.is_none());
+        c.set(
+            1,
+            Val {
+                v: 42,
+                expired: false,
+            },
+        );
+        let v: Option<Val> = c.get(&1);
+        assert_eq!(v.map(|x| x.v), Some(42));
+    }
+
+    #[test]
+    fn inherent_get_returns_none_for_expired() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            1,
+            Val {
+                v: 99,
+                expired: true,
+            },
+        );
+        // Expired entries are filtered out by get.
+        let v: Option<Val> = c.get(&1);
+        assert!(
+            v.is_none(),
+            "expired entry must return None from inherent get"
+        );
+    }
+
+    #[test]
+    fn inherent_set_returns_previous_value() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        let prev: Option<Val> = c.set(
+            1,
+            Val {
+                v: 10,
+                expired: false,
+            },
+        );
+        assert!(prev.is_none());
+        let prev: Option<Val> = c.set(
+            1,
+            Val {
+                v: 20,
+                expired: false,
+            },
+        );
+        assert_eq!(prev.map(|x| x.v), Some(10));
+        assert_eq!(c.get(&1).map(|x| x.v), Some(20));
+    }
+
+    #[test]
+    fn inherent_remove_returns_prior_live_value() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            1,
+            Val {
+                v: 99,
+                expired: false,
+            },
+        );
+        let v: Option<Val> = c.remove(&1);
+        assert_eq!(v.map(|x| x.v), Some(99));
+        assert!(c.remove(&1).is_none());
+    }
+
+    #[test]
+    fn inherent_remove_entry_returns_key_and_value() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            7,
+            Val {
+                v: 77,
+                expired: false,
+            },
+        );
+        let pair: Option<(u32, Val)> = c.remove_entry(&7);
+        assert_eq!(pair.map(|(k, v)| (k, v.v)), Some((7, 77)));
+        assert!(c.remove_entry(&7).is_none());
+    }
+
+    #[test]
+    fn inherent_delete_returns_bool() {
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        c.set(
+            1,
+            Val {
+                v: 10,
+                expired: false,
+            },
+        );
+        let removed: bool = c.delete(&1);
+        assert!(removed);
+        let removed: bool = c.delete(&1);
+        assert!(!removed);
+    }
+
+    #[test]
+    fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
+        fn use_trait<C>(cache: &C, k: u32, v: Val)
+        where
+            C: SyncConcurrentCached<u32, Val>,
+        {
+            let _: Result<Option<Val>, _> = ConcurrentCached::cache_set(cache, k, v);
+            let _: Result<Option<Val>, _> = ConcurrentCached::cache_get(cache, &k);
+            let _: Result<Option<Val>, _> = ConcurrentCached::cache_remove(cache, &k);
+        }
+        let c = ShardedExpiringCache::<u32, Val>::new();
+        use_trait(
+            &c,
+            1,
+            Val {
+                v: 42,
+                expired: false,
+            },
         );
     }
 }

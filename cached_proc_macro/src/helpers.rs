@@ -1,17 +1,96 @@
+use darling::ast::NestedMeta;
 use darling::{Error, FromMeta};
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::__private::Span;
-use quote::quote;
+use quote::{format_ident, quote};
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::token::Comma;
 use syn::{
     Attribute, Block, FnArg, GenericArgument, Pat, PatType, PathArguments, ReturnType, Signature,
     Type, parse_quote, parse_str,
 };
 
-/// Returns `true` if `output` is a `Result<…>` type (last path segment is
+/// Scan the raw attribute arguments for `#[cached]` and `#[once]` and reject
+/// any that are only valid on `#[concurrent_cached]` with a clear message
+/// directing the user to the correct macro. This runs before `FromMeta::from_list`
+/// so the friendly message replaces darling's generic "Unknown field" error.
+///
+/// The concurrent-only attributes are the I/O-backed store selectors:
+/// - `disk` - selects the redb disk-backed store
+/// - `redis` - selects the Redis-backed store
+/// - `map_error` - converts the store error; only meaningful with `disk`/`redis`
+pub(super) fn reject_concurrent_only_attrs(
+    macro_name: &str,
+    attr_args: &[NestedMeta],
+) -> Result<(), syn::Error> {
+    for arg in attr_args {
+        let Some(meta) = (match arg {
+            NestedMeta::Meta(meta) => Some(meta),
+            NestedMeta::Lit(_) => None,
+        }) else {
+            continue;
+        };
+        let Some(ident) = meta.path().get_ident().map(ToString::to_string) else {
+            continue;
+        };
+        let message = match ident.as_str() {
+            "disk" => Some(format!(
+                "`disk` is not supported on `#[{macro_name}]`; \
+                 `disk` selects the redb disk-backed concurrent store. \
+                 Use `#[concurrent_cached(disk = true)]` instead."
+            )),
+            "redis" => Some(format!(
+                "`redis` is not supported on `#[{macro_name}]`; \
+                 `redis` selects the Redis-backed concurrent store. \
+                 Use `#[concurrent_cached(redis = true)]` instead."
+            )),
+            "map_error" => Some(format!(
+                "`map_error` is not supported on `#[{macro_name}]`; \
+                 `map_error` converts the store error on the `disk` or `redis` concurrent store. \
+                 Use `#[concurrent_cached]` with `disk = true` or `redis = true`."
+            )),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(syn::Error::new(meta.span(), message));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the path to the `cached` crate for use in generated code.
+///
+/// Generated code that referred to `::cached::...` broke for downstream crates
+/// that renamed the dependency (e.g. `cached = { package = "cached", ... }` under
+/// a different name) - issue #157. `proc-macro-crate` looks up the actual import
+/// name from the dependent crate's `Cargo.toml`:
+///
+/// - `FoundCrate::Itself` (the macro is used inside `cached`'s own tests/examples)
+///   resolves to `::cached`.
+/// - `FoundCrate::Name(n)` resolves to `::n` (the renamed import).
+/// - On error (no manifest / not found), fall back to `::cached` so the crate's
+///   own test suite - where the lookup can fail - keeps working. This cannot be a
+///   hard error: doctests and some build configs hit the `Err` path legitimately,
+///   so propagating a diagnostic would break `cached`'s own build. The cost is
+///   that a downstream crate that both renamed the dependency and trips the error
+///   path gets an "unresolved import `::cached`" error rather than a manifest-lookup
+///   message - a rare edge case where the import error is itself a usable signal.
+pub(super) fn crate_path() -> TokenStream2 {
+    match crate_name("cached") {
+        Ok(FoundCrate::Itself) => quote! { ::cached },
+        Ok(FoundCrate::Name(name)) => {
+            let ident = format_ident!("{}", name);
+            quote! { ::#ident }
+        }
+        Err(_) => quote! { ::cached },
+    }
+}
+
+/// Returns `true` if `output` is a `Result<...>` type (last path segment is
 /// exactly `"Result"` and carries type arguments).
 pub(super) fn is_result_return_type(output: &ReturnType) -> bool {
     match output {
@@ -25,7 +104,7 @@ pub(super) fn is_result_return_type(output: &ReturnType) -> bool {
     }
 }
 
-/// Returns `true` if `output` is an `Option<…>` type (last path segment is `"Option"` with type args).
+/// Returns `true` if `output` is an `Option<...>` type (last path segment is `"Option"` with type args).
 pub(super) fn is_option_return_type(output: &ReturnType) -> bool {
     match output {
         ReturnType::Default => false,
@@ -38,7 +117,102 @@ pub(super) fn is_option_return_type(output: &ReturnType) -> bool {
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+/// The migration message emitted when `ttl` is given as a bare integer literal
+/// (the old `ttl = 60` whole-seconds form). Shared by all three macros so the
+/// message stays identical everywhere.
+pub(super) const TTL_INT_MIGRATION_MESSAGE: &str = "`ttl` now takes a Duration expression (e.g. `ttl = \"Duration::from_secs(60)\"`); \
+     for whole seconds use `ttl_secs = 60`, for milliseconds use `ttl_millis = 500`.";
+
+/// Custom `FromMeta` type for the `ttl` macro attribute.
+///
+/// `ttl` now accepts a `Duration` expression written as a string literal (the
+/// same convention as `create`/`convert`), e.g.
+/// `ttl = "core::time::Duration::from_secs(60)"`. The string is stored verbatim
+/// here and parsed into a `syn::Expr` later by the macro.
+///
+/// A bare integer literal (`ttl = 60`) was the old whole-seconds form. It is now
+/// rejected with a helpful migration message pointing at `ttl_secs`/`ttl_millis`
+/// (matching the crate's helpful-rename pattern), rather than darling's generic
+/// "expected string" error.
+#[derive(Debug, Clone)]
+pub(super) struct TtlExpr {
+    pub expr: String,
+    pub span: Option<Span>,
+}
+
+impl FromMeta for TtlExpr {
+    fn from_string(value: &str) -> darling::Result<Self> {
+        Ok(Self {
+            expr: value.to_string(),
+            span: None,
+        })
+    }
+
+    // Intercept any non-string literal (e.g. the old `ttl = 60` integer form)
+    // and emit the migration message instead of darling's "expected string".
+    fn from_value(value: &syn::Lit) -> darling::Result<Self> {
+        match value {
+            syn::Lit::Str(s) => Ok(Self {
+                expr: s.value(),
+                span: Some(s.span()),
+            }),
+            other => Err(darling::Error::custom(TTL_INT_MIGRATION_MESSAGE).with_span(other)),
+        }
+    }
+}
+
+/// Build the internal `ttl_duration` token and `has_ttl` flag from the three
+/// mutually exclusive TTL attributes (`ttl` expr, `ttl_secs`, `ttl_millis`).
+///
+/// Returns `Ok((has_ttl, ttl_duration))` where `ttl_duration` is `Some` when any
+/// TTL is set. Performs the 3-way mutual-exclusion check, the `ttl_secs >= 1` /
+/// `ttl_millis >= 1` validation, and parses the `ttl` expression string.
+pub(super) fn resolve_ttl_duration(
+    krate: &TokenStream2,
+    ttl: &Option<TtlExpr>,
+    ttl_secs: Option<u64>,
+    ttl_millis: Option<u64>,
+    span: Span,
+) -> Result<(bool, Option<TokenStream2>), syn::Error> {
+    let set_count = usize::from(ttl.is_some())
+        + usize::from(ttl_secs.is_some())
+        + usize::from(ttl_millis.is_some());
+    if set_count > 1 {
+        return Err(syn::Error::new(
+            span,
+            "`ttl`, `ttl_secs`, and `ttl_millis` are mutually exclusive - \
+             `ttl` takes a `Duration` expression, `ttl_secs` whole seconds, \
+             `ttl_millis` milliseconds; use exactly one",
+        ));
+    }
+    if matches!(ttl_secs, Some(0)) {
+        return Err(syn::Error::new(span, "`ttl_secs` must be >= 1"));
+    }
+    if matches!(ttl_millis, Some(0)) {
+        return Err(syn::Error::new(span, "`ttl_millis` must be >= 1"));
+    }
+    let ttl_duration = if let Some(ttl_expr) = ttl {
+        let err_span = ttl_expr.span.unwrap_or(span);
+        let expr = parse_str::<syn::Expr>(&ttl_expr.expr).map_err(|error| {
+            syn::Error::new(
+                err_span,
+                format!(
+                    "unable to parse `ttl` as a Duration expression: {error}; \
+                     `ttl` takes a `Duration` expression as a string literal, e.g. \
+                     `ttl = \"core::time::Duration::from_secs(60)\"`"
+                ),
+            )
+        })?;
+        Some(quote! { #expr })
+    } else if let Some(secs) = ttl_secs {
+        Some(quote! { #krate::time::Duration::from_secs(#secs) })
+    } else {
+        ttl_millis.map(|millis| quote! { #krate::time::Duration::from_millis(#millis) })
+    };
+    Ok((ttl_duration.is_some(), ttl_duration))
+}
+
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub(super) enum SyncWriteMode {
     #[default]
     Disabled,
@@ -160,12 +334,12 @@ pub(super) fn find_value_type(
         (false, false) => Ok(output_ty),
         (true, true) => Err(syn::Error::new(
             output_ty.span(),
-            "the `result` and `option` attributes are mutually exclusive",
+            "a return type cannot be detected as both `Result<T, E>` and `Option<T>`",
         )),
         _ => match output.clone() {
             ReturnType::Default => Err(syn::Error::new(
                 output_ty.span(),
-                "function must return something when `result` or `option` is set",
+                "function must return a `Result<T, E>` or `Option<T>` for its inner value to be cached",
             )),
             ReturnType::Type(_, ty) => {
                 let span = ty.span();
@@ -199,9 +373,9 @@ pub(super) fn find_value_type(
 }
 
 /// Extracts the single angle-bracketed type argument from a path type's last
-/// segment — e.g. the `T` in `Result<T, E>` or `Return<T>`. `not_path` is the
+/// segment - e.g. the `T` in `Result<T, E>` or `Return<T>`. `not_path` is the
 /// error message when `ty` is not a simple path type; `no_arg` is the message
-/// when the path has no usable `<…>` argument. Used by `#[concurrent_cached]`
+/// when the path has no usable `<...>` argument. Used by `#[concurrent_cached]`
 /// to peel `Result` (and, with `with_cached_flag`, `cached::Return`).
 pub(super) fn first_type_arg<'a>(
     ty: &'a Type,
@@ -227,28 +401,68 @@ pub(super) fn first_type_arg<'a>(
 // make the cache key type and block that converts the inputs into the key type
 pub(super) fn make_cache_key_type(
     key: &Option<String>,
-    convert: &Option<String>,
+    convert: &Option<syn::Expr>,
     ty: &Option<String>,
     input_tys: Vec<Type>,
-    input_names: &Vec<Pat>,
+    input_names: &[Pat],
 ) -> Result<(TokenStream2, TokenStream2), syn::Error> {
     match (key, convert, ty) {
-        (Some(key_str), Some(convert_str), _) => {
-            let cache_key_ty = parse_str::<Type>(key_str)?;
+        (Some(key_str), Some(convert_expr), _) => {
+            let cache_key_ty = parse_str::<Type>(key_str).map_err(|error| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "unable to parse `key` as a type: {error}; \
+                         `key` must be a Rust type, e.g. `key = \"String\"` or \
+                         `key = \"(u32, String)\"`"
+                    ),
+                )
+            })?;
 
-            let key_convert_block = parse_str::<Block>(convert_str)?;
+            let key_convert_block = expr_to_block(convert_expr.clone());
 
             Ok((quote! {#cache_key_ty}, quote! {#key_convert_block}))
         }
-        (None, Some(convert_str), Some(_)) => {
-            let key_convert_block = parse_str::<Block>(convert_str)?;
+        (None, Some(convert_expr), Some(_)) => {
+            let key_convert_block = expr_to_block(convert_expr.clone());
 
             Ok((quote! {}, quote! {#key_convert_block}))
         }
-        (None, None, _) => Ok((
-            quote! {(#(#input_tys),*)},
-            quote! {(#(#input_names.clone()),*)},
-        )),
+        (None, None, _) => {
+            // Default key: derive an owned key type + conversion from the
+            // function inputs. Reference inputs (`&T`/`&mut T` and
+            // `Option<&T>`/`Option<&mut T>`) are converted to owned key components
+            // so the cache can store them without borrowing from the call
+            // (#202/#203). The owned type is `<T as ToOwned>::Owned` (so `&str`
+            // keys on `String`, `&[u8]` on `Vec<u8>`, `&Foo: Clone` on `Foo`):
+            //   `&T` / `&mut T`                 -> key type `<T as ToOwned>::Owned`,         expr `name.to_owned()`
+            //   `Option<&T>` / `Option<&mut T>` -> key type `Option<<T as ToOwned>::Owned>`, expr `name.as_deref().map(|__cached_v| __cached_v.to_owned())`
+            //   otherwise                       -> key type `T`,                             expr `name.clone()`
+            let mut key_tys: Vec<TokenStream2> = Vec::with_capacity(input_tys.len());
+            let mut key_exprs: Vec<TokenStream2> = Vec::with_capacity(input_tys.len());
+            for (ty, name) in input_tys.iter().zip(input_names.iter()) {
+                if let Some(inner) = strip_ref(ty) {
+                    key_tys.push(quote! { <#inner as ::std::borrow::ToOwned>::Owned });
+                    key_exprs.push(quote! { #name.to_owned() });
+                } else if let Some(inner) = option_ref_inner(ty) {
+                    key_tys.push(quote! { Option<<#inner as ::std::borrow::ToOwned>::Owned> });
+                    // Use `as_deref()` to avoid moving `name` (Option<&mut T> is not
+                    // Copy, and `.map()` would move it, causing a use-after-move error
+                    // when `name` is reused in the `_no_cache` call). `as_deref` takes
+                    // `&self` and yields `Option<&T>` for both `Option<&T>` and
+                    // `Option<&mut T>` without consuming the Option (#FIX-C).
+                    key_exprs
+                        .push(quote! { #name.as_deref().map(|__cached_v| __cached_v.to_owned()) });
+                } else {
+                    key_tys.push(quote! { #ty });
+                    key_exprs.push(quote! { #name.clone() });
+                }
+            }
+            // Match the original parenthesized-list shape (no trailing comma):
+            // a single input yields the bare element type `(T)` == `T` and expr
+            // `(name...)`, exactly as before; multiple inputs yield a tuple.
+            Ok((quote! {(#(#key_tys),*)}, quote! {(#(#key_exprs),*)}))
+        }
         (Some(_), None, _) => Err(syn::Error::new(
             Span::call_site(),
             "`key` requires `convert` to be set",
@@ -258,6 +472,35 @@ pub(super) fn make_cache_key_type(
             "`convert` requires `key` or `ty` to be set",
         )),
     }
+}
+
+/// If `ty` is a reference `&T` (or `&mut T`), return the referent `T`.
+/// Used by the default-key path to derive an owned key component (#202).
+fn strip_ref(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Reference(r) => Some(&r.elem),
+        _ => None,
+    }
+}
+
+/// If `ty` is `Option<&T>` (or `Option<&mut T>`, including qualified
+/// `std::option::Option`), return the referent `T`. Used by the default-key
+/// path so `Option<&str>` keys on an owned `Option<String>` (#203).
+fn option_ref_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    let GenericArgument::Type(inner) = args.args.first()? else {
+        return None;
+    };
+    strip_ref(inner)
 }
 
 // if you define arguments as mutable, e.g.
@@ -273,9 +516,12 @@ pub(super) fn make_cache_key_type(
 pub(super) fn get_input_names(inputs: &Punctuated<FnArg, Comma>) -> Vec<Pat> {
     inputs
         .iter()
-        .map(|input| match input {
-            FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
-            FnArg::Typed(pat_type) => *match_pattern_type(&pat_type),
+        // Skip the receiver (`self`/`&self`/`&mut self`): it is not a keyable
+        // argument. `in_impl = true` / a custom `convert` allow `self` methods,
+        // and the `self.` prefix is re-prepended at the call site (#16/#140).
+        .filter_map(|input| match input {
+            FnArg::Receiver(_) => None,
+            FnArg::Typed(pat_type) => Some(*match_pattern_type(&pat_type)),
         })
         .collect()
 }
@@ -294,9 +540,10 @@ pub(super) fn fill_in_attributes(attributes: &mut Vec<Attribute>, cache_fn_doc_e
 pub(super) fn get_input_types(inputs: &Punctuated<FnArg, Comma>) -> Vec<Type> {
     inputs
         .iter()
-        .map(|input| match input {
-            FnArg::Receiver(_) => panic!("methods (functions taking 'self') are not supported"),
-            FnArg::Typed(pat_type) => *pat_type.ty.clone(),
+        // Skip the receiver (see `get_input_names`): `self` is not a keyable arg.
+        .filter_map(|input| match input {
+            FnArg::Receiver(_) => None,
+            FnArg::Typed(pat_type) => Some(*pat_type.ty.clone()),
         })
         .collect()
 }
@@ -319,21 +566,104 @@ pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: Stri
     .into()
 }
 
+/// Parse the `force_refresh` expression (`Option<syn::Expr>`, already parsed by
+/// darling) into an `Option<syn::Block>` for use in generated code.
+///
+/// Returns `Ok(None)` when `force_refresh` is `None`. Shared by
+/// `build_force_refresh_guard` and by `#[concurrent_cached]`, which needs the
+/// same parsed block to build its `force_refresh_bypass` token, so the expression
+/// is extracted only once per macro expansion.
+///
+/// If the `Expr` is already `Expr::Block`, its inner `Block` is used directly.
+/// Otherwise the expression is wrapped in a synthetic block so a bare expression
+/// (e.g. `force_refresh = { id == 0 }`) also works.
+pub(super) fn parse_force_refresh_block(
+    force_refresh: &Option<syn::Expr>,
+    _span: Span,
+) -> Result<Option<Block>, syn::Error> {
+    match force_refresh {
+        Some(expr) => {
+            let block = expr_to_block(expr.clone());
+            Ok(Some(block))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Convert a `syn::Expr` to a `syn::Block`.
+///
+/// If `expr` is already `Expr::Block`, return its inner block directly.
+/// Otherwise wrap it in a synthetic block `{ expr }`.
+pub(super) fn expr_to_block(expr: syn::Expr) -> Block {
+    use syn::{Stmt, parse_quote};
+    match expr {
+        syn::Expr::Block(eb) => eb.block,
+        other => {
+            let stmt: Stmt = parse_quote! { #other };
+            Block {
+                brace_token: Default::default(),
+                stmts: vec![stmt],
+            }
+        }
+    }
+}
+
+/// Emit an attribute expression for *value/argument* position (e.g. `create`,
+/// `cache_prefix_block`, which expand into `Lock::new(<here>)` / `.prefix(<here>)`).
+///
+/// A single-expression block (`{ Store::builder()...build().unwrap() }`, the natural
+/// unquoted spelling, or the parsed legacy quoted form) is unwrapped to its inner
+/// expression so the generated code is `Lock::new(Store::builder()...)` rather than
+/// `Lock::new({ Store::builder()... })` (which trips `unused_braces` under `-D warnings`).
+/// Bare expressions are emitted directly; multi-statement blocks are kept as-is (the
+/// braces are load-bearing and `unused_braces` does not flag them).
+pub(super) fn expr_value_tokens(expr: &syn::Expr) -> TokenStream2 {
+    if let syn::Expr::Block(eb) = expr
+        && eb.attrs.is_empty()
+        && eb.label.is_none()
+        && eb.block.stmts.len() == 1
+        && let syn::Stmt::Expr(inner, None) = &eb.block.stmts[0]
+    {
+        return quote! { #inner };
+    }
+    quote! { #expr }
+}
+
+/// Build the `force_refresh` guard token that wraps a cached-hit early return.
+///
+/// `force_refresh` is an opt-in boolean expression block over the function args,
+/// in curly braces like `convert` (e.g. `force_refresh = { id == 0 }` or the
+/// legacy quoted form `force_refresh = "{ id == 0 }"`). When it evaluates to
+/// `true`, the cached-hit early return is skipped so the body re-runs and
+/// re-caches. The returned token is `if !(block)`; with no `force_refresh` it is
+/// `if true` (always take the cached value). Orthogonal to `refresh` (TTL renewal
+/// on hit) (#146). Shared by `#[cached]`, `#[concurrent_cached]`, and `#[once]`.
+pub(super) fn build_force_refresh_guard(
+    force_refresh: &Option<syn::Expr>,
+    span: Span,
+) -> Result<TokenStream2, syn::Error> {
+    match parse_force_refresh_block(force_refresh, span)? {
+        Some(block) => Ok(quote! { if !(#block) }),
+        None => Ok(quote! { if true }),
+    }
+}
+
 pub(super) fn gen_return_cache_block(
-    time: Option<u64>,
+    krate: &TokenStream2,
+    ttl_duration: Option<TokenStream2>,
     expires: bool,
     return_cache_block: TokenStream2,
 ) -> TokenStream2 {
     if expires {
         quote! {
-            if !<_ as ::cached::Expires>::is_expired(result) {
+            if !<_ as #krate::Expires>::is_expired(__cached_result) {
                 #return_cache_block
             }
         }
-    } else if let Some(time) = &time {
+    } else if let Some(ttl_duration) = &ttl_duration {
         quote! {
-            let (created_sec, result) = result;
-            if now.saturating_duration_since(*created_sec) < ::cached::time::Duration::from_secs(#time) {
+            let (__cached_created_sec, __cached_result) = __cached_result;
+            if __cached_now.saturating_duration_since(*__cached_created_sec) < #ttl_duration {
                 #return_cache_block
             }
         }
@@ -346,7 +676,7 @@ pub(super) fn gen_return_cache_block(
 // `Return<T>`), descending through a single outer `Result<_, _>` / `Option<_>`
 // wrapper via its first type argument. A proc macro sees tokens, not resolved
 // types, so this still cannot see through a type alias
-// (e.g. `use cached::Return as R;`) — but it correctly rejects an unrelated
+// (e.g. `use cached::Return as R;`) - but it correctly rejects an unrelated
 // `Return` from another module (e.g. `other::Return<T>`) instead of accepting
 // it and failing later with a confusing error.
 fn type_is_cached_return(ty: &Type) -> bool {

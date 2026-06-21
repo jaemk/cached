@@ -1,0 +1,5 @@
+error: `ttl_millis` must be >= 1
+ --> tests/ui/once_ttl_millis_zero.rs:4:4
+  |
+4 | fn f(x: i32) -> i32 {
+  |    ^

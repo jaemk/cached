@@ -1,0 +1,5 @@
+error: the `unbound` attribute has been removed. The default store (no `max_size`, `ttl`, or `expires`) is already an `UnboundCache`, so use `#[cached]` without `unbound`.
+ --> tests/ui/cached_unbound_attr_removed.rs:4:4
+  |
+4 | fn my_fn(x: u32) -> u32 {
+  |    ^^^^^

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, CachedIter, ConcurrentCached};
+use crate::{CacheMetrics, CachedIter, ConcurrentCacheBase, ConcurrentCached};
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -29,15 +29,18 @@ struct LruInner<K, V, H> {
 /// Use [`deep_clone`](ShardedLruCacheBase::deep_clone) to get an independent copy.
 ///
 /// This is a type alias for `ShardedLruCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, construct a [`ShardedLruCacheBase`] directly via
-/// [`ShardedLruCacheBase::builder()`].
+/// To use a custom shard hasher, call [`ShardedLruCache::builder()`] and then
+/// [`hasher`](ShardedLruCacheBuilder::hasher), which yields a `ShardedLruCacheBase<K, V, H>`
+/// over your hasher.
 ///
 /// **Note**: LRU promotion requires mutable access to the per-shard store, so
-/// `cache_get` acquires a **write** lock (unlike `ShardedCache` which only needs a read lock).
-/// Under many concurrent readers this can be a bottleneck; consider `ShardedCache` if you do
-/// not need capacity bounding.
+/// `cache_get` acquires a **write** lock (unlike `ShardedUnboundCache` which only needs a read lock).
+/// Under many concurrent readers this can be a bottleneck; consider `ShardedUnboundCache` if you do
+/// not need capacity bounding. This write-lock-on-read behavior is a known limitation of the
+/// strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering
+/// will ship as a separate store type; the existing stores will not change semantics.
 ///
-/// **Note**: `K` must implement `Clone` (needed for LRU key tracking). `ShardedCache<K, V>`
+/// **Note**: `K` must implement `Clone` (needed for LRU key tracking). `ShardedUnboundCache<K, V>`
 /// requires only `K: Hash + Eq`. `V` must also implement `Clone`, because reads return owned
 /// values cloned from under the shard lock.
 ///
@@ -69,19 +72,49 @@ impl<K, V, H> std::fmt::Debug for ShardedLruCacheBase<K, V, H> {
     }
 }
 
+impl<K, V> ShardedLruCacheBase<K, V, DefaultShardHasher>
+where
+    K: Hash + Eq + Clone,
+{
+    /// Construct a ready-to-use [`ShardedLruCache`] holding up to roughly `max_size`
+    /// entries total, with the [`DefaultShardHasher`] and a default shard count.
+    ///
+    /// Note that the effective total capacity can exceed `max_size` for small values
+    /// because each shard reserves a minimum capacity (see
+    /// [`max_size`](ShardedLruCacheBuilder::max_size)). For a custom hasher, shard count,
+    /// per-shard cap, or `on_evict`, use [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is `0`, or if the effective sharded capacity overflows
+    /// `usize` / a per-shard allocation fails. Use [`builder`](Self::builder) with
+    /// [`build`](ShardedLruCacheBuilder::build) to handle those cases without panicking.
+    #[must_use]
+    pub fn new(max_size: usize) -> ShardedLruCache<K, V> {
+        Self::builder()
+            .max_size(max_size)
+            .build()
+            .expect("ShardedLruCache::new requires a non-zero max_size with a valid allocation")
+    }
+
+    /// Return a builder for constructing a [`ShardedLruCache`].
+    ///
+    /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
+    /// [`hasher`](ShardedLruCacheBuilder::hasher) on the returned builder; it switches the
+    /// builder's hasher type and `build` then yields a `ShardedLruCacheBase` over that hasher.
+    /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
+    /// introduced via `hasher`, never a `ShardedLruCacheBase::<_, _, H>` turbofish.
+    #[must_use]
+    pub fn builder() -> ShardedLruCacheBuilder<K, V, DefaultShardHasher> {
+        ShardedLruCacheBuilder::default()
+    }
+}
+
 impl<K, V, H> ShardedLruCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
     H: ShardHasher<K>,
 {
-    /// Return a builder for constructing a [`ShardedLruCacheBase`].
-    ///
-    /// Always returns a builder with the [`DefaultShardHasher`], regardless of the `H` type
-    /// parameter on `Self`. Call `.hasher(h)` on the builder to use a custom hasher.
-    pub fn builder() -> ShardedLruCacheBuilder<K, V, DefaultShardHasher> {
-        ShardedLruCacheBuilder::default()
-    }
-
     #[inline]
     fn shard_of(&self, k: &K) -> &CachePadded<Shard<LruCache<K, V>>> {
         let h = self.inner.hasher.shard_hash(k);
@@ -89,7 +122,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedLruCacheBase<K, V, H> {
+impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedLruCacheBase<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
@@ -121,6 +154,58 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K> + Clone> ShardedLruCacheB
                 total_capacity: self.inner.total_capacity,
             }),
         }
+    }
+}
+
+impl<K, V, H: ShardHasher<K>> ShardedLruCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+{
+    /// Retrieve a cached value, returning `None` on a miss.
+    ///
+    /// This is the infallible ergonomic API for the concrete type. Generic code over
+    /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
+    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
+    /// method is in scope.
+    #[must_use]
+    pub fn get(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_get(self, k).unwrap()
+    }
+
+    /// Insert a key-value pair and return the previous value, if any.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn set(&self, k: K, v: V) -> Option<V> {
+        ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Remove a cached value and return it if the entry was live.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        ConcurrentCached::cache_remove(self, k).unwrap()
+    }
+
+    /// Remove a cached entry and return the stored key and value, if present.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
+        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    }
+
+    /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn delete(&self, k: &K) -> bool {
+        ConcurrentCached::cache_delete(self, k).unwrap()
+    }
+
+    /// Remove all entries from every shard and reset metrics.
+    ///
+    /// This is the infallible ergonomic API for the concrete type.
+    pub fn reset(&self) {
+        ConcurrentCached::cache_reset(self).unwrap()
     }
 }
 
@@ -249,7 +334,7 @@ where
 
 use crate::Cached;
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedLruCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Clone,
@@ -257,6 +342,52 @@ where
 {
     type Error = std::convert::Infallible;
 
+    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
+        Ok(Some(self.len()))
+    }
+
+    fn cache_hits(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_misses(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.misses.load(Ordering::Relaxed))
+                .sum(),
+        )
+    }
+
+    fn cache_capacity(&self) -> Option<usize> {
+        Some(self.inner.total_capacity)
+    }
+
+    fn cache_evictions(&self) -> Option<u64> {
+        let mut evictions = 0u64;
+        for shard in self.inner.shards.iter() {
+            let guard = shard.lock.read();
+            if let Some(e) = guard.cache_evictions() {
+                evictions += e;
+            }
+        }
+        Some(evictions)
+    }
+}
+
+impl<K, V, H> ConcurrentCached<K, V> for ShardedLruCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+    H: ShardHasher<K>,
+{
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let mut guard = shard.lock.write();
@@ -300,10 +431,6 @@ where
         Ok(removed)
     }
 
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
     fn cache_clear(&self) -> Result<(), Self::Error> {
         self.clear();
         Ok(())
@@ -323,11 +450,6 @@ where
         }
         Ok(())
     }
-
-    /// No-op: this store has no TTL to refresh on hit. Always returns `false`.
-    fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-        false
-    }
 }
 
 #[cfg(feature = "async_core")]
@@ -337,8 +459,6 @@ where
     V: Clone + Send + Sync,
     H: ShardHasher<K>,
 {
-    type Error = std::convert::Infallible;
-
     async fn async_cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         ConcurrentCached::cache_get(self, k)
     }
@@ -365,14 +485,6 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
-    }
-
-    fn cache_size(&self) -> Result<Option<usize>, Self::Error> {
-        Ok(Some(self.len()))
-    }
-
-    fn set_refresh_on_hit(&self, b: bool) -> bool {
-        <Self as ConcurrentCached<K, V>>::set_refresh_on_hit(self, b)
     }
 }
 
@@ -450,6 +562,7 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
     /// distribute keys across those high bits to avoid lopsided shards; a hasher that only
     /// varies the low 32 bits will pile every key into one shard. See [`ShardHasher`] for the
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
+    #[doc(alias = "with_hasher")]
     #[must_use]
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruCacheBuilder<K, V, H2> {
         ShardedLruCacheBuilder {
@@ -541,6 +654,7 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
     /// Returns [`BuildError`] if `max_size` (or `per_shard_max_size`) was not set, is `0`,
     /// or if both `max_size` and `per_shard_max_size` are set simultaneously, or if the
     /// effective sharded capacity overflows `usize`.
+    #[must_use = "the Result from build() must be used"]
     pub fn build(self) -> Result<ShardedLruCacheBase<K, V, H>, BuildError>
     where
         K: Hash + Eq + Clone,
@@ -617,7 +731,45 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
+
+    #[test]
+    fn new_returns_ready_cache_respecting_max_size() {
+        // shards(1) gives an exact cap so the eviction bound is deterministic.
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(2)
+            .build()
+            .unwrap();
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 10).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(10));
+        SyncConcurrentCached::cache_set(&c, 2, 20).unwrap();
+        SyncConcurrentCached::cache_set(&c, 3, 30).unwrap(); // evicts LRU (1)
+        assert_eq!(c.len(), 2);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), None);
+
+        // The inherent `new` constructor returns a ready cache too.
+        let c2 = ShardedLruCache::<u32, u32>::new(64);
+        assert_eq!(SyncConcurrentCached::cache_set(&c2, 1, 100).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c2, &1).unwrap(), Some(100));
+
+        // `new(N)` must forward N to the builder — capacity must equal the builder path.
+        assert_eq!(
+            ShardedLruCache::<u32, u32>::new(1024).capacity(),
+            ShardedLruCache::<u32, u32>::builder()
+                .max_size(1024)
+                .build()
+                .unwrap()
+                .capacity()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size")]
+    fn new_zero_max_size_panics() {
+        let _c = ShardedLruCache::<u32, u32>::new(0);
+    }
 
     #[test]
     fn basic_get_set_remove() {
@@ -973,5 +1125,106 @@ mod tests {
         SyncConcurrentCached::cache_set(&c, 1u32, 10u32).expect("insert must succeed");
         assert!(SyncConcurrentCached::cache_delete(&c, &1u32).expect("cache_delete must succeed"));
         assert!(!SyncConcurrentCached::cache_delete(&c, &1u32).expect("cache_delete must succeed"));
+    }
+
+    // --- Inherent infallible method tests ---
+
+    #[test]
+    fn inherent_get_returns_option_not_result() {
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, None);
+        c.set(1, 42);
+        let v: Option<u32> = c.get(&1);
+        assert_eq!(v, Some(42));
+    }
+
+    #[test]
+    fn inherent_set_returns_previous_value() {
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        let prev: Option<u32> = c.set(1, 10);
+        assert_eq!(prev, None);
+        let prev: Option<u32> = c.set(1, 20);
+        assert_eq!(prev, Some(10));
+        assert_eq!(c.get(&1), Some(20));
+    }
+
+    #[test]
+    fn inherent_remove_returns_prior_value() {
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        c.set(1, 99);
+        let v: Option<u32> = c.remove(&1);
+        assert_eq!(v, Some(99));
+        assert_eq!(c.remove(&1), None);
+        assert_eq!(c.get(&1), None);
+    }
+
+    #[test]
+    fn inherent_remove_entry_returns_key_and_value() {
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        c.set(7, 77);
+        let pair: Option<(u32, u32)> = c.remove_entry(&7);
+        assert_eq!(pair, Some((7, 77)));
+        assert_eq!(c.remove_entry(&7), None);
+    }
+
+    #[test]
+    fn inherent_delete_returns_bool() {
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        c.set(1, 10);
+        let removed: bool = c.delete(&1);
+        assert!(removed);
+        let removed: bool = c.delete(&1);
+        assert!(!removed);
+    }
+
+    #[test]
+    fn inherent_reset_clears_and_resets_metrics() {
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        c.set(1, 1);
+        c.set(2, 2);
+        let _ = c.get(&1);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.metrics().hits, Some(1));
+        c.reset();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        assert_eq!(c.metrics().hits, Some(0));
+    }
+
+    #[test]
+    fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
+        fn use_trait<C>(cache: &C, k: u32, v: u32)
+        where
+            C: SyncConcurrentCached<u32, u32>,
+        {
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_set(cache, k, v);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_get(cache, &k);
+            let _: Result<Option<u32>, _> = ConcurrentCached::cache_remove(cache, &k);
+        }
+        let c = ShardedLruCache::<u32, u32>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        use_trait(&c, 1, 100);
     }
 }

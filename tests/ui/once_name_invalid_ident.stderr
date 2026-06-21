@@ -1,0 +1,5 @@
+error: `name` must be a valid Rust identifier
+ --> tests/ui/once_name_invalid_ident.rs:4:4
+  |
+4 | fn f() -> i32 {
+  |    ^

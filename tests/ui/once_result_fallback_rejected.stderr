@@ -1,0 +1,5 @@
+error: `result_fallback` is not supported on `#[once]`; it returns the last cached `Ok` value from a keyed cache, but `#[once]` stores a single value and already returns the one cached `Ok` on subsequent calls
+ --> tests/ui/once_result_fallback_rejected.rs:4:4
+  |
+4 | fn f() -> Result<i32, String> {
+  |    ^

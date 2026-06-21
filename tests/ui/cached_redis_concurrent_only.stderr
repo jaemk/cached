@@ -1,0 +1,5 @@
+error: `redis` is not supported on `#[cached]`; `redis` selects the Redis-backed concurrent store. Use `#[concurrent_cached(redis = true)]` instead.
+ --> tests/ui/cached_redis_concurrent_only.rs:3:10
+  |
+3 | #[cached(redis = true)]
+  |          ^^^^^

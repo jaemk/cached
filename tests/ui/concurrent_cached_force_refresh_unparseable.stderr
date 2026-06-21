@@ -1,0 +1,5 @@
+error: Unknown literal value `{ this is not ; an expr }`
+ --> tests/ui/concurrent_cached_force_refresh_unparseable.rs:3:37
+  |
+3 | #[concurrent_cached(force_refresh = "{ this is not ; an expr }")]
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^

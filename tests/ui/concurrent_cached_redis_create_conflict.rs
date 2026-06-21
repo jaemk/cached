@@ -1,6 +1,6 @@
 use cached::macros::concurrent_cached;
 
-#[concurrent_cached(map_error = "|e| e", redis = true, ttl = 1, create = "{ }")]
+#[concurrent_cached(map_error = "|e| e", redis = true, ttl_secs = 1, create = "{ }")]
 fn my_fn(k: i32) -> Result<i32, String> {
     Ok(k)
 }

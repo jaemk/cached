@@ -1,5 +1,0 @@
-error: `expires` and `unbound` are mutually exclusive — `ExpiringCache` (the default store for `expires`) is already unbounded; use `expires = true` alone for an unbounded expiring cache
-  --> tests/ui/cached_expires_unbound_exclusive.rs:13:4
-   |
-13 | fn my_fn(x: u32) -> MyVal {
-   |    ^^^^^

@@ -4,7 +4,7 @@ Full tests of macro-defined functions
 
 #[cfg(feature = "time_stores")]
 use cached::time::Duration;
-use cached::{Cached, LruCache, UnboundCache};
+use cached::{Cached, CachedExt, LruCache, UnboundCache};
 use cached::{Expires, ExpiringLruCache};
 #[cfg(feature = "proc_macro")]
 use cached::{macros::cached, macros::once};
@@ -35,6 +35,15 @@ fn compile_fail_unsync_reads_timed() {
     t.compile_fail("tests/ui/unsync_reads_timed_cache.rs");
 }
 
+// `new`/`builder` on each sharded `*Base` are constrained to the default-hasher
+// specialization, so a `Base::<_, _, CustomHasher>::{new,builder}()` turbofish (which
+// would silently drop the custom hasher) must not compile.
+#[test]
+fn compile_fail_sharded_constructor() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/sharded_base_custom_hasher_constructor.rs");
+}
+
 // One negative trybuild case per *semantic* compile error the macros raise
 // (i.e. errors we define for invalid attribute/signature states). Pure
 // syn-parser pass-through messages for malformed user strings (bad `ty` /
@@ -59,13 +68,16 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_result_fallback_sync_writes.rs");
     t.compile_fail("tests/ui/cached_sync_lock_unknown.rs");
     t.compile_fail("tests/ui/cached_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/cached_expires_malformed_ttl.rs");
     t.compile_fail("tests/ui/cached_expires_type_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_create_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_with_cached_flag_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_unsync_reads_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_non_expires_type.rs");
     t.compile_fail("tests/ui/cached_expires_refresh_exclusive.rs");
-    t.compile_fail("tests/ui/cached_expires_unbound_exclusive.rs");
+    t.compile_fail("tests/ui/cached_unbound_attr_removed.rs");
+    t.compile_fail("tests/ui/cached_key_unparseable.rs");
+    t.compile_fail("tests/ui/cached_convert_unparseable.rs");
     t.compile_fail("tests/ui/cached_expires_cache_none_exclusive.rs");
     t.compile_fail("tests/ui/cached_expires_cache_err_exclusive.rs");
     t.compile_fail("tests/ui/cached_cache_err_requires_result_return.rs");
@@ -81,6 +93,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/once_time_attr_renamed.rs");
     t.compile_fail("tests/ui/once_with_cached_flag_foreign.rs");
     t.compile_fail("tests/ui/once_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/once_expires_malformed_ttl.rs");
     t.compile_fail("tests/ui/once_expires_non_expires_type.rs");
     t.compile_fail("tests/ui/once_expires_cache_none_exclusive.rs");
     t.compile_fail("tests/ui/once_expires_cache_err_exclusive.rs");
@@ -103,6 +116,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_async_redis_no_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_redis_no_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_create_conflict.rs");
+    t.compile_fail("tests/ui/concurrent_cached_refresh_create_conflict.rs");
     t.compile_fail("tests/ui/concurrent_cached_max_size_create_conflict.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_create_ignored_attrs.rs");
     t.compile_fail("tests/ui/concurrent_cached_option_return.rs");
@@ -124,6 +138,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_key_without_convert.rs");
     t.compile_fail("tests/ui/concurrent_cached_refresh_without_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_ttl_exclusive.rs");
+    t.compile_fail("tests/ui/concurrent_cached_expires_malformed_ttl.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_redis_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_disk_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_ty_exclusive.rs");
@@ -188,7 +203,7 @@ fn test_proc_cached_result() {
     assert!(proc_cached_result(2).is_ok());
     assert!(proc_cached_result(4).is_ok());
     {
-        let cache = PROC_CACHED_RESULT.read();
+        let cache = PROC_CACHED_RESULT.0.read();
         assert_eq!(2, cache.cache_size());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(4, cache.cache_misses().unwrap());
@@ -213,7 +228,7 @@ fn test_proc_cached_option() {
     assert!(proc_cached_option(1).is_some());
     assert!(proc_cached_option(4).is_some());
     {
-        let cache = PROC_CACHED_OPTION.read();
+        let cache = PROC_CACHED_OPTION.0.read();
         assert_eq!(3, cache.cache_size());
         assert_eq!(3, cache.cache_hits().unwrap());
         assert_eq!(5, cache.cache_misses().unwrap());
@@ -330,7 +345,7 @@ fn test_cached_return_flag() {
     assert_eq!(*r, 1);
     assert!(r.is_positive());
     {
-        let cache = CACHED_RETURN_FLAG.read();
+        let cache = CACHED_RETURN_FLAG.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -360,7 +375,7 @@ fn test_cached_return_flag_result() {
     let r = cached_return_flag_result(10);
     assert!(r.is_err());
     {
-        let cache = CACHED_RETURN_FLAG_RESULT.read();
+        let cache = CACHED_RETURN_FLAG_RESULT.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -390,7 +405,7 @@ fn test_cached_return_flag_option() {
     let r = cached_return_flag_option(10);
     assert!(r.is_none());
     {
-        let cache = CACHED_RETURN_FLAG_OPTION.read();
+        let cache = CACHED_RETURN_FLAG_OPTION.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -499,14 +514,14 @@ fn test_cached_smartstring() {
     string.push_str("very stringy");
     assert_eq!("equal", cached_smartstring(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.read();
+        let cache = CACHED_SMARTSTRING.0.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert_eq!("equal", cached_smartstring(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.read();
+        let cache = CACHED_SMARTSTRING.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -514,7 +529,7 @@ fn test_cached_smartstring() {
     let string = smartstring::alias::String::from("also stringy");
     assert_eq!("not equal", cached_smartstring(string));
     {
-        let cache = CACHED_SMARTSTRING.read();
+        let cache = CACHED_SMARTSTRING.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -543,7 +558,7 @@ fn test_cached_max_size_alias_sets_bound() {
     assert_eq!(cached_max_size_alias(1), 2);
     assert_eq!(cached_max_size_alias(2), 4);
     assert_eq!(cached_max_size_alias(3), 6); // evicts the LRU entry
-    let cache = CACHED_MAX_SIZE_ALIAS.read();
+    let cache = CACHED_MAX_SIZE_ALIAS.0.read();
     // capacity reflects the `max_size = 2` bound, and the store never exceeds it
     assert_eq!(cache.capacity(), 2);
     assert_eq!(cache.cache_size(), 2);
@@ -572,21 +587,21 @@ fn sync_cached_remove_entry_and_delete_aliases() {
 fn test_cached_smartstring_from_str() {
     assert!(cached_smartstring_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.read();
+        let cache = CACHED_SMARTSTRING_FROM_STR.0.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(cached_smartstring_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.read();
+        let cache = CACHED_SMARTSTRING_FROM_STR.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(!cached_smartstring_from_str("false"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.read();
+        let cache = CACHED_SMARTSTRING_FROM_STR.0.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -715,7 +730,7 @@ mod expires_macro_tests {
     #[test]
     fn test_expires_macro_hit_and_miss() {
         {
-            let mut c = SM_CACHED_EXPIRES.write();
+            let mut c = SM_CACHED_EXPIRES.0.write();
             c.cache_clear();
             c.cache_reset_metrics();
         }
@@ -727,7 +742,7 @@ mod expires_macro_tests {
         let v2 = sm_cached_expires(1, false);
         assert!(!v2.expired);
         {
-            let c = SM_CACHED_EXPIRES.read();
+            let c = SM_CACHED_EXPIRES.0.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -739,7 +754,7 @@ mod expires_macro_tests {
         let v4 = sm_cached_expires(2, false);
         assert!(!v4.expired);
         {
-            let c = SM_CACHED_EXPIRES.read();
+            let c = SM_CACHED_EXPIRES.0.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -747,7 +762,7 @@ mod expires_macro_tests {
     #[test]
     fn test_expires_lru_macro_hit_and_miss() {
         {
-            let mut c = SM_CACHED_EXPIRES_LRU.write();
+            let mut c = SM_CACHED_EXPIRES_LRU.0.write();
             c.cache_clear();
             c.cache_reset_metrics();
         }
@@ -756,7 +771,7 @@ mod expires_macro_tests {
         let v2 = sm_cached_expires_lru(10, false);
         assert!(!v2.expired);
         {
-            let c = SM_CACHED_EXPIRES_LRU.read();
+            let c = SM_CACHED_EXPIRES_LRU.0.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -767,7 +782,7 @@ mod expires_macro_tests {
         let v4 = sm_cached_expires_lru(11, false);
         assert!(!v4.expired);
         {
-            let c = SM_CACHED_EXPIRES_LRU.read();
+            let c = SM_CACHED_EXPIRES_LRU.0.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -801,7 +816,7 @@ mod expires_macro_tests {
     #[test]
     fn test_expires_macro_dynamic_ttl_from_arg() {
         {
-            let mut c = DYN_TTL.write();
+            let mut c = DYN_TTL.0.write();
             c.cache_clear();
             c.cache_reset_metrics();
         }
@@ -814,7 +829,7 @@ mod expires_macro_tests {
         assert_eq!(dyn_ttl(1, 0).v, 1);
         assert_eq!(dyn_ttl(2, 60_000).v, 2);
 
-        let c = DYN_TTL.read();
+        let c = DYN_TTL.0.read();
         // Only the long-TTL key produced a live hit; the 0ms key never hits.
         assert_eq!(c.cache_hits(), Some(1));
     }
@@ -838,7 +853,7 @@ mod time_store_tests {
         input.len()
     }
 
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn slow_once_timestamp_after_body(input: u32) -> u32 {
         sleep(Duration::from_millis(1100));
         input
@@ -848,7 +863,7 @@ mod time_store_tests {
     fn test_expiring_sized_unsync_read_macro() {
         assert_eq!(3, expiring_sized_unsync_read("abc"));
         assert_eq!(3, expiring_sized_unsync_read("abc"));
-        let cache = EXPIRING_SIZED_UNSYNC_READ.read();
+        let cache = EXPIRING_SIZED_UNSYNC_READ.0.read();
         assert_eq!(Some(&3), cache.cache_peek("abc"));
         assert_eq!(Some(&3), cache.cache_get_read("abc"));
     }
@@ -860,7 +875,7 @@ mod time_store_tests {
         assert_eq!(1, slow_once_timestamp_after_body(2));
     }
 
-    #[cached(max_size = 1, ttl = 1)]
+    #[cached(max_size = 1, ttl_secs = 1)]
     fn proc_timed_sized_sleeper(n: u64) -> u64 {
         sleep(Duration::new(1, 0));
         n
@@ -871,7 +886,7 @@ mod time_store_tests {
         proc_timed_sized_sleeper(1);
         proc_timed_sized_sleeper(1);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
             assert_eq!(1, cache.cache_misses().unwrap());
             assert_eq!(1, cache.cache_hits().unwrap());
         }
@@ -879,7 +894,7 @@ mod time_store_tests {
         sleep(Duration::new(1, 0));
         proc_timed_sized_sleeper(1);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
             assert_eq!(2, cache.cache_misses().unwrap());
             assert_eq!(1, cache.cache_hits().unwrap());
             assert_eq!(cache.key_order(), vec![1]);
@@ -887,13 +902,13 @@ mod time_store_tests {
         // sleep to expire the one entry
         sleep(Duration::new(1, 0));
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
             assert!(cache.key_order().is_empty());
         }
         proc_timed_sized_sleeper(1);
         proc_timed_sized_sleeper(1);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
             assert_eq!(3, cache.cache_misses().unwrap());
             assert_eq!(2, cache.cache_hits().unwrap());
             assert_eq!(cache.key_order(), vec![1]);
@@ -901,7 +916,7 @@ mod time_store_tests {
         // lru size is 1, so this new thing evicts the existing key
         proc_timed_sized_sleeper(2);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
             assert_eq!(4, cache.cache_misses().unwrap());
             assert_eq!(2, cache.cache_hits().unwrap());
             assert_eq!(cache.key_order(), vec![2]);
@@ -911,7 +926,7 @@ mod time_store_tests {
     /// should only cache the _first_ value returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn only_cached_once_per_second(s: String) -> Vec<String> {
         vec![s]
     }
@@ -929,7 +944,7 @@ mod time_store_tests {
     /// should only cache the _first_ `Ok` returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn only_cached_result_once_per_second(
         s: String,
         error: bool,
@@ -951,7 +966,7 @@ mod time_store_tests {
     /// should only cache the _first_ `Some` returned for 1 second.
     /// all arguments are ignored for subsequent calls until the
     /// cache expires after a second.
-    #[once(ttl = 1)]
+    #[once(ttl_secs = 1)]
     fn only_cached_option_once_per_second(s: String, none: bool) -> Option<Vec<String>> {
         if none { None } else { Some(vec![s]) }
     }
@@ -967,7 +982,7 @@ mod time_store_tests {
         assert_eq!(vec!["b".to_string()], b);
     }
 
-    #[cached(ttl = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
+    #[cached(ttl_secs = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
     fn cached_sync_writes(s: String) -> Vec<String> {
         vec![s]
     }
@@ -985,7 +1000,7 @@ mod time_store_tests {
         assert_eq!(a, c);
     }
 
-    #[cached(ttl = 2, sync_writes = true, key = "u32", convert = "{ 2 }")]
+    #[cached(ttl_secs = 2, sync_writes = true, key = "u32", convert = "{ 2 }")]
     fn cached_sync_writes_true(s: String) -> Vec<String> {
         vec![s]
     }
@@ -997,7 +1012,7 @@ mod time_store_tests {
         assert_eq!(a, b);
     }
 
-    #[cached(ttl = 2, sync_writes = false, key = "u32", convert = "{ 3 }")]
+    #[cached(ttl_secs = 2, sync_writes = false, key = "u32", convert = "{ 3 }")]
     fn cached_sync_writes_false(s: String) -> Vec<String> {
         vec![s]
     }
@@ -1010,7 +1025,7 @@ mod time_store_tests {
     }
 
     #[cached(
-        ttl = 2,
+        ttl_secs = 2,
         sync_writes = "by_key",
         sync_writes_buckets = 8,
         key = "u32",
@@ -1034,7 +1049,7 @@ mod time_store_tests {
     }
 
     #[cached(
-        ttl = 1,
+        ttl_secs = 1,
         refresh = true,
         key = "String",
         convert = r#"{ String::from(s) }"#
@@ -1047,14 +1062,14 @@ mod time_store_tests {
     fn test_cached_timed_refresh() {
         assert!(cached_timed_refresh("true"));
         {
-            let cache = CACHED_TIMED_REFRESH.read();
+            let cache = CACHED_TIMED_REFRESH.0.read();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
 
         assert!(cached_timed_refresh("true"));
         {
-            let cache = CACHED_TIMED_REFRESH.read();
+            let cache = CACHED_TIMED_REFRESH.0.read();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1066,7 +1081,7 @@ mod time_store_tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(cached_timed_refresh("true"));
         {
-            let cache = CACHED_TIMED_REFRESH.read();
+            let cache = CACHED_TIMED_REFRESH.0.read();
             assert_eq!(cache.cache_hits(), Some(4));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1074,7 +1089,7 @@ mod time_store_tests {
 
     #[cached(
         max_size = 2,
-        ttl = 1,
+        ttl_secs = 1,
         refresh = true,
         key = "String",
         convert = r#"{ String::from(s) }"#
@@ -1087,14 +1102,14 @@ mod time_store_tests {
     fn test_cached_timed_sized_refresh() {
         assert!(cached_timed_sized_refresh("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH.0.read();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
 
         assert!(cached_timed_sized_refresh("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH.0.read();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1106,7 +1121,7 @@ mod time_store_tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(cached_timed_sized_refresh("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH.0.read();
             assert_eq!(cache.cache_hits(), Some(4));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1114,7 +1129,7 @@ mod time_store_tests {
 
     #[cached(
         max_size = 2,
-        ttl = 1,
+        ttl_secs = 1,
         refresh = true,
         key = "String",
         convert = r#"{ String::from(s) }"#
@@ -1127,13 +1142,13 @@ mod time_store_tests {
     fn test_cached_timed_sized_refresh_prime() {
         assert!(cached_timed_sized_refresh_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.0.read();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
         assert!(cached_timed_sized_refresh_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.0.read();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1148,7 +1163,7 @@ mod time_store_tests {
         // stats unchanged (other than this new hit) since we kept priming
         assert!(cached_timed_sized_refresh_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.0.read();
             assert_eq!(cache.cache_hits(), Some(2));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1156,7 +1171,7 @@ mod time_store_tests {
 
     #[cached(
         max_size = 2,
-        ttl = 1,
+        ttl_secs = 1,
         key = "String",
         convert = r#"{ String::from(s) }"#
     )]
@@ -1168,13 +1183,13 @@ mod time_store_tests {
     fn test_cached_timed_sized_prime() {
         assert!(cached_timed_sized_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_PRIME.write();
+            let cache = CACHED_TIMED_SIZED_PRIME.0.write();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
         assert!(cached_timed_sized_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_PRIME.write();
+            let cache = CACHED_TIMED_SIZED_PRIME.0.write();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1189,17 +1204,17 @@ mod time_store_tests {
         // stats unchanged (other than this new hit) since we kept priming
         assert!(cached_timed_sized_prime("true"));
         {
-            let mut cache = CACHED_TIMED_SIZED_PRIME.write();
+            let mut cache = CACHED_TIMED_SIZED_PRIME.0.write();
             assert_eq!(cache.cache_hits(), Some(2));
             assert_eq!(cache.cache_misses(), Some(1));
             assert!(cache.cache_size() > 0);
             std::thread::sleep(Duration::from_millis(1000));
-            cache.evict();
+            let _ = cache.evict();
             assert_eq!(cache.cache_size(), 0);
         }
     }
 
-    #[cached::macros::cached(ttl = 1, result_fallback = true)]
+    #[cached::macros::cached(ttl_secs = 1, result_fallback = true)]
     fn always_failing() -> Result<String, ()> {
         Err(())
     }
@@ -1247,7 +1262,7 @@ mod time_store_tests {
         std::sync::atomic::AtomicBool::new(true);
 
     #[cfg(feature = "proc_macro")]
-    #[cached::macros::concurrent_cached(ttl = 1, result_fallback = true)]
+    #[cached::macros::concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn concurrent_result_fallback_fn() -> Result<u32, &'static str> {
         if CONCURRENT_RESULT_FALLBACK_SHOULD_SUCCEED.load(std::sync::atomic::Ordering::SeqCst) {
             Ok(42)
@@ -1443,7 +1458,7 @@ mod time_store_tests {
     mod async_tests {
         use super::*;
 
-        #[once(ttl = 1)]
+        #[once(ttl_secs = 1)]
         async fn only_cached_once_per_second_a(s: String) -> Vec<String> {
             vec![s]
         }
@@ -1458,7 +1473,7 @@ mod time_store_tests {
             assert_eq!(vec!["b".to_string()], b);
         }
 
-        #[once(ttl = 1)]
+        #[once(ttl_secs = 1)]
         async fn only_cached_result_once_per_second_a(
             s: String,
             error: bool,
@@ -1487,7 +1502,7 @@ mod time_store_tests {
             assert_eq!(vec!["b".to_string()], b);
         }
 
-        #[once(ttl = 1)]
+        #[once(ttl_secs = 1)]
         async fn only_cached_option_once_per_second_a(
             s: String,
             none: bool,
@@ -1523,7 +1538,7 @@ mod time_store_tests {
         /// _one_ call will be "executed" and all others will be synchronized
         /// to return the cached result of the one call instead of all
         /// concurrently un-cached tasks executing and writing concurrently.
-        #[once(ttl = 2, sync_writes)]
+        #[once(ttl_secs = 2, sync_writes)]
         async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
             vec![s]
         }
@@ -1536,7 +1551,7 @@ mod time_store_tests {
             assert_eq!(a.await.unwrap(), b.await.unwrap());
         }
 
-        #[cached(ttl = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
+        #[cached(ttl_secs = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
         async fn cached_sync_writes_a(s: String) -> Vec<String> {
             vec![s]
         }
@@ -1553,7 +1568,7 @@ mod time_store_tests {
         }
 
         #[cached(
-            ttl = 5,
+            ttl_secs = 5,
             sync_writes = "by_key",
             key = "String",
             convert = r#"{ format!("{}", s) }"#
@@ -1716,9 +1731,9 @@ mod time_store_tests {
 
             let mut cache = ExpiringCache::builder().build().unwrap();
 
-            // async_get_or_set_with: vacant
+            // async_cache_get_or_set_with: vacant
             let r1 = cache
-                .async_get_or_set_with("key".to_string(), || async {
+                .async_cache_get_or_set_with("key".to_string(), || async {
                     AsyncValue {
                         val: "hello".to_string(),
                         expired: false,
@@ -1727,9 +1742,9 @@ mod time_store_tests {
                 .await;
             assert_eq!(r1.val, "hello");
 
-            // async_get_or_set_with: occupied and fresh
+            // async_cache_get_or_set_with: occupied and fresh
             let r2 = cache
-                .async_get_or_set_with("key".to_string(), || async {
+                .async_cache_get_or_set_with("key".to_string(), || async {
                     AsyncValue {
                         val: "ignored".to_string(),
                         expired: false,
@@ -1747,9 +1762,9 @@ mod time_store_tests {
                 },
             );
 
-            // async_get_or_set_with: occupied but expired
+            // async_cache_get_or_set_with: occupied but expired
             let r3 = cache
-                .async_get_or_set_with("key".to_string(), || async {
+                .async_cache_get_or_set_with("key".to_string(), || async {
                     AsyncValue {
                         val: "new_fresh".to_string(),
                         expired: false,
@@ -1925,7 +1940,7 @@ mod time_store_tests {
         // hit — same key, returns cached value
         assert_eq!(cached_expires_basic(1, false).val, 1);
         {
-            let c = CACHED_EXPIRES_BASIC.read();
+            let c = CACHED_EXPIRES_BASIC.0.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -1936,7 +1951,7 @@ mod time_store_tests {
         assert_eq!(r.val, 1);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_BASIC.read();
+            let c = CACHED_EXPIRES_BASIC.0.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(2));
             assert_eq!(c.cache_evictions(), Some(1));
@@ -1957,7 +1972,7 @@ mod time_store_tests {
         // hit
         assert_eq!(cached_expires_lru(10, false).val, 10);
         {
-            let c = CACHED_EXPIRES_LRU.read();
+            let c = CACHED_EXPIRES_LRU.0.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -1968,7 +1983,7 @@ mod time_store_tests {
         assert_eq!(r.val, 10);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_LRU.read();
+            let c = CACHED_EXPIRES_LRU.0.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -1998,7 +2013,7 @@ mod time_store_tests {
         assert_eq!(r.val, 1);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_RESULT.read();
+            let c = CACHED_EXPIRES_RESULT.0.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -2028,7 +2043,7 @@ mod time_store_tests {
         assert_eq!(r.val, 1);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_OPTION.read();
+            let c = CACHED_EXPIRES_OPTION.0.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -2190,7 +2205,7 @@ mod sharded_ttl_tests {
     // Covers `ConcurrentCached::cache_reset` / `cache_reset_metrics` on the TTL/expiring
     // sharded stores, whose `cache_reset_metrics` must zero a *split* eviction count
     // (the per-shard inner `LruCache`'s capacity-eviction counter plus the store's own
-    // counter). The non-TTL test exercises only `ShardedCache`/`ShardedLruCache`.
+    // counter). The non-TTL test exercises only `ShardedUnboundCache`/`ShardedLruCache`.
     #[test]
     fn reset_metrics_zeros_split_eviction_counter_on_ttl_expiring_sharded_stores() {
         use cached::time::Duration;
@@ -2251,7 +2266,7 @@ mod sharded_ttl_tests {
     #[test]
     fn non_sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
-        use cached::{LruTtlCache, TtlCache};
+        use cached::{CacheTtl, LruTtlCache, TtlCache};
 
         // Primary `.refresh_on_hit(true)` setter.
         let ttl = TtlCache::<u32, u32>::builder()
@@ -2259,7 +2274,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(true)
             .build()
             .expect("valid config");
-        assert!(ttl.refresh_on_hit());
+        assert!(CacheTtl::refresh_on_hit(&ttl));
 
         let lru_ttl = LruTtlCache::<u32, u32>::builder()
             .max_size(64)
@@ -2267,7 +2282,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(true)
             .build()
             .expect("valid config");
-        assert!(lru_ttl.refresh_on_hit());
+        assert!(CacheTtl::refresh_on_hit(&lru_ttl));
 
         // Both setters default to / can clear the flag.
         let ttl_off = TtlCache::<u32, u32>::builder()
@@ -2275,7 +2290,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(false)
             .build()
             .expect("valid config");
-        assert!(!ttl_off.refresh_on_hit());
+        assert!(!CacheTtl::refresh_on_hit(&ttl_off));
     }
 
     #[test]
@@ -2425,7 +2440,7 @@ mod async_tests {
     }
 }
 
-#[cfg(all(feature = "disk_store", feature = "proc_macro"))]
+#[cfg(all(feature = "redb_store", feature = "proc_macro"))]
 mod disk_tests {
     use super::*;
     use cached::RedbCache;
@@ -2442,7 +2457,7 @@ mod disk_tests {
 
     #[concurrent_cached(
         disk = true,
-        ttl = 1,
+        ttl_secs = 1,
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
     )]
     fn cached_disk(n: u32) -> Result<u32, TestError> {
@@ -2461,9 +2476,40 @@ mod disk_tests {
         assert_eq!(cached_disk(6), Err(TestError::Count(6)));
     }
 
+    // #8 disk-path parity: `refresh = true` on the disk (redb) path is now a
+    // plain `bool` and is wired straight into the store builder via
+    // `.refresh_on_hit(refresh)`. This proves the macro emits a working disk
+    // store with `refresh = true` + a TTL (compiles, caches an `Ok` hit, and
+    // does not cache `Err`). The TTL-renewal side effect of `refresh_on_hit`
+    // itself is exercised by the store-level tests; here we lock that the macro
+    // attribute path wires it without error.
     #[concurrent_cached(
         disk = true,
-        ttl = 1,
+        ttl_secs = 60,
+        refresh = true,
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
+    )]
+    fn cached_disk_refresh(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk_refresh() {
+        // First call: miss, Ok value computed and cached.
+        assert_eq!(cached_disk_refresh(1), Ok(1));
+        // Second call same arg: served from the disk cache (refresh_on_hit set).
+        assert_eq!(cached_disk_refresh(1), Ok(1));
+        // Err is not cached and is returned as-is.
+        assert_eq!(cached_disk_refresh(5), Err(TestError::Count(5)));
+    }
+
+    #[concurrent_cached(
+        disk = true,
+        ttl_secs = 1,
         with_cached_flag = true,
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##
     )]
@@ -2486,7 +2532,7 @@ mod disk_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         ty = "cached::RedbCache<u32, u32>",
-        create = r##" { RedbCache::new("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
+        create = r##" { RedbCache::builder().name("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -2502,6 +2548,36 @@ mod disk_tests {
         assert_eq!(cached_disk_cache_create(1), Ok(1));
         assert_eq!(cached_disk_cache_create(5), Err(TestError::Count(5)));
         assert_eq!(cached_disk_cache_create(6), Err(TestError::Count(6)));
+    }
+
+    // #8: `refresh = false` is now the plain-bool default and must NOT conflict
+    // with a `create` block. Previously `refresh` was `Option<bool>`, so an
+    // explicit `refresh = Some(false)` alongside `create` tripped the
+    // create-conflict rejection (`check_create_conflicts`). It now compiles:
+    // `refresh = false` is treated as "not set" by the conflict check.
+    #[concurrent_cached(
+        map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
+        refresh = false,
+        ty = "cached::RedbCache<u32, u32>",
+        create = r##" { RedbCache::builder().name("cached_disk_refresh_false_create").build().expect("error building disk cache") } "##
+    )]
+    fn cached_disk_refresh_false_create(n: u32) -> Result<u32, TestError> {
+        if n < 5 {
+            Ok(n)
+        } else {
+            Err(TestError::Count(n))
+        }
+    }
+
+    #[test]
+    fn test_cached_disk_refresh_false_create() {
+        // `refresh = false` + `create` compiles and behaves as a plain cache.
+        assert_eq!(cached_disk_refresh_false_create(1), Ok(1));
+        assert_eq!(cached_disk_refresh_false_create(1), Ok(1));
+        assert_eq!(
+            cached_disk_refresh_false_create(5),
+            Err(TestError::Count(5))
+        );
     }
 
     /// Just calling the macro with durable to test it doesn't break with an expected value
@@ -2727,13 +2803,13 @@ mod concurrent_cached_plain_return_ttl {
 
     static TTL_PLAIN_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(ttl = 60)]
+    #[concurrent_cached(ttl_secs = 60)]
     fn plain_double_ttl(x: u64) -> u64 {
         TTL_PLAIN_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 2
     }
 
-    #[concurrent_cached(max_size = 50, ttl = 60)]
+    #[concurrent_cached(max_size = 50, ttl_secs = 60)]
     fn plain_double_lru_ttl(x: u64) -> u64 {
         x * 2
     }
@@ -2754,7 +2830,7 @@ mod concurrent_cached_plain_return_ttl {
 }
 
 // Sharded in-memory default for `#[concurrent_cached]`. No `ty`, `create`,
-// `map_error`, `redis`, or `disk` — the macro defaults to `ShardedCache`.
+// `map_error`, `redis`, or `disk` — the macro defaults to `ShardedUnboundCache`.
 #[cfg(feature = "proc_macro")]
 mod concurrent_cached_default_in_memory {
     use cached::macros::concurrent_cached;
@@ -2936,14 +3012,14 @@ mod concurrent_cached_default_with_ttl {
 
     static SLOW_QUAD_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(ttl = 60)]
+    #[concurrent_cached(ttl_secs = 60)]
     fn slow_quad(x: u64) -> u64 {
         SLOW_QUAD_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 4
     }
 
     // Verify `refresh = true` compiles and is wired (store created with refresh enabled).
-    #[concurrent_cached(ttl = 60, refresh = true)]
+    #[concurrent_cached(ttl_secs = 60, refresh = true)]
     fn slow_quad_refresh(x: u64) -> u64 {
         x * 4
     }
@@ -2973,14 +3049,14 @@ mod concurrent_cached_default_with_max_size_and_ttl {
 
     static SLOW_QUINT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(max_size = 50, ttl = 60)]
+    #[concurrent_cached(max_size = 50, ttl_secs = 60)]
     fn slow_quint(x: u64) -> u64 {
         SLOW_QUINT_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 5
     }
 
     // Verify `refresh = true` compiles and is wired for the LRU+TTL variant.
-    #[concurrent_cached(max_size = 50, ttl = 60, refresh = true)]
+    #[concurrent_cached(max_size = 50, ttl_secs = 60, refresh = true)]
     fn slow_quint_refresh(x: u64) -> u64 {
         x * 5
     }
@@ -3044,7 +3120,7 @@ mod concurrent_cached_default_with_ttl_and_shards {
 
     static TTL_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(ttl = 60, shards = 16)]
+    #[concurrent_cached(ttl_secs = 60, shards = 16)]
     fn ttl_shards_double(x: u64) -> u64 {
         TTL_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 2
@@ -3067,7 +3143,7 @@ mod concurrent_cached_default_with_max_size_and_ttl_and_shards {
 
     static SIZE_TTL_SHARDS_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    #[concurrent_cached(max_size = 100, ttl = 60, shards = 16)]
+    #[concurrent_cached(max_size = 100, ttl_secs = 60, shards = 16)]
     fn size_ttl_shards_double(x: u64) -> u64 {
         SIZE_TTL_SHARDS_CALLS.fetch_add(1, Ordering::Relaxed);
         x * 2
@@ -3095,7 +3171,7 @@ mod concurrent_cached_result_fallback {
 
     static FAIL: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn maybe_double(x: u32) -> Result<u32, String> {
         if FAIL.load(Ordering::Relaxed) {
             Err("injected failure".to_string())
@@ -3127,7 +3203,7 @@ mod concurrent_cached_result_fallback {
     // Uses a dedicated function so its cache is fresh (not shared with above test).
     static FAIL_METRIC: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn maybe_triple(x: u32) -> Result<u32, String> {
         if FAIL_METRIC.load(Ordering::Relaxed) {
             Err("metric test failure".to_string())
@@ -3169,7 +3245,7 @@ mod concurrent_cached_result_fallback {
     static FAIL_STR: AtomicBool = AtomicBool::new(false);
 
     #[concurrent_cached(
-        ttl = 1,
+        ttl_secs = 1,
         result_fallback = true,
         key = "String",
         convert = r#"{ x.to_string() }"#
@@ -3197,7 +3273,7 @@ mod concurrent_cached_result_fallback {
     // function and returns the raw result without substituting a stale Ok for Err.
     static FAIL_PRIME: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     fn prime_fallback_fn(x: u32) -> Result<u32, String> {
         if FAIL_PRIME.load(Ordering::Relaxed) {
             Err("prime failure".to_string())
@@ -3239,7 +3315,7 @@ mod concurrent_cached_result_fallback_lru_ttl {
 
     static FAIL_LRU: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, max_size = 100, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, max_size = 100, result_fallback = true)]
     fn lru_ttl_maybe_double(x: u32) -> Result<u32, String> {
         if FAIL_LRU.load(Ordering::Relaxed) {
             Err("lru_ttl failure".to_string())
@@ -3277,11 +3353,7 @@ mod concurrent_cached_result_fallback_lru_ttl {
 }
 
 // Async path: `result_fallback = true` returns the last-known-good Ok value after TTL expiry.
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod concurrent_cached_result_fallback_async {
     use cached::macros::concurrent_cached;
     use cached::time::Duration;
@@ -3290,7 +3362,7 @@ mod concurrent_cached_result_fallback_async {
 
     static FAIL_ASYNC: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, result_fallback = true)]
     async fn maybe_double_async(x: u32) -> Result<u32, String> {
         if FAIL_ASYNC.load(Ordering::Relaxed) {
             Err("async failure".to_string())
@@ -3318,11 +3390,7 @@ mod concurrent_cached_result_fallback_async {
 
 // Async path: `result_fallback = true` with a non-Copy key — regression guard for
 // use-after-move in async codegen when arguments are cloned to form the cache key.
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod concurrent_cached_result_fallback_async_non_copy_key {
     use cached::macros::concurrent_cached;
     use cached::time::Duration;
@@ -3332,7 +3400,7 @@ mod concurrent_cached_result_fallback_async_non_copy_key {
     static FAIL_ASYNC_STR: AtomicBool = AtomicBool::new(false);
 
     #[concurrent_cached(
-        ttl = 1,
+        ttl_secs = 1,
         result_fallback = true,
         key = "String",
         convert = r#"{ x.to_string() }"#
@@ -3364,11 +3432,7 @@ mod concurrent_cached_result_fallback_async_non_copy_key {
 
 // Async path: `result_fallback = true` with size+ttl selects ShardedLruTtlCache; verify the
 // stale-ok path and metrics work identically on the async LRU-TTL store.
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod concurrent_cached_result_fallback_async_lru_ttl {
     use cached::macros::concurrent_cached;
     use cached::time::Duration;
@@ -3377,7 +3441,7 @@ mod concurrent_cached_result_fallback_async_lru_ttl {
 
     static FAIL_ASYNC_LRU: AtomicBool = AtomicBool::new(false);
 
-    #[concurrent_cached(ttl = 1, max_size = 100, result_fallback = true)]
+    #[concurrent_cached(ttl_secs = 1, max_size = 100, result_fallback = true)]
     async fn lru_ttl_maybe_double_async(x: u32) -> Result<u32, String> {
         if FAIL_ASYNC_LRU.load(Ordering::Relaxed) {
             Err("async lru_ttl failure".to_string())
@@ -3450,8 +3514,8 @@ mod concurrent_cached_cache_err {
     }
 }
 
-// Async path uses `OnceCell<ShardedCache>`.
-#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+// Async path uses `OnceCell<ShardedUnboundCache>`.
+#[cfg(all(feature = "proc_macro", feature = "async"))]
 mod concurrent_cached_default_async {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3589,7 +3653,7 @@ mod concurrent_cached_option {
 }
 
 // Async `option = true` on the sharded default path.
-#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "proc_macro", feature = "async"))]
 mod concurrent_cached_async_option {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3657,7 +3721,7 @@ mod concurrent_cached_async_option {
 }
 
 // Async `with_cached_flag = true` on the sharded default path (plain and Result variants).
-#[cfg(all(feature = "proc_macro", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "proc_macro", feature = "async"))]
 mod concurrent_cached_default_async_with_cached_flag {
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3709,8 +3773,8 @@ mod sharded_send_sync_typecheck {
     fn _typecheck_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        assert_send::<cached::ShardedCache<String, u32>>();
-        assert_sync::<cached::ShardedCache<String, u32>>();
+        assert_send::<cached::ShardedUnboundCache<String, u32>>();
+        assert_sync::<cached::ShardedUnboundCache<String, u32>>();
         assert_send::<cached::ShardedLruCache<String, u32>>();
         assert_sync::<cached::ShardedLruCache<String, u32>>();
     }
@@ -3728,13 +3792,32 @@ mod sharded_send_sync_typecheck {
 
 #[test]
 fn concurrent_cached_trait_short_aliases_work() {
-    use cached::{ConcurrentCached, ShardedCache};
+    // The concrete type's inherent `get`/`set`/`remove`/`delete` now return unwrapped values.
+    // Use the `cache_`-prefixed trait methods (or fully-qualified path) to access the
+    // `Result`-returning trait surface.
+    use cached::{ConcurrentCached, ShardedUnboundCache};
 
-    let cache = ShardedCache::<String, u32>::builder().build().unwrap();
-    assert_eq!(cache.set("a".to_string(), 1).unwrap(), None);
-    assert_eq!(cache.get(&"a".to_string()).unwrap(), Some(1));
-    assert_eq!(cache.remove(&"a".to_string()).unwrap(), Some(1));
-    assert!(!cache.delete(&"a".to_string()).unwrap());
+    let cache = ShardedUnboundCache::<String, u32>::builder()
+        .build()
+        .unwrap();
+
+    // Inherent methods — return unwrapped values directly.
+    assert_eq!(cache.set("a".to_string(), 1), None);
+    assert_eq!(cache.get(&"a".to_string()), Some(1));
+    assert_eq!(cache.remove(&"a".to_string()), Some(1));
+    assert!(!cache.delete(&"a".to_string()));
+
+    // Trait methods via fully-qualified path — still return Result.
+    cache.set("b".to_string(), 2);
+    assert_eq!(
+        ConcurrentCached::cache_get(&cache, &"b".to_string()).unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        ConcurrentCached::cache_remove(&cache, &"b".to_string()).unwrap(),
+        Some(2)
+    );
+    assert!(!ConcurrentCached::cache_delete(&cache, &"b".to_string()).unwrap());
 }
 
 // `cache_clear_with_on_evict` without a callback delegates to `clear()` and does NOT
@@ -3742,15 +3825,15 @@ fn concurrent_cached_trait_short_aliases_work() {
 // increment gets moved before the early-return.
 #[test]
 fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
-    use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+    use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 
-    // ShardedCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
-    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
-    ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible ShardedCache set");
-    ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible ShardedCache set");
+    // ShardedUnboundCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
+    let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
+    ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible ShardedUnboundCache set");
+    ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible ShardedUnboundCache set");
     cache.cache_clear_with_on_evict();
     assert_eq!(cache.len(), 0, "cache should be empty after clear");
-    // ShardedCache does not track evictions — None is expected, not Some(0)
+    // ShardedUnboundCache does not track evictions — None is expected, not Some(0)
     assert_eq!(cache.metrics().evictions, None);
 
     // ShardedLruCache tracks evictions; no on_evict means the counter stays at zero
@@ -3773,10 +3856,10 @@ fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
 // (default no-op) overridden by the sharded stores to actually clear entries and zero metrics.
 #[test]
 fn concurrent_cached_trait_clear_and_reset_metrics_on_sharded_stores() {
-    use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+    use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 
-    // --- Unbound ShardedCache: cache_clear empties the store via the trait method ---
-    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    // --- Unbound ShardedUnboundCache: cache_clear empties the store via the trait method ---
+    let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
     ConcurrentCached::cache_set(&cache, 1, 10).expect("infallible");
     ConcurrentCached::cache_set(&cache, 2, 20).expect("infallible");
     assert_eq!(cache.len(), 2);
@@ -3835,9 +3918,9 @@ fn concurrent_cached_trait_clear_and_reset_metrics_on_sharded_stores() {
 #[cfg(feature = "async")]
 #[tokio::test]
 async fn concurrent_cached_async_trait_clear_and_reset_metrics_on_sharded_stores() {
-    use cached::{ConcurrentCachedAsync, ShardedCache};
+    use cached::{ConcurrentCachedAsync, ShardedUnboundCache};
 
-    let cache = ShardedCache::<u32, u32>::builder().build().unwrap();
+    let cache = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
     ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
         .await
         .expect("infallible");
@@ -3883,7 +3966,9 @@ mod sharded_expiring_tests {
         ShardedExpiringLruCache,
     };
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(feature = "proc_macro")]
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Clone, Debug)]
     struct ExpiringItem {
@@ -4292,8 +4377,10 @@ mod concurrent_cached_return_named_error {
             Self(std::sync::Mutex::new(std::collections::HashMap::new()))
         }
     }
-    impl cached::ConcurrentCached<String, String> for Store {
+    impl cached::ConcurrentCacheBase for Store {
         type Error = std::convert::Infallible;
+    }
+    impl cached::ConcurrentCached<String, String> for Store {
         fn cache_get(&self, k: &String) -> Result<Option<String>, Self::Error> {
             Ok(self.0.lock().unwrap().get(k).cloned())
         }
@@ -4306,8 +4393,12 @@ mod concurrent_cached_return_named_error {
         fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
             Ok(self.0.lock().unwrap().remove_entry(k))
         }
-        fn set_refresh_on_hit(&self, _r: bool) -> bool {
-            false
+        fn cache_clear(&self) -> Result<(), Self::Error> {
+            self.0.lock().unwrap().clear();
+            Ok(())
+        }
+        fn cache_reset(&self) -> Result<(), Self::Error> {
+            self.cache_clear()
         }
     }
 
@@ -4347,7 +4438,7 @@ mod redis_tests {
 
     #[concurrent_cached(
         redis = true,
-        ttl = 1,
+        ttl_secs = 1,
         cache_prefix_block = "{ \"__cached_redis_proc_macro_test_fn_cached_redis\" }",
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
     )]
@@ -4369,7 +4460,7 @@ mod redis_tests {
 
     #[concurrent_cached(
         redis = true,
-        ttl = 1,
+        ttl_secs = 1,
         with_cached_flag = true,
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
     )]
@@ -4392,7 +4483,7 @@ mod redis_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
         ty = "cached::RedisCache<u32, u32>",
-        create = r##" { RedisCache::new("cache_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
+        create = r##" { RedisCache::builder().prefix("cache_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4416,7 +4507,7 @@ mod redis_tests {
 
         #[concurrent_cached(
             redis = true,
-            ttl = 1,
+            ttl_secs = 1,
             cache_prefix_block = "{ \"__cached_redis_proc_macro_test_fn_async_cached_redis\" }",
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
         )]
@@ -4438,7 +4529,7 @@ mod redis_tests {
 
         #[concurrent_cached(
             redis = true,
-            ttl = 1,
+            ttl_secs = 1,
             with_cached_flag = true,
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##
         )]
@@ -4462,7 +4553,7 @@ mod redis_tests {
         #[concurrent_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
             ty = "cached::AsyncRedisCache<u32, u32>",
-            create = r##" { AsyncRedisCache::new("async_cached_redis_test_cache_create", Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
+            create = r##" { AsyncRedisCache::builder().prefix("async_cached_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
             if n < 5 {
@@ -4488,17 +4579,825 @@ mod redis_tests {
 
         #[tokio::test]
         async fn async_redis_builder_aliases_and_zero_ttl_validation() {
-            let result = cached::AsyncRedisCache::<String, String>::builder(
-                "async-zero-ttl",
-                Duration::ZERO,
-            )
-            .build()
-            .await;
+            let result = cached::AsyncRedisCache::<String, String>::builder()
+                .prefix("async-zero-ttl")
+                .ttl(Duration::ZERO)
+                .build()
+                .await;
             assert!(matches!(
                 result,
-                Err(cached::RedisCacheBuildError::InvalidTtl(..))
+                Err(cached::RedisCacheBuildError::Build(
+                    cached::BuildError::InvalidValue { field: "ttl", .. }
+                ))
             ));
         }
+
+        // I2 (async): set_ttl(0) disables expiry — keys written afterward are
+        // persistent (raw TTL == -1), and set_ttl(nonzero) resumes expiry.
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_set_ttl_zero_writes_key_without_expiry() {
+            use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync};
+
+            let prefix = "async_test_set_ttl_zero_no_expiry";
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            // Probe the raw Redis TTL synchronously (-1 == persistent, no expiry).
+            let conn_str = cache.connection_string();
+            let raw_ttl = |key: &str| -> i64 {
+                let client = redis::Client::open(conn_str.reveal())
+                    .expect("open redis client for TTL probe");
+                let mut conn = client
+                    .get_connection()
+                    .expect("redis connection for TTL probe");
+                redis::cmd("TTL")
+                    .arg(format!("{prefix}:{key}"))
+                    .query(&mut conn)
+                    .expect("TTL query")
+            };
+
+            // Baseline: a real ttl writes the key with a positive TTL.
+            cache
+                .async_cache_set("k_live".to_string(), "v".to_string())
+                .await
+                .expect("set k_live");
+            assert!(
+                raw_ttl("k_live") > 0,
+                "a non-zero ttl must write the key with a positive TTL"
+            );
+
+            // Disable expiry.
+            let prev = ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
+            assert_eq!(prev, Some(Duration::from_secs(30)));
+            assert_eq!(ConcurrentCacheTtl::ttl(&cache), None);
+
+            cache
+                .async_cache_set("k_persist".to_string(), "v".to_string())
+                .await
+                .expect("set k_persist");
+            assert_eq!(
+                raw_ttl("k_persist"),
+                -1,
+                "set_ttl(0) must write the key WITHOUT any expiry (persistent)"
+            );
+            assert_eq!(
+                cache
+                    .async_cache_get(&"k_persist".to_string())
+                    .await
+                    .expect("get"),
+                Some("v".to_string())
+            );
+
+            // Re-arm a real ttl.
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(30));
+            cache
+                .async_cache_set("k_rearm".to_string(), "v".to_string())
+                .await
+                .expect("set k_rearm");
+            assert!(
+                raw_ttl("k_rearm") > 0,
+                "set_ttl(nonzero) must resume writing keys with a TTL"
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
+
+        // gap 2 (async): `async_cache_set_ref` (SerializeCachedAsync) must honor
+        // the disabled-ttl path — write WITHOUT expiry when ttl is zero, and WITH
+        // expiry when nonzero. Only `async_cache_set` was previously covered.
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_set_ref_zero_ttl_writes_key_without_expiry() {
+            use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync, SerializeCachedAsync};
+
+            let prefix = "async_test_set_ref_zero_ttl";
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            let conn_str = cache.connection_string();
+            let raw_ttl = move |key: &str| -> i64 {
+                let client = redis::Client::open(conn_str.reveal())
+                    .expect("open redis client for TTL probe");
+                let mut conn = client
+                    .get_connection()
+                    .expect("redis connection for TTL probe");
+                redis::cmd("TTL")
+                    .arg(format!("{prefix}:{key}"))
+                    .query(&mut conn)
+                    .expect("TTL query")
+            };
+
+            // Baseline: a real ttl via set_ref writes with a positive TTL.
+            let prev = cache
+                .async_cache_set_ref(&"k_live".to_string(), &"v".to_string())
+                .await
+                .expect("set_ref k_live");
+            assert_eq!(prev, None, "first set_ref must return None");
+            assert!(
+                raw_ttl("k_live") > 0,
+                "set_ref under a real ttl must write a positive TTL"
+            );
+
+            // Disable expiry: set_ref must write the key WITHOUT any expiry.
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
+            let prev2 = cache
+                .async_cache_set_ref(&"k_persist".to_string(), &"v".to_string())
+                .await
+                .expect("set_ref k_persist");
+            assert_eq!(prev2, None);
+            assert_eq!(
+                raw_ttl("k_persist"),
+                -1,
+                "set_ref under disabled ttl must write the key WITHOUT expiry (persistent)"
+            );
+            assert_eq!(
+                cache
+                    .async_cache_get(&"k_persist".to_string())
+                    .await
+                    .expect("get k_persist"),
+                Some("v".to_string())
+            );
+
+            // Re-arm a real ttl: set_ref resumes writing a TTL, and returns the prior value.
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(30));
+            let prev3 = cache
+                .async_cache_set_ref(&"k_persist".to_string(), &"v2".to_string())
+                .await
+                .expect("set_ref k_persist overwrite");
+            assert_eq!(
+                prev3,
+                Some("v".to_string()),
+                "set_ref overwrite must return the previous value"
+            );
+            assert!(
+                raw_ttl("k_persist") > 0,
+                "set_ref under a re-enabled ttl must write a positive TTL"
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
+
+        // gap 1 (async): refresh-on-hit skip-EXPIRE under disabled ttl, and the
+        // reverse (re-enabled ttl adds EXPIRE to a previously persistent key).
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_refresh_on_hit_disabled_then_reenabled_ttl() {
+            use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync};
+
+            let prefix = "async_test_refresh_disabled_reenabled";
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(100))
+                .namespace("")
+                .refresh_on_hit(true)
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            let conn_str = cache.connection_string();
+            let raw_ttl = move |key: &str| -> i64 {
+                let client = redis::Client::open(conn_str.reveal())
+                    .expect("open redis client for TTL probe");
+                let mut conn = client
+                    .get_connection()
+                    .expect("redis connection for TTL probe");
+                redis::cmd("TTL")
+                    .arg(format!("{prefix}:{key}"))
+                    .query(&mut conn)
+                    .expect("TTL query")
+            };
+
+            // Key written WITH a TTL.
+            cache
+                .async_cache_set("k".to_string(), "v".to_string())
+                .await
+                .expect("set k");
+            let ttl_before = raw_ttl("k");
+            assert!(ttl_before > 0, "key must start with a positive TTL");
+
+            // Disable expiry, refresh-on-hit GET: prior TTL must remain intact
+            // (skip-EXPIRE: not renewed, not PERSISTed).
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
+            assert_eq!(
+                cache
+                    .async_cache_get(&"k".to_string())
+                    .await
+                    .expect("get k"),
+                Some("v".to_string())
+            );
+            let ttl_after_disable = raw_ttl("k");
+            assert!(
+                ttl_after_disable > 0,
+                "skip-EXPIRE must leave the prior TTL intact (not PERSIST), got {ttl_after_disable}"
+            );
+            assert!(
+                ttl_after_disable <= ttl_before,
+                "skip-EXPIRE must not renew the prior TTL: before={ttl_before} after={ttl_after_disable}"
+            );
+
+            // Write a persistent key under disabled ttl, re-arm, then refresh-on-hit
+            // GET must add a TTL.
+            cache
+                .async_cache_set("p".to_string(), "v".to_string())
+                .await
+                .expect("set p");
+            assert_eq!(
+                raw_ttl("p"),
+                -1,
+                "persistent key written under disabled ttl"
+            );
+            ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(50));
+            assert_eq!(
+                cache
+                    .async_cache_get(&"p".to_string())
+                    .await
+                    .expect("get p"),
+                Some("v".to_string())
+            );
+            assert!(
+                raw_ttl("p") > 0,
+                "refresh-on-hit under a re-enabled ttl must add a TTL to the persistent key"
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
+
+        // The author flagged the non-zero `try_set_ttl` success path as untested on the
+        // async Redis store. `ConcurrentCacheTtl::try_set_ttl` is a defaulted method:
+        // zero -> Err(ZeroTtl) (no store mutation), non-zero -> Ok(prev) where `prev`
+        // is whatever `set_ttl` returned (the PRIOR ttl). This pins both arms on
+        // `AsyncRedisCache`, including that a rejected zero leaves the ttl untouched and
+        // that the returned prior value is correct across consecutive calls.
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_try_set_ttl_zero_and_nonzero() {
+            use cached::{ConcurrentCacheTtl, SetTtlError};
+
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix("async_test_try_set_ttl")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+
+            // Zero is rejected and the ttl is left untouched.
+            assert_eq!(cache.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
+            assert_eq!(
+                ConcurrentCacheTtl::ttl(&cache),
+                Some(Duration::from_secs(30)),
+                "rejected try_set_ttl must not change the ttl"
+            );
+
+            // Non-zero succeeds and returns the PRIOR ttl (the build ttl).
+            assert_eq!(
+                cache.try_set_ttl(Duration::from_secs(60)),
+                Ok(Some(Duration::from_secs(30))),
+                "non-zero try_set_ttl must return the previous ttl"
+            );
+            assert_eq!(
+                ConcurrentCacheTtl::ttl(&cache),
+                Some(Duration::from_secs(60))
+            );
+
+            // A second non-zero try_set_ttl returns the value just installed.
+            assert_eq!(
+                cache.try_set_ttl(Duration::from_secs(10)),
+                Ok(Some(Duration::from_secs(60)))
+            );
+        }
+
+        // `ConcurrentCacheTtl::refresh_on_hit` on AsyncRedisCache reads the real
+        // AtomicBool through trait dispatch (previously the trait default always
+        // returned false even after set_refresh_on_hit(true)).
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_refresh_on_hit_trait_getter_reflects_setter() {
+            use cached::ConcurrentCacheTtl;
+
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix("async_test_refresh_getter")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+
+            assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+            let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+            assert!(!prev, "previous flag must be false");
+            assert!(
+                ConcurrentCacheTtl::refresh_on_hit(&cache),
+                "trait getter must reflect set_refresh_on_hit(true)"
+            );
+            let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+            assert!(prev, "previous flag must be true");
+            assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+        }
+
+        // ConcurrentCacheBase::cache_size / len / is_empty on the ASYNC Redis store
+        // (called via the sync base methods, as the task specifies for async stores).
+        // Like the sync Redis store, the count is structurally unknown, so all three
+        // must answer Ok(None) — never Ok(Some(0)) / Ok(Some(true)).
+        #[cfg(feature = "redis_tokio")]
+        #[tokio::test]
+        async fn async_redis_cache_size_len_is_empty_unknown() {
+            use cached::{ConcurrentCacheBase, ConcurrentCachedAsync};
+
+            let cache = AsyncRedisCache::<String, String>::builder()
+                .prefix("async_test_cache_size_unknown")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .await
+                .expect("build async cache");
+            cache.async_cache_clear().await.expect("clear");
+
+            // RedisCacheError does not implement PartialEq; unwrap and compare payloads.
+            assert_eq!(
+                ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+                None
+            );
+            assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+            assert_eq!(
+                ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+                None
+            );
+
+            cache
+                .async_cache_set("k".to_string(), "v".to_string())
+                .await
+                .expect("set k");
+            assert_eq!(
+                ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+                None
+            );
+            assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+            assert_eq!(
+                ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+                None
+            );
+
+            cache.async_cache_clear().await.expect("clean up");
+        }
+    }
+
+    // Requires a live Redis server (provided by CI).
+    use cached::{ConcurrentCacheTtl, ConcurrentCached, SerializeCached};
+
+    #[test]
+    fn test_redis_cache_clear_scoped() {
+        // Build two caches with different prefixes under an empty namespace so
+        // only the SCAN scope (prefix) distinguishes them.
+        let cache_a = RedisCache::<String, String>::builder()
+            .prefix("test_clear_scope_a")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache_a");
+
+        let cache_b = RedisCache::<String, String>::builder()
+            .prefix("test_clear_scope_b")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache_b");
+
+        // Seed both caches.
+        cache_a
+            .cache_set("k1".to_string(), "v1".to_string())
+            .expect("cache_a set k1");
+        cache_a
+            .cache_set("k2".to_string(), "v2".to_string())
+            .expect("cache_a set k2");
+        cache_b
+            .cache_set("kb".to_string(), "vb".to_string())
+            .expect("cache_b set kb");
+
+        // Clearing cache_a must remove its keys.
+        cache_a.cache_clear().expect("cache_a clear");
+        assert_eq!(
+            cache_a
+                .cache_get(&"k1".to_string())
+                .expect("cache_a get k1"),
+            None,
+            "k1 must be gone after cache_clear"
+        );
+        assert_eq!(
+            cache_a
+                .cache_get(&"k2".to_string())
+                .expect("cache_a get k2"),
+            None,
+            "k2 must be gone after cache_clear"
+        );
+
+        // cache_b's key must still be present.
+        assert_eq!(
+            cache_b
+                .cache_get(&"kb".to_string())
+                .expect("cache_b get kb"),
+            Some("vb".to_string()),
+            "cache_b key must survive cache_a clear"
+        );
+
+        // Clean up.
+        cache_b.cache_clear().expect("cache_b clear");
+    }
+
+    #[test]
+    fn test_redis_cache_set_ref_round_trip() {
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_set_ref_rt")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+
+        cache.cache_clear().unwrap();
+
+        let key = "ref_key".to_string();
+        let val = "ref_val".to_string();
+        let val2 = "ref_val_overwrite".to_string();
+
+        // First insert must return None (no previous entry).
+        let prev = cache
+            .cache_set_ref(&key, &val)
+            .expect("first cache_set_ref");
+        assert_eq!(prev, None, "first cache_set_ref must return None");
+
+        let got = cache.cache_get(&key).expect("cache_get after set_ref");
+        assert_eq!(
+            got,
+            Some(val.clone()),
+            "cache_get must return the value written by cache_set_ref"
+        );
+
+        // Overwrite with a different value; must return the previous value.
+        let prev2 = cache
+            .cache_set_ref(&key, &val2)
+            .expect("second cache_set_ref");
+        assert_eq!(
+            prev2,
+            Some(val),
+            "second cache_set_ref must return the previous value"
+        );
+
+        // Overwrite must be visible via cache_get.
+        let got2 = cache.cache_get(&key).expect("cache_get after overwrite");
+        assert_eq!(
+            got2,
+            Some(val2),
+            "cache_get must return the overwritten value"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // Read the raw Redis `TTL` (in seconds) for the namespace-less key
+    // `{prefix}:{key}` directly via the redis client. Returns -1 for a
+    // persistent (no-expiry) key, -2 if the key is absent, or the remaining
+    // seconds otherwise.
+    fn raw_ttl_secs(cache: &RedisCache<String, String>, prefix: &str, key: &str) -> i64 {
+        let conn_str = cache.connection_string();
+        let client =
+            redis::Client::open(conn_str.reveal()).expect("open redis client for TTL probe");
+        let mut conn = client
+            .get_connection()
+            .expect("redis connection for TTL probe");
+        let full_key = format!("{prefix}:{key}");
+        redis::cmd("TTL")
+            .arg(full_key)
+            .query(&mut conn)
+            .expect("TTL query")
+    }
+
+    // I2: set_ttl(0) disables expiry. A key written afterward must have NO TTL
+    // (persistent, raw TTL == -1), and set_ttl(nonzero) must resume expiry.
+    #[test]
+    fn test_redis_set_ttl_zero_writes_key_without_expiry() {
+        let prefix = "test_set_ttl_zero_no_expiry";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Baseline: a freshly-built cache writes with a real TTL.
+        cache
+            .cache_set("k_live".to_string(), "v".to_string())
+            .expect("set k_live");
+        let live_ttl = raw_ttl_secs(&cache, prefix, "k_live");
+        assert!(
+            live_ttl > 0,
+            "a non-zero ttl must write the key with a positive TTL, got {live_ttl}"
+        );
+
+        // Disable expiry: ttl() now resolves to None.
+        let prev = cache.set_ttl(Duration::ZERO);
+        assert_eq!(prev, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), None, "set_ttl(0) disables expiry");
+
+        // A key written under the disabled ttl must be persistent (raw TTL == -1).
+        cache
+            .cache_set("k_persist".to_string(), "v".to_string())
+            .expect("set k_persist");
+        assert_eq!(
+            raw_ttl_secs(&cache, prefix, "k_persist"),
+            -1,
+            "set_ttl(0) must write the key WITHOUT any expiry (persistent)"
+        );
+        // ...and it is readable.
+        assert_eq!(
+            cache.cache_get(&"k_persist".to_string()).expect("get"),
+            Some("v".to_string())
+        );
+
+        // Re-arm a real ttl: subsequent writes carry a TTL again.
+        cache.set_ttl(Duration::from_secs(30));
+        cache
+            .cache_set("k_rearm".to_string(), "v".to_string())
+            .expect("set k_rearm");
+        assert!(
+            raw_ttl_secs(&cache, prefix, "k_rearm") > 0,
+            "set_ttl(nonzero) must resume writing keys with a TTL"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // unset_ttl() is equivalent to set_ttl(0) on the Redis store: keys written
+    // afterward are persistent.
+    #[test]
+    fn test_redis_unset_ttl_writes_key_without_expiry() {
+        let prefix = "test_unset_ttl_no_expiry";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        let prev = cache.unset_ttl();
+        assert_eq!(prev, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), None, "unset_ttl disables expiry");
+
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        assert_eq!(
+            raw_ttl_secs(&cache, prefix, "k"),
+            -1,
+            "unset_ttl must write the key WITHOUT any expiry (persistent)"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // gap 1 (sync): refresh-on-hit interaction with the disabled-ttl write path.
+    //
+    // The implementor chose to SKIP `EXPIRE` on a refresh-on-hit GET when the ttl
+    // is disabled. So a key written WITH a TTL, then read after `set_ttl(0)`, must
+    // KEEP its prior TTL (the refresh path neither renews it nor PERSISTs it).
+    // Conversely a key written WITHOUT a TTL (disabled), then read after
+    // `set_ttl(nonzero)`, must GAIN a TTL via the refresh `EXPIRE`.
+    #[test]
+    fn test_redis_refresh_on_hit_disabled_ttl_skips_expire_preexisting_key() {
+        let prefix = "test_refresh_disabled_skips_expire";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(100))
+            .namespace("")
+            .refresh_on_hit(true)
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Write a key WITH a TTL while expiry is enabled.
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        let ttl_before = raw_ttl_secs(&cache, prefix, "k");
+        assert!(
+            ttl_before > 0,
+            "key written under a real ttl must have a positive TTL, got {ttl_before}"
+        );
+
+        // Disable expiry, then refresh-on-hit GET the pre-existing key.
+        assert_eq!(
+            cache.set_ttl(Duration::ZERO),
+            Some(Duration::from_secs(100))
+        );
+        assert_eq!(
+            cache.cache_get(&"k".to_string()).expect("get k"),
+            Some("v".to_string()),
+            "refresh-on-hit get under disabled ttl must still return the value"
+        );
+
+        // The skip-EXPIRE choice: the prior TTL must remain INTACT (not renewed,
+        // not PERSISTed). It must still be a positive, non-increased TTL.
+        let ttl_after = raw_ttl_secs(&cache, prefix, "k");
+        assert!(
+            ttl_after > 0,
+            "skip-EXPIRE on a disabled-ttl refresh must leave the prior TTL intact \
+             (not PERSIST it); got {ttl_after}"
+        );
+        assert!(
+            ttl_after <= ttl_before,
+            "skip-EXPIRE must NOT renew/extend the prior TTL: before={ttl_before} after={ttl_after}"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    #[test]
+    fn test_redis_refresh_on_hit_reenabled_ttl_adds_expire_to_persistent_key() {
+        let prefix = "test_refresh_reenabled_adds_expire";
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::ZERO) // start disabled — strict build path is exercised elsewhere
+            .namespace("")
+            .refresh_on_hit(true)
+            .build();
+        // build() rejects a zero ttl, so construct with a real ttl then disable.
+        assert!(
+            cache.is_err(),
+            "build() must reject a zero ttl even on the refresh path"
+        );
+        let cache = RedisCache::<String, String>::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(100))
+            .namespace("")
+            .refresh_on_hit(true)
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Disable expiry and write a persistent (no-TTL) key.
+        cache.set_ttl(Duration::ZERO);
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        assert_eq!(
+            raw_ttl_secs(&cache, prefix, "k"),
+            -1,
+            "key written under disabled ttl must be persistent"
+        );
+
+        // Re-arm a real ttl, then refresh-on-hit GET: the key must GAIN a TTL.
+        cache.set_ttl(Duration::from_secs(50));
+        assert_eq!(
+            cache.cache_get(&"k".to_string()).expect("get k"),
+            Some("v".to_string())
+        );
+        let ttl_after = raw_ttl_secs(&cache, prefix, "k");
+        assert!(
+            ttl_after > 0,
+            "refresh-on-hit under a re-enabled ttl must EXPIRE the previously \
+             persistent key (give it a TTL); got {ttl_after}"
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // Behavior parity for the moved `ConcurrentCacheTtl` knobs on the SYNC Redis store.
+    // The author covered `set_ttl(0)`/`unset_ttl` (the disable paths) with raw-TTL
+    // probes, but not the plain non-zero round-trip: `ttl()` reflects the build ttl,
+    // `set_ttl(nonzero)` returns the PRIOR ttl and updates the live value, and
+    // `unset_ttl()` returns the prior ttl and resolves `ttl()` to None. A regression in
+    // the moved getter/setter would be caught here without inspecting raw Redis state.
+    #[test]
+    fn test_redis_set_ttl_nonzero_round_trip() {
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_set_ttl_nonzero_round_trip")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+
+        // ttl() reflects the configured build ttl.
+        assert_eq!(cache.ttl(), Some(Duration::from_secs(30)));
+
+        // set_ttl(nonzero) returns the PREVIOUS ttl and installs the new one.
+        let prev = cache.set_ttl(Duration::from_secs(60));
+        assert_eq!(prev, Some(Duration::from_secs(30)));
+        assert_eq!(cache.ttl(), Some(Duration::from_secs(60)));
+
+        // A second set_ttl returns the value just installed.
+        let prev2 = cache.set_ttl(Duration::from_secs(10));
+        assert_eq!(prev2, Some(Duration::from_secs(60)));
+
+        // unset_ttl returns the prior ttl and disables expiry (ttl -> None).
+        let prev3 = cache.unset_ttl();
+        assert_eq!(prev3, Some(Duration::from_secs(10)));
+        assert_eq!(cache.ttl(), None);
+
+        // unset_ttl on an already-disabled store returns None.
+        assert_eq!(cache.unset_ttl(), None);
+    }
+
+    // ConcurrentCacheBase::cache_size / len / is_empty on the SYNC Redis store.
+    // The author noted `cache_size() == Ok(None)` was only asserted for `RedbCache`.
+    // RedisCache cannot answer its own entry count cheaply (a server-side DBSIZE/SCAN
+    // over a shared keyspace), so it must return Ok(None) — and the `len`/`is_empty`
+    // defaults must forward through (len -> cache_size, is_empty -> None map). This
+    // holds even with live entries present, since the size is structurally unknown.
+    #[test]
+    fn test_redis_cache_size_len_is_empty_unknown() {
+        use cached::ConcurrentCacheBase;
+
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_redis_cache_size_unknown")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+        cache.cache_clear().expect("clear");
+
+        // Empty store: size is still structurally unknown (None), NOT Some(0).
+        // RedisCacheError does not implement PartialEq, so unwrap and compare payloads.
+        assert_eq!(
+            ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+            None
+        );
+        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(
+            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            None,
+            "unknown size must map to is_empty == None, not Some(true)"
+        );
+
+        // With a live entry, the answer is still None (no implicit DBSIZE/SCAN).
+        cache
+            .cache_set("k".to_string(), "v".to_string())
+            .expect("set k");
+        assert_eq!(
+            ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
+            None
+        );
+        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(
+            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            None
+        );
+
+        cache.cache_clear().expect("clean up");
+    }
+
+    // The `ConcurrentCacheTtl` impl on the sync Redis store now provides a truthful
+    // `refresh_on_hit` getter that reads the internal `AtomicBool` set by
+    // `set_refresh_on_hit`. Previously the getter relied on the trait default and
+    // always returned `false` even after `set_refresh_on_hit(true)` — a latent bug.
+    // Making the trait method required forces a real getter, so the trait-level value
+    // now reflects the setter through trait dispatch.
+    #[test]
+    fn test_redis_refresh_on_hit_trait_getter_reflects_setter() {
+        let cache = RedisCache::<String, String>::builder()
+            .prefix("test_redis_refresh_getter_reflects_setter")
+            .ttl(Duration::from_secs(30))
+            .namespace("")
+            .build()
+            .expect("build cache");
+
+        // Trait getter starts false (builder default).
+        assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+
+        // set_refresh_on_hit returns the previous flag (the AtomicBool swap value).
+        let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+        assert!(!prev, "previous flag must be false");
+
+        // Trait getter now reports the value set via trait dispatch.
+        assert!(
+            ConcurrentCacheTtl::refresh_on_hit(&cache),
+            "trait-level refresh_on_hit getter must reflect set_refresh_on_hit(true)"
+        );
+
+        // Round-trip back to false: getter reflects it, swap reports the real prior value.
+        let prev2 = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+        assert!(
+            prev2,
+            "set_refresh_on_hit must report the real prior flag (true)"
+        );
+        assert!(
+            !ConcurrentCacheTtl::refresh_on_hit(&cache),
+            "trait-level refresh_on_hit getter must reflect set_refresh_on_hit(false)"
+        );
     }
 }
 
@@ -4545,7 +5444,7 @@ fn fetch_article(slug: String) -> Result<NewsArticle, ()> {
 #[serial(ExpiringCacheTest)]
 fn test_expiring_value_expired_article_returned_with_miss() {
     {
-        let mut cache = FETCH_ARTICLE.write();
+        let mut cache = FETCH_ARTICLE.0.write();
         cache.cache_reset();
         cache.cache_reset_metrics();
     }
@@ -4556,7 +5455,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 
     // The article was fetched due to a cache miss and the result cached.
     {
-        let cache = FETCH_ARTICLE.write();
+        let cache = FETCH_ARTICLE.0.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -4566,7 +5465,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 
     // The article was fetched again as it had expired.
     {
-        let cache = FETCH_ARTICLE.write();
+        let cache = FETCH_ARTICLE.0.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(2));
@@ -4578,7 +5477,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 #[serial(ExpiringCacheTest)]
 fn test_expiring_value_unexpired_article_returned_with_hit() {
     {
-        let mut cache = FETCH_ARTICLE.write();
+        let mut cache = FETCH_ARTICLE.0.write();
         cache.cache_reset();
         cache.cache_reset_metrics();
     }
@@ -4589,7 +5488,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
     // The article was fetched due to a cache miss and the result cached.
     {
-        let cache = FETCH_ARTICLE.write();
+        let cache = FETCH_ARTICLE.0.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -4601,7 +5500,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
     // The article was not fetched but returned as a hit from the cache.
     {
-        let cache = FETCH_ARTICLE.write();
+        let cache = FETCH_ARTICLE.0.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -4710,8 +5609,6 @@ fn test_timed_sized_expired_get_does_not_pollute_inner_metrics() {
     assert!(cache.cache_get(&1).is_none());
     assert_eq!(cache.cache_hits(), Some(0));
     assert_eq!(cache.cache_misses(), Some(1));
-    assert_eq!(cache.store().cache_hits(), Some(0));
-    assert_eq!(cache.store().cache_misses(), Some(0));
 }
 
 #[test]
@@ -4893,8 +5790,11 @@ fn test_fallible_builders_return_build_error() {
             .ttl(cached::time::Duration::ZERO)
             .build();
         assert!(
-            matches!(zero_ttl.unwrap_err(), cached::BuildError::InvalidTtl { .. }),
-            "expected InvalidTtl"
+            matches!(
+                zero_ttl.unwrap_err(),
+                cached::BuildError::InvalidValue { field: "ttl", .. }
+            ),
+            "expected InvalidValue(ttl)"
         );
 
         let zero_lru_ttl = cached::LruTtlCache::<i32, i32>::builder()
@@ -4904,9 +5804,9 @@ fn test_fallible_builders_return_build_error() {
         assert!(
             matches!(
                 zero_lru_ttl.unwrap_err(),
-                cached::BuildError::InvalidTtl { .. }
+                cached::BuildError::InvalidValue { field: "ttl", .. }
             ),
-            "expected InvalidTtl"
+            "expected InvalidValue(ttl)"
         );
 
         let zero_sorted_ttl = cached::TtlSortedCache::<i32, i32>::builder()
@@ -4915,13 +5815,13 @@ fn test_fallible_builders_return_build_error() {
         assert!(
             matches!(
                 zero_sorted_ttl.unwrap_err(),
-                cached::BuildError::InvalidTtl { .. }
+                cached::BuildError::InvalidValue { field: "ttl", .. }
             ),
-            "expected InvalidTtl"
+            "expected InvalidValue(ttl)"
         );
     }
 
-    let sharded_unbound = cached::ShardedCache::<i32, i32>::builder()
+    let sharded_unbound = cached::ShardedUnboundCache::<i32, i32>::builder()
         .shards(0)
         .build();
     assert!(
@@ -4936,38 +5836,34 @@ fn test_fallible_builders_return_build_error() {
     );
 }
 
-#[cfg(feature = "disk_store")]
+#[cfg(feature = "redb_store")]
 #[test]
-fn disk_cache_builder_aliases_and_zero_ttl_validation() {
-    // Canonical `RedbCache` name.
-    let result = cached::RedbCache::<String, String>::builder("zero-ttl")
+fn redb_cache_builder_zero_ttl_validation() {
+    // `RedbCache` rejects a zero TTL at build time.
+    let result = cached::RedbCache::<String, String>::builder()
+        .name("zero-ttl")
         .ttl(cached::time::Duration::ZERO)
         .build();
     assert!(matches!(
         result,
-        Err(cached::RedbCacheBuildError::InvalidTtl(..))
-    ));
-
-    // The kept `DiskCache` alias (and its `DiskCacheBuildError` alias) still
-    // compile and behave identically.
-    let result = cached::DiskCache::<String, String>::builder("zero-ttl")
-        .ttl(cached::time::Duration::ZERO)
-        .build();
-    assert!(matches!(
-        result,
-        Err(cached::DiskCacheBuildError::InvalidTtl(..))
+        Err(cached::RedbCacheBuildError::Build(
+            cached::BuildError::InvalidValue { field: "ttl", .. }
+        ))
     ));
 }
 
 #[cfg(feature = "redis_store")]
 #[test]
 fn redis_cache_builder_aliases_and_zero_ttl_validation() {
-    let result =
-        cached::RedisCache::<String, String>::builder("zero-ttl", cached::time::Duration::ZERO)
-            .build();
+    let result = cached::RedisCache::<String, String>::builder()
+        .prefix("zero-ttl")
+        .ttl(cached::time::Duration::ZERO)
+        .build();
     assert!(matches!(
         result,
-        Err(cached::RedisCacheBuildError::InvalidTtl(..))
+        Err(cached::RedisCacheBuildError::Build(
+            cached::BuildError::InvalidValue { field: "ttl", .. }
+        ))
     ));
 }
 
@@ -5084,7 +5980,7 @@ async fn test_timed_cache_async_on_evict_fires() {
     cache.cache_set(1, 10);
     tokio::time::sleep(cached::time::Duration::from_millis(100)).await;
 
-    let val = CachedAsync::async_get_or_set_with(&mut cache, 1, || async { 99u32 }).await;
+    let val = CachedAsync::async_cache_get_or_set_with(&mut cache, 1, || async { 99u32 }).await;
     assert_eq!(*val, 99);
     assert_eq!(
         evicted_count.load(Ordering::Relaxed),
@@ -5198,11 +6094,11 @@ fn test_expiring_value_cache_on_evict_fires_on_cache_get() {
 #[cfg(feature = "proc_macro")]
 #[test]
 fn test_unsync_reads_unbound_cache() {
-    UNSYNC_DOUBLE.write().cache_reset();
+    UNSYNC_DOUBLE.0.write().cache_reset();
     assert_eq!(4, unsync_double(2));
     assert_eq!(4, unsync_double(2));
     assert_eq!(10, unsync_double(5));
-    let cache = UNSYNC_DOUBLE.read();
+    let cache = UNSYNC_DOUBLE.0.read();
     assert_eq!(2, cache.cache_size());
     assert_eq!(1, cache.cache_hits().unwrap());
     assert_eq!(2, cache.cache_misses().unwrap());
@@ -5246,14 +6142,14 @@ mod unsync_reads_ttl_sorted {
     #[test]
     fn test_unsync_reads_ttl_sorted_cache() {
         CALL_COUNT.store(0, Ordering::SeqCst);
-        UNSYNC_TTL_SORTED.write().cache_reset();
+        UNSYNC_TTL_SORTED.0.write().cache_reset();
 
         assert_eq!(unsync_ttl_sorted(4), 12);
         assert_eq!(unsync_ttl_sorted(4), 12); // cache hit — body not re-run
         assert_eq!(unsync_ttl_sorted(5), 15);
 
         assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 2);
-        let cache = UNSYNC_TTL_SORTED.read();
+        let cache = UNSYNC_TTL_SORTED.0.read();
         assert_eq!(cache.cache_size(), 2);
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
@@ -5273,7 +6169,10 @@ fn test_ttl_cache_zero_ttl() {
         .ttl(Duration::from_nanos(0))
         .build()
         .unwrap_err();
-    assert!(matches!(err, cached::BuildError::InvalidTtl { .. }));
+    assert!(matches!(
+        err,
+        cached::BuildError::InvalidValue { field: "ttl", .. }
+    ));
 }
 
 #[cfg(feature = "time_stores")]
@@ -5286,7 +6185,10 @@ fn test_lru_ttl_cache_zero_ttl() {
         .ttl(Duration::from_nanos(0))
         .build()
         .unwrap_err();
-    assert!(matches!(err, cached::BuildError::InvalidTtl { .. }));
+    assert!(matches!(
+        err,
+        cached::BuildError::InvalidValue { field: "ttl", .. }
+    ));
 }
 
 #[cfg(feature = "time_stores")]
@@ -5412,13 +6314,13 @@ fn test_unbound_cache_on_evict_fires_on_remove() {
     cache.cache_set(2, 200);
     assert_eq!(fired.load(Ordering::Relaxed), 0);
 
-    cache.cache_remove(&1u32);
+    let _ = cache.cache_remove(&1u32);
     assert_eq!(fired.load(Ordering::Relaxed), 1);
 
-    cache.cache_remove(&99u32); // not present — on_evict should NOT fire
+    let _ = cache.cache_remove(&99u32); // not present — on_evict should NOT fire
     assert_eq!(fired.load(Ordering::Relaxed), 1);
 
-    cache.cache_remove(&2u32);
+    let _ = cache.cache_remove(&2u32);
     assert_eq!(fired.load(Ordering::Relaxed), 2);
 }
 
@@ -5525,7 +6427,7 @@ fn test_ttl_sorted_cache_clone_cached() {
     assert!(!expired);
 }
 
-#[cfg(all(feature = "time_stores", feature = "async_tokio_rt_multi_thread"))]
+#[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_ttl_sorted_cache_cached_async() {
     use cached::CachedAsync;
@@ -5536,15 +6438,15 @@ async fn test_ttl_sorted_cache_cached_async() {
         .build()
         .unwrap();
 
-    let val = CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { 42u32 }).await;
+    let val = CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 42u32 }).await;
     assert_eq!(*val, 42);
 
     // Second call returns cached value.
-    let val2 = CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { 99u32 }).await;
+    let val2 = CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 99u32 }).await;
     assert_eq!(*val2, 42);
 }
 
-#[cfg(feature = "async_tokio_rt_multi_thread")]
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_expiring_lru_cache_cached_async() {
     use cached::CachedAsync;
@@ -5563,12 +6465,14 @@ async fn test_expiring_lru_cache_cached_async() {
         .unwrap();
 
     let val =
-        CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(42) }).await;
+        CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(42) })
+            .await;
     assert_eq!(val.0, 42);
 
     // Cache hit: factory not called.
     let val2 =
-        CachedAsync::async_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(99) }).await;
+        CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(99) })
+            .await;
     assert_eq!(val2.0, 42);
 
     assert_eq!(cache.cache_hits(), Some(1));
@@ -5627,7 +6531,7 @@ fn test_ttl_cache_builder_build() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_lru_ttl_cache_builder_build() {
-    use cached::{Cached, LruTtlCache};
+    use cached::{CacheTtl, Cached, LruTtlCache};
     let mut cache = LruTtlCache::<u32, u32>::builder()
         .max_size(4)
         .ttl(Duration::from_secs(60))
@@ -5636,7 +6540,7 @@ fn test_lru_ttl_cache_builder_build() {
         .unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
-    assert!(cache.refresh_on_hit());
+    assert!(CacheTtl::refresh_on_hit(&cache));
 }
 
 #[test]
@@ -5652,47 +6556,116 @@ fn test_ttl_sorted_cache_builder_build() {
     assert_eq!(cache.cache_get(&1), Some(&10));
 }
 
-// ── `store()` getter ───────────────────────────────────────────────────────────
+// ── `store()` getter removed; public API covers the same assertions ────────────
 
 #[test]
 #[cfg(feature = "time_stores")]
-fn test_ttl_cache_store_getter() {
+fn test_ttl_cache_size_and_get() {
     use cached::{Cached, TtlCache};
     let mut cache = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .unwrap();
     cache.cache_set(1, 10);
-    // store() gives direct access to the underlying HashMap<K, TimedEntry<V>>
-    assert_eq!(cache.store().len(), 1);
-    assert!(cache.store().contains_key(&1));
+    // cache_size() and cache_get() replace direct store() introspection.
+    assert_eq!(cache.cache_size(), 1);
+    assert_eq!(cache.cache_get(&1), Some(&10));
 }
 
 #[test]
-fn test_unbound_cache_store_getter() {
+fn test_unbound_cache_size() {
     use cached::Cached;
     let mut cache = UnboundCache::<u32, u32>::builder().build().unwrap();
     cache.cache_set(1, 10);
     cache.cache_set(2, 20);
-    assert_eq!(cache.store().len(), 2);
+    assert_eq!(cache.cache_size(), 2);
 }
 
-// ── `refresh_on_hit()` getter and `set_refresh_on_hit()` setter ──────────────
+// ── `CacheTtl::refresh_on_hit()` and `CacheTtl::set_refresh_on_hit()` ────────
 
+// Confirms the inherent shadowing methods are gone and the trait methods work.
+// `set_refresh_on_hit` now returns the PREVIOUS value (trait contract).
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_ttl_cache_refresh_getter_and_setter() {
-    use cached::TtlCache;
+    use cached::{CacheTtl, TtlCache};
     let mut cache = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .refresh_on_hit(false)
         .build()
         .unwrap();
-    assert!(!cache.refresh_on_hit());
-    cache.set_refresh_on_hit(true);
-    assert!(cache.refresh_on_hit());
-    cache.set_refresh_on_hit(false);
-    assert!(!cache.refresh_on_hit());
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+    // set_refresh_on_hit returns the PREVIOUS value.
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, true);
+    assert!(!prev, "previous value was false");
+    assert!(CacheTtl::refresh_on_hit(&cache));
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, false);
+    assert!(prev, "previous value was true");
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+}
+
+// Same contract for LruTtlCache.
+#[test]
+#[cfg(feature = "time_stores")]
+fn test_lru_ttl_cache_refresh_getter_and_setter() {
+    use cached::{CacheTtl, LruTtlCache};
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(false)
+        .build()
+        .unwrap();
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+    // set_refresh_on_hit returns the PREVIOUS value.
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, true);
+    assert!(!prev, "previous value was false");
+    assert!(CacheTtl::refresh_on_hit(&cache));
+    let prev = CacheTtl::set_refresh_on_hit(&mut cache, false);
+    assert!(prev, "previous value was true");
+    assert!(!CacheTtl::refresh_on_hit(&cache));
+}
+
+// Builder-time `refresh_on_hit(true)` must be reflected by the getter on BOTH
+// timed stores (the round-trip tests above start from `false`; this pins the
+// `true` builder default through to `CacheTtl::refresh_on_hit`).
+#[test]
+#[cfg(feature = "time_stores")]
+fn test_refresh_on_hit_builder_true_reflected_on_both_stores() {
+    use cached::{CacheTtl, LruTtlCache, TtlCache};
+
+    let ttl = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+    assert!(
+        CacheTtl::refresh_on_hit(&ttl),
+        "TtlCache builder refresh_on_hit(true) must be reflected"
+    );
+
+    let lru_ttl = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+    assert!(
+        CacheTtl::refresh_on_hit(&lru_ttl),
+        "LruTtlCache builder refresh_on_hit(true) must be reflected"
+    );
+
+    // And the unset builder default is `false` on both.
+    let ttl_default = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    assert!(!CacheTtl::refresh_on_hit(&ttl_default));
+    let lru_default = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    assert!(!CacheTtl::refresh_on_hit(&lru_default));
 }
 
 // ── CachedIter ────────────────────────────────────────────────────────────────
@@ -6124,8 +7097,10 @@ mod generic_where_tests {
         }
     }
 
-    impl cached::ConcurrentCached<String, String> for TestStore {
+    impl cached::ConcurrentCacheBase for TestStore {
         type Error = std::convert::Infallible;
+    }
+    impl cached::ConcurrentCached<String, String> for TestStore {
         fn cache_get(&self, k: &String) -> Result<Option<String>, Self::Error> {
             Ok(self.inner.lock().unwrap().get(k).cloned())
         }
@@ -6138,8 +7113,12 @@ mod generic_where_tests {
         fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
             Ok(self.inner.lock().unwrap().remove_entry(k))
         }
-        fn set_refresh_on_hit(&self, _refresh: bool) -> bool {
-            false
+        fn cache_clear(&self) -> Result<(), Self::Error> {
+            self.inner.lock().unwrap().clear();
+            Ok(())
+        }
+        fn cache_reset(&self) -> Result<(), Self::Error> {
+            self.cache_clear()
         }
     }
 
@@ -6263,22 +7242,17 @@ fn test_ttl_sorted_cache_try_size_limit() {
 
     // Error: size of zero is invalid
     let err = cache.try_set_max_size(0);
-    assert!(err.is_err(), "zero size limit must fail");
-    assert_eq!(err.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(err, Err(cached::SetMaxSizeError::ZeroSize));
 }
 
 // ── result_fallback async ─────────────────────────────────────────────────────
 
-#[cfg(all(
-    feature = "proc_macro",
-    feature = "time_stores",
-    feature = "async_tokio_rt_multi_thread"
-))]
+#[cfg(all(feature = "proc_macro", feature = "time_stores", feature = "async"))]
 mod result_fallback_async_tests {
     use super::sleep;
     use cached::time::Duration;
 
-    #[cached::macros::cached(ttl = 1, result_fallback = true)]
+    #[cached::macros::cached(ttl_secs = 1, result_fallback = true)]
     async fn async_always_failing() -> Result<String, ()> {
         Err(())
     }
@@ -6397,9 +7371,6 @@ fn test_expiring_lru_cache_get_does_not_inflate_inner_metrics() {
     assert!(cache.cache_get(&1).is_some());
     assert_eq!(cache.cache_hits(), Some(1));
     assert_eq!(cache.cache_misses(), Some(0));
-    // Inner LruCache metrics must not be incremented — ExpiringLruCache manages its own.
-    assert_eq!(cache.store().cache_hits(), Some(0));
-    assert_eq!(cache.store().cache_misses(), Some(0));
 }
 
 #[test]
@@ -6446,9 +7417,9 @@ mod macro_arg_pairwise {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // name + unbound: custom static identifier, explicit unbound store.
+    // name: custom static identifier with the default UnboundCache.
     // Default sync_lock is RwLock, so the named static is read via `.write()`.
-    #[cached(name = "PAIRWISE_NAMED_UNBOUND", unbound)]
+    #[cached(name = "PAIRWISE_NAMED_UNBOUND")]
     fn named_unbound(n: u32) -> u32 {
         n + 1
     }
@@ -6457,7 +7428,7 @@ mod macro_arg_pairwise {
     fn test_name_with_unbound() {
         assert_eq!(named_unbound(2), 3);
         assert_eq!(named_unbound(2), 3);
-        let cache = PAIRWISE_NAMED_UNBOUND.write();
+        let cache = PAIRWISE_NAMED_UNBOUND.0.write();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -6472,7 +7443,7 @@ mod macro_arg_pairwise {
     fn test_size_with_sync_lock_mutex() {
         assert_eq!(sized_mutex(3), 6);
         assert_eq!(sized_mutex(3), 6);
-        let cache = SIZED_MUTEX.lock();
+        let cache = SIZED_MUTEX.0.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -6516,8 +7487,8 @@ mod macro_arg_pairwise {
         assert_eq!(sync_lock_snake(1), 2);
         // `.write()` only exists on the RwLock wrapper; compiling+passing here
         // proves both spellings resolved to RwLock.
-        assert_eq!(SYNC_LOCK_DOC_SPELLING.write().cache_misses(), Some(1));
-        assert_eq!(SYNC_LOCK_SNAKE_SPELLING.write().cache_misses(), Some(1));
+        assert_eq!(SYNC_LOCK_DOC_SPELLING.0.write().cache_misses(), Some(1));
+        assert_eq!(SYNC_LOCK_SNAKE_SPELLING.0.write().cache_misses(), Some(1));
     }
 
     // sync_writes = "by_key" + explicit non-default sync_writes_buckets.
@@ -6598,7 +7569,7 @@ mod macro_arg_pairwise {
 
     // once + name + ttl (pairwise; the TTL store requires `time_stores`).
     #[cfg(feature = "time_stores")]
-    #[once(name = "PAIRWISE_ONCE_NAMED_TTL", ttl = 100)]
+    #[once(name = "PAIRWISE_ONCE_NAMED_TTL", ttl_secs = 100)]
     fn once_named_ttl(n: u32) -> u32 {
         n + 3
     }
@@ -6633,7 +7604,7 @@ mod async_cache_store_tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         let val = cache
-            .async_get_or_set_with(1, || {
+            .async_cache_get_or_set_with(1, || {
                 let calls = calls_clone.clone();
                 async move {
                     calls.fetch_add(1, Ordering::Relaxed);
@@ -6646,7 +7617,7 @@ mod async_cache_store_tests {
 
         // Get from cache
         let val = cache
-            .async_get_or_set_with(1, || async {
+            .async_cache_get_or_set_with(1, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
                 "world".to_string()
             })
@@ -6658,7 +7629,7 @@ mod async_cache_store_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
 
         let val = cache
-            .async_get_or_set_with(1, || async {
+            .async_cache_get_or_set_with(1, || async {
                 calls.fetch_add(1, Ordering::Relaxed);
                 "world".to_string()
             })
@@ -6680,7 +7651,7 @@ mod async_cache_store_tests {
             .unwrap();
 
         let val = cache
-            .async_try_get_or_set_with(1, || async { Ok::<_, ()>("hello".to_string()) })
+            .async_cache_try_get_or_set_with(1, || async { Ok::<_, ()>("hello".to_string()) })
             .await
             .unwrap();
         assert_eq!(val, "hello");
@@ -6691,7 +7662,7 @@ mod async_cache_store_tests {
 
         // Try get or set with a new value, triggers evict on old expired value
         let val = cache
-            .async_try_get_or_set_with(1, || async { Ok::<_, ()>("world".to_string()) })
+            .async_cache_try_get_or_set_with(1, || async { Ok::<_, ()>("world".to_string()) })
             .await
             .unwrap();
         assert_eq!(val, "world");
@@ -6712,16 +7683,16 @@ mod async_cache_store_tests {
             .unwrap();
 
         cache
-            .async_get_or_set_with(1, || async { "one".to_string() })
+            .async_cache_get_or_set_with(1, || async { "one".to_string() })
             .await;
         cache
-            .async_get_or_set_with(2, || async { "two".to_string() })
+            .async_cache_get_or_set_with(2, || async { "two".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 0);
 
         // Trigger LRU eviction by size limit
         cache
-            .async_get_or_set_with(3, || async { "three".to_string() })
+            .async_cache_get_or_set_with(3, || async { "three".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 1);
 
@@ -6730,7 +7701,7 @@ mod async_cache_store_tests {
 
         // Trigger evict on expired value
         cache
-            .async_get_or_set_with(3, || async { "new_three".to_string() })
+            .async_cache_get_or_set_with(3, || async { "new_three".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 2);
     }
@@ -6748,14 +7719,14 @@ mod async_cache_store_tests {
             .unwrap();
 
         cache
-            .async_get_or_set_with(1, || async { "one".to_string() })
+            .async_cache_get_or_set_with(1, || async { "one".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 0);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
 
         cache
-            .async_get_or_set_with(1, || async { "new_one".to_string() })
+            .async_cache_get_or_set_with(1, || async { "new_one".to_string() })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 1);
     }
@@ -6783,13 +7754,13 @@ mod async_cache_store_tests {
             .unwrap();
 
         cache
-            .async_get_or_set_with(1, || async { ExpiringVal { expired: true } })
+            .async_cache_get_or_set_with(1, || async { ExpiringVal { expired: true } })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 0);
 
         // Fetching it when expired triggers eviction
         cache
-            .async_get_or_set_with(1, || async { ExpiringVal { expired: false } })
+            .async_cache_get_or_set_with(1, || async { ExpiringVal { expired: false } })
             .await;
         assert_eq!(evicted.load(Ordering::Relaxed), 1);
     }
@@ -6798,8 +7769,346 @@ mod async_cache_store_tests {
     async fn test_unbound_cache_async() {
         let mut cache = UnboundCache::builder().build().unwrap();
         let val = cache
-            .async_get_or_set_with(1, || async { "hello".to_string() })
+            .async_cache_get_or_set_with(1, || async { "hello".to_string() })
             .await;
         assert_eq!(val, "hello");
+    }
+}
+
+// --- len / iter / evict contract tests (spec 0002) ---
+//
+// These tests assert the documented contract:
+//   - `len()` returns the raw stored count; on lazy-eviction stores it may include
+//     expired-but-not-yet-swept entries.
+//   - `iter().count()` omits expired entries but does not remove them.
+//   - `evict()` physically removes expired entries; afterwards `len()` reflects only
+//     live entries.
+
+#[cfg(feature = "time_stores")]
+mod len_iter_evict_contract {
+    use cached::time::Duration;
+    use cached::{CachedExt, CachedIter, LruTtlCache, TtlCache, TtlSortedCache};
+
+    /// TtlCache: an expired entry is visible in `len()` but omitted from `iter()`;
+    /// `evict()` removes it so `len()` drops to the live count.
+    #[test]
+    fn ttl_cache_len_iter_evict() {
+        let mut cache: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        // Wait for entries to expire.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // len() counts both expired entries - no eviction scan.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        // iter() omits expired entries without removing them.
+        assert_eq!(
+            cache.iter().count(),
+            0,
+            "iter().count() must omit expired entries"
+        );
+
+        // len() is still 2 because iter() did not remove anything.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must remain unchanged after iter() - iter does not remove entries"
+        );
+
+        // evict() physically removes the expired entries.
+        let removed = cache.evict();
+        assert_eq!(
+            removed, 2,
+            "evict() must return the number of removed entries"
+        );
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// LruTtlCache: same contract as TtlCache.
+    #[test]
+    fn lru_ttl_cache_len_iter_evict() {
+        let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(10)
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            0,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// TtlSortedCache: same contract.
+    #[test]
+    fn ttl_sorted_cache_len_iter_evict() {
+        let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            0,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+}
+
+mod len_iter_evict_contract_expiring {
+    use cached::{CachedExt, CachedIter, Expires, ExpiringCache, ExpiringLruCache};
+
+    #[derive(Clone)]
+    struct Val {
+        expired: bool,
+    }
+
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    /// ExpiringCache: a value that reports `is_expired() == true` is visible in `len()`
+    /// but omitted from `iter()`; `evict()` removes it.
+    #[test]
+    fn expiring_cache_len_iter_evict() {
+        let mut cache: ExpiringCache<u32, Val> = ExpiringCache::builder().build().unwrap();
+        cache.set(1, Val { expired: false }); // live
+        cache.set(2, Val { expired: true }); // already expired
+
+        // Both entries are stored; len() reports 2.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        // iter() omits the expired entry without removing it.
+        assert_eq!(
+            cache.iter().count(),
+            1,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        // evict() removes the one expired entry.
+        let removed = cache.evict();
+        assert_eq!(removed, 1, "evict() must return count of removed entries");
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            1,
+            "iter().count() must match len() after evict()"
+        );
+    }
+
+    /// ExpiringLruCache: same contract.
+    #[test]
+    fn expiring_lru_cache_len_iter_evict() {
+        let mut cache: ExpiringLruCache<u32, Val> =
+            ExpiringLruCache::builder().max_size(10).build().unwrap();
+        cache.set(1, Val { expired: false });
+        cache.set(2, Val { expired: true });
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+        assert_eq!(
+            cache.iter().count(),
+            1,
+            "iter().count() must omit expired entries"
+        );
+        assert_eq!(cache.len(), 2, "len() must remain unchanged after iter()");
+
+        let removed = cache.evict();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+}
+
+#[cfg(feature = "time_stores")]
+mod len_iter_evict_contract_sharded {
+    use cached::time::Duration;
+    use cached::{ShardedLruTtlCache, ShardedTtlCache};
+
+    /// ShardedTtlCache: `len()` on the inherent method may count expired-but-unswept
+    /// entries; `evict()` removes them and the inherent `len()` then drops to the live count.
+    #[test]
+    fn sharded_ttl_cache_len_evict() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Inherent len() counts all stored entries regardless of expiry.
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2, "evict() must return count of removed entries");
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// ShardedLruTtlCache: same contract.
+    #[test]
+    fn sharded_lru_ttl_cache_len_evict() {
+        let cache: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(10)
+            .ttl(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache.len(),
+            0,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+}
+
+mod len_iter_evict_contract_sharded_expiring {
+    use cached::{Expires, ShardedExpiringCache, ShardedExpiringLruCache};
+
+    #[derive(Clone)]
+    struct Val {
+        expired: bool,
+    }
+
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    /// ShardedExpiringCache: `len()` counts expired-but-unswept entries; `evict()` removes them.
+    #[test]
+    fn sharded_expiring_cache_len_evict() {
+        let cache: ShardedExpiringCache<u32, Val> =
+            ShardedExpiringCache::builder().build().unwrap();
+        cache.set(1, Val { expired: false });
+        cache.set(2, Val { expired: true });
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 1, "evict() must remove only expired entries");
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
+    }
+
+    /// ShardedExpiringLruCache: same contract.
+    #[test]
+    fn sharded_expiring_lru_cache_len_evict() {
+        let cache: ShardedExpiringLruCache<u32, Val> = ShardedExpiringLruCache::builder()
+            .max_size(10)
+            .build()
+            .unwrap();
+        cache.set(1, Val { expired: false });
+        cache.set(2, Val { expired: true });
+
+        assert_eq!(
+            cache.len(),
+            2,
+            "len() must count expired-but-unswept entries"
+        );
+
+        let removed = cache.evict();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            cache.len(),
+            1,
+            "len() must reflect only live entries after evict()"
+        );
     }
 }

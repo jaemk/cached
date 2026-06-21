@@ -1,4 +1,4 @@
-error: `result_fallback` requires `ttl` to be set (e.g. `ttl = 60`). It serves the last cached `Ok` value when a refresh returns `Err`, but a refresh only happens after an entry expires. Without a TTL entries never expire, so the function body is never re-run for a cached key and the fallback can never fire — making the option a no-op. Set a TTL so cached entries expire and `result_fallback` has something to fall back to.
+error: `result_fallback` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set (e.g. `ttl_secs = 60`). It serves the last cached `Ok` value when a refresh returns `Err`, but a refresh only happens after an entry expires. Without a TTL entries never expire, so the function body is never re-run for a cached key and the fallback can never fire - making the option a no-op. Set a TTL so cached entries expire and `result_fallback` has something to fall back to.
  --> tests/ui/concurrent_cached_result_fallback_requires_ttl.rs:7:4
   |
 7 | fn my_fn(x: u32) -> Result<u32, String> {

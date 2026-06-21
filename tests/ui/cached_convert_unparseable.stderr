@@ -1,0 +1,5 @@
+error: Unknown literal value `{ this is not a block `
+ --> tests/ui/cached_convert_unparseable.rs:6:33
+  |
+6 | #[cached(key = "u32", convert = "{ this is not a block ")]
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^

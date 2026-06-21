@@ -1,4 +1,4 @@
-error: `expires` and `ty` are mutually exclusive — `expires` generates the store type automatically
+error: `expires` and `ty` are mutually exclusive - `expires` generates the store type automatically
  --> tests/ui/cached_expires_type_exclusive.rs:6:4
   |
 6 | fn my_fn(x: u32) -> u32 {

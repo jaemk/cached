@@ -1,14 +1,14 @@
 /*
 Synchronous Redis cache: `#[concurrent_cached(redis = true)]` and an explicit
 `ty = "RedisCache<..>"` + `create` store. The connection string is read from
-`CACHED_REDIS_CONNECTION_STRING`. (`main` is `#[tokio::main]`, hence the
-`async_tokio_rt_multi_thread` feature even though the cache itself is sync.)
+`CACHED_REDIS_CONNECTION_STRING`. (`main` is `#[tokio::main]`; tokio is a
+dev-dependency so it is always available for examples.)
 
 Start redis if you don't already have one:
     docker run --rm --name cached-redis-example -p 6379:6379 -d redis
 Run:
     CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
-        cargo run --example redis --features "redis_store,async_tokio_rt_multi_thread,proc_macro"
+        cargo run --example redis --features "redis_store,proc_macro"
 Cleanup:
     docker rm -f cached-redis-example
 */
@@ -31,7 +31,7 @@ enum ExampleError {
 // will be pulled from the env var: `CACHED_REDIS_CONNECTION_STRING`;
 #[concurrent_cached(
     redis = true,
-    ttl = 30,
+    ttl_secs = 30,
     cache_prefix_block = r##"{ "cache-redis-example-1" }"##,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
@@ -44,7 +44,7 @@ fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
 // is used to create a prefix for cache keys used by this function
 #[concurrent_cached(
     redis = true,
-    ttl = 30,
+    ttl_secs = 30,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
 fn cached_sleep_secs_example_2(secs: u64) -> Result<(), ExampleError> {
@@ -69,7 +69,9 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::RedisCache<u64, String>",
     create = r##" {
-        RedisCache::new("cache_redis_example_cached_sleep_secs_config", Duration::from_secs(1))
+        RedisCache::builder()
+            .prefix("cache_redis_example_cached_sleep_secs_config")
+            .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)
             .build()
@@ -92,8 +94,8 @@ async fn main() {
     cached_sleep_secs(2).unwrap();
     println!("done");
 
-    use cached::ConcurrentCached;
-    CACHED_SLEEP_SECS.cache_remove(&2).unwrap();
+    use cached::ConcurrentCachedExt;
+    CACHED_SLEEP_SECS.remove(&2).unwrap();
     print!("third sync call with a 2 seconds sleep (slow, after cache-remove)...");
     io::stdout().flush().unwrap();
     cached_sleep_secs(2).unwrap();

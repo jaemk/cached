@@ -1,13 +1,7 @@
 use crate::time::Duration;
 use crate::time::Instant;
 use std::cmp::Eq;
-use std::hash::Hash;
-
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 
 use std::collections::{HashMap, hash_map::Entry};
 
@@ -16,7 +10,7 @@ use {super::CachedAsync, std::future::Future};
 
 use crate::{CachedIter, CachedPeek, CloneCached};
 
-use super::{CacheEvict, Cached, TimedEntry};
+use super::{CacheEvict, Cached, DefaultHashBuilder, TimedEntry};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,8 +20,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// evicted if expired at time of retrieval.
 ///
 /// Note: This cache is in-memory only
-pub struct TtlCache<K, V> {
-    pub(super) store: HashMap<K, TimedEntry<V>, RandomState>,
+///
+/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
+/// from the view but does not remove them. Call `evict()` (via [`CacheEvict`](crate::CacheEvict))
+/// to physically remove expired entries and obtain an accurate live count.
+///
+/// The optional type parameter `S` selects the hash builder. It defaults to
+/// [`DefaultHashBuilder`] (ahash when the `ahash` feature is enabled, otherwise
+/// `std::collections::hash_map::RandomState`). Supply a custom `S` via
+/// [`TtlCacheBuilder::hasher`] to use a different hasher.
+pub struct TtlCache<K, V, S = DefaultHashBuilder> {
+    pub(super) store: HashMap<K, TimedEntry<V>, S>,
     pub(super) ttl: Duration,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
@@ -37,7 +41,7 @@ pub struct TtlCache<K, V> {
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K, V> std::fmt::Debug for TtlCache<K, V> {
+impl<K, V, S> std::fmt::Debug for TtlCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TtlCache")
             .field("ttl", &self.ttl)
@@ -51,10 +55,11 @@ impl<K, V> std::fmt::Debug for TtlCache<K, V> {
     }
 }
 
-impl<K, V> Clone for TtlCache<K, V>
+impl<K, V, S> Clone for TtlCache<K, V, S>
 where
     K: Clone + Hash + Eq,
     V: Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -71,20 +76,53 @@ where
 }
 
 /// Builder for [`TtlCache`].
-pub struct TtlCacheBuilder<K, V> {
+pub struct TtlCacheBuilder<K, V, S = DefaultHashBuilder> {
     ttl: Option<Duration>,
     capacity: Option<usize>,
     refresh: bool,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V> TtlCacheBuilder<K, V> {
-    /// Set the TTL for cache entries. Required — `build()` returns
+impl<K, V> Default for TtlCacheBuilder<K, V, DefaultHashBuilder> {
+    fn default() -> Self {
+        Self {
+            ttl: None,
+            capacity: None,
+            refresh: false,
+            on_evict: None,
+            hasher: super::new_default_hash_builder(),
+        }
+    }
+}
+
+impl<K, V, S> TtlCacheBuilder<K, V, S> {
+    /// Set the TTL for cache entries. Required -- `build()` returns
     /// `Err(BuildError::MissingRequired("ttl"))` if not set.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    /// Set the TTL for cache entries in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Set the TTL for cache entries in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Set the initial allocation capacity (optional).
@@ -116,21 +154,57 @@ impl<K, V> TtlCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used to hash keys in the internal `HashMap`. Calling this method
+    /// changes the builder's type parameter so `build()` returns a `TtlCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::{Cached, TtlCache};
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// let mut cache = TtlCache::<u32, u32>::builder()
+    ///     .ttl_secs(60)
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, 100);
+    /// assert_eq!(cache.cache_get(&1), Some(&100));
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> TtlCacheBuilder<K, V, S2> {
+        TtlCacheBuilder {
+            ttl: self.ttl,
+            capacity: self.capacity,
+            refresh: self.refresh,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// # Errors
     ///
     /// Returns [`BuildError`](super::BuildError) if `ttl` was not set or is zero
     /// ([`BuildError::MissingRequired`](super::BuildError::MissingRequired) /
-    /// [`BuildError::InvalidTtl`](super::BuildError::InvalidTtl)).
-    pub fn build(self) -> Result<TtlCache<K, V>, super::BuildError>
+    /// [`BuildError::InvalidValue`](super::BuildError::InvalidValue)).
+    pub fn build(self) -> Result<TtlCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq,
+        S: BuildHasher,
     {
         let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
         super::validate_ttl(ttl)?;
+        let store = match self.capacity {
+            Some(cap) => HashMap::with_capacity_and_hasher(cap, self.hasher),
+            None => HashMap::with_hasher(self.hasher),
+        };
         Ok(TtlCache {
-            store: TtlCache::<K, V>::new_store(self.capacity),
+            store,
             ttl,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -143,39 +217,53 @@ impl<K, V> TtlCacheBuilder<K, V> {
 }
 
 impl<K: Hash + Eq, V> TtlCache<K, V> {
+    /// Construct a ready-to-use [`TtlCache`] with the given `ttl`.
+    ///
+    /// For optional settings (initial capacity, `refresh_on_hit`, `on_evict`) use
+    /// [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` is zero. Use [`builder`](Self::builder) with
+    /// [`build`](TtlCacheBuilder::build) to handle a zero TTL without panicking.
+    #[must_use]
+    pub fn new(ttl: Duration) -> Self {
+        Self::builder()
+            .ttl(ttl)
+            .build()
+            .expect("TtlCache::new requires a non-zero ttl")
+    }
+
     /// Return a builder for constructing a [`TtlCache`].
     #[must_use]
     pub fn builder() -> TtlCacheBuilder<K, V> {
-        TtlCacheBuilder {
-            ttl: None,
-            capacity: None,
-            refresh: false,
-            on_evict: None,
+        TtlCacheBuilder::default()
+    }
+}
+
+impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
+    /// `true` if the entry is still live.
+    /// `expires_at = None` means the entry never expires (TTL was disabled at insert time).
+    #[inline]
+    pub(super) fn entry_live(expires_at: Option<Instant>) -> bool {
+        expires_at.is_none_or(|t| Instant::now() < t)
+    }
+
+    /// Compute the expiry instant for a new or refreshed entry given the current TTL.
+    /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
+    /// Returns `Err(CacheSetError::TimeBounds)` on overflow.
+    #[inline]
+    pub(super) fn compute_expires_at(
+        ttl: Duration,
+        now: Instant,
+    ) -> Result<Option<Instant>, super::CacheSetError> {
+        if ttl.is_zero() {
+            Ok(None)
+        } else {
+            now.checked_add(ttl)
+                .map(Some)
+                .ok_or(super::CacheSetError::TimeBounds)
         }
-    }
-
-    /// Returns whether the ttl is refreshed when the value is retrieved.
-    #[must_use]
-    pub fn refresh_on_hit(&self) -> bool {
-        self.refresh
-    }
-
-    /// Sets whether the ttl is refreshed when the value is retrieved.
-    pub fn set_refresh_on_hit(&mut self, refresh: bool) {
-        self.refresh = refresh;
-    }
-
-    fn new_store(capacity: Option<usize>) -> HashMap<K, TimedEntry<V>, RandomState> {
-        capacity.map_or_else(
-            || HashMap::with_hasher(RandomState::new()),
-            |cap| HashMap::with_capacity_and_hasher(cap, RandomState::new()),
-        )
-    }
-
-    /// Returns a reference to the cache's `store`
-    #[must_use]
-    pub fn store(&self) -> &HashMap<K, TimedEntry<V>, RandomState> {
-        &self.store
     }
 
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
@@ -202,14 +290,15 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
     }
 
     /// Evict expired values from the cache.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
-        let ttl = self.ttl;
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
         let now = Instant::now();
         self.store.retain(|key, entry| {
-            if now.saturating_duration_since(entry.instant) < ttl {
+            // None means never-expires; Some(t) expires when now >= t.
+            if entry.expires_at.is_none_or(|t| now < t) {
                 true
             } else {
                 if let Some(on_evict) = on_evict {
@@ -224,24 +313,29 @@ impl<K: Hash + Eq, V> TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
+    type Error = super::CacheSetError;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(key)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(entry.expires_at)
         {
             self.hits.fetch_add(1, Ordering::Relaxed);
             if self.refresh {
-                entry.instant = Instant::now();
+                entry.expires_at = Self::compute_expires_at(self.ttl, Instant::now())
+                    .ok()
+                    .flatten()
+                    .or(entry.expires_at);
             }
             // SAFETY: `ptr` points into a HashMap entry obtained from `get_mut`.
             // We return immediately without modifying the map, so the entry is
             // not moved while the returned reference is live. The raw pointer is
             // needed because the borrow checker cannot see that the `&mut entry`
-            // borrow ends here when `refresh` mutated `entry.instant` above.
+            // borrow ends here when `refresh` mutated `entry.expires_at` above.
             let ptr = &entry.value as *const V;
             return Some(unsafe { &*ptr });
         }
@@ -261,13 +355,16 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(key)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(entry.expires_at)
         {
             self.hits.fetch_add(1, Ordering::Relaxed);
             if self.refresh {
-                entry.instant = Instant::now();
+                entry.expires_at = Self::compute_expires_at(self.ttl, Instant::now())
+                    .ok()
+                    .flatten()
+                    .or(entry.expires_at);
             }
-            // SAFETY: same as `cache_get` — entry is not moved between obtaining
+            // SAFETY: same as `cache_get` -- entry is not moved between obtaining
             // the pointer and returning, and `&mut self` prevents concurrent access.
             let ptr = &mut entry.value as *mut V;
             return Some(unsafe { &mut *ptr });
@@ -282,12 +379,17 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         None
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
-                if occupied.get().instant.elapsed() < self.ttl {
+                if Self::entry_live(occupied.get().expires_at) {
                     if self.refresh {
-                        occupied.get_mut().instant = Instant::now();
+                        let now = Instant::now();
+                        let new_exp = Self::compute_expires_at(self.ttl, now)
+                            .ok()
+                            .flatten()
+                            .or(occupied.get().expires_at);
+                        occupied.get_mut().expires_at = new_exp;
                     }
                     self.hits.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -297,8 +399,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                     let val = f();
+                    let now = Instant::now();
+                    let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     occupied.insert(TimedEntry {
-                        instant: Instant::now(),
+                        expires_at,
                         value: val,
                     });
                 }
@@ -307,9 +411,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
             Entry::Vacant(vacant) => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 let val = f();
+                let now = Instant::now();
+                let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                 &mut vacant
                     .insert(TimedEntry {
-                        instant: Instant::now(),
+                        expires_at,
                         value: val,
                     })
                     .value
@@ -317,16 +423,21 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
         }
     }
 
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
     ) -> Result<&mut V, E> {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
-                if occupied.get().instant.elapsed() < self.ttl {
+                if Self::entry_live(occupied.get().expires_at) {
                     if self.refresh {
-                        occupied.get_mut().instant = Instant::now();
+                        let now = Instant::now();
+                        let new_exp = Self::compute_expires_at(self.ttl, now)
+                            .ok()
+                            .flatten()
+                            .or(occupied.get().expires_at);
+                        occupied.get_mut().expires_at = new_exp;
                     }
                     self.hits.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -336,8 +447,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                     let val = f()?;
+                    let now = Instant::now();
+                    let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     occupied.insert(TimedEntry {
-                        instant: Instant::now(),
+                        expires_at,
                         value: val,
                     });
                 }
@@ -346,9 +459,11 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
             Entry::Vacant(vacant) => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 let val = f()?;
+                let now = Instant::now();
+                let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                 Ok(&mut vacant
                     .insert(TimedEntry {
-                        instant: Instant::now(),
+                        expires_at,
                         value: val,
                     })
                     .value)
@@ -358,18 +473,40 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
 
     /// Insert a key-value pair. Returns the previous value only if it had not yet expired.
     /// Expired previous values are silently discarded.
+    ///
+    /// If computing the expiry instant overflows (very large TTL), the entry is stored
+    /// with `expires_at = None` (never expires). Use [`cache_try_set`](crate::Cached::cache_try_set)
+    /// when you need to detect this overflow condition.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
+        let now = Instant::now();
+        let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
         let entry = TimedEntry {
-            instant: Instant::now(),
+            expires_at,
             value: val,
         };
         self.store.insert(key, entry).and_then(|entry| {
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(entry.expires_at) {
                 Some(entry.value)
             } else {
                 None
             }
         })
+    }
+
+    fn cache_try_set(&mut self, key: K, val: V) -> Result<Option<V>, super::CacheSetError> {
+        let now = Instant::now();
+        let expires_at = Self::compute_expires_at(self.ttl, now)?;
+        let entry = TimedEntry {
+            expires_at,
+            value: val,
+        };
+        Ok(self.store.insert(key, entry).and_then(|entry| {
+            if Self::entry_live(entry.expires_at) {
+                Some(entry.value)
+            } else {
+                None
+            }
+        }))
     }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
@@ -381,7 +518,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
                 on_evict(&stored_k, &entry.value);
             }
             self.evictions.fetch_add(1, Ordering::Relaxed);
-            if entry.instant.elapsed() < self.ttl {
+            if Self::entry_live(entry.expires_at) {
                 Some(entry.value)
             } else {
                 None
@@ -417,7 +554,9 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
     }
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
-        self.store = Self::new_store(self.initial_capacity);
+        // We use clear + shrink_to rather than rebuilding so we don't need S: Clone.
+        self.store.clear();
+        self.store.shrink_to(self.initial_capacity.unwrap_or(0));
         self.cache_reset_metrics();
     }
     fn cache_size(&self) -> usize {
@@ -434,15 +573,14 @@ impl<K: Hash + Eq, V> Cached<K, V> for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedIter<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedIter<K, V> for TtlCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
         V: 'a,
     {
-        let ttl = self.ttl;
         self.store.iter().filter_map(move |(k, entry)| {
-            if entry.instant.elapsed() < ttl {
+            if Self::entry_live(entry.expires_at) {
                 Some((k, &entry.value))
             } else {
                 None
@@ -451,14 +589,14 @@ impl<K: Hash + Eq, V> CachedIter<K, V> for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedPeek<K, V> for TtlCache<K, V, S> {
     fn cache_peek<Q>(&self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get(k)
-            && entry.instant.elapsed() < self.ttl
+            && Self::entry_live(entry.expires_at)
         {
             return Some(&entry.value);
         }
@@ -466,17 +604,26 @@ impl<K: Hash + Eq, V> CachedPeek<K, V> for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> crate::CacheTtl for TtlCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> crate::CacheTtl for TtlCache<K, V, S> {
     fn ttl(&self) -> Option<Duration> {
-        Some(self.ttl)
+        // A zero TTL means expiry is disabled.
+        if self.ttl.is_zero() {
+            None
+        } else {
+            Some(self.ttl)
+        }
     }
+    /// A zero `ttl` disables expiry -- exactly equivalent to `unset_ttl`.
+    /// Returns the previous TTL, or `None` if expiry was already disabled.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
         let old = self.ttl;
         self.ttl = ttl;
-        Some(old)
+        if old.is_zero() { None } else { Some(old) }
     }
     fn unset_ttl(&mut self) -> Option<Duration> {
-        None
+        let old = self.ttl;
+        self.ttl = Duration::ZERO;
+        if old.is_zero() { None } else { Some(old) }
     }
     fn refresh_on_hit(&self) -> bool {
         self.refresh
@@ -488,21 +635,28 @@ impl<K: Hash + Eq, V> crate::CacheTtl for TtlCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TtlCache<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
+    for TtlCache<K, V, S>
+{
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(k) {
-            let expired = entry.instant.elapsed() >= self.ttl;
+            let expired = !Self::entry_live(entry.expires_at);
             if expired {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 (Some(entry.value.clone()), true)
             } else {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    entry.instant = Instant::now();
+                    let now = Instant::now();
+                    let new_exp = Self::compute_expires_at(self.ttl, now)
+                        .ok()
+                        .flatten()
+                        .or(entry.expires_at);
+                    entry.expires_at = new_exp;
                 }
                 (Some(entry.value.clone()), false)
             }
@@ -511,14 +665,34 @@ impl<K: Hash + Eq + Clone, V: Clone> CloneCached<K, V> for TtlCache<K, V> {
             (None, false)
         }
     }
+
+    /// Peek at the entry (including expired entries) without any read side effects.
+    ///
+    /// Returns `(Some(v), true)` for an expired entry, `(Some(v), false)` for a live
+    /// entry, and `(None, false)` when the key is absent. Does not update hit/miss
+    /// counters, does not promote in LRU order, and does not renew the TTL.
+    fn cache_peek_with_expiry_status<Q>(&self, k: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        if let Some(entry) = self.store.get(k) {
+            let expired = !Self::entry_live(entry.expires_at);
+            (Some(entry.value.clone()), expired)
+        } else {
+            (None, false)
+        }
+    }
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for TtlCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for TtlCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
+    S: BuildHasher + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -532,9 +706,14 @@ where
         async move {
             match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
-                    if occupied.get().instant.elapsed() < self.ttl {
+                    if Self::entry_live(occupied.get().expires_at) {
                         if self.refresh {
-                            occupied.get_mut().instant = Instant::now();
+                            let now = Instant::now();
+                            let new_exp = Self::compute_expires_at(self.ttl, now)
+                                .ok()
+                                .flatten()
+                                .or(occupied.get().expires_at);
+                            occupied.get_mut().expires_at = new_exp;
                         }
                         self.hits.fetch_add(1, Ordering::Relaxed);
                     } else {
@@ -543,8 +722,10 @@ where
                             on_evict(occupied.key(), &occupied.get().value);
                         }
                         self.evictions.fetch_add(1, Ordering::Relaxed);
+                        let now = Instant::now();
+                        let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                         occupied.insert(TimedEntry {
-                            instant: Instant::now(),
+                            expires_at,
                             value: f().await,
                         });
                     }
@@ -552,9 +733,11 @@ where
                 }
                 Entry::Vacant(vacant) => {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    let now = Instant::now();
+                    let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     &mut vacant
                         .insert(TimedEntry {
-                            instant: Instant::now(),
+                            expires_at,
                             value: f().await,
                         })
                         .value
@@ -563,7 +746,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -578,9 +761,14 @@ where
         async move {
             let v = match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
-                    if occupied.get().instant.elapsed() < self.ttl {
+                    if Self::entry_live(occupied.get().expires_at) {
                         if self.refresh {
-                            occupied.get_mut().instant = Instant::now();
+                            let now = Instant::now();
+                            let new_exp = Self::compute_expires_at(self.ttl, now)
+                                .ok()
+                                .flatten()
+                                .or(occupied.get().expires_at);
+                            occupied.get_mut().expires_at = new_exp;
                         }
                         self.hits.fetch_add(1, Ordering::Relaxed);
                     } else {
@@ -589,8 +777,10 @@ where
                             on_evict(occupied.key(), &occupied.get().value);
                         }
                         self.evictions.fetch_add(1, Ordering::Relaxed);
+                        let now = Instant::now();
+                        let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                         occupied.insert(TimedEntry {
-                            instant: Instant::now(),
+                            expires_at,
                             value: f().await?,
                         });
                     }
@@ -598,9 +788,11 @@ where
                 }
                 Entry::Vacant(vacant) => {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    let now = Instant::now();
+                    let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     &mut vacant
                         .insert(TimedEntry {
-                            instant: Instant::now(),
+                            expires_at,
                             value: f().await?,
                         })
                         .value
@@ -611,7 +803,7 @@ where
     }
 }
 
-impl<K: std::hash::Hash + Eq + Clone, V> CacheEvict for TtlCache<K, V> {
+impl<K: std::hash::Hash + Eq + Clone, V, S: BuildHasher> CacheEvict for TtlCache<K, V, S> {
     fn evict(&mut self) -> usize {
         TtlCache::evict(self)
     }
@@ -623,6 +815,70 @@ mod tests {
     use crate::stores::Cached;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn new_returns_ready_cache_respecting_ttl() {
+        use crate::CacheTtl;
+        let mut c: TtlCache<u32, u32> = TtlCache::new(crate::time::Duration::from_millis(50));
+        assert_eq!(
+            CacheTtl::ttl(&c),
+            Some(crate::time::Duration::from_millis(50))
+        );
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero ttl")]
+    fn new_zero_ttl_panics() {
+        let _c: TtlCache<u32, u32> = TtlCache::new(crate::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        use crate::CacheTtl;
+        let c: TtlCache<u32, u32> = TtlCache::builder().ttl_secs(7).build().unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(crate::time::Duration::from_secs(7)));
+
+        let c: TtlCache<u32, u32> = TtlCache::builder().ttl_millis(250).build().unwrap();
+        assert_eq!(
+            CacheTtl::ttl(&c),
+            Some(crate::time::Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        use crate::CacheTtl;
+        // ttl(secs=10) then ttl_secs(5) -> 5s
+        let c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(10))
+            .ttl_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(crate::time::Duration::from_secs(5)));
+
+        // ttl_secs then ttl_millis -> the millis value
+        let c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl_secs(10)
+            .ttl_millis(500)
+            .build()
+            .unwrap();
+        assert_eq!(
+            CacheTtl::ttl(&c),
+            Some(crate::time::Duration::from_millis(500))
+        );
+
+        // ttl_millis then ttl -> the ttl value
+        let c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl_millis(500)
+            .ttl(crate::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        assert_eq!(CacheTtl::ttl(&c), Some(crate::time::Duration::from_secs(3)));
+    }
 
     #[test]
     fn cache_clear_with_on_evict_fires_for_all_entries() {
@@ -799,11 +1055,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Even for an expired entry, on_evict must fire.
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         // No fire for absent key.
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
@@ -816,12 +1072,60 @@ mod tests {
         c.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u32); // expired but present — must increment
-        c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32); // expired but present -- must increment
+        let _ = c.cache_remove_entry(&999u32); // absent -- must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,
             "cache_remove_entry must increment evictions for present key only"
         );
+    }
+
+    // --- custom hasher tests ---
+
+    #[test]
+    fn custom_hasher_get_set_round_trip() {
+        use std::collections::hash_map::RandomState;
+        let mut c = TtlCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), Some(&200));
+        assert_eq!(c.cache_hits(), Some(2));
+        assert_eq!(c.cache_misses(), Some(0));
+        assert_eq!(c.cache_get(&99), None);
+        assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn default_constructor_still_works() {
+        let mut c: TtlCache<u32, u32> = TtlCache::new(crate::time::Duration::from_secs(60));
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+
+        let mut b = TtlCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .build()
+            .unwrap();
+        b.cache_set(2, 20);
+        assert_eq!(b.cache_get(&2), Some(&20));
+    }
+
+    #[test]
+    fn custom_hasher_respects_ttl_expiry() {
+        use std::collections::hash_map::RandomState;
+        let mut c = TtlCache::<u32, u32>::builder()
+            .ttl(crate::time::Duration::from_millis(50))
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
     }
 }

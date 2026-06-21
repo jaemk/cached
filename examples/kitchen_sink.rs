@@ -8,7 +8,7 @@ Run:
 */
 
 use cached::macros::cached;
-use cached::{Cached, LruCache, UnboundCache};
+use cached::{Cached, CachedExt, LruCache, UnboundCache};
 use std::cmp::Eq;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -29,7 +29,7 @@ fn fib(n: u32) -> u32 {
 // Note that the cache key type is a tuple of function argument types.
 #[cached(
     ty = "UnboundCache<u32, u32>",
-    create = "{ UnboundCache::builder().capacity(50).build().unwrap() }"
+    create = UnboundCache::builder().capacity(50).build().unwrap()
 )]
 fn fib_specific(n: u32) -> u32 {
     if n == 0 || n == 1 {
@@ -50,7 +50,7 @@ fn slow(a: u32, b: u32) -> u32 {
 // Note that the cache key type is a `String` created from the borrow arguments
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
+    create = LruCache::builder().max_size(100).build().unwrap(),
     convert = r#"{ format!("{a}{b}") }"#
 )]
 fn keyed(a: &str, b: &str) -> usize {
@@ -73,6 +73,8 @@ impl<K: Hash + Eq, V> MyCache<K, V> {
     }
 }
 impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -87,10 +89,10 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
     {
         self.store.get_mut(k)
     }
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
         self.store.entry(k).or_insert_with(f)
     }
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         k: K,
         f: F,
@@ -135,7 +137,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for MyCache<K, V> {
 #[cached(
     name = "CUSTOM",
     ty = "MyCache<u32, ()>",
-    create = "{ MyCache::with_capacity(50) }"
+    create = MyCache::with_capacity(50)
 )]
 fn custom(n: u32) {
     if n == 0 {
@@ -144,22 +146,22 @@ fn custom(n: u32) {
     custom(n - 1);
 }
 
-#[cached(ttl = 1)]
+#[cached(ttl_secs = 1)]
 fn expires(a: i32) -> i32 {
     a
 }
 
-#[cached(ttl = 1)]
+#[cached(ttl_secs = 1)]
 fn expires_result(a: i32) -> Result<i32, ()> {
     Ok(a)
 }
 
-#[cached(ttl = 1)]
+#[cached(ttl_secs = 1)]
 fn expires_option(a: i32) -> Option<i32> {
     Some(a)
 }
 
-#[cached(ttl = 1, name = "EXPIRES_FOR_PRIMING")]
+#[cached(ttl_secs = 1, name = "EXPIRES_FOR_PRIMING")]
 fn expires_for_priming(a: i32) -> i32 {
     a
 }
@@ -169,9 +171,11 @@ pub fn main() {
     fib(3);
     fib(3);
     {
-        let cache = FIB.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        // `.0` accesses the inner lock of the (lock, key-buckets) tuple generated
+        // by the default `sync_writes = "by_key"` mode.
+        let cache = FIB.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
     }
     fib(10);
@@ -181,9 +185,9 @@ pub fn main() {
     fib_specific(20);
     fib_specific(20);
     {
-        let cache = FIB_SPECIFIC.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        let cache = FIB_SPECIFIC.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
     }
     fib_specific(20);
@@ -192,9 +196,9 @@ pub fn main() {
     println!("\n ** custom cache **");
     custom(25);
     {
-        let cache = CUSTOM.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        let cache = CUSTOM.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure lock is dropped
     }
 
@@ -204,9 +208,9 @@ pub fn main() {
     println!(" - second run `slow(10)`");
     slow(10, 10);
     {
-        let cache = SLOW.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        let cache = SLOW.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
         // make sure the cache-lock is dropped
     }
 
@@ -217,9 +221,9 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     expires(1);
     {
-        let cache = EXPIRES.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        let cache = EXPIRES.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
     }
 
     println!("\n ** expires_result **");
@@ -229,9 +233,9 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     let _ = expires_result(1);
     {
-        let cache = EXPIRES_RESULT.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        let cache = EXPIRES_RESULT.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
     }
 
     println!("\n ** expires_option **");
@@ -241,9 +245,9 @@ pub fn main() {
     sleep(Duration::new(2, 0));
     expires_option(1);
     {
-        let cache = EXPIRES_OPTION.read();
-        println!("hits: {:?}", cache.cache_hits());
-        println!("misses: {:?}", cache.cache_misses());
+        let cache = EXPIRES_OPTION.0.read();
+        println!("hits: {:?}", cache.hits());
+        println!("misses: {:?}", cache.misses());
     }
 
     println!("\n ** expires_for_priming **");
@@ -251,25 +255,25 @@ pub fn main() {
     expires_for_priming(1);
     // Second call: cache hit (key 1 is still within its TTL)
     expires_for_priming(1);
-    // Prime key 1 and key 2 — refreshes the cache directly without affecting hit/miss counters
+    // Prime key 1 and key 2 - refreshes the cache directly without affecting hit/miss counters
     expires_for_priming_prime_cache(1);
     expires_for_priming_prime_cache(2);
     {
-        let c = EXPIRES_FOR_PRIMING.read();
+        let c = EXPIRES_FOR_PRIMING.0.read();
         // Only the two explicit function calls above count toward metrics
-        assert_eq!(c.cache_hits(), Some(1)); // second call was a hit
-        assert_eq!(c.cache_misses(), Some(1)); // first call was a miss
+        assert_eq!(c.hits(), Some(1)); // second call was a hit
+        assert_eq!(c.misses(), Some(1)); // first call was a miss
     }
     // Sleep longer than the 1-second TTL so the cached values expire
     sleep(Duration::new(2, 0));
     // Re-prime key 1 so it's fresh in the cache again
     expires_for_priming_prime_cache(1);
-    // Now calling the function finds the freshly-primed value — it's a hit
+    // Now calling the function finds the freshly-primed value - it's a hit
     assert_eq!(expires_for_priming(1), 1);
     {
-        let c = EXPIRES_FOR_PRIMING.read();
-        assert_eq!(c.cache_hits(), Some(2)); // this last call was also a hit
-        assert_eq!(c.cache_misses(), Some(1)); // still only 1 miss
+        let c = EXPIRES_FOR_PRIMING.0.read();
+        assert_eq!(c.hits(), Some(2)); // this last call was also a hit
+        assert_eq!(c.misses(), Some(1)); // still only 1 miss
     }
 
     println!("done!");

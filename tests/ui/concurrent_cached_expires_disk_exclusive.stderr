@@ -1,4 +1,4 @@
-error: `expires` and `disk` are mutually exclusive — `expires` selects sharded in-memory expiring stores
+error: `expires` and `disk` are mutually exclusive - `expires` selects sharded in-memory expiring stores
  --> tests/ui/concurrent_cached_expires_disk_exclusive.rs:4:4
   |
 4 | fn my_fn(x: u32) -> Result<u32, String> {

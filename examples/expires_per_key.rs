@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cached::macros::{cached, once};
 use cached::stores::ExpiringCache;
 use cached::time::{Duration, Instant};
-use cached::{Cached, Expires, ExpiringLruCache};
+use cached::{CachedExt, Expires, ExpiringLruCache};
 
 static CALL_N: AtomicU64 = AtomicU64::new(0);
 
@@ -41,14 +41,14 @@ impl Expires for MyValue {
     }
 }
 
-// A keyed cache using the #[cached] macro — each user_id key independently expires
+// A keyed cache using the #[cached] macro - each user_id key independently expires
 // when its stored value reports `is_expired() == true`.
 //
 // `expires = true` alone gives an unbounded ExpiringCache.
 // Add `max_size = N` to switch to an LRU-bounded ExpiringLruCache.
 // `key`/`convert` narrow the cache key to just user_id so expiry_offset_ms only
 // influences the token's lifetime, not which cache slot it occupies.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token(user_id: u64, expiry_offset_ms: u64) -> MyValue {
     println!("  -> [fetch_token] generating new token for user {user_id}...");
     let n = CALL_N.fetch_add(1, Ordering::Relaxed);
@@ -72,7 +72,7 @@ fn get_session_token(expiry_offset_ms: u64) -> MyValue {
 // `expires = true` composes with a `Result` return: only the `Ok(MyValue)` is
 // cached (and expires per-value via `Expires`); an `Err` is never cached, so a
 // failing call always re-executes.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token_result(user_id: u64, expiry_offset_ms: u64, fail: bool) -> Result<MyValue, String> {
     println!("  -> [fetch_token_result] generating token for user {user_id} (fail={fail})...");
     if fail {
@@ -88,7 +88,7 @@ fn fetch_token_result(user_id: u64, expiry_offset_ms: u64, fail: bool) -> Result
 // `expires = true` composes with an `Option` return: only `Some(MyValue)` is
 // cached (and expires per-value); a `None` is never cached, so a miss keeps
 // re-executing until a `Some` is produced.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token_option(user_id: u64, expiry_offset_ms: u64, found: bool) -> Option<MyValue> {
     println!("  -> [fetch_token_option] generating token for user {user_id} (found={found})...");
     if !found {
@@ -114,19 +114,19 @@ fn main() {
         data: "Short-lived LRU response".to_string(),
         expires_at: now + Duration::from_millis(500),
     };
-    lru_cache.cache_set("short", quick_expiry);
+    lru_cache.set("short", quick_expiry);
 
     let long_expiry = MyValue {
         data: "Long-lived LRU response".to_string(),
         expires_at: now + Duration::from_secs(10),
     };
-    lru_cache.cache_set("long", long_expiry);
+    lru_cache.set("long", long_expiry);
 
     println!("Immediately after insertion into ExpiringLruCache:");
-    if let Some(val) = lru_cache.cache_get(&"short") {
+    if let Some(val) = lru_cache.get(&"short") {
         println!("  'short' exists: '{}'", val.data);
     }
-    if let Some(val) = lru_cache.cache_get(&"long") {
+    if let Some(val) = lru_cache.get(&"long") {
         println!("  'long' exists: '{}'", val.data);
     }
 
@@ -134,11 +134,11 @@ fn main() {
     std::thread::sleep(Duration::from_secs(1));
 
     println!("After waiting 1 second:");
-    match lru_cache.cache_get(&"short") {
+    match lru_cache.get(&"short") {
         Some(val) => println!("  'short' exists: '{}'", val.data),
         None => println!("  'short' has expired and was removed!"),
     }
-    match lru_cache.cache_get(&"long") {
+    match lru_cache.get(&"long") {
         Some(val) => println!("  'long' exists: '{}' (still active)", val.data),
         None => println!("  'long' expired!"),
     }
@@ -153,19 +153,19 @@ fn main() {
         data: "Short-lived response".to_string(),
         expires_at: Instant::now() + Duration::from_millis(500),
     };
-    expiring_cache.cache_set("short", quick_expiry);
+    expiring_cache.set("short", quick_expiry);
 
     let long_expiry = MyValue {
         data: "Long-lived response".to_string(),
         expires_at: Instant::now() + Duration::from_secs(10),
     };
-    expiring_cache.cache_set("long", long_expiry);
+    expiring_cache.set("long", long_expiry);
 
     println!("Immediately after insertion into ExpiringCache:");
-    if let Some(val) = expiring_cache.cache_get(&"short") {
+    if let Some(val) = expiring_cache.get(&"short") {
         println!("  'short' exists: '{}'", val.data);
     }
-    if let Some(val) = expiring_cache.cache_get(&"long") {
+    if let Some(val) = expiring_cache.get(&"long") {
         println!("  'long' exists: '{}'", val.data);
     }
 
@@ -173,11 +173,11 @@ fn main() {
     std::thread::sleep(Duration::from_secs(1));
 
     println!("After waiting 1 second:");
-    match expiring_cache.cache_get(&"short") {
+    match expiring_cache.get(&"short") {
         Some(val) => println!("  'short' exists: '{}'", val.data),
         None => println!("  'short' has expired and was removed!"),
     }
-    match expiring_cache.cache_get(&"long") {
+    match expiring_cache.get(&"long") {
         Some(val) => println!("  'long' exists: '{}' (still active)", val.data),
         None => println!("  'long' expired!"),
     }
@@ -188,7 +188,7 @@ fn main() {
     println!("\n--- 3. #[cached(expires = true)] Macro (keyed) ---");
     // Each cache key (user_id) has its own independent expiry.
 
-    // First calls for each user — both are cache misses.
+    // First calls for each user - both are cache misses.
     println!("First call for user 1 (expires in 500ms):");
     let u1_t1 = fetch_token(1, 500);
     println!("  Returned: '{}'", u1_t1.data);
@@ -197,7 +197,7 @@ fn main() {
     let u2_t1 = fetch_token(2, 10_000);
     println!("  Returned: '{}'", u2_t1.data);
 
-    // Same arguments → cache hits, function not re-executed.
+    // Same arguments -> cache hits, function not re-executed.
     println!("\nSecond call for user 1 (cache hit):");
     let u1_t2 = fetch_token(1, 500);
     println!("  Returned: '{}' (same token)", u1_t2.data);
@@ -205,7 +205,7 @@ fn main() {
     println!("\nWaiting 1 second...");
     std::thread::sleep(Duration::from_secs(1));
 
-    // User 1's token has expired → re-evaluated. User 2's is still live.
+    // User 1's token has expired -> re-evaluated. User 2's is still live.
     println!("\nAfter 1 second:");
     let u1_t3 = fetch_token(1, 500);
     println!("  user 1: '{}' (re-evaluated — was expired)", u1_t3.data);

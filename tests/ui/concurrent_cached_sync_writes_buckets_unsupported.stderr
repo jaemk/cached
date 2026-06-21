@@ -1,0 +1,5 @@
+error: `sync_writes_buckets` is not supported on `#[concurrent_cached]`
+ --> tests/ui/concurrent_cached_sync_writes_buckets_unsupported.rs:3:21
+  |
+3 | #[concurrent_cached(sync_writes_buckets = 32)]
+  |                     ^^^^^^^^^^^^^^^^^^^

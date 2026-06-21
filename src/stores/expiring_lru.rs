@@ -1,6 +1,6 @@
-use super::{CacheEvict, Cached, LruCache};
+use super::{CacheEvict, Cached, DefaultHashBuilder, LruCache};
 use crate::{CachedIter, CachedPeek, CloneCached};
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,7 +12,7 @@ use {super::CachedAsync, std::future::Future};
 /// and are removed on access:
 ///
 /// ```rust
-/// use cached::{Cached, Expires, ExpiringCache, ExpiringLruCache};
+/// use cached::{CachedExt, Expires, ExpiringCache, ExpiringLruCache};
 ///
 /// struct Token {
 ///     #[allow(dead_code)]
@@ -26,20 +26,36 @@ use {super::CachedAsync, std::future::Future};
 /// }
 ///
 /// // Unbounded store (default for `#[cached(expires = true)]`)
-/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::builder().build().unwrap();
-/// cache.cache_set(1, Token { value: "live".into(), expired: false });
-/// assert!(cache.cache_get(&1).is_some());
-/// cache.cache_set(2, Token { value: "stale".into(), expired: true });
-/// assert!(cache.cache_get(&2).is_none()); // expired -> not returned
+/// let mut cache: ExpiringCache<u32, Token> = ExpiringCache::new();
+/// cache.set(1, Token { value: "live".into(), expired: false });
+/// assert!(cache.get(&1).is_some());
+/// cache.set(2, Token { value: "stale".into(), expired: true });
+/// assert!(cache.get(&2).is_none()); // expired -> not returned
 ///
 /// // LRU-bounded store (`#[cached(expires = true, max_size = N)]`)
-/// let mut lru: ExpiringLruCache<u32, Token> = ExpiringLruCache::builder().max_size(8).build().unwrap();
-/// lru.cache_set(3, Token { value: "live".into(), expired: false });
-/// assert!(lru.cache_get(&3).is_some());
+/// let mut lru: ExpiringLruCache<u32, Token> = ExpiringLruCache::new(8);
+/// lru.set(3, Token { value: "live".into(), expired: false });
+/// assert!(lru.get(&3).is_some());
 /// ```
 pub trait Expires {
     /// `is_expired` returns whether the value has expired.
+    ///
+    /// This is the authoritative liveness check: callers must use `is_expired` to
+    /// decide whether a cached value may be returned, not `expires_at`.
     fn is_expired(&self) -> bool;
+
+    /// Returns the [`std::time::Instant`] at which this value expires, or `None` if the
+    /// expiry instant is unknown or not tracked by this type.
+    ///
+    /// The default implementation returns `None`. Override this in types that record a
+    /// concrete deadline to enable observability (logging, metrics) and to allow callers
+    /// to extend or compare deadlines without re-computing them.
+    ///
+    /// `is_expired()` remains the authoritative liveness check; `expires_at` is advisory
+    /// and must not be used as a substitute for `is_expired`.
+    fn expires_at(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
 
 /// LRU-bounded cache with per-value expiry.
@@ -54,19 +70,24 @@ pub trait Expires {
 ///
 /// Note: This cache is in-memory only.
 ///
+/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
+/// from the view but does not remove them. Call `evict()` (via [`CacheEvict`](crate::CacheEvict))
+/// to physically remove expired entries and obtain an accurate live count.
+///
 /// Note: once specialization is stable (`#[feature(specialization)]`), the expiry-checking
 /// behavior here could be folded into [`LruCache`] via a specialized `Cached<K, V>` impl
 /// for `V: Expires`, eliminating this separate type. Until then, the two must remain
 /// distinct because overlapping blanket impls are not allowed on stable Rust.
-pub struct ExpiringLruCache<K: Hash + Eq, V: Expires> {
-    pub(super) store: LruCache<K, V>,
+pub struct ExpiringLruCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
+    pub(super) store: LruCache<K, V, S>,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
     pub(super) evictions: AtomicU64,
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K: Hash + Eq, V: Expires> std::fmt::Debug for ExpiringLruCache<K, V> {
+impl<K: Hash + Eq, V: Expires, S> std::fmt::Debug for ExpiringLruCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExpiringLruCache")
             .field("hits", &self.hits.load(Ordering::Relaxed))
@@ -77,10 +98,34 @@ impl<K: Hash + Eq, V: Expires> std::fmt::Debug for ExpiringLruCache<K, V> {
     }
 }
 
-impl<K, V> Clone for ExpiringLruCache<K, V>
+/// Two `ExpiringLruCache` values are equal when their stored entries are equal
+/// (same keys, same values). Equality is membership-based: LRU recency order is
+/// not compared. Metrics (hits, misses, evictions) and the `on_evict` callback
+/// are not part of the comparison.
+impl<K, V, S> PartialEq for ExpiringLruCache<K, V, S>
+where
+    K: Clone + Hash + Eq,
+    V: Expires + PartialEq,
+    S: BuildHasher,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.store == other.store
+    }
+}
+
+impl<K, V, S> Eq for ExpiringLruCache<K, V, S>
+where
+    K: Clone + Hash + Eq,
+    V: Expires + Eq,
+    S: BuildHasher,
+{
+}
+
+impl<K, V, S> Clone for ExpiringLruCache<K, V, S>
 where
     K: Clone + Hash + Eq,
     V: Expires + Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -96,16 +141,27 @@ where
 /// Builder for [`ExpiringLruCache`].
 ///
 /// Note: there is intentionally **no `.ttl()` setter**. An `ExpiringLruCache` has no global
-/// expiry duration — each value decides when it is expired via the [`Expires`] trait, while
+/// expiry duration -- each value decides when it is expired via the [`Expires`] trait, while
 /// `max_size` bounds the entry count via LRU. For a single global TTL applied to every entry,
 /// use [`LruTtlCache`](crate::stores::LruTtlCache) instead.
 #[doc(alias = "ttl")]
-pub struct ExpiringLruCacheBuilder<K, V: Expires> {
+pub struct ExpiringLruCacheBuilder<K, V: Expires, S = DefaultHashBuilder> {
     size: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V: Expires> ExpiringLruCacheBuilder<K, V> {
+impl<K, V: Expires> Default for ExpiringLruCacheBuilder<K, V, DefaultHashBuilder> {
+    fn default() -> Self {
+        Self {
+            size: None,
+            on_evict: None,
+            hasher: super::new_default_hash_builder(),
+        }
+    }
+}
+
+impl<K, V: Expires, S> ExpiringLruCacheBuilder<K, V, S> {
     /// Set the maximum number of entries.
     #[doc(alias = "size")]
     #[doc(alias = "capacity")]
@@ -126,24 +182,60 @@ impl<K, V: Expires> ExpiringLruCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used to hash keys in the internal `LruCache`. Calling this method
+    /// changes the builder's type parameter so `build()` returns an `ExpiringLruCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::{Cached, Expires, ExpiringLruCache};
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// struct Val(bool);
+    /// impl Expires for Val { fn is_expired(&self) -> bool { self.0 } }
+    ///
+    /// let mut cache = ExpiringLruCache::<u32, Val>::builder()
+    ///     .max_size(10)
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, Val(false));
+    /// assert!(cache.cache_get(&1).is_some());
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> ExpiringLruCacheBuilder<K, V, S2> {
+        ExpiringLruCacheBuilder {
+            size: self.size,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// # Errors
     ///
     /// Returns [`BuildError::MissingRequired`](super::BuildError) if `max_size` was not set,
     /// or [`BuildError::InvalidValue`](super::BuildError) if `max_size` is `0`.
-    pub fn build(self) -> Result<ExpiringLruCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<ExpiringLruCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq + Clone,
+        S: BuildHasher,
     {
         let size = self
             .size
             .ok_or(super::BuildError::MissingRequired("max_size"))?;
-        let mut store = LruCache::builder().max_size(size).build()?;
+        let mut store = LruCache::builder()
+            .max_size(size)
+            .hasher(self.hasher)
+            .build()?;
         store.disable_hit_miss_tracking();
         // Two separate callbacks for two separate eviction causes:
-        //   cache.on_evict    — fires when ExpiringLruCache itself removes an expired entry
-        //   cache.store.on_evict — fires when LruCache::check_capacity evicts for capacity
+        //   cache.on_evict    -- fires when ExpiringLruCache itself removes an expired entry
+        //   cache.store.on_evict -- fires when LruCache::check_capacity evicts for capacity
         // Both must be registered independently so neither path is silently skipped.
         let mut cache = ExpiringLruCache {
             store,
@@ -160,15 +252,31 @@ impl<K, V: Expires> ExpiringLruCacheBuilder<K, V> {
 }
 
 impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
+    /// Construct a ready-to-use [`ExpiringLruCache`] holding up to `max_size` entries.
+    ///
+    /// For optional settings (`on_evict`) use [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is `0`, or if pre-allocating the backing store for
+    /// `max_size` entries fails (e.g. `usize::MAX`). Use [`builder`](Self::builder)
+    /// with [`build`](ExpiringLruCacheBuilder::build) to handle those cases without panicking.
+    #[must_use]
+    pub fn new(max_size: usize) -> Self {
+        Self::builder()
+            .max_size(max_size)
+            .build()
+            .expect("ExpiringLruCache::new requires a non-zero max_size with a valid allocation")
+    }
+
     /// Return a builder for constructing an [`ExpiringLruCache`].
     #[must_use]
     pub fn builder() -> ExpiringLruCacheBuilder<K, V> {
-        ExpiringLruCacheBuilder {
-            size: None,
-            on_evict: None,
-        }
+        ExpiringLruCacheBuilder::default()
     }
+}
 
+impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S> {
     /// Returns the maximum number of entries this cache will hold before evicting.
     ///
     /// This is the bound set via [`ExpiringLruCacheBuilder::max_size`],
@@ -180,13 +288,38 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
         self.store.capacity()
     }
 
-    /// Returns a reference to the inner [`LruCache`].
-    #[must_use]
-    pub fn store(&self) -> &LruCache<K, V> {
-        &self.store
+    /// Change the maximum number of entries, returning the previous capacity;
+    /// shrinking below the current entry count immediately evicts least-recently-used
+    /// entries.
+    ///
+    /// Eviction on shrink fires `on_evict` and counts evictions until the cache
+    /// fits. Growing the capacity does not pre-allocate; the backing stores grow
+    /// on demand as entries are inserted.
+    ///
+    /// This is useful for sizing a `#[cached(create = "{ ... }")]` cache from a value
+    /// loaded at startup (e.g. config), then adjusting it later as load changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0. Use [`try_set_max_size`](ExpiringLruCache::try_set_max_size)
+    /// to validate first and avoid the panic.
+    pub fn set_max_size(&mut self, max_size: usize) -> usize {
+        self.store.set_max_size(max_size)
+    }
+
+    /// Fallible counterpart of [`set_max_size`](ExpiringLruCache::set_max_size): validates
+    /// that `max_size` is non-zero and then delegates to `set_max_size`.
+    /// Returns the previous capacity on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
+    pub fn try_set_max_size(&mut self, max_size: usize) -> Result<usize, super::SetMaxSizeError> {
+        self.store.try_set_max_size(max_size)
     }
 
     /// Evict expired values from the cache.
+    #[must_use]
     pub fn evict(&mut self) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
@@ -237,7 +370,9 @@ impl<K: Clone + Hash + Eq, V: Expires> ExpiringLruCache<K, V> {
 }
 
 // https://docs.rs/cached/latest/cached/trait.Cached.html
-impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
+impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringLruCache<K, V, S> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -294,7 +429,7 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
         }
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
         let key_for_evict = k.clone();
         // get_or_set_with_if will set the value in the cache if an existing
         // value is not valid, which, in our case, is if the value has expired.
@@ -313,7 +448,7 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
         }
         v
     }
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -336,7 +471,7 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
         Ok(v)
     }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
-        self.store.set(k, v)
+        self.store.cache_set(k, v)
     }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
@@ -364,17 +499,12 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
     }
 
     fn cache_clear(&mut self) {
-        self.store.clear();
+        self.store.cache_clear();
     }
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
-        let on_evict = self.store.on_evict.clone();
-        let capacity = self.store.capacity;
-        self.store = LruCache::builder()
-            .max_size(capacity)
-            .build()
-            .expect("LruCache build failed");
-        self.store.on_evict = on_evict;
+        // Delegate to the inner LruCache's reset which preserves the hash builder.
+        self.store.cache_reset();
         self.cache_reset_metrics();
     }
     fn cache_size(&self) -> usize {
@@ -402,7 +532,9 @@ impl<K: Hash + Eq + Clone, V: Expires> Cached<K, V> for ExpiringLruCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Expires> CachedIter<K, V> for ExpiringLruCache<K, V> {
+impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> CachedIter<K, V>
+    for ExpiringLruCache<K, V, S>
+{
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
@@ -414,7 +546,9 @@ impl<K: Hash + Eq + Clone, V: Expires> CachedIter<K, V> for ExpiringLruCache<K, 
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Expires> CachedPeek<K, V> for ExpiringLruCache<K, V> {
+impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> CachedPeek<K, V>
+    for ExpiringLruCache<K, V, S>
+{
     fn cache_peek<Q>(&self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -431,12 +565,13 @@ impl<K: Hash + Eq + Clone, V: Expires> CachedPeek<K, V> for ExpiringLruCache<K, 
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for ExpiringLruCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for ExpiringLruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     V: Expires + Send,
+    S: BuildHasher + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -468,7 +603,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -502,7 +637,9 @@ where
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Expires + Clone> CloneCached<K, V> for ExpiringLruCache<K, V> {
+impl<K: Hash + Eq + Clone, V: Expires + Clone, S: BuildHasher + Clone> CloneCached<K, V>
+    for ExpiringLruCache<K, V, S>
+{
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
@@ -528,9 +665,31 @@ impl<K: Hash + Eq + Clone, V: Expires + Clone> CloneCached<K, V> for ExpiringLru
             (None, false)
         }
     }
+
+    /// Peek at the entry (including expired entries) without any read side effects.
+    ///
+    /// Returns `(Some(v), true)` for an expired entry, `(Some(v), false)` for a live
+    /// entry, and `(None, false)` when the key is absent. Does not update hit/miss
+    /// counters and does not promote in LRU order.
+    fn cache_peek_with_expiry_status<Q>(&self, k: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        // Use the inner LruCache's `cache_peek` to avoid LRU promotion.
+        if let Some(value) = self.store.cache_peek(k) {
+            let expired = value.is_expired();
+            (Some(value.clone()), expired)
+        } else {
+            (None, false)
+        }
+    }
 }
 
-impl<K: std::hash::Hash + Eq + Clone, V: Expires> CacheEvict for ExpiringLruCache<K, V> {
+impl<K: std::hash::Hash + Eq + Clone, V: Expires, S: BuildHasher> CacheEvict
+    for ExpiringLruCache<K, V, S>
+{
     fn evict(&mut self) -> usize {
         ExpiringLruCache::evict(self)
     }
@@ -540,7 +699,7 @@ impl<K: std::hash::Hash + Eq + Clone, V: Expires> CacheEvict for ExpiringLruCach
 /// Expiring Value Cache tests
 mod tests {
     use super::*;
-    use crate::Cached;
+    use crate::{Cached, CachedExt};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     type ExpiredU8 = u8;
@@ -549,6 +708,24 @@ mod tests {
         fn is_expired(&self) -> bool {
             *self > 10
         }
+    }
+
+    #[test]
+    fn new_returns_ready_cache_respecting_max_size() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::new(2);
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(c.set(1, 5), None);
+        assert_eq!(c.get(&1), Some(&5));
+        c.set(2, 6);
+        c.set(3, 7); // evicts LRU (1)
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.get(&1), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size")]
+    fn new_zero_max_size_panics() {
+        let _c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::new(0);
     }
 
     #[test]
@@ -698,21 +875,15 @@ mod tests {
         let mut c: ExpiringLruCache<u8, ExpiredU8> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
 
-        assert_eq!(
-            c.cache_try_get_or_set_with(1, || Ok::<_, ()>(1)),
-            Ok(&mut 1)
-        );
+        assert_eq!(c.cache_try_get_or_set_with(1, || Ok::<_, ()>(1)), Ok(&1));
         assert_eq!(c.cache_hits(), Some(0));
         assert_eq!(c.cache_misses(), Some(1));
 
-        assert_eq!(c.cache_try_get_or_set_with(1, || Err(())), Ok(&mut 1));
+        assert_eq!(c.cache_try_get_or_set_with(1, || Err(())), Ok(&1));
         assert_eq!(c.cache_hits(), Some(1));
         assert_eq!(c.cache_misses(), Some(1));
 
-        assert_eq!(
-            c.cache_try_get_or_set_with(2, || Ok::<_, ()>(2)),
-            Ok(&mut 2)
-        );
+        assert_eq!(c.cache_try_get_or_set_with(2, || Ok::<_, ()>(2)), Ok(&2));
         assert_eq!(c.cache_hits(), Some(1));
         assert_eq!(c.cache_misses(), Some(2));
     }
@@ -729,7 +900,7 @@ mod tests {
 
         // It should only evict n > 10
         assert_eq!(2, c.cache_size());
-        c.evict();
+        let _ = c.evict();
         assert_eq!(1, c.cache_size());
     }
 
@@ -969,14 +1140,14 @@ mod tests {
             .unwrap();
         c.cache_set(1u8, 20u8); // expired
 
-        c.cache_remove_entry(&1u8);
+        let _ = c.cache_remove_entry(&1u8);
         assert_eq!(
             count.load(Ordering::Relaxed),
             1,
             "on_evict fires for expired entries"
         );
 
-        c.cache_remove_entry(&99u8);
+        let _ = c.cache_remove_entry(&99u8);
         assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
     }
 
@@ -993,12 +1164,319 @@ mod tests {
             ExpiringLruCache::builder().max_size(4).build().unwrap();
         c.cache_set(1u8, 20u8); // expired: 20 > 10
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u8); // expired but present — must increment
-        c.cache_remove_entry(&99u8); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u8); // expired but present - must increment
+        let _ = c.cache_remove_entry(&99u8); // absent - must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,
             "cache_remove_entry must increment evictions for present key only"
         );
+    }
+
+    #[test]
+    fn set_max_size_changes_capacity_and_evicts() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        c.cache_set(3, 3);
+        assert_eq!(c.capacity(), 3);
+
+        // Shrink to 2: LRU entry (1) should be evicted.
+        let prev = c.set_max_size(2);
+        assert_eq!(prev, 3);
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(c.cache_size(), 2);
+
+        // Insert beyond new cap triggers eviction.
+        c.cache_set(4, 4);
+        assert_eq!(c.cache_size(), 2);
+    }
+
+    #[test]
+    fn set_max_size_shrink_fires_on_evict_and_counts_evictions() {
+        use std::sync::{Arc, Mutex};
+        let evicted_keys: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_keys2 = evicted_keys.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &u8, _v: &ExpiredU8| {
+                evicted_keys2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+
+        // Values 1..=4 are all <= 10, so none are expired.
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        c.cache_set(3, 3);
+        c.cache_set(4, 4);
+        // Touch 1 and 2 so 3 and 4 become least-recently-used.
+        assert_eq!(c.cache_get(&1), Some(&1));
+        assert_eq!(c.cache_get(&2), Some(&2));
+
+        let evictions_before = c.cache_evictions().expect("evictions tracked");
+        let prev = c.set_max_size(2);
+        assert_eq!(prev, 4);
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(c.cache_size(), 2);
+
+        // Two entries were dropped; eviction counter must reflect that.
+        assert_eq!(
+            c.cache_evictions().expect("evictions tracked") - evictions_before,
+            2,
+            "set_max_size shrink must increment cache_evictions by the number of dropped entries"
+        );
+
+        // on_evict must have fired for exactly the two LRU keys (3 and 4).
+        let mut fired: Vec<u8> = evicted_keys.lock().unwrap().clone();
+        fired.sort();
+        assert_eq!(
+            fired,
+            vec![3, 4],
+            "on_evict must fire for the evicted (least-recently-used) keys"
+        );
+
+        // The two most-recently-used entries must survive.
+        assert_eq!(c.cache_get(&1), Some(&1));
+        assert_eq!(c.cache_get(&2), Some(&2));
+        assert_eq!(c.cache_get(&3), None);
+        assert_eq!(c.cache_get(&4), None);
+    }
+
+    #[test]
+    fn try_set_max_size_rejects_zero() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        assert_eq!(
+            c.try_set_max_size(0),
+            Err(super::super::SetMaxSizeError::ZeroSize)
+        );
+        assert_eq!(c.try_set_max_size(5).unwrap(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_size must be greater than zero")]
+    fn set_max_size_zero_panics() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.set_max_size(0);
+    }
+
+    #[test]
+    fn eq_same_entries_compare_equal() {
+        let mut a: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        let mut b: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        a.cache_set(1, 5);
+        a.cache_set(2, 6);
+        // Insert in a different order: inner LruCache equality is membership-based.
+        b.cache_set(2, 6);
+        b.cache_set(1, 5);
+        assert_eq!(
+            a, b,
+            "caches with the same stored entries must compare equal"
+        );
+    }
+
+    #[test]
+    fn eq_ignores_metrics_and_on_evict() {
+        // Equality is over stored entries only: differing metrics and an
+        // `on_evict` callback on one side must not break it.
+        let mut a: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        let mut b: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(|_k: &u8, _v: &ExpiredU8| {})
+            .build()
+            .unwrap();
+        a.cache_set(1, 5);
+        b.cache_set(1, 5);
+        // Drive `a`'s metrics away from `b`'s.
+        a.cache_get(&1);
+        a.cache_get(&99);
+        assert_ne!(a.cache_hits(), b.cache_hits());
+        assert_eq!(
+            a, b,
+            "metrics and on_evict must not participate in equality"
+        );
+    }
+
+    #[test]
+    fn ne_differing_entries() {
+        let mut a: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        let mut b: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        a.cache_set(1, 5);
+        b.cache_set(1, 6); // same key, different value
+        assert_ne!(a, b, "differing values must compare unequal");
+
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1, 5);
+        c.cache_set(2, 5); // extra key
+        assert_ne!(a, c, "differing key sets must compare unequal");
+
+        // An empty cache differs from a populated one and equals another empty one.
+        let empty1: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        let empty2: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        assert_eq!(empty1, empty2);
+        assert_ne!(empty1, a);
+    }
+
+    // --- expires_at tests ---
+
+    /// A type that overrides `expires_at` to return a concrete deadline.
+    struct TimedValue {
+        deadline: std::time::Instant,
+    }
+
+    impl Expires for TimedValue {
+        fn is_expired(&self) -> bool {
+            std::time::Instant::now() >= self.deadline
+        }
+
+        fn expires_at(&self) -> Option<std::time::Instant> {
+            Some(self.deadline)
+        }
+    }
+
+    #[test]
+    fn expires_at_default_returns_none() {
+        // ExpiredU8 does not override expires_at, so the default must return None.
+        let v: ExpiredU8 = 5;
+        assert_eq!(
+            v.expires_at(),
+            None,
+            "default expires_at must return None for types that do not track a deadline"
+        );
+    }
+
+    #[test]
+    fn expires_at_override_returns_some_instant() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let v = TimedValue { deadline };
+        assert_eq!(
+            v.expires_at(),
+            Some(deadline),
+            "expires_at must return the overridden deadline when the impl provides one"
+        );
+        // Confirm is_expired is not confused: a future deadline is not yet expired.
+        assert!(
+            !v.is_expired(),
+            "a value whose deadline is in the future must not be expired"
+        );
+    }
+
+    /// `is_expired` is the authoritative liveness check; `expires_at` is advisory only.
+    /// This type deliberately reports a deadline that is already in the past while
+    /// claiming to be live. A correct cache must consult `is_expired` (live), NOT
+    /// `expires_at` (past), and therefore keep the entry.
+    struct LiveDespitePastDeadline {
+        past: std::time::Instant,
+    }
+
+    impl Expires for LiveDespitePastDeadline {
+        fn is_expired(&self) -> bool {
+            // Authoritative: always live, regardless of the advisory deadline below.
+            false
+        }
+
+        fn expires_at(&self) -> Option<std::time::Instant> {
+            // Advisory: a deadline in the past. Must not be used for liveness.
+            Some(self.past)
+        }
+    }
+
+    #[test]
+    fn expires_at_past_does_not_override_is_expired_for_value() {
+        // Sanity at the value level: the two methods disagree on purpose.
+        let v = LiveDespitePastDeadline {
+            past: std::time::Instant::now() - std::time::Duration::from_secs(3600),
+        };
+        assert!(
+            !v.is_expired(),
+            "is_expired is authoritative and reports the value as live"
+        );
+        let reported = v.expires_at().expect("override returns Some");
+        assert!(
+            reported < std::time::Instant::now(),
+            "expires_at advisory deadline is in the past"
+        );
+    }
+
+    #[test]
+    fn cache_keeps_entry_with_past_expires_at_but_live_is_expired() {
+        // Contract: the cache must decide liveness from is_expired, not expires_at.
+        // The stored value's expires_at is in the past, but is_expired() == false,
+        // so the entry must be returned as a live hit and survive in the cache.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let mut c: ExpiringLruCache<u8, LiveDespitePastDeadline> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, LiveDespitePastDeadline { past });
+
+        // get must treat it as a live hit (is_expired() == false).
+        assert!(
+            c.cache_get(&1u8).is_some(),
+            "entry whose is_expired() is false must be returned even if expires_at is in the past"
+        );
+        assert_eq!(c.cache_hits(), Some(1), "the access must count as a hit");
+        assert_eq!(
+            c.cache_misses(),
+            Some(0),
+            "an entry the cache treats as live must not register a miss"
+        );
+        assert_eq!(c.cache_size(), 1, "the live entry must remain in the cache");
+
+        // evict() must also consult is_expired, not expires_at: nothing is removed.
+        assert_eq!(
+            c.evict(),
+            0,
+            "evict must not remove an entry whose is_expired() is false"
+        );
+        assert_eq!(c.cache_size(), 1);
+
+        // peek and iter must likewise keep it.
+        assert!(
+            c.cache_peek(&1u8).is_some(),
+            "peek must surface the live entry"
+        );
+        let keys: Vec<u8> = c.iter().map(|(&k, _)| k).collect();
+        assert_eq!(keys, vec![1], "iter must include the live entry");
+    }
+
+    /// A type that provides ONLY `is_expired`, relying on the trait default for
+    /// `expires_at`. The fact that this compiles and is usable as a cache value is
+    /// the contract: adding `expires_at` did not break impls that omit it.
+    struct OnlyIsExpired(bool);
+
+    impl Expires for OnlyIsExpired {
+        fn is_expired(&self) -> bool {
+            self.0
+        }
+        // expires_at intentionally not provided — exercises the default impl.
+    }
+
+    #[test]
+    fn impl_with_only_is_expired_compiles_and_defaults_expires_at_to_none() {
+        let live = OnlyIsExpired(false);
+        assert!(!live.is_expired());
+        assert_eq!(
+            live.expires_at(),
+            None,
+            "an impl omitting expires_at must inherit the None default"
+        );
+
+        // And it works as a cache value type end to end.
+        let mut c: ExpiringLruCache<u8, OnlyIsExpired> =
+            ExpiringLruCache::builder().max_size(2).build().unwrap();
+        c.cache_set(1, OnlyIsExpired(false)); // live
+        c.cache_set(2, OnlyIsExpired(true)); // expired
+        assert!(c.cache_get(&1u8).is_some(), "live entry returned");
+        assert!(c.cache_get(&2u8).is_none(), "expired entry not returned");
     }
 }

@@ -1,0 +1,5 @@
+error: `map_error` must be a closure, e.g. `map_error = |e| MyErr(e)`
+ --> tests/ui/concurrent_cached_map_error_non_closure.rs:4:61
+  |
+4 | #[concurrent_cached(disk = true, ttl_secs = 60, map_error = 5)]
+  |                                                             ^

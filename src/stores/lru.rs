@@ -1,4 +1,4 @@
-use super::Cached;
+use super::{Cached, DefaultHashBuilder};
 use crate::lru_list::LRUList;
 use crate::{CachedIter, CachedPeek};
 use hashbrown::HashTable;
@@ -6,12 +6,6 @@ use std::borrow::Borrow;
 use std::cmp::Eq;
 use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
-
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
 
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
@@ -25,10 +19,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// to evict the least recently used keys
 ///
 /// Note: This cache is in-memory only
-pub struct LruCache<K, V> {
+///
+/// The optional type parameter `S` selects the hash builder. It defaults to
+/// [`DefaultHashBuilder`] (ahash when the `ahash` feature is enabled, otherwise
+/// `std::collections::hash_map::RandomState`). Supply a custom `S` via
+/// [`LruCacheBuilder::hasher`] to use a different hasher.
+pub struct LruCache<K, V, S = DefaultHashBuilder> {
     // `store` contains a hash of K -> index of (K, V) tuple in `order`
     pub(super) store: HashTable<usize>,
-    pub(super) hash_builder: RandomState,
+    pub(super) hash_builder: S,
     pub(super) order: LRUList<(K, V)>,
     pub(super) capacity: usize,
     pub(super) hits: AtomicU64,
@@ -41,10 +40,11 @@ pub struct LruCache<K, V> {
     pub(crate) track_hit_miss: bool,
 }
 
-impl<K, V> Clone for LruCache<K, V>
+impl<K, V, S> Clone for LruCache<K, V, S>
 where
     K: Clone + Hash + Eq,
     V: Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -61,7 +61,7 @@ where
     }
 }
 
-impl<K, V> fmt::Debug for LruCache<K, V> {
+impl<K, V, S> fmt::Debug for LruCache<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LruCache")
             .field("capacity", &self.capacity)
@@ -73,12 +73,13 @@ impl<K, V> fmt::Debug for LruCache<K, V> {
     }
 }
 
-impl<K, V> PartialEq for LruCache<K, V>
+impl<K, V, S> PartialEq for LruCache<K, V, S>
 where
     K: Eq + Hash + Clone,
     V: PartialEq,
+    S: BuildHasher,
 {
-    fn eq(&self, other: &LruCache<K, V>) -> bool {
+    fn eq(&self, other: &LruCache<K, V, S>) -> bool {
         self.store.len() == other.store.len() && {
             self.order
                 .iter()
@@ -90,21 +91,33 @@ where
     }
 }
 
-impl<K, V> Eq for LruCache<K, V>
+impl<K, V, S> Eq for LruCache<K, V, S>
 where
     K: Eq + Hash + Clone,
     V: PartialEq,
+    S: BuildHasher,
 {
 }
 
 /// Builder for [`LruCache`].
-pub struct LruCacheBuilder<K, V> {
+pub struct LruCacheBuilder<K, V, S = DefaultHashBuilder> {
     size: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V> LruCacheBuilder<K, V> {
-    /// Set the maximum number of entries. Required — `build` returns `Err` if not set.
+impl<K, V> Default for LruCacheBuilder<K, V, DefaultHashBuilder> {
+    fn default() -> Self {
+        Self {
+            size: None,
+            on_evict: None,
+            hasher: super::new_default_hash_builder(),
+        }
+    }
+}
+
+impl<K, V, S> LruCacheBuilder<K, V, S> {
+    /// Set the maximum number of entries. Required -- `build` returns `Err` if not set.
     #[doc(alias = "size")]
     #[doc(alias = "capacity")]
     #[must_use]
@@ -124,16 +137,46 @@ impl<K, V> LruCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used to hash keys in the internal `HashTable`. Calling this method
+    /// changes the builder's type parameter so `build()` returns an `LruCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::{Cached, LruCache};
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// let mut cache = LruCache::<u32, u32>::builder()
+    ///     .max_size(10)
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, 100);
+    /// assert_eq!(cache.cache_get(&1), Some(&100));
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> LruCacheBuilder<K, V, S2> {
+        LruCacheBuilder {
+            size: self.size,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::MissingRequired`](super::BuildError) if `max_size` was not set,
-    /// or [`BuildError::InvalidValue`](super::BuildError) if `max_size` is `0` or capacity
+    /// Returns [`BuildError::MissingRequired`](super::BuildError::MissingRequired) if `max_size` was not set,
+    /// or [`BuildError::InvalidValue`](super::BuildError::InvalidValue) if `max_size` is `0` or capacity
     /// pre-allocation fails.
-    pub fn build(self) -> Result<LruCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<LruCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq + Clone,
+        S: BuildHasher,
     {
         let size = self
             .size
@@ -146,8 +189,9 @@ impl<K, V> LruCacheBuilder<K, V> {
         }
 
         let mut store = HashTable::new();
+        // Use a temporary hasher for pre-reservation; the actual hash_builder is stored on the cache.
         if let Err(_e) = store.try_reserve(size, |&index: &usize| {
-            let hasher = &mut RandomState::new().build_hasher();
+            let hasher = &mut self.hasher.build_hasher();
             index.hash(hasher);
             hasher.finish()
         }) {
@@ -159,7 +203,7 @@ impl<K, V> LruCacheBuilder<K, V> {
 
         let mut cache = LruCache {
             store,
-            hash_builder: RandomState::new(),
+            hash_builder: self.hasher,
             order: LRUList::<(K, V)>::try_with_capacity(size)?,
             capacity: size,
             hits: AtomicU64::new(0),
@@ -174,15 +218,31 @@ impl<K, V> LruCacheBuilder<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
+    /// Construct a ready-to-use [`LruCache`] holding up to `max_size` entries.
+    ///
+    /// For optional settings (`on_evict`) use [`builder`](Self::builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is `0`, or if pre-allocating the backing store for
+    /// `max_size` entries fails (e.g. `usize::MAX`). Use [`builder`](Self::builder)
+    /// with [`build`](LruCacheBuilder::build) to handle those cases without panicking.
+    #[must_use]
+    pub fn new(max_size: usize) -> Self {
+        Self::builder()
+            .max_size(max_size)
+            .build()
+            .expect("LruCache::new requires a non-zero max_size with a valid allocation")
+    }
+
     /// Return a builder for constructing a [`LruCache`].
     #[must_use]
     pub fn builder() -> LruCacheBuilder<K, V> {
-        LruCacheBuilder {
-            size: None,
-            on_evict: None,
-        }
+        LruCacheBuilder::default()
     }
+}
 
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// Disable hit/miss counter increments on this cache.
     ///
     /// Called by wrapper stores (`LruTtlCache`, `ExpiringLruCache`, and the sharded equivalents)
@@ -200,6 +260,56 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Change the maximum number of entries, returning the previous capacity;
+    /// shrinking below the current entry count immediately evicts least-recently-used
+    /// entries.
+    ///
+    /// Eviction on shrink fires `on_evict` and counts evictions until the cache
+    /// fits. Growing the capacity does not pre-allocate; the backing stores grow
+    /// on demand as entries are inserted.
+    ///
+    /// This is useful for sizing a `#[cached(create = "{ ... }")]` cache from a value
+    /// loaded at startup (e.g. config), then adjusting it later as load changes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0. Use [`try_set_max_size`](LruCache::try_set_max_size)
+    /// to validate first and avoid the panic.
+    ///
+    /// # See also
+    ///
+    /// [`LruTtlCache::set_max_size`](super::LruTtlCache::set_max_size),
+    /// [`ExpiringLruCache::set_max_size`](super::ExpiringLruCache::set_max_size), and
+    /// [`TtlSortedCache::set_max_size`](super::TtlSortedCache::set_max_size) are
+    /// parallel methods on the other LRU-family stores. Note that `TtlSortedCache::set_max_size`
+    /// returns `Option<usize>` (the previous bound, which is optional) rather than `usize`.
+    /// All stores also provide a fallible `try_set_max_size` counterpart.
+    pub fn set_max_size(&mut self, max_size: usize) -> usize {
+        assert!(max_size > 0, "max_size must be greater than zero");
+        let prev = self.capacity;
+        self.capacity = max_size;
+        // `check_capacity` evicts at most one entry per call (it normally runs after
+        // a single insert), so loop until the cache fits the new, smaller bound.
+        while self.store.len() > self.capacity {
+            self.check_capacity();
+        }
+        prev
+    }
+
+    /// Fallible counterpart of [`set_max_size`](LruCache::set_max_size): validates
+    /// that `max_size` is non-zero and then delegates to `set_max_size`.
+    /// Returns the previous capacity on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
+    pub fn try_set_max_size(&mut self, max_size: usize) -> Result<usize, super::SetMaxSizeError> {
+        if max_size == 0 {
+            return Err(super::SetMaxSizeError::ZeroSize);
+        }
+        Ok(self.set_max_size(max_size))
     }
 
     /// Return all entries in current LRU order (most-recently-used first) as a `Vec` of `(K, V)` pairs.
@@ -448,7 +558,7 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
                 .collect::<Vec<_>>()
         };
         for k in remove_keys {
-            self.cache_remove(&k);
+            let _ = self.cache_remove(&k);
         }
     }
 
@@ -497,9 +607,10 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> LruCache<K, V>
+impl<K, V, S> LruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
+    S: BuildHasher,
 {
     pub(super) async fn get_or_set_with_if_async<F, Fut, FC>(
         &mut self,
@@ -598,7 +709,9 @@ where
     }
 }
 
-impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruCache<K, V> {
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruCache<K, V, S> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -628,12 +741,12 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruCache<K, V> {
         v
     }
 
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         let (_, _, _, v) = self.get_or_set_with_if(key, f, |_| true);
         v
     }
 
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -697,7 +810,7 @@ impl<K: Hash + Eq + Clone, V> Cached<K, V> for LruCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Clone, V> CachedIter<K, V> for LruCache<K, V> {
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> CachedIter<K, V> for LruCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
@@ -707,7 +820,7 @@ impl<K: Hash + Eq + Clone, V> CachedIter<K, V> for LruCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq + Clone, V> CachedPeek<K, V> for LruCache<K, V> {
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> CachedPeek<K, V> for LruCache<K, V, S> {
     fn cache_peek<Q>(&self, k: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -721,11 +834,12 @@ impl<K: Hash + Eq + Clone, V> CachedPeek<K, V> for LruCache<K, V> {
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for LruCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for LruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
+    S: BuildHasher + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         k: K,
         f: F,
@@ -742,7 +856,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         k: K,
         f: F,
@@ -764,7 +878,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CachedExt;
     use crate::stores::Cached;
+
+    #[test]
+    fn new_returns_ready_cache_respecting_max_size() {
+        let mut c: LruCache<u32, u32> = LruCache::new(2);
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(c.set(1, 10), None);
+        assert_eq!(c.get(&1), Some(&10));
+        c.set(2, 20);
+        c.set(3, 30); // evicts LRU (1)
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.get(&1), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero max_size")]
+    fn new_zero_max_size_panics() {
+        let _c: LruCache<u32, u32> = LruCache::new(0);
+    }
 
     #[test]
     fn sized_cache() {
@@ -1027,13 +1160,13 @@ mod tests {
                 Err("dead".to_string())
             }
         }
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
         assert!(res.is_err());
         assert!(c.key_order().is_empty());
 
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
         assert_eq!(res.unwrap(), &1);
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
         assert_eq!(res.unwrap(), &1);
     }
 
@@ -1090,37 +1223,37 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 2, || async { _get(2).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(2).await }).await,
             &2
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 3, || async { _get(3).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(3).await }).await,
             &3
         );
 
         // hits — should not re-evaluate
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 1, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(99).await }).await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 2, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(99).await }).await,
             &2
         );
         assert_eq!(
-            CachedAsync::async_get_or_set_with(&mut c, 3, || async { _get(99).await }).await,
+            CachedAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(99).await }).await,
             &3
         );
 
@@ -1134,30 +1267,34 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(0).await })
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(0).await })
                 .await
                 .unwrap(),
             &0
         );
         assert_eq!(
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
                 .await
                 .unwrap(),
             &0 // cached value, 5 never evaluated
         );
 
         c.cache_reset();
-        let res: Result<&mut usize, String> =
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(10).await })
-                .await;
+        let res: Result<&usize, String> =
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+                _try_get(10).await
+            })
+            .await;
         assert!(res.is_err());
         assert!(c.key_order().is_empty());
 
-        let res: Result<&mut usize, String> =
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(1).await }).await;
+        let res: Result<&usize, String> =
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(1).await })
+                .await;
         assert_eq!(res.unwrap(), &1);
-        let res: Result<&mut usize, String> =
-            CachedAsync::async_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await }).await;
+        let res: Result<&usize, String> =
+            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
+                .await;
         assert_eq!(res.unwrap(), &1);
     }
 
@@ -1296,11 +1433,11 @@ mod tests {
             .build()
             .unwrap();
         c.cache_set(1u32, 10u32);
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         // No fire for absent key.
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
@@ -1309,8 +1446,8 @@ mod tests {
         let mut c = LruCache::builder().max_size(4).build().unwrap();
         c.cache_set(1u32, 10u32);
         let before = c.cache_evictions().expect("evictions are always tracked");
-        c.cache_remove_entry(&1u32);
-        c.cache_remove_entry(&999u32); // absent — must not increment
+        let _ = c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&999u32); // absent — must not increment
         assert_eq!(
             c.cache_evictions().expect("evictions are always tracked") - before,
             1,
@@ -1324,5 +1461,123 @@ mod tests {
         c.cache_set(1u32, 10u32);
         assert!(c.cache_delete(&1u32));
         assert!(!c.cache_delete(&1u32));
+    }
+
+    #[test]
+    fn set_max_size_grow_returns_previous_and_keeps_entries() {
+        let mut c = LruCache::builder().max_size(2).build().unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_set(2u32, 20u32);
+        let prev = c.set_max_size(4);
+        assert_eq!(prev, 2);
+        assert_eq!(c.capacity(), 4);
+        // Growing keeps existing entries.
+        assert_eq!(c.cache_get(&1), Some(&10));
+        assert_eq!(c.cache_get(&2), Some(&20));
+        // Room for more before eviction.
+        c.cache_set(3u32, 30u32);
+        c.cache_set(4u32, 40u32);
+        assert_eq!(c.cache_size(), 4);
+    }
+
+    #[test]
+    fn set_max_size_shrink_evicts_lru_entries() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let evicted2 = evicted.clone();
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                evicted2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_set(2u32, 20u32);
+        c.cache_set(3u32, 30u32);
+        c.cache_set(4u32, 40u32);
+        // Touch 1 and 2 so 3 and 4 become the least-recently-used.
+        assert_eq!(c.cache_get(&1), Some(&10));
+        assert_eq!(c.cache_get(&2), Some(&20));
+
+        let prev = c.set_max_size(2);
+        assert_eq!(prev, 4);
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(c.cache_size(), 2);
+        // Shrinking fires on_evict for each evicted entry and counts evictions.
+        assert_eq!(evicted.load(AOrdering::Relaxed), 2);
+        assert_eq!(c.cache_evictions(), Some(2));
+        // The two most-recently-used survive.
+        assert_eq!(c.cache_get(&1), Some(&10));
+        assert_eq!(c.cache_get(&2), Some(&20));
+        assert_eq!(c.cache_get(&3), None);
+        assert_eq!(c.cache_get(&4), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_size must be greater than zero")]
+    fn set_max_size_zero_panics() {
+        let mut c: LruCache<u32, u32> = LruCache::builder().max_size(2).build().unwrap();
+        c.set_max_size(0);
+    }
+
+    #[test]
+    fn try_set_max_size_rejects_zero() {
+        let mut c: LruCache<u32, u32> = LruCache::builder().max_size(2).build().unwrap();
+        assert_eq!(
+            c.try_set_max_size(0),
+            Err(super::super::SetMaxSizeError::ZeroSize)
+        );
+        assert_eq!(c.try_set_max_size(8).unwrap(), 2);
+        assert_eq!(c.capacity(), 8);
+    }
+
+    // --- custom hasher tests ---
+
+    #[test]
+    fn custom_hasher_get_set_round_trip() {
+        use std::collections::hash_map::RandomState;
+        let mut c = LruCache::<u32, u32>::builder()
+            .max_size(10)
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), Some(&200));
+        assert_eq!(c.cache_hits(), Some(2));
+        assert_eq!(c.cache_misses(), Some(0));
+        assert_eq!(c.cache_get(&99), None);
+        assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn default_constructor_still_works() {
+        let mut c: LruCache<u32, u32> = LruCache::new(5);
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+
+        let mut b = LruCache::<u32, u32>::builder().max_size(5).build().unwrap();
+        b.cache_set(2, 20);
+        assert_eq!(b.cache_get(&2), Some(&20));
+    }
+
+    #[test]
+    fn custom_hasher_respects_lru_eviction() {
+        use std::collections::hash_map::RandomState;
+        let mut c = LruCache::<u32, u32>::builder()
+            .max_size(2)
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_get(&1); // make 1 most-recently-used
+        c.cache_set(3, 30); // should evict 2 (least-recently-used)
+        assert_eq!(c.cache_get(&1), Some(&10));
+        assert_eq!(c.cache_get(&2), None); // evicted
+        assert_eq!(c.cache_get(&3), Some(&30));
     }
 }

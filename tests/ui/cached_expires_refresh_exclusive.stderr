@@ -1,4 +1,4 @@
-error: `expires` and `refresh` are mutually exclusive — `refresh` renews a TTL on cache hit, but `ExpiringCache` and `ExpiringLruCache` have no TTL to refresh; expiry is controlled by the value
+error: `expires` and `refresh` are mutually exclusive - `refresh` renews a TTL on cache hit, but `ExpiringCache` and `ExpiringLruCache` have no TTL to refresh; expiry is controlled by the value
   --> tests/ui/cached_expires_refresh_exclusive.rs:13:4
    |
 13 | fn my_fn(x: u32) -> MyVal {

@@ -1,0 +1,5 @@
+error: in_impl = true requires a method with a `self` receiver; for a free function or an associated function without `self`, remove in_impl.
+  --> tests/ui/once_in_impl_requires_self.rs:10:8
+   |
+10 |     fn f(x: usize) -> usize {
+   |        ^

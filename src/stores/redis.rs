@@ -1,5 +1,5 @@
-use crate::ConcurrentCached;
 use crate::time::Duration;
+use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCached};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -8,10 +8,10 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct RedisCacheBuilder<K, V> {
-    ttl: Duration,
+    ttl: Option<Duration>,
     refresh: bool,
     namespace: String,
-    prefix: String,
+    prefix: Option<String>,
     connection_string: Option<String>,
     pool_max_size: Option<u32>,
     pool_min_idle: Option<u32>,
@@ -24,7 +24,7 @@ pub struct RedisCacheBuilder<K, V> {
 const ENV_KEY: &str = "CACHED_REDIS_CONNECTION_STRING";
 const DEFAULT_NAMESPACE: &str = "cached-redis-store:";
 
-fn ttl_seconds(ttl: Duration) -> Result<u64, RedisCacheError> {
+fn ttl_millis(ttl: Duration) -> Result<u64, RedisCacheError> {
     if ttl.is_zero() {
         return Err(redis::RedisError::from((
             redis::ErrorKind::InvalidClientConfig,
@@ -33,21 +33,21 @@ fn ttl_seconds(ttl: Duration) -> Result<u64, RedisCacheError> {
         ))
         .into());
     }
-    // Redis only supports whole-second granularity. Round up so keys never
-    // expire earlier than the caller requested (any non-zero duration yields >= 1).
-    // Saturate rather than overflow on pathologically large durations, then clamp
-    // to Redis' supported TTL range (`i64::MAX` seconds). Clamping here means the
-    // same bounded value is used by both `SETEX` (cache_set) and `EXPIRE`
-    // (refresh); an out-of-range value would otherwise be rejected by Redis.
-    let secs = ttl
-        .as_secs()
-        .saturating_add(u64::from(ttl.subsec_nanos() > 0));
-    Ok(secs.min(i64::MAX as u64))
+    // Convert to milliseconds with saturating arithmetic so pathologically large
+    // durations do not overflow. Clamp to `i64::MAX` milliseconds so the same
+    // bounded value can be used for both `PSETEX` (u64) and `PEXPIRE` (i64)
+    // without a second clamp at the call site. Clamp the low end to 1ms: a
+    // non-zero sub-millisecond Duration truncates to 0ms, which `PSETEX`/`PEXPIRE`
+    // reject (or treat as immediate-delete). The `is_zero` guard above already
+    // rejects an actually-zero Duration, so the `.max(1)` only lifts a truncated
+    // (but non-zero) sub-millisecond value up to the minimum valid TTL.
+    let millis = ttl.as_millis();
+    Ok(millis.min(i64::MAX as u128).max(1) as u64)
 }
 
-fn ttl_seconds_i64(ttl: Duration) -> Result<i64, RedisCacheError> {
-    // `ttl_seconds` is already clamped to `i64::MAX`, so this cast is lossless.
-    Ok(ttl_seconds(ttl)? as i64)
+fn ttl_millis_i64(ttl: Duration) -> Result<i64, RedisCacheError> {
+    // `ttl_millis` is already clamped to `i64::MAX`, so this cast is lossless.
+    Ok(ttl_millis(ttl)? as i64)
 }
 
 /// Build the Redis key: `{namespace}:{prefix}:{key}`, colon-joined with empty
@@ -74,6 +74,48 @@ fn generate_redis_key(namespace: &str, prefix: &str, key: &str) -> String {
     }
     out.push_str(key);
     out
+}
+
+/// `SCAN MATCH` glob covering every key a cache with this `namespace`/`prefix`
+/// writes: the [`generate_redis_key`] scope with a trailing `*`. Glob
+/// metacharacters (`*`, `?`, `[`, `]`) and `\` in the namespace/prefix are
+/// escaped so they match literally — otherwise a prefix like `cache[v2]` would
+/// scan (and `cache_clear` would delete) keys outside this cache's scope.
+/// Single source of truth shared by the sync and async stores.
+fn clear_match_pattern(namespace: &str, prefix: &str) -> String {
+    fn escape_glob(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+    generate_redis_key(&escape_glob(namespace), &escape_glob(prefix), "*")
+}
+
+#[cfg(test)]
+mod clear_pattern_tests {
+    // No Redis server needed — pins the `SCAN MATCH` pattern used by `cache_clear`.
+    use super::clear_match_pattern;
+
+    #[test]
+    fn plain_segments_get_scope_and_trailing_star() {
+        assert_eq!(clear_match_pattern("ns", "p"), "ns:p:*");
+        assert_eq!(clear_match_pattern("", "p"), "p:*");
+        assert_eq!(clear_match_pattern("ns", ""), "ns:*");
+    }
+
+    #[test]
+    fn glob_metacharacters_in_segments_are_escaped() {
+        // Unescaped, `cache[v2]` would glob-match keys outside this cache's
+        // scope (e.g. `cachev:...`) and `cache_clear` would delete them.
+        assert_eq!(clear_match_pattern("ns", "cache[v2]"), "ns:cache\\[v2\\]:*");
+        assert_eq!(clear_match_pattern("n*s", "p?x"), "n\\*s:p\\?x:*");
+        assert_eq!(clear_match_pattern("back\\slash", "p"), "back\\\\slash:p:*");
+    }
 }
 
 #[cfg(test)]
@@ -124,57 +166,188 @@ mod generate_key_tests {
 }
 
 #[cfg(test)]
-mod ttl_seconds_tests {
-    // Pure-function coverage for the subtle Redis TTL normalization (reject
-    // zero, round any sub-second remainder up, clamp to `i64::MAX`). These need
-    // no Redis server and guard both the `SETEX` and `EXPIRE` paths, which
-    // share `ttl_seconds`/`ttl_seconds_i64`.
-    use super::{ttl_seconds, ttl_seconds_i64};
+mod ttl_millis_tests {
+    // Pure-function coverage for the Redis millisecond TTL helpers: reject zero,
+    // preserve sub-second precision, clamp to `i64::MAX` ms. These need no
+    // Redis server and guard both the `PSETEX` (cache_set) and `PEXPIRE`
+    // (refresh) paths, which share `ttl_millis`/`ttl_millis_i64`.
+    use super::{ttl_millis, ttl_millis_i64};
     use crate::time::Duration;
 
     #[test]
     fn zero_is_rejected() {
-        assert!(ttl_seconds(Duration::ZERO).is_err());
-        assert!(ttl_seconds_i64(Duration::ZERO).is_err());
+        assert!(ttl_millis(Duration::ZERO).is_err());
+        assert!(ttl_millis_i64(Duration::ZERO).is_err());
     }
 
     #[test]
-    fn whole_seconds_pass_through() {
-        assert_eq!(ttl_seconds(Duration::from_secs(1)).unwrap(), 1);
-        assert_eq!(ttl_seconds(Duration::from_secs(60)).unwrap(), 60);
-        assert_eq!(ttl_seconds_i64(Duration::from_secs(60)).unwrap(), 60);
+    fn whole_seconds_become_milliseconds() {
+        assert_eq!(ttl_millis(Duration::from_secs(1)).unwrap(), 1_000);
+        assert_eq!(ttl_millis(Duration::from_secs(60)).unwrap(), 60_000);
+        assert_eq!(ttl_millis_i64(Duration::from_secs(60)).unwrap(), 60_000);
     }
 
     #[test]
-    fn subsecond_rounds_up_to_one() {
-        assert_eq!(ttl_seconds(Duration::from_nanos(1)).unwrap(), 1);
-        assert_eq!(ttl_seconds(Duration::from_millis(1)).unwrap(), 1);
-        assert_eq!(ttl_seconds(Duration::from_millis(999)).unwrap(), 1);
+    fn subsecond_precision_is_preserved() {
+        // Unlike the old SETEX path, sub-second TTLs are NOT rounded up to 1s.
+        assert_eq!(ttl_millis(Duration::from_millis(1)).unwrap(), 1);
+        assert_eq!(ttl_millis(Duration::from_millis(250)).unwrap(), 250);
+        assert_eq!(ttl_millis(Duration::from_millis(999)).unwrap(), 999);
     }
 
     #[test]
-    fn fractional_rounds_up() {
-        assert_eq!(ttl_seconds(Duration::from_millis(1_500)).unwrap(), 2);
-        assert_eq!(ttl_seconds(Duration::new(5, 1)).unwrap(), 6);
+    fn nonzero_submillisecond_clamps_to_one() {
+        // A non-zero Duration under 1ms truncates to 0ms, which PSETEX/PEXPIRE
+        // reject (or treat as immediate-delete). The low-end clamp lifts it to 1ms.
+        let one_ns = Duration::from_nanos(1);
+        assert!(!one_ns.is_zero());
+        // Truncation to milliseconds is still 0...
+        assert_eq!(one_ns.as_millis(), 0);
+        // ...but ttl_millis clamps a non-zero sub-ms Duration up to 1ms.
+        assert_eq!(ttl_millis(one_ns).unwrap(), 1);
+        assert_eq!(ttl_millis_i64(one_ns).unwrap(), 1);
+        // Other sub-millisecond, non-zero durations also clamp to 1.
+        assert_eq!(ttl_millis(Duration::from_nanos(999_999)).unwrap(), 1);
+        assert_eq!(ttl_millis(Duration::from_micros(500)).unwrap(), 1);
+    }
+
+    #[test]
+    fn zero_never_reaches_the_clamp() {
+        // The is_zero guard rejects an actually-zero Duration before the
+        // low-end `.max(1)` clamp can lift it to 1ms.
+        assert!(ttl_millis(Duration::ZERO).is_err());
+        assert!(ttl_millis_i64(Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn subsecond_mixed_passes_through() {
+        assert_eq!(ttl_millis(Duration::from_millis(1_500)).unwrap(), 1_500);
+        assert_eq!(ttl_millis(Duration::new(5, 1_000_000)).unwrap(), 5_001);
     }
 
     #[test]
     fn very_large_clamps_to_i64_max() {
+        // A Duration that, in milliseconds, overflows i64 is clamped.
         let huge = Duration::from_secs(u64::MAX);
-        assert_eq!(ttl_seconds(huge).unwrap(), i64::MAX as u64);
-        assert_eq!(ttl_seconds_i64(huge).unwrap(), i64::MAX);
+        assert_eq!(ttl_millis(huge).unwrap(), i64::MAX as u64);
+        assert_eq!(ttl_millis_i64(huge).unwrap(), i64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod builder_ttl_setter_tests {
+    // No Redis server needed -- these only inspect the builder's ttl field set by
+    // the convenience setters, without calling `build()`.
+    use super::RedisCacheBuilder;
+    use crate::time::Duration;
+
+    #[test]
+    fn ttl_secs_and_ttl_millis_set_duration() {
+        let b = RedisCacheBuilder::<String, String>::new()
+            .prefix("p")
+            .ttl_secs(7);
+        assert_eq!(b.ttl, Some(Duration::from_secs(7)));
+
+        let b = RedisCacheBuilder::<String, String>::new()
+            .prefix("p")
+            .ttl_millis(250);
+        assert_eq!(b.ttl, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn ttl_setters_override_last_writer_wins() {
+        // ttl(secs=10) then ttl_secs(5) -> 5s
+        let b = RedisCacheBuilder::<String, String>::new()
+            .prefix("p")
+            .ttl(Duration::from_secs(10))
+            .ttl_secs(5);
+        assert_eq!(b.ttl, Some(Duration::from_secs(5)));
+
+        // ttl_secs then ttl_millis -> the millis value
+        let b = RedisCacheBuilder::<String, String>::new()
+            .prefix("p")
+            .ttl_secs(10)
+            .ttl_millis(500);
+        assert_eq!(b.ttl, Some(Duration::from_millis(500)));
+
+        // ttl_millis then ttl -> the ttl value
+        let b = RedisCacheBuilder::<String, String>::new()
+            .prefix("p")
+            .ttl_millis(500)
+            .ttl(Duration::from_secs(3));
+        assert_eq!(b.ttl, Some(Duration::from_secs(3)));
+    }
+}
+
+#[cfg(test)]
+mod builder_empty_scope_tests {
+    // No Redis server needed -- verifies the empty-scope guard in `build()`.
+    use super::{RedisCacheBuildError, RedisCacheBuilder};
+    use crate::time::Duration;
+
+    #[test]
+    fn empty_namespace_and_prefix_is_rejected() {
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("")
+            .ttl(Duration::from_secs(1))
+            .namespace("")
+            .build();
+        assert!(
+            matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+            "expected EmptyScope"
+        );
+    }
+
+    #[test]
+    fn namespace_all_colons_and_empty_prefix_is_rejected() {
+        // ":::" trims to "" so the effective namespace is also empty.
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("")
+            .ttl(Duration::from_secs(1))
+            .namespace(":::")
+            .build();
+        assert!(
+            matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+            "expected EmptyScope"
+        );
+    }
+
+    #[test]
+    fn non_empty_prefix_builds_ok() {
+        // Guard must not fire when the prefix is set -- no real Redis needed
+        // because the build error would come before the connection attempt.
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("my-prefix")
+            .ttl(Duration::from_secs(1))
+            .namespace("")
+            .build();
+        // The only failure here would be a missing connection string, not EmptyScope.
+        assert!(
+            !matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+            "EmptyScope must not fire when prefix is non-empty"
+        );
     }
 }
 
 /// A Redis connection URL stored in memory with credentials redacted in `Debug`/`Display`.
 ///
-/// The inner string (accessible via `.as_str()`) is the full URL including any password
-/// and should not be logged or exposed in error messages.
+/// Both [`Debug`](std::fmt::Debug) and [`Display`](std::fmt::Display) render the placeholder
+/// `[REDACTED connection string]`, so the value is safe to log or include in error messages.
+/// The raw URL (including any password) is available via [`reveal`](Self::reveal) and must not
+/// be logged or exposed in error messages.
 #[derive(Clone)]
-struct ConnectionString(String);
+pub struct ConnectionString(String);
 
 impl ConnectionString {
-    fn as_str(&self) -> &str {
+    /// Return the raw connection URL, including any embedded credentials.
+    ///
+    /// **Warning:** the returned string may contain credentials
+    /// (e.g. `redis://:password@host`). Do not log or expose it in error messages.
+    /// The redacting [`Debug`](std::fmt::Debug)/[`Display`](std::fmt::Display) impls exist
+    /// precisely to keep this value out of logs; only call `reveal` when the full
+    /// credentials are genuinely required.
+    #[must_use]
+    pub fn reveal(&self) -> &str {
         &self.0
     }
 }
@@ -193,6 +366,18 @@ impl std::fmt::Display for ConnectionString {
 
 use thiserror::Error;
 
+/// Error returned when building a [`RedisCache`]/[`AsyncRedisCache`].
+///
+/// Configuration problems (a missing `prefix`/`ttl`, or a zero `ttl`) surface as the
+/// transparent [`Build`](Self::Build) variant wrapping a [`BuildError`](super::BuildError):
+///
+/// ```ignore
+/// match RedisCache::<String, u32>::builder().build() {
+///     Err(RedisCacheBuildError::Build(BuildError::MissingRequired(field))) => { /* e.g. "prefix" */ }
+///     Err(RedisCacheBuildError::Build(BuildError::InvalidValue { field, reason })) => { /* e.g. "ttl" */ }
+///     _ => {}
+/// }
+/// ```
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedisCacheBuildError {
@@ -201,12 +386,29 @@ pub enum RedisCacheBuildError {
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
     #[error(transparent)]
-    InvalidTtl(#[from] super::BuildError),
-    #[error("Connection string not specified or invalid in env var {env_key:?}: {error:?}")]
+    Build(#[from] super::BuildError),
+    #[error("Connection string not specified or invalid in env var {env_key:?}: {error}")]
     MissingConnectionString {
         env_key: String,
+        #[source]
         error: std::env::VarError,
     },
+    #[error(
+        "empty scope: namespace (after trimming trailing colons) and prefix are both empty; \
+        cache_clear would run SCAN MATCH * and delete every key in the Redis DB. \
+        Set a non-empty namespace or prefix."
+    )]
+    EmptyScope,
+}
+
+impl<K, V> Default for RedisCacheBuilder<K, V>
+where
+    K: Display,
+    V: Serialize + DeserializeOwned,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K, V> RedisCacheBuilder<K, V>
@@ -214,13 +416,18 @@ where
     K: Display,
     V: Serialize + DeserializeOwned,
 {
-    /// Initialize a `RedisCacheBuilder`
-    pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
+    /// Initialize a `RedisCacheBuilder`.
+    ///
+    /// Both the key `prefix` and the `ttl` are required; set them with
+    /// [`prefix`](Self::prefix) and [`ttl`](Self::ttl) (or [`ttl_secs`](Self::ttl_secs) /
+    /// [`ttl_millis`](Self::ttl_millis)) before calling [`build`](Self::build).
+    #[must_use]
+    pub fn new() -> RedisCacheBuilder<K, V> {
         Self {
-            ttl,
+            ttl: None,
             refresh: false,
             namespace: DEFAULT_NAMESPACE.to_string(),
-            prefix: prefix.as_ref().to_string(),
+            prefix: None,
             connection_string: None,
             pool_max_size: None,
             pool_min_idle: None,
@@ -230,12 +437,33 @@ where
         }
     }
 
-    /// Specify the cache TTL as a `Duration`.
-    /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
+    /// Specify the cache TTL as a `Duration` (required).
+    /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = ttl;
+        self.ttl = Some(ttl);
         self
+    }
+
+    /// Specify the cache TTL in whole seconds. Equivalent to
+    /// `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Specify the cache TTL in milliseconds. Equivalent to
+    /// `ttl(Duration::from_millis(millis))`.
+    /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    #[must_use]
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
     }
 
     /// Specify whether cache hits refresh the TTL
@@ -258,15 +486,20 @@ where
         self
     }
 
-    /// Set the prefix for cache keys.
+    /// Set the prefix for cache keys (required).
     /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
     /// Empty prefix values are omitted from the generated key.
     ///
     /// **Note:** colons in the prefix are not escaped and can cause key collisions
     /// with differently-split namespace/prefix combinations sharing the same segments.
+    ///
+    /// **Note:** the prefix is what scopes `cache_clear` to this logical cache.
+    /// With an empty prefix, `cache_clear` matches `<namespace>:*` and will delete
+    /// entries belonging to every cache that shares the same namespace. Set a unique
+    /// prefix per logical cache to ensure `cache_clear` is scoped correctly.
     #[must_use]
     pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
-        self.prefix = prefix.as_ref().to_string();
+        self.prefix = Some(prefix.as_ref().to_string());
         self
     }
 
@@ -358,16 +591,37 @@ where
     ///
     /// # Errors
     ///
-    /// Will return a `RedisCacheBuildError`, depending on the error
+    /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
+    /// - `Build(BuildError::MissingRequired("ttl"))`: no TTL was set.
+    /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
+    /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
+    ///   the prefix are empty. `cache_clear` would otherwise issue `SCAN MATCH *`
+    ///   and delete every key in the Redis database.
+    /// - `MissingConnectionString`: no connection string was set and the
+    ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
+    /// - `Connection` / `Pool`: the Redis client or connection pool could not
+    ///   be created.
     pub fn build(self) -> Result<RedisCache<K, V>, RedisCacheBuildError> {
-        super::validate_ttl(self.ttl)?;
+        // Validate required fields before any IO/connection attempt so the
+        // missing-required error is returned without needing a server.
+        if self.prefix.is_none() {
+            return Err(super::BuildError::MissingRequired("prefix").into());
+        }
+        let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
+        super::validate_ttl(ttl)?;
+        let prefix = self.prefix.as_deref().unwrap_or_default();
+        if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
+            return Err(RedisCacheBuildError::EmptyScope);
+        }
+        let connection_string = ConnectionString(self.resolve_connection_string()?);
+        let pool = self.create_pool()?;
         Ok(RedisCache {
-            ttl: Mutex::new(self.ttl),
+            ttl: Mutex::new(ttl),
             refresh: AtomicBool::new(self.refresh),
-            connection_string: ConnectionString(self.resolve_connection_string()?),
-            pool: self.create_pool()?,
+            connection_string,
+            pool,
             namespace: self.namespace,
-            prefix: self.prefix,
+            prefix: self.prefix.unwrap_or_default(),
             _phantom: PhantomData,
         })
     }
@@ -395,20 +649,49 @@ pub struct RedisCache<K, V> {
     _phantom: PhantomData<fn() -> (K, V)>,
 }
 
+impl<K, V> std::fmt::Debug for RedisCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisCache")
+            .field("namespace", &self.namespace)
+            .field("prefix", &self.prefix)
+            .field("ttl", &*self.ttl.lock())
+            .field("refresh", &self.refresh.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K, V> Clone for RedisCache<K, V> {
+    /// Shallow clone - both handles share the same r2d2 connection pool
+    /// (`r2d2::Pool` is `Arc`-backed). The `ttl` is snapshot into a fresh
+    /// `Mutex` so the two handles can independently update their TTL view.
+    fn clone(&self) -> Self {
+        Self {
+            ttl: Mutex::new(*self.ttl.lock()),
+            refresh: AtomicBool::new(self.refresh.load(Ordering::Relaxed)),
+            namespace: self.namespace.clone(),
+            prefix: self.prefix.clone(),
+            connection_string: self.connection_string.clone(),
+            pool: self.pool.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<K, V> RedisCache<K, V>
 where
     K: Display,
     V: Serialize + DeserializeOwned,
 {
-    #[allow(clippy::new_ret_no_self)]
     /// Initialize a `RedisCacheBuilder`.
-    pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
-        RedisCacheBuilder::new(prefix, ttl)
-    }
-
-    /// Initialize a `RedisCacheBuilder`.
-    pub fn builder<S: AsRef<str>>(prefix: S, ttl: Duration) -> RedisCacheBuilder<K, V> {
-        RedisCacheBuilder::new(prefix, ttl)
+    ///
+    /// The key `prefix` and `ttl` are required; set them via
+    /// [`RedisCacheBuilder::prefix`] and [`RedisCacheBuilder::ttl`] before calling
+    /// [`build`](RedisCacheBuilder::build). If either is missing, `build` returns
+    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`)` rather
+    /// than panicking.
+    #[must_use]
+    pub fn builder() -> RedisCacheBuilder<K, V> {
+        RedisCacheBuilder::new()
     }
 
     fn generate_key(&self, key: &K) -> String {
@@ -418,13 +701,24 @@ where
         generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
     }
 
-    /// Return the redis connection string used.
+    /// `SCAN MATCH` glob covering every key this cache writes: the same
+    /// `{namespace}:{prefix}:` scope as [`generate_key`](Self::generate_key) with a
+    /// trailing `*`, with glob metacharacters in the segments escaped (see
+    /// [`clear_match_pattern`]). Used by `cache_clear` to delete only this
+    /// cache's entries.
+    fn clear_match_pattern(&self) -> String {
+        clear_match_pattern(&self.namespace, &self.prefix)
+    }
+
+    /// Return the redis connection string as a [`ConnectionString`].
     ///
-    /// **Note:** the returned string may contain credentials (e.g. `redis://:password@host`).
-    /// Do not log or expose it in error messages.
+    /// `ConnectionString`'s `Debug`/`Display` render `[REDACTED connection string]`,
+    /// so the returned value is safe to log or include in error messages.
+    /// Call [`ConnectionString::reveal`] to retrieve the raw URL when the full
+    /// credentials are required.
     #[must_use]
-    pub fn connection_string(&self) -> String {
-        self.connection_string.as_str().to_string()
+    pub fn connection_string(&self) -> ConnectionString {
+        self.connection_string.clone()
     }
 }
 
@@ -435,26 +729,134 @@ pub enum RedisCacheError {
     Redis(#[from] redis::RedisError),
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
-    #[error("Error deserializing cached value {cached_value:?}: {error:?}")]
+    #[error("Error deserializing cached value")]
     CacheDeserialization {
-        cached_value: String,
-        error: serde_json::Error,
+        #[source]
+        source: rmp_serde::decode::Error,
+        cached_value: Vec<u8>,
     },
-    #[error("Error serializing cached value: {error:?}")]
-    CacheSerialization { error: serde_json::Error },
+    #[error("Error serializing cached value")]
+    CacheSerialization {
+        #[from]
+        source: rmp_serde::encode::Error,
+    },
 }
+
+/// On-disk schema version stamped into every value written by this store.
+/// Shared by [`CachedRedisValue::new`] and [`CachedRedisValueRef::new`] so the
+/// two constructors cannot drift. The field type is `Option<u64>`.
+const REDIS_VALUE_VERSION: Option<u64> = Some(1);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedRedisValue<V> {
-    pub(crate) value: V,
-    pub(crate) version: Option<u64>,
+    value: V,
+    version: Option<u64>,
 }
 impl<V> CachedRedisValue<V> {
     fn new(value: V) -> Self {
         Self {
             value,
-            version: Some(1),
+            version: REDIS_VALUE_VERSION,
         }
+    }
+}
+
+/// Borrowed counterpart of [`CachedRedisValue`] used by `cache_set_ref` to
+/// serialize from a `&V` without cloning. Produces the same MessagePack bytes
+/// as `CachedRedisValue::new(value)` (same field names and order).
+#[derive(serde::Serialize)]
+struct CachedRedisValueRef<'a, V> {
+    value: &'a V,
+    version: Option<u64>,
+}
+impl<'a, V> CachedRedisValueRef<'a, V> {
+    fn new(value: &'a V) -> Self {
+        Self {
+            value,
+            version: REDIS_VALUE_VERSION,
+        }
+    }
+}
+
+/// Deserialize a stored [`CachedRedisValue`] from its raw Redis bytes, reading
+/// both the current MessagePack format and the pre-3.0 JSON format.
+///
+/// Single source of truth for every value-deserialize site (sync and async) so
+/// the backward-read behavior cannot drift between them.
+///
+/// Logic:
+/// 1. Try MessagePack (`rmp_serde`) — the format written since 3.0.
+/// 2. On failure, attempt the legacy pre-3.0 JSON encoding: parse the bytes as a
+///    generic JSON value and, only if it carries a `version` key (the shape this
+///    store always wrote), deserialize it into a [`CachedRedisValue`]. This
+///    transparently reads entries written by cached 2.x.
+/// 3. If neither path succeeds, return
+///    [`RedisCacheError::CacheDeserialization`] preserving the *original*
+///    MessagePack error as `source` and the raw bytes in `cached_value`.
+fn deserialize_cached_redis_value<V: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<CachedRedisValue<V>, RedisCacheError> {
+    match rmp_serde::from_slice::<CachedRedisValue<V>>(bytes) {
+        Ok(v) => Ok(v),
+        Err(msgpack_err) => {
+            // Fall back to the pre-3.0 JSON format. Only treat the bytes as the
+            // legacy format if they parse as JSON AND carry the `version` key the
+            // old store always wrote — otherwise this is genuinely corrupt data
+            // and we should surface the original MessagePack error.
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes)
+                && json.get("version").is_some()
+                && let Ok(v) = serde_json::from_value::<CachedRedisValue<V>>(json)
+            {
+                return Ok(v);
+            }
+            Err(RedisCacheError::CacheDeserialization {
+                source: msgpack_err,
+                cached_value: bytes.to_vec(),
+            })
+        }
+    }
+}
+
+impl<K, V> ConcurrentCacheBase for RedisCache<K, V> {
+    type Error = RedisCacheError;
+}
+
+impl<K, V> ConcurrentCacheTtl for RedisCache<K, V> {
+    fn ttl(&self) -> Option<Duration> {
+        let ttl = *self.ttl.lock();
+        if ttl.is_zero() { None } else { Some(ttl) }
+    }
+
+    /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
+    /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
+    /// TTL was applied when they were originally inserted.
+    ///
+    /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
+    /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
+    /// until explicitly removed. Use [`try_set_ttl`](crate::ConcurrentCacheTtl::try_set_ttl) if you
+    /// want a zero TTL rejected instead.
+    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = ttl;
+        if old.is_zero() { None } else { Some(old) }
+    }
+
+    /// Disable expiry: subsequent `cache_set` writes store keys without a TTL (plain `SET`).
+    /// Returns the previous TTL, or `None` if expiry was already disabled.
+    fn unset_ttl(&self) -> Option<Duration> {
+        let mut guard = self.ttl.lock();
+        let old = *guard;
+        *guard = Duration::ZERO;
+        if old.is_zero() { None } else { Some(old) }
+    }
+
+    fn refresh_on_hit(&self) -> bool {
+        self.refresh.load(Ordering::Relaxed)
+    }
+
+    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+        self.refresh.swap(refresh, Ordering::Relaxed)
     }
 }
 
@@ -463,8 +865,6 @@ where
     K: Display + Clone,
     V: Serialize + DeserializeOwned,
 {
-    type Error = RedisCacheError;
-
     fn cache_get(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
         let mut conn = self.pool.get()?;
         let mut pipe = redis::pipe();
@@ -473,19 +873,18 @@ where
         pipe.get(&key);
         if self.refresh.load(Ordering::Relaxed) {
             let ttl = *self.ttl.lock();
-            pipe.expire(key, ttl_seconds_i64(ttl)?).ignore();
+            // A zero (disabled) TTL means entries are stored without expiry; skip the
+            // refresh `PEXPIRE` so the key stays persistent (no TTL to renew).
+            if !ttl.is_zero() {
+                pipe.pexpire(key, ttl_millis_i64(ttl)?).ignore();
+            }
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
-        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
         match res.0 {
             None => Ok(None),
-            Some(s) => {
-                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                    RedisCacheError::CacheDeserialization {
-                        cached_value: s,
-                        error: e,
-                    }
-                })?;
+            Some(bytes) => {
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -496,28 +895,24 @@ where
         let mut pipe = redis::pipe();
         let key = self.generate_key(&key);
 
-        let ttl_secs = ttl_seconds(*self.ttl.lock())?;
+        let ttl = *self.ttl.lock();
 
         let val = CachedRedisValue::new(val);
+        let serialized = rmp_serde::to_vec(&val)?;
         pipe.get(&key);
-        pipe.set_ex::<String, String>(
-            key,
-            serde_json::to_string(&val)
-                .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
-            ttl_secs,
-        )
-        .ignore();
+        if ttl.is_zero() {
+            // Disabled TTL: write the key without expiry (plain `SET`).
+            pipe.set::<String, Vec<u8>>(key, serialized).ignore();
+        } else {
+            pipe.pset_ex::<String, Vec<u8>>(key, serialized, ttl_millis(ttl)?)
+                .ignore();
+        }
 
-        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
         match res.0 {
             None => Ok(None),
-            Some(s) => {
-                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                    RedisCacheError::CacheDeserialization {
-                        cached_value: s,
-                        error: e,
-                    }
-                })?;
+            Some(bytes) => {
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -530,16 +925,11 @@ where
 
         pipe.get(&key);
         pipe.del::<String>(key).ignore();
-        let res: (Option<String>,) = pipe.query(&mut *conn)?;
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
         match res.0 {
             None => Ok(None),
-            Some(s) => {
-                let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                    RedisCacheError::CacheDeserialization {
-                        cached_value: s,
-                        error: e,
-                    }
-                })?;
+            Some(bytes) => {
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -563,26 +953,87 @@ where
         Ok(removed > 0)
     }
 
-    fn ttl(&self) -> Option<Duration> {
-        Some(*self.ttl.lock())
+    /// Remove every entry written by this cache instance.
+    ///
+    /// Scoped to this cache's `{namespace}:{prefix}:*` keyspace via `SCAN` +
+    /// batched `DEL`. It is **not** a server `FLUSHDB`: keys outside this
+    /// namespace/prefix are untouched, and entries written by other caches
+    /// sharing the Redis server are preserved.
+    ///
+    /// Cost is **O(n)** in the number of matching keys (a cursored `SCAN`), so it
+    /// is heavier than the in-memory `cache_clear`. New keys inserted concurrently
+    /// during the scan may or may not be removed (standard `SCAN` semantics).
+    ///
+    /// **Note:** the `prefix` is what scopes a clear to a single logical cache. A
+    /// cache built with an empty prefix but a non-empty namespace will match every
+    /// key under that namespace on `cache_clear` (pattern `<namespace>:*`), which
+    /// includes entries written by every other cache that shares the same namespace.
+    /// Set a unique prefix per logical cache to avoid this.
+    fn cache_clear(&self) -> Result<(), RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let pattern = self.clear_match_pattern();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query(&mut *conn)?;
+            if !keys.is_empty() {
+                redis::cmd("DEL").arg(keys).query::<()>(&mut *conn)?;
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(())
     }
 
-    /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
-    /// they retain whatever TTL was applied when they were originally inserted.
-    fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let mut guard = self.ttl.lock();
-        let old = *guard;
-        *guard = ttl;
-        Some(old)
+    /// Delegates to [`cache_clear`](crate::ConcurrentCached::cache_clear): the redis
+    /// store tracks no in-memory metrics, so resetting is exactly clearing the
+    /// entries (matching `RedbCache`, which also overrides both).
+    fn cache_reset(&self) -> Result<(), RedisCacheError> {
+        self.cache_clear()
     }
+}
 
-    fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.refresh.swap(refresh, Ordering::Relaxed)
-    }
+impl<K, V> crate::SerializeCached<K, V> for RedisCache<K, V>
+where
+    K: Display + Clone,
+    V: Serialize + DeserializeOwned,
+{
+    /// Serializes from the borrowed `val` (no clone) and `SET`s it, returning the
+    /// previous value if any. Equivalent to [`ConcurrentCached::cache_set`] but
+    /// avoids taking ownership of `val`.
+    fn cache_set_ref(&self, key: &K, val: &V) -> Result<Option<V>, RedisCacheError> {
+        let mut conn = self.pool.get()?;
+        let mut pipe = redis::pipe();
+        let key = self.generate_key(key);
 
-    /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
-    fn unset_ttl(&self) -> Option<Duration> {
-        None
+        let ttl = *self.ttl.lock();
+
+        let val = CachedRedisValueRef::new(val);
+        let serialized = rmp_serde::to_vec(&val)?;
+        pipe.get(&key);
+        if ttl.is_zero() {
+            // Disabled TTL: write the key without expiry (plain `SET`).
+            pipe.set::<String, Vec<u8>>(key, serialized).ignore();
+        } else {
+            pipe.pset_ex::<String, Vec<u8>>(key, serialized, ttl_millis(ttl)?)
+                .ignore();
+        }
+
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
+        match res.0 {
+            None => Ok(None),
+            Some(bytes) => {
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
+                Ok(Some(v.value))
+            }
+        }
     }
 }
 
@@ -590,7 +1041,12 @@ where
     feature = "async",
     any(
         feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
         feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+        feature = "redis_async_cache",
         feature = "redis_connection_manager"
     )
 ))]
@@ -600,18 +1056,19 @@ mod async_redis {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        CachedRedisValue, ConnectionString, DEFAULT_NAMESPACE, DeserializeOwned, Display, ENV_KEY,
-        PhantomData, RedisCacheBuildError, RedisCacheError, Serialize,
+        CachedRedisValue, CachedRedisValueRef, ConnectionString, DEFAULT_NAMESPACE,
+        DeserializeOwned, Display, ENV_KEY, PhantomData, RedisCacheBuildError, RedisCacheError,
+        Serialize,
     };
-    use crate::ConcurrentCachedAsync;
+    use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCachedAsync};
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
 
     pub struct AsyncRedisCacheBuilder<K, V> {
-        ttl: Duration,
+        ttl: Option<Duration>,
         refresh: bool,
         namespace: String,
-        prefix: String,
+        prefix: Option<String>,
         connection_string: Option<String>,
         #[cfg(feature = "redis_async_cache")]
         client_side_caching: bool,
@@ -619,18 +1076,33 @@ mod async_redis {
         _phantom: PhantomData<fn() -> (K, V)>,
     }
 
+    impl<K, V> Default for AsyncRedisCacheBuilder<K, V>
+    where
+        K: Display,
+        V: Serialize + DeserializeOwned,
+    {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl<K, V> AsyncRedisCacheBuilder<K, V>
     where
         K: Display,
         V: Serialize + DeserializeOwned,
     {
-        /// Initialize a `RedisCacheBuilder`
-        pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
+        /// Initialize an `AsyncRedisCacheBuilder`.
+        ///
+        /// Both the key `prefix` and the `ttl` are required; set them with
+        /// [`prefix`](Self::prefix) and [`ttl`](Self::ttl) (or [`ttl_secs`](Self::ttl_secs) /
+        /// [`ttl_millis`](Self::ttl_millis)) before calling [`build`](Self::build).
+        #[must_use]
+        pub fn new() -> AsyncRedisCacheBuilder<K, V> {
             Self {
-                ttl,
+                ttl: None,
                 refresh: false,
                 namespace: DEFAULT_NAMESPACE.to_string(),
-                prefix: prefix.as_ref().to_string(),
+                prefix: None,
                 connection_string: None,
                 #[cfg(feature = "redis_async_cache")]
                 client_side_caching: false,
@@ -638,12 +1110,33 @@ mod async_redis {
             }
         }
 
-        /// Specify the cache TTL as a `Duration`.
-        /// Redis enforces whole-second granularity; sub-second non-zero TTLs round up to 1 second.
+        /// Specify the cache TTL as a `Duration` (required).
+        /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`.
+        ///
+        /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
         #[must_use]
         pub fn ttl(mut self, ttl: Duration) -> Self {
-            self.ttl = ttl;
+            self.ttl = Some(ttl);
             self
+        }
+
+        /// Specify the cache TTL in whole seconds. Equivalent to
+        /// `ttl(Duration::from_secs(secs))`.
+        ///
+        /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+        #[must_use]
+        pub fn ttl_secs(self, secs: u64) -> Self {
+            self.ttl(Duration::from_secs(secs))
+        }
+
+        /// Specify the cache TTL in milliseconds. Equivalent to
+        /// `ttl(Duration::from_millis(millis))`.
+        /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`.
+        ///
+        /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+        #[must_use]
+        pub fn ttl_millis(self, millis: u64) -> Self {
+            self.ttl(Duration::from_millis(millis))
         }
 
         /// Specify whether cache hits refresh the TTL
@@ -666,15 +1159,21 @@ mod async_redis {
             self
         }
 
-        /// Set the prefix for cache keys.
+        /// Set the prefix for cache keys (required).
         /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
         /// Empty prefix values are omitted from the generated key.
         ///
         /// **Note:** colons in the prefix are not escaped and can cause key collisions
         /// with differently-split namespace/prefix combinations sharing the same segments.
+        ///
+        /// **Note:** the prefix is what scopes `async_cache_clear` to this logical
+        /// cache. With an empty prefix, `async_cache_clear` matches `<namespace>:*`
+        /// and will delete entries belonging to every cache that shares the same
+        /// namespace. Set a unique prefix per logical cache to ensure
+        /// `async_cache_clear` is scoped correctly.
         #[must_use]
         pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
-            self.prefix = prefix.as_ref().to_string();
+            self.prefix = Some(prefix.as_ref().to_string());
             self
         }
 
@@ -769,23 +1268,46 @@ mod async_redis {
             Ok(conn)
         }
 
-        /// The last step in building a `RedisCache` is to call `build()`
+        /// The last step in building an `AsyncRedisCache` is to call `build()`
         ///
         /// # Errors
         ///
-        /// Will return a `RedisCacheBuildError`, depending on the error
+        /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
+        /// - `Build(BuildError::MissingRequired("ttl"))`: no TTL was set.
+        /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
+        /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
+        ///   the prefix are empty. `async_cache_clear` would otherwise issue
+        ///   `SCAN MATCH *` and delete every key in the Redis database.
+        /// - `MissingConnectionString`: no connection string was set and the
+        ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
+        /// - `Connection`: the Redis client or multiplexed connection could not
+        ///   be created.
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
-            super::super::validate_ttl(self.ttl)?;
+            // Validate required fields before any IO/connection attempt so the
+            // missing-required error is returned without needing a server.
+            if self.prefix.is_none() {
+                return Err(super::super::BuildError::MissingRequired("prefix").into());
+            }
+            let ttl = self
+                .ttl
+                .ok_or(super::super::BuildError::MissingRequired("ttl"))?;
+            super::super::validate_ttl(ttl)?;
+            let prefix = self.prefix.as_deref().unwrap_or_default();
+            if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
+                return Err(RedisCacheBuildError::EmptyScope);
+            }
+            let connection_string = ConnectionString(self.resolve_connection_string()?);
+            #[cfg(not(feature = "redis_connection_manager"))]
+            let connection = self.create_multiplexed_connection().await?;
+            #[cfg(feature = "redis_connection_manager")]
+            let connection = self.create_connection_manager().await?;
             Ok(AsyncRedisCache {
-                ttl: Mutex::new(self.ttl),
+                ttl: Mutex::new(ttl),
                 refresh: AtomicBool::new(self.refresh),
-                connection_string: ConnectionString(self.resolve_connection_string()?),
-                #[cfg(not(feature = "redis_connection_manager"))]
-                connection: self.create_multiplexed_connection().await?,
-                #[cfg(feature = "redis_connection_manager")]
-                connection: self.create_connection_manager().await?,
+                connection_string,
+                connection,
                 namespace: self.namespace,
-                prefix: self.prefix,
+                prefix: self.prefix.unwrap_or_default(),
                 _phantom: PhantomData,
             })
         }
@@ -814,6 +1336,35 @@ mod async_redis {
         _phantom: PhantomData<fn() -> (K, V)>,
     }
 
+    impl<K, V> std::fmt::Debug for AsyncRedisCache<K, V> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("AsyncRedisCache")
+                .field("namespace", &self.namespace)
+                .field("prefix", &self.prefix)
+                .field("ttl", &*self.ttl.lock())
+                .field("refresh", &self.refresh.load(Ordering::Relaxed))
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl<K, V> Clone for AsyncRedisCache<K, V> {
+        /// Shallow clone - the underlying multiplexed connection or connection
+        /// manager is `Clone` (internally `Arc`-backed). The `ttl` is snapshot
+        /// into a fresh `Mutex` so the two handles can independently update
+        /// their TTL view.
+        fn clone(&self) -> Self {
+            Self {
+                ttl: Mutex::new(*self.ttl.lock()),
+                refresh: AtomicBool::new(self.refresh.load(Ordering::Relaxed)),
+                namespace: self.namespace.clone(),
+                prefix: self.prefix.clone(),
+                connection_string: self.connection_string.clone(),
+                connection: self.connection.clone(),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
     impl<K, V> AsyncRedisCache<K, V>
     where
         // `V: Sync` is intentionally absent: `V` is sent across the async
@@ -822,15 +1373,14 @@ mod async_redis {
         K: Display + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
-        #[allow(clippy::new_ret_no_self)]
-        /// Initialize an `AsyncRedisCacheBuilder`
-        pub fn new<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
-            AsyncRedisCacheBuilder::new(prefix, ttl)
-        }
-
         /// Initialize an `AsyncRedisCacheBuilder`.
-        pub fn builder<S: AsRef<str>>(prefix: S, ttl: Duration) -> AsyncRedisCacheBuilder<K, V> {
-            AsyncRedisCacheBuilder::new(prefix, ttl)
+        ///
+        /// The key `prefix` and `ttl` are required; set them via
+        /// [`AsyncRedisCacheBuilder::prefix`] and [`AsyncRedisCacheBuilder::ttl`]
+        /// before calling [`build`](AsyncRedisCacheBuilder::build).
+        #[must_use]
+        pub fn builder() -> AsyncRedisCacheBuilder<K, V> {
+            AsyncRedisCacheBuilder::new()
         }
 
         fn generate_key(&self, key: &K) -> String {
@@ -838,13 +1388,69 @@ mod async_redis {
             super::generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
         }
 
-        /// Return the redis connection string used.
+        /// `SCAN MATCH` glob covering every key this cache writes — the same
+        /// `{namespace}:{prefix}:` scope with a trailing `*`, with glob
+        /// metacharacters in the segments escaped (see
+        /// [`clear_match_pattern`](super::clear_match_pattern)). Used by
+        /// `async_cache_clear`.
+        fn clear_match_pattern(&self) -> String {
+            super::clear_match_pattern(&self.namespace, &self.prefix)
+        }
+
+        /// Return the redis connection string as a [`ConnectionString`].
         ///
-        /// **Note:** the returned string may contain credentials (e.g. `redis://:password@host`).
-        /// Do not log or expose it in error messages.
+        /// `ConnectionString`'s `Debug`/`Display` render `[REDACTED connection string]`,
+        /// so the returned value is safe to log or include in error messages.
+        /// Call [`ConnectionString::reveal`](super::ConnectionString::reveal) to
+        /// retrieve the raw URL when the full credentials are required.
         #[must_use]
-        pub fn connection_string(&self) -> String {
-            self.connection_string.as_str().to_string()
+        pub fn connection_string(&self) -> ConnectionString {
+            self.connection_string.clone()
+        }
+    }
+
+    impl<K, V> ConcurrentCacheBase for AsyncRedisCache<K, V> {
+        type Error = RedisCacheError;
+    }
+
+    impl<K, V> ConcurrentCacheTtl for AsyncRedisCache<K, V> {
+        /// Return the ttl of cached values (time to eviction), or `None` if expiry is disabled.
+        fn ttl(&self) -> Option<Duration> {
+            let ttl = *self.ttl.lock();
+            if ttl.is_zero() { None } else { Some(ttl) }
+        }
+
+        /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
+        /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
+        /// TTL was applied when they were originally inserted.
+        ///
+        /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
+        /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys
+        /// persist until explicitly removed. Use
+        /// [`try_set_ttl`](crate::ConcurrentCacheTtl::try_set_ttl) if you want a zero TTL rejected.
+        fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = ttl;
+            if old.is_zero() { None } else { Some(old) }
+        }
+
+        /// Disable expiry: subsequent `async_cache_set` writes store keys without a TTL
+        /// (plain `SET`). Returns the previous TTL, or `None` if expiry was already disabled.
+        fn unset_ttl(&self) -> Option<Duration> {
+            let mut guard = self.ttl.lock();
+            let old = *guard;
+            *guard = Duration::ZERO;
+            if old.is_zero() { None } else { Some(old) }
+        }
+
+        fn refresh_on_hit(&self) -> bool {
+            self.refresh.load(Ordering::Relaxed)
+        }
+
+        /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
+        fn set_refresh_on_hit(&self, refresh: bool) -> bool {
+            self.refresh.swap(refresh, Ordering::Relaxed)
         }
     }
 
@@ -855,8 +1461,6 @@ mod async_redis {
         K: Display + Clone + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
-        type Error = RedisCacheError;
-
         /// Get a cached value
         async fn async_cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
@@ -866,18 +1470,17 @@ mod async_redis {
             pipe.get(&key);
             if self.refresh.load(Ordering::Relaxed) {
                 let ttl = *self.ttl.lock();
-                pipe.expire(key, super::ttl_seconds_i64(ttl)?).ignore();
+                // A zero (disabled) TTL means entries are stored without expiry; skip the
+                // refresh `PEXPIRE` so the key stays persistent (no TTL to renew).
+                if !ttl.is_zero() {
+                    pipe.pexpire(key, super::ttl_millis_i64(ttl)?).ignore();
+                }
             }
-            let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+            let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
                 None => Ok(None),
-                Some(s) => {
-                    let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                        RedisCacheError::CacheDeserialization {
-                            cached_value: s,
-                            error: e,
-                        }
-                    })?;
+                Some(bytes) => {
+                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                     Ok(Some(v.value))
                 }
             }
@@ -889,28 +1492,24 @@ mod async_redis {
             let mut pipe = redis::pipe();
             let key = self.generate_key(&key);
 
-            let ttl_secs = super::ttl_seconds(*self.ttl.lock())?;
+            let ttl = *self.ttl.lock();
 
             let val = CachedRedisValue::new(val);
+            let serialized = rmp_serde::to_vec(&val)?;
             pipe.get(&key);
-            pipe.set_ex::<String, String>(
-                key,
-                serde_json::to_string(&val)
-                    .map_err(|e| RedisCacheError::CacheSerialization { error: e })?,
-                ttl_secs,
-            )
-            .ignore();
+            if ttl.is_zero() {
+                // Disabled TTL: write the key without expiry (plain `SET`).
+                pipe.set::<String, Vec<u8>>(key, serialized).ignore();
+            } else {
+                pipe.pset_ex::<String, Vec<u8>>(key, serialized, super::ttl_millis(ttl)?)
+                    .ignore();
+            }
 
-            let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+            let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
                 None => Ok(None),
-                Some(s) => {
-                    let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                        RedisCacheError::CacheDeserialization {
-                            cached_value: s,
-                            error: e,
-                        }
-                    })?;
+                Some(bytes) => {
+                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                     Ok(Some(v.value))
                 }
             }
@@ -924,16 +1523,11 @@ mod async_redis {
 
             pipe.get(&key);
             pipe.del::<String>(key).ignore();
-            let res: (Option<String>,) = pipe.query_async(&mut conn).await?;
+            let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
             match res.0 {
                 None => Ok(None),
-                Some(s) => {
-                    let v: CachedRedisValue<V> = serde_json::from_str(&s).map_err(|e| {
-                        RedisCacheError::CacheDeserialization {
-                            cached_value: s,
-                            error: e,
-                        }
-                    })?;
+                Some(bytes) => {
+                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                     Ok(Some(v.value))
                 }
             }
@@ -958,28 +1552,107 @@ mod async_redis {
             Ok(removed > 0)
         }
 
-        /// Set whether cache hits refresh the ttl of cached values, returning the previous flag value.
-        fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-            self.refresh.swap(refresh, Ordering::Relaxed)
+        /// Remove every entry written by this cache instance.
+        ///
+        /// Async counterpart of [`ConcurrentCached::cache_clear`](crate::ConcurrentCached::cache_clear)
+        /// for `RedisCache`. Scoped to this cache's `{namespace}:{prefix}:*` keyspace
+        /// via `SCAN` + batched `DEL`; it is **not** a server `FLUSHDB` and leaves keys
+        /// outside this namespace/prefix untouched. Cost is **O(n)** in the number of
+        /// matching keys (a cursored `SCAN`).
+        ///
+        /// **Note:** the `prefix` is what scopes a clear to a single logical cache. A
+        /// cache built with an empty prefix but a non-empty namespace will match every
+        /// key under that namespace on `async_cache_clear` (pattern `<namespace>:*`),
+        /// which includes entries written by every other cache that shares the same
+        /// namespace. Set a unique prefix per logical cache to avoid this.
+        async fn async_cache_clear(&self) -> Result<(), Self::Error> {
+            let mut conn = self.connection.clone();
+            let pattern = self.clear_match_pattern();
+            let mut cursor: u64 = 0;
+            loop {
+                let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut conn)
+                    .await?;
+                if !keys.is_empty() {
+                    redis::cmd("DEL")
+                        .arg(keys)
+                        .query_async::<()>(&mut conn)
+                        .await?;
+                }
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
+            }
+            Ok(())
         }
 
-        /// Return the ttl of cached values (time to eviction).
-        fn ttl(&self) -> Option<Duration> {
-            Some(*self.ttl.lock())
+        /// Delegates to
+        /// [`async_cache_clear`](crate::ConcurrentCachedAsync::async_cache_clear): the
+        /// redis store tracks no in-memory metrics, so resetting is exactly clearing
+        /// the entries (matching `RedbCache`, which also overrides both).
+        async fn async_cache_reset(&self) -> Result<(), Self::Error> {
+            self.async_cache_clear().await
         }
+    }
 
-        /// Set the TTL for newly inserted cache entries. Existing Redis keys are not affected;
-        /// they retain whatever TTL was applied when they were originally inserted.
-        fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-            let mut guard = self.ttl.lock();
-            let old = *guard;
-            *guard = ttl;
-            Some(old)
-        }
+    impl<K, V> crate::SerializeCachedAsync<K, V> for AsyncRedisCache<K, V>
+    where
+        K: Display + Clone + Send + Sync,
+        V: Serialize + DeserializeOwned + Send,
+    {
+        /// Serializes from the borrowed `val` (no clone) and `SET`s it, returning
+        /// the previous value if any. Async counterpart of
+        /// [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref).
+        ///
+        /// Serialization happens eagerly (before the returned future is awaited) so
+        /// the borrowed `&V` is never held across the `.await`, keeping the `V: Send`
+        /// (not `Sync`) bound consistent with `async_cache_set`.
+        fn async_cache_set_ref(
+            &self,
+            key: &K,
+            val: &V,
+        ) -> impl std::future::Future<Output = Result<Option<V>, Self::Error>> + Send {
+            let mut conn = self.connection.clone();
+            let key = self.generate_key(key);
+            let ttl = *self.ttl.lock();
+            // Compute the milliseconds eagerly (only for a real, non-zero TTL) so any
+            // error is surfaced before the future is awaited, matching the eager
+            // serialization below.
+            let ttl_ms = if ttl.is_zero() {
+                Ok(None)
+            } else {
+                super::ttl_millis(ttl).map(Some)
+            };
+            let serialized = rmp_serde::to_vec(&CachedRedisValueRef::new(val))
+                .map_err(|source| RedisCacheError::CacheSerialization { source });
+            async move {
+                let mut pipe = redis::pipe();
+                let serialized: Vec<u8> = serialized?;
+                let ttl_ms = ttl_ms?;
+                pipe.get(&key);
+                match ttl_ms {
+                    // Disabled TTL: write the key without expiry (plain `SET`).
+                    None => pipe.set::<String, Vec<u8>>(key, serialized).ignore(),
+                    Some(ttl_ms) => pipe
+                        .pset_ex::<String, Vec<u8>>(key, serialized, ttl_ms)
+                        .ignore(),
+                };
 
-        /// Redis cache entries always require a TTL. This method is a no-op and always returns `None`.
-        fn unset_ttl(&self) -> Option<Duration> {
-            None
+                let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
+                match res.0 {
+                    None => Ok(None),
+                    Some(bytes) => {
+                        let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
+                        Ok(Some(v.value))
+                    }
+                }
+            }
         }
     }
 
@@ -996,15 +1669,29 @@ mod async_redis {
                 .as_millis()
         }
 
+        // No Redis server needed -- verifies the empty-scope guard in async `build()`.
+        #[tokio::test]
+        async fn async_empty_namespace_and_prefix_is_rejected() {
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("")
+                .ttl(Duration::from_secs(1))
+                .namespace("")
+                .build()
+                .await;
+            assert!(
+                matches!(result, Err(RedisCacheBuildError::EmptyScope)),
+                "expected EmptyScope"
+            );
+        }
+
         #[tokio::test]
         async fn test_async_redis_cache() {
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::new(
-                format!("{}:async-redis-cache-test", now_millis()),
-                Duration::from_secs(2),
-            )
-            .build()
-            .await
-            .unwrap();
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(format!("{}:async-redis-cache-test", now_millis()))
+                .ttl(Duration::from_secs(2))
+                .build()
+                .await
+                .unwrap();
 
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
@@ -1014,7 +1701,7 @@ mod async_redis {
             sleep(Duration::new(2, 500_000));
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
-            let old = ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(1)).unwrap();
+            let old = ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(1)).unwrap();
             assert_eq!(2, old.as_secs());
             assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
             assert!(c.async_cache_get(&1).await.unwrap().is_some());
@@ -1022,11 +1709,49 @@ mod async_redis {
             sleep(Duration::new(1, 600_000));
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
-            ConcurrentCachedAsync::set_ttl(&c, Duration::from_secs(10)).unwrap();
+            ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(10)).unwrap();
             assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
             assert!(c.async_cache_set(2, 100).await.unwrap().is_none());
             assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
             assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
+        }
+    }
+
+    #[cfg(test)]
+    mod async_builder_ttl_setter_tests {
+        // No Redis server needed -- these only inspect the builder's ttl field set by
+        // the convenience setters, without calling `build()`.
+        use super::AsyncRedisCacheBuilder;
+        use crate::time::Duration;
+
+        #[test]
+        fn ttl_secs_and_ttl_millis_set_duration() {
+            let b = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("p")
+                .ttl_secs(7);
+            assert_eq!(b.ttl, Some(Duration::from_secs(7)));
+
+            let b = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("p")
+                .ttl_millis(250);
+            assert_eq!(b.ttl, Some(Duration::from_millis(250)));
+        }
+
+        #[test]
+        fn ttl_setters_override_last_writer_wins() {
+            // ttl_secs then ttl_millis -> the millis value
+            let b = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("p")
+                .ttl_secs(10)
+                .ttl_millis(500);
+            assert_eq!(b.ttl, Some(Duration::from_millis(500)));
+
+            // ttl_millis then ttl_secs -> the secs value
+            let b = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("p")
+                .ttl_millis(500)
+                .ttl_secs(10);
+            assert_eq!(b.ttl, Some(Duration::from_secs(10)));
         }
     }
 }
@@ -1035,7 +1760,12 @@ mod async_redis {
     feature = "async",
     any(
         feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
         feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+        feature = "redis_async_cache",
         feature = "redis_connection_manager"
     )
 ))]
@@ -1045,12 +1775,345 @@ mod async_redis {
         feature = "async",
         any(
             feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
             feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
+            feature = "redis_async_cache",
             feature = "redis_connection_manager"
         )
     )))
 )]
 pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
+
+#[cfg(test)]
+mod error_source_tests {
+    use std::error::Error;
+
+    use super::{RedisCacheBuildError, RedisCacheError};
+
+    /// `RedisCacheBuildError::MissingConnectionString` must expose its inner
+    /// `VarError` via `Error::source()`.
+    #[test]
+    fn missing_connection_string_has_source() {
+        let inner = std::env::VarError::NotPresent;
+        let err = RedisCacheBuildError::MissingConnectionString {
+            env_key: "TEST_KEY".to_string(),
+            error: inner,
+        };
+        let source = err
+            .source()
+            .expect("MissingConnectionString must expose its inner VarError as source()");
+        // Non-tautological: the source must be the actual inner VarError, whose
+        // Display is the std message - not some other wrapped error.
+        assert_eq!(
+            source.to_string(),
+            std::env::VarError::NotPresent.to_string(),
+            "source() must be the inner VarError"
+        );
+        // The source must downcast to VarError, proving the #[source] wiring
+        // points at the real inner field and not a re-stringified copy.
+        assert!(
+            source.downcast_ref::<std::env::VarError>().is_some(),
+            "source() must downcast to std::env::VarError"
+        );
+    }
+
+    /// `MissingConnectionString`'s Display must read cleanly: env key and the
+    /// VarError's human message, with no `VarError { .. }` / `NotPresent`
+    /// debug noise.
+    #[test]
+    fn missing_connection_string_display_is_clean() {
+        let err = RedisCacheBuildError::MissingConnectionString {
+            env_key: "CACHED_REDIS_CONNECTION_STRING".to_string(),
+            error: std::env::VarError::NotPresent,
+        };
+        let rendered = err.to_string();
+
+        // The env key is surfaced (it is formatted with {env_key:?}, so quoted).
+        assert!(
+            rendered.contains("CACHED_REDIS_CONNECTION_STRING"),
+            "Display must name the env var; got: {rendered}"
+        );
+        // The inner error's *Display* message is present.
+        assert!(
+            rendered.contains(&std::env::VarError::NotPresent.to_string()),
+            "Display must include the VarError's human message; got: {rendered}"
+        );
+        // No Debug-form noise.
+        assert!(
+            !rendered.contains("NotPresent"),
+            "Display must not leak the Debug variant name `NotPresent`; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("VarError"),
+            "Display must not leak the `VarError` type name; got: {rendered}"
+        );
+    }
+
+    /// `RedisCacheError::CacheDeserialization` must expose its inner
+    /// `rmp_serde::decode::Error` via `Error::source()`.
+    #[test]
+    fn cache_deserialization_has_source() {
+        // Construct a decode error by trying to decode garbage bytes.
+        let bad_bytes: Vec<u8> = vec![0xc1]; // 0xc1 is an unused msgpack byte
+        let inner: rmp_serde::decode::Error = rmp_serde::from_slice::<u32>(&bad_bytes).unwrap_err();
+        let inner_display = inner.to_string();
+        let err = RedisCacheError::CacheDeserialization {
+            source: inner,
+            cached_value: bad_bytes.clone(),
+        };
+        let source = err
+            .source()
+            .expect("CacheDeserialization must expose its inner decode::Error as source()");
+        assert!(
+            source.downcast_ref::<rmp_serde::decode::Error>().is_some(),
+            "source() must downcast to rmp_serde::decode::Error"
+        );
+        let rendered = err.to_string();
+        assert!(
+            !rendered.is_empty(),
+            "Display must produce a non-empty string; got: {rendered}"
+        );
+        // The source error's message is reachable via source().
+        assert_eq!(
+            source.to_string(),
+            inner_display,
+            "source() display must match the original decode error"
+        );
+        // The cached_value field is accessible on the variant.
+        if let RedisCacheError::CacheDeserialization { cached_value, .. } = &err {
+            assert_eq!(cached_value, &bad_bytes);
+        } else {
+            panic!("expected CacheDeserialization");
+        }
+    }
+
+    /// `RedisCacheError::CacheSerialization` must expose its inner
+    /// `rmp_serde::encode::Error` via `Error::source()`.
+    #[test]
+    fn cache_serialization_has_source() {
+        // Construct an encode error via a type that fails to serialize.
+        #[derive(Debug)]
+        struct Unserializable;
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+        let inner: rmp_serde::encode::Error = rmp_serde::to_vec(&Unserializable).unwrap_err();
+        let inner_display = inner.to_string();
+        let err = RedisCacheError::CacheSerialization { source: inner };
+        let source = err
+            .source()
+            .expect("CacheSerialization must expose its inner encode::Error as source()");
+        assert!(
+            source.downcast_ref::<rmp_serde::encode::Error>().is_some(),
+            "source() must downcast to rmp_serde::encode::Error"
+        );
+        // The inner serde error message is reachable.
+        assert_eq!(
+            source.to_string(),
+            inner_display,
+            "source() display must match the original encode error"
+        );
+    }
+
+    /// MessagePack round-trip: a value serialized with rmp_serde can be
+    /// deserialized back to the same value without going through Redis.
+    /// This verifies the codec chosen for the redis store works end-to-end.
+    #[test]
+    fn msgpack_round_trip_via_cached_redis_value() {
+        use super::CachedRedisValue;
+
+        let original: u64 = 42;
+        let wrapped = CachedRedisValue::new(original);
+        let bytes = rmp_serde::to_vec(&wrapped).expect("serialize must succeed");
+
+        // Bytes must be non-empty and not UTF-8 text (they are binary msgpack).
+        assert!(!bytes.is_empty());
+        // The msgpack encoding of a struct is not the same as JSON text.
+        assert!(
+            std::str::from_utf8(&bytes).is_err() || !bytes.starts_with(b"{"),
+            "msgpack output should not look like JSON"
+        );
+
+        let recovered: CachedRedisValue<u64> =
+            rmp_serde::from_slice(&bytes).expect("deserialize must succeed");
+        assert_eq!(recovered.value, original);
+        assert_eq!(recovered.version, Some(1));
+    }
+
+    /// MessagePack round-trip for a string value.
+    #[test]
+    fn msgpack_round_trip_string_value() {
+        use super::CachedRedisValue;
+
+        let original = "hello, msgpack!".to_string();
+        let wrapped = CachedRedisValue::new(original.clone());
+        let bytes = rmp_serde::to_vec(&wrapped).expect("serialize must succeed");
+        let recovered: CachedRedisValue<String> =
+            rmp_serde::from_slice(&bytes).expect("deserialize must succeed");
+        assert_eq!(recovered.value, original);
+    }
+
+    /// The shared backward-read helper round-trips the current MessagePack format.
+    #[test]
+    fn deserialize_helper_reads_msgpack() {
+        use super::{CachedRedisValue, deserialize_cached_redis_value};
+
+        let bytes = rmp_serde::to_vec(&CachedRedisValue::new(7u64)).expect("serialize");
+        let recovered: CachedRedisValue<u64> =
+            deserialize_cached_redis_value(&bytes).expect("msgpack must deserialize");
+        assert_eq!(recovered.value, 7u64);
+        assert_eq!(recovered.version, Some(1));
+    }
+
+    /// The helper transparently reads the legacy pre-3.0 JSON format: a
+    /// `CachedRedisValue` serialized with `serde_json` (the cached 2.x on-disk
+    /// shape, carrying a `version` key) must deserialize via the helper.
+    #[test]
+    fn deserialize_helper_reads_legacy_json() {
+        use super::{CachedRedisValue, deserialize_cached_redis_value};
+
+        // Old format: JSON object with `value` and `version` keys.
+        let json = serde_json::to_vec(&CachedRedisValue::new("legacy".to_string()))
+            .expect("json serialize");
+        // Sanity: this is JSON text, not msgpack, so the msgpack path must fail
+        // first and the helper must fall through to the JSON path.
+        assert!(json.starts_with(b"{"));
+        assert!(rmp_serde::from_slice::<CachedRedisValue<String>>(&json).is_err());
+
+        let recovered: CachedRedisValue<String> =
+            deserialize_cached_redis_value(&json).expect("legacy JSON must deserialize");
+        assert_eq!(recovered.value, "legacy");
+        assert_eq!(recovered.version, Some(1));
+    }
+
+    /// A legacy JSON object that lacks the `version` key is NOT treated as the
+    /// old format: the helper must surface a `CacheDeserialization` error
+    /// (preserving the original msgpack error) rather than silently coercing.
+    #[test]
+    fn deserialize_helper_rejects_json_without_version() {
+        use super::{RedisCacheError, deserialize_cached_redis_value};
+
+        // `{"value": 1}` parses as JSON but has no `version` key.
+        let bytes = br#"{"value": 1}"#.to_vec();
+        match deserialize_cached_redis_value::<u64>(&bytes) {
+            Ok(_) => panic!("JSON without a version key must not be accepted"),
+            Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
+                assert_eq!(cached_value, bytes, "raw bytes must be preserved");
+            }
+            Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
+        }
+    }
+
+    /// Corrupt bytes (neither valid msgpack nor legacy JSON) yield a
+    /// `CacheDeserialization` error that preserves the original raw bytes.
+    #[test]
+    fn deserialize_helper_corrupt_bytes_preserve_value() {
+        use super::{RedisCacheError, deserialize_cached_redis_value};
+
+        // 0xc1 is an unused/reserved msgpack byte and is not valid JSON either.
+        let bytes: Vec<u8> = vec![0xc1, 0x00, 0xff];
+        match deserialize_cached_redis_value::<u64>(&bytes) {
+            Ok(_) => panic!("corrupt bytes must not deserialize"),
+            Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
+                assert_eq!(
+                    cached_value, bytes,
+                    "the original corrupt bytes must be preserved in the error"
+                );
+            }
+            Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
+        }
+    }
+
+    /// `RedisCache` is `Clone` - compile-time bound check.
+    #[allow(dead_code)]
+    fn assert_clone<T: Clone>() {}
+    #[allow(dead_code)]
+    fn check_redis_cache_is_clone() {
+        assert_clone::<super::RedisCache<String, String>>();
+    }
+    /// `AsyncRedisCache` is `Clone` - compile-time bound check.
+    #[cfg(all(
+        feature = "async",
+        any(
+            feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
+            feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
+            feature = "redis_async_cache",
+            feature = "redis_connection_manager"
+        )
+    ))]
+    #[allow(dead_code)]
+    fn check_async_redis_cache_is_clone() {
+        assert_clone::<super::AsyncRedisCache<String, String>>();
+    }
+}
+
+#[cfg(test)]
+mod connection_string_tests {
+    // No Redis server needed -- verifies the redaction behavior of
+    // `ConnectionString` (returned by `connection_string()`) and that `reveal()`
+    // exposes the raw URL.
+    use super::ConnectionString;
+
+    /// `Display` of `ConnectionString` returns the redacted placeholder, not the raw URL.
+    #[test]
+    fn display_is_redacted() {
+        let cs = ConnectionString("redis://:secret@127.0.0.1:6379".to_string());
+        let displayed = cs.to_string();
+        assert_eq!(
+            displayed, "[REDACTED connection string]",
+            "Display must return the redacted placeholder, got: {displayed}"
+        );
+        assert!(
+            !displayed.contains("secret"),
+            "Display must not expose the password; got: {displayed}"
+        );
+    }
+
+    /// `Debug` of `ConnectionString` also returns the redacted placeholder.
+    #[test]
+    fn debug_is_redacted() {
+        let cs = ConnectionString("redis://:secret@127.0.0.1:6379".to_string());
+        let debugged = format!("{cs:?}");
+        assert_eq!(
+            debugged, "[REDACTED connection string]",
+            "Debug must return the redacted placeholder, got: {debugged}"
+        );
+        assert!(
+            !debugged.contains("secret"),
+            "Debug must not expose the password; got: {debugged}"
+        );
+    }
+
+    /// `reveal()` returns the raw URL, including credentials.
+    #[test]
+    fn reveal_returns_raw() {
+        let raw = "redis://:secret@127.0.0.1:6379";
+        let cs = ConnectionString(raw.to_string());
+        assert_eq!(cs.reveal(), raw);
+        assert!(cs.reveal().contains("secret"));
+    }
+
+    /// Both `Debug` and `Display` redact while `reveal()` still exposes the raw value.
+    #[test]
+    fn debug_and_display_redact_but_reveal_does_not() {
+        let cs = ConnectionString("redis://:s3cr3t@localhost:6379/0".to_string());
+        assert_eq!(cs.to_string(), "[REDACTED connection string]");
+        assert_eq!(format!("{cs:?}"), "[REDACTED connection string]");
+        assert!(!cs.to_string().contains("s3cr3t"));
+        assert!(!format!("{cs:?}").contains("s3cr3t"));
+        // The raw value is still recoverable via reveal().
+        assert!(cs.reveal().contains("s3cr3t"));
+    }
+}
 
 #[cfg(test)]
 /// Cache store tests
@@ -1069,13 +2132,12 @@ mod tests {
 
     #[test]
     fn redis_cache() {
-        let c: RedisCache<u32, u32> = RedisCache::new(
-            format!("{}:redis-cache-test", now_millis()),
-            Duration::from_secs(2),
-        )
-        .namespace("in-tests:")
-        .build()
-        .unwrap();
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(format!("{}:redis-cache-test", now_millis()))
+            .ttl(Duration::from_secs(2))
+            .namespace("in-tests:")
+            .build()
+            .unwrap();
 
         assert!(c.cache_get(&1).unwrap().is_none());
 
@@ -1085,7 +2147,7 @@ mod tests {
         sleep(Duration::new(2, 500_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        let old = ConcurrentCached::set_ttl(&c, Duration::from_secs(1)).unwrap();
+        let old = ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(1)).unwrap();
         assert_eq!(2, old.as_secs());
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
@@ -1093,7 +2155,7 @@ mod tests {
         sleep(Duration::new(1, 600_000));
         assert!(c.cache_get(&1).unwrap().is_none());
 
-        ConcurrentCached::set_ttl(&c, Duration::from_secs(10)).unwrap();
+        ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(10)).unwrap();
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 100).unwrap().is_none());
         assert_eq!(c.cache_get(&1).unwrap().unwrap(), 100);
@@ -1102,12 +2164,11 @@ mod tests {
 
     #[test]
     fn remove() {
-        let c: RedisCache<u32, u32> = RedisCache::new(
-            format!("{}:redis-cache-test-remove", now_millis()),
-            Duration::from_secs(3600),
-        )
-        .build()
-        .unwrap();
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(format!("{}:redis-cache-test-remove", now_millis()))
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
 
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 200).unwrap().is_none());

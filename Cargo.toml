@@ -11,34 +11,40 @@ keywords = ["cache", "memoize", "lru", "redis", "disk"]
 license = "MIT"
 edition = "2024"
 rust-version = "1.89"
+# Internal dev tooling and process docs that should not ship in the published crate.
+exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "AGENTS.md", "CLAUDE.md"]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
 
 [features]
 default = ["proc_macro", "ahash", "time_stores"]
 proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
-async = ["async_core", "tokio"]
-async_tokio_rt_multi_thread = ["async", "tokio/rt-multi-thread"]
-redis_store = ["redis", "r2d2", "serde", "serde_json"]
-redis_connection_manager = ["async", "redis_store", "redis/connection-manager", "redis/tokio-comp"]
+async = ["async_core", "dep:async-lock", "dep:blocking"]
+redis_store = ["redis", "r2d2", "serde", "rmp-serde", "serde_json"]
+redis_connection_manager = ["redis_tokio", "redis/connection-manager"]
 redis_smol = [
   "redis_store",
   "async",
-  "redis/smol-native-tls-comp",
+  "redis/smol-comp",
 ]
+redis_smol_native_tls = ["redis_smol", "redis/smol-native-tls-comp"]
+redis_smol_rustls = ["redis_smol", "redis/smol-rustls-comp"]
 redis_tokio = [
   "redis_store",
   "async",
-  "redis/tokio-native-tls-comp",
+  "redis/tokio-comp",
 ]
-redis_async_cache = ["redis_tokio", "redis/cache-aio"]
-redis_ahash = ["redis_store", "redis/ahash"]
-disk_store = ["redb", "serde", "rmp-serde", "directories"]
-wasm = []
+redis_tokio_native_tls = ["redis_tokio", "redis/tokio-native-tls-comp"]
+redis_tokio_rustls = ["redis_tokio", "redis/tokio-rustls-comp"]
+redis_async_cache = ["redis_store", "async", "redis_tokio", "redis/cache-aio"]
+redb_store = ["redb", "serde", "rmp-serde", "directories"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
@@ -95,12 +101,15 @@ features = ["derive"]
 optional = true
 
 [dependencies.serde_json]
-version = "1.0"
+version = "1"
 optional = true
 
-[dependencies.tokio]
+[dependencies.async-lock]
+version = "3"
+optional = true
+
+[dependencies.blocking]
 version = "1"
-features = ["macros", "time", "sync", "parking_lot", "rt"]
 optional = true
 
 [dependencies.web-time]
@@ -111,6 +120,11 @@ googletest = "0.14"
 tempfile = "3.10.1"
 trybuild = "1"
 criterion = "0.8"
+futures = "0.3"
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["macros", "time", "sync", "parking_lot", "rt", "rt-multi-thread"]
 
 [dev-dependencies.async-std]
 version = "1.6"
@@ -125,21 +139,27 @@ version = "3"
 [workspace]
 members = ["cached_proc_macro", "examples/wasm"]
 
+# Elevate all compiler warnings to errors across the workspace (equivalent to
+# `-D warnings`). Applies to `cargo build`/`test`/`clippy`, not just the Makefile
+# clippy target. Members opt in with `[lints] workspace = true`.
+[workspace.lints.rust]
+warnings = "deny"
+
 [[example]]
 name = "redis"
-required-features = ["redis_store", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_store", "proc_macro"]
 
 [[example]]
 name = "redis-async-tokio"
-required-features = ["redis_tokio", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_tokio_native_tls", "proc_macro"]
 
 [[example]]
 name = "redis-async-async-std"
-required-features = ["redis_smol", "proc_macro"]
+required-features = ["redis_smol_native_tls", "proc_macro"]
 
 [[example]]
 name = "tokio"
-required-features = ["async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["async", "proc_macro"]
 
 [[example]]
 name = "async_std"
@@ -151,7 +171,7 @@ required-features = ["proc_macro"]
 
 [[example]]
 name = "expiring_sized_cache"
-required-features = ["async_tokio_rt_multi_thread", "time_stores"]
+required-features = ["time_stores"]
 
 [[example]]
 name = "basic"
@@ -163,15 +183,15 @@ required-features = ["time_stores", "proc_macro"]
 
 [[example]]
 name = "disk"
-required-features = ["disk_store", "proc_macro"]
+required-features = ["redb_store", "proc_macro"]
 
 [[example]]
 name = "disk_async"
-required-features = ["disk_store", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redb_store", "async", "proc_macro"]
 
 [[example]]
 name = "redis-client-side-cache-tokio"
-required-features = ["redis_async_cache", "async_tokio_rt_multi_thread", "proc_macro"]
+required-features = ["redis_async_cache", "redis_tokio_native_tls", "proc_macro"]
 
 [[example]]
 name = "sharded"
@@ -179,6 +199,10 @@ required-features = ["time_stores", "proc_macro"]
 
 [[example]]
 name = "sharded_expiring"
+required-features = ["proc_macro"]
+
+[[example]]
+name = "struct_method"
 required-features = ["proc_macro"]
 
 [[bench]]

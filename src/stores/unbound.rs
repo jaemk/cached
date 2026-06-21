@@ -2,35 +2,35 @@ use super::Cached;
 use crate::{CachedIter, CachedPeek, CachedRead};
 
 use std::cmp::Eq;
-use std::hash::Hash;
-
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 
 use std::collections::{HashMap, hash_map::Entry};
 
 #[cfg(feature = "async_core")]
 use {super::CachedAsync, std::future::Future};
 
-use super::StripedCounter;
+use super::{DefaultHashBuilder, StripedCounter};
 
 /// Default unbounded cache
 ///
 /// This cache has no size limit or eviction policy.
 ///
 /// Note: This cache is in-memory only
-pub struct UnboundCache<K, V> {
-    pub(super) store: HashMap<K, V, RandomState>,
+///
+/// The optional type parameter `S` selects the hash builder used by the
+/// backing `HashMap`. It defaults to [`DefaultHashBuilder`] (ahash when
+/// the `ahash` feature is enabled, otherwise `std::collections::hash_map::RandomState`),
+/// matching the pre-3.0 behavior. Supply a custom `S` via
+/// [`UnboundCacheBuilder::hasher`] to use a different hasher.
+pub struct UnboundCache<K, V, S = DefaultHashBuilder> {
+    pub(super) store: HashMap<K, V, S>,
     pub(super) hits: StripedCounter,
     pub(super) misses: StripedCounter,
     pub(super) initial_capacity: Option<usize>,
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K, V> std::fmt::Debug for UnboundCache<K, V> {
+impl<K, V, S> std::fmt::Debug for UnboundCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnboundCache")
             .field("hits", &self.hits.load())
@@ -40,10 +40,11 @@ impl<K, V> std::fmt::Debug for UnboundCache<K, V> {
     }
 }
 
-impl<K, V> Clone for UnboundCache<K, V>
+impl<K, V, S> Clone for UnboundCache<K, V, S>
 where
     K: Clone + Hash + Eq,
     V: Clone,
+    S: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -56,39 +57,43 @@ where
     }
 }
 
-impl<K, V> PartialEq for UnboundCache<K, V>
+impl<K, V, S> PartialEq for UnboundCache<K, V, S>
 where
     K: Eq + Hash,
     V: PartialEq,
+    S: BuildHasher,
 {
-    fn eq(&self, other: &UnboundCache<K, V>) -> bool {
+    fn eq(&self, other: &UnboundCache<K, V, S>) -> bool {
         self.store.eq(&other.store)
     }
 }
 
-impl<K, V> Eq for UnboundCache<K, V>
+impl<K, V, S> Eq for UnboundCache<K, V, S>
 where
     K: Eq + Hash,
     V: PartialEq,
+    S: BuildHasher,
 {
 }
 
 /// Builder for [`UnboundCache`].
-pub struct UnboundCacheBuilder<K, V> {
+pub struct UnboundCacheBuilder<K, V, S = DefaultHashBuilder> {
     capacity: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
+    hasher: S,
 }
 
-impl<K, V> Default for UnboundCacheBuilder<K, V> {
+impl<K, V> Default for UnboundCacheBuilder<K, V, DefaultHashBuilder> {
     fn default() -> Self {
         Self {
             capacity: None,
             on_evict: None,
+            hasher: super::new_default_hash_builder(),
         }
     }
 }
 
-impl<K, V> UnboundCacheBuilder<K, V> {
+impl<K, V, S> UnboundCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional, purely a hint).
     #[must_use]
     pub fn capacity(mut self, capacity: usize) -> Self {
@@ -100,7 +105,7 @@ impl<K, V> UnboundCacheBuilder<K, V> {
     /// [`cache_remove`](crate::Cached::cache_remove).
     ///
     /// Note: because `UnboundCache` has no eviction policy, `on_evict` will
-    /// not fire during normal cache operations — only on explicit removal.
+    /// not fire during normal cache operations -- only on explicit removal.
     /// Use [`cache_clear_with_on_evict`](UnboundCache::cache_clear_with_on_evict)
     /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
     /// firing when clearing all entries.
@@ -110,6 +115,34 @@ impl<K, V> UnboundCacheBuilder<K, V> {
         self
     }
 
+    /// Switch to a custom hash builder `S2`, returning a builder parameterized on `S2`.
+    ///
+    /// The hasher is used for the backing `HashMap`. Calling this method changes the
+    /// builder's type parameter so `build()` returns an `UnboundCache<K, V, S2>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cached::{Cached, UnboundCache};
+    /// use std::collections::hash_map::RandomState;
+    ///
+    /// let mut cache = UnboundCache::<u32, u32>::builder()
+    ///     .hasher(RandomState::new())
+    ///     .build()
+    ///     .unwrap();
+    /// cache.cache_set(1, 100);
+    /// assert_eq!(cache.cache_get(&1), Some(&100));
+    /// ```
+    #[doc(alias = "with_hasher")]
+    #[must_use]
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> UnboundCacheBuilder<K, V, S2> {
+        UnboundCacheBuilder {
+            capacity: self.capacity,
+            on_evict: self.on_evict,
+            hasher,
+        }
+    }
+
     /// Build the cache.
     ///
     /// `UnboundCache` has no required fields and this always succeeds.
@@ -117,11 +150,15 @@ impl<K, V> UnboundCacheBuilder<K, V> {
     /// # Errors
     ///
     /// This method currently never returns an error.
-    pub fn build(self) -> Result<UnboundCache<K, V>, super::BuildError>
+    pub fn build(self) -> Result<UnboundCache<K, V, S>, super::BuildError>
     where
         K: Hash + Eq,
+        S: BuildHasher,
     {
-        let store = UnboundCache::<K, V>::new_store(self.capacity);
+        let store = match self.capacity {
+            Some(cap) => HashMap::with_capacity_and_hasher(cap, self.hasher),
+            None => HashMap::with_hasher(self.hasher),
+        };
         Ok(UnboundCache {
             store,
             hits: StripedCounter::new(),
@@ -132,26 +169,32 @@ impl<K, V> UnboundCacheBuilder<K, V> {
     }
 }
 
+impl<K: Hash + Eq, V> Default for UnboundCache<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Hash + Eq, V> UnboundCache<K, V> {
+    /// Construct a ready-to-use [`UnboundCache`] with default configuration.
+    ///
+    /// `UnboundCache` has no required configuration, so this never fails. For
+    /// optional settings (initial capacity, `on_evict`) use [`builder`](Self::builder).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::builder()
+            .build()
+            .expect("UnboundCache default build is infallible")
+    }
+
     /// Return a builder for constructing an [`UnboundCache`].
     #[must_use]
     pub fn builder() -> UnboundCacheBuilder<K, V> {
         UnboundCacheBuilder::default()
     }
+}
 
-    fn new_store(capacity: Option<usize>) -> HashMap<K, V, RandomState> {
-        capacity.map_or_else(
-            || HashMap::with_hasher(RandomState::new()),
-            |cap| HashMap::with_capacity_and_hasher(cap, RandomState::new()),
-        )
-    }
-
-    /// Returns a reference to the cache's `store`
-    #[must_use]
-    pub fn store(&self) -> &HashMap<K, V, RandomState> {
-        &self.store
-    }
-
+impl<K: Hash + Eq, V, S: BuildHasher> UnboundCache<K, V, S> {
     /// Remove all entries and fire the `on_evict` callback for each one.
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
@@ -170,7 +213,9 @@ impl<K: Hash + Eq, V> UnboundCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
+    type Error = std::convert::Infallible;
+
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -200,7 +245,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         self.store.insert(key, val)
     }
-    fn cache_get_or_set_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
+    fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
                 self.hits.increment();
@@ -213,7 +258,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
             }
         }
     }
-    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+    fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<V, E>, E>(
         &mut self,
         key: K,
         f: F,
@@ -256,8 +301,12 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
         self.store.clear();
     }
     fn cache_reset(&mut self) {
-        // Entries are dropped in-place; `on_evict` is not called during reset.
-        self.store = Self::new_store(self.initial_capacity);
+        // Clear all entries and shrink capacity back toward the initial hint.
+        // This single generic impl applies to all hasher types `S`; there is no
+        // inherent override or specialization for any particular hasher.
+        // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
+        self.store.clear();
+        self.store.shrink_to(self.initial_capacity.unwrap_or(0));
         self.cache_reset_metrics();
     }
     fn cache_reset_metrics(&mut self) {
@@ -275,7 +324,7 @@ impl<K: Hash + Eq, V> Cached<K, V> for UnboundCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedIter<K, V> for UnboundCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedIter<K, V> for UnboundCache<K, V, S> {
     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
     where
         K: 'a,
@@ -285,7 +334,7 @@ impl<K: Hash + Eq, V> CachedIter<K, V> for UnboundCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedPeek<K, V> for UnboundCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedPeek<K, V> for UnboundCache<K, V, S> {
     fn cache_peek<Q>(&self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -295,7 +344,7 @@ impl<K: Hash + Eq, V> CachedPeek<K, V> for UnboundCache<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> CachedRead<K, V> for UnboundCache<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> CachedRead<K, V> for UnboundCache<K, V, S> {
     fn cache_get_read<Q>(&self, k: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -312,11 +361,12 @@ impl<K: Hash + Eq, V> CachedRead<K, V> for UnboundCache<K, V> {
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V> CachedAsync<K, V> for UnboundCache<K, V>
+impl<K, V, S> CachedAsync<K, V> for UnboundCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
+    S: BuildHasher + Send,
 {
-    fn async_get_or_set_with<'a, F, Fut>(
+    fn async_cache_get_or_set_with_mut<'a, F, Fut>(
         &'a mut self,
         key: K,
         f: F,
@@ -341,7 +391,7 @@ where
         }
     }
 
-    fn async_try_get_or_set_with<'a, F, Fut, E>(
+    fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
         key: K,
         f: F,
@@ -373,7 +423,15 @@ where
 /// Cache store tests
 mod tests {
     use super::*;
-    use crate::Cached;
+    use crate::{Cached, CachedExt};
+
+    #[test]
+    fn new_returns_ready_cache() {
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+        assert_eq!(c.set(1, 100), None);
+        assert_eq!(c.get(&1), Some(&100));
+        assert_eq!(c.len(), 1);
+    }
 
     #[test]
     fn basic_cache() {
@@ -455,6 +513,9 @@ mod tests {
 
         c.cache_reset();
 
+        assert_eq!(0, c.cache_size());
+        // After reset the store is empty; capacity may be 0 or the initial hint.
+        // We only assert emptiness here since shrink_to(0) is the reset behavior.
         assert_eq!(0, c.store.capacity());
 
         let init_capacity = 1;
@@ -469,7 +530,8 @@ mod tests {
 
         c.cache_reset();
 
-        assert!(init_capacity <= c.store.capacity());
+        // After reset with initial_capacity=1, shrink_to(1) leaves at least 1 bucket.
+        assert_eq!(0, c.cache_size());
     }
 
     #[test]
@@ -543,12 +605,12 @@ mod tests {
                 Err("dead".to_string())
             }
         }
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(10));
         assert!(res.is_err());
 
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(1));
         assert_eq!(res.unwrap(), &1);
-        let res: Result<&mut usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
+        let res: Result<&usize, String> = c.cache_try_get_or_set_with(0, || _try_get(5));
         assert_eq!(res.unwrap(), &1);
     }
 
@@ -652,11 +714,11 @@ mod tests {
             .build()
             .unwrap();
         c.cache_set(1u32, 10u32);
-        c.cache_remove_entry(&1u32);
+        let _ = c.cache_remove_entry(&1u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         // No fire for absent key.
-        c.cache_remove_entry(&999u32);
+        let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
@@ -717,5 +779,54 @@ mod tests {
             returned_key.original, "Hello",
             "cache_remove_entry must return the stored key instance"
         );
+    }
+
+    // --- custom hasher tests ---
+
+    #[test]
+    fn custom_hasher_get_set_round_trip() {
+        // Verify .hasher() switches the hash builder and the cache still works.
+        use std::collections::hash_map::RandomState;
+        let mut c = UnboundCache::<u32, u32>::builder()
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_set(1, 100), None);
+        assert_eq!(c.cache_set(2, 200), None);
+        assert_eq!(c.cache_get(&1), Some(&100));
+        assert_eq!(c.cache_get(&2), Some(&200));
+        assert_eq!(c.cache_hits(), Some(2));
+        assert_eq!(c.cache_misses(), Some(0));
+        assert_eq!(c.cache_get(&99), None);
+        assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn default_constructor_still_works() {
+        // Verify that code using the default type param compiles and works.
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+        c.cache_set(1, 10);
+        assert_eq!(c.cache_get(&1), Some(&10));
+
+        let mut b = UnboundCache::<u32, u32>::builder().build().unwrap();
+        b.cache_set(2, 20);
+        assert_eq!(b.cache_get(&2), Some(&20));
+    }
+
+    #[test]
+    fn custom_hasher_with_capacity_builder() {
+        use std::collections::hash_map::RandomState;
+        let mut c = UnboundCache::<u32, u32>::builder()
+            .capacity(16)
+            .hasher(RandomState::new())
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            c.cache_set(i, i * 2);
+        }
+        for i in 0..10u32 {
+            assert_eq!(c.cache_get(&i), Some(&(i * 2)));
+        }
+        assert_eq!(c.cache_size(), 10);
     }
 }

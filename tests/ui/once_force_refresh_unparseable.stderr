@@ -1,0 +1,5 @@
+error: Unknown literal value `{ this is not ; an expr }`
+ --> tests/ui/once_force_refresh_unparseable.rs:3:24
+  |
+3 | #[once(force_refresh = "{ this is not ; an expr }")]
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^

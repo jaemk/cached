@@ -1,10 +1,10 @@
 /*
 Async disk cache. `redb` has no async API, so `#[concurrent_cached(disk = true)]`
-on an `async fn` runs the blocking I/O on tokio's blocking pool via
-`spawn_blocking` — it never stalls the async runtime.
+on an `async fn` runs the blocking I/O on a background thread via the `blocking`
+crate -- it never stalls the async runtime and works with any executor.
 
 Run:
-    cargo run --example disk_async --features "disk_store,async_tokio_rt_multi_thread,proc_macro"
+    cargo run --example disk_async --features "redb_store,async,proc_macro"
 */
 
 use cached::macros::concurrent_cached;
@@ -24,7 +24,7 @@ enum ExampleError {
 // $system_cache_dir/<exe>_cached_disk_cache/).
 #[concurrent_cached(
     disk = true,
-    ttl = 30,
+    ttl_secs = 30,
     name = "ASYNC_DISK_SLEEP_SECS",
     map_error = r##"|e| ExampleError::DiskError(format!("{:?}", e))"##
 )]

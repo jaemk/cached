@@ -1,0 +1,5 @@
+error: Unknown literal value `{ this is not ; an expr }`
+ --> tests/ui/cached_force_refresh_unparseable.rs:3:26
+  |
+3 | #[cached(force_refresh = "{ this is not ; an expr }")]
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: unable to parse `ttl` as a Duration expression: cannot parse string into token stream; `ttl` takes a `Duration` expression as a string literal, e.g. `ttl = "core::time::Duration::from_secs(60)"`
+ --> tests/ui/cached_ttl_unparseable_duration.rs:3:16
+  |
+3 | #[cached(ttl = "core::time::Duration::from_secs(")]
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

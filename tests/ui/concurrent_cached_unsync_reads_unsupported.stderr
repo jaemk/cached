@@ -1,0 +1,5 @@
+error: `unsync_reads` is not supported on `#[concurrent_cached]`
+ --> tests/ui/concurrent_cached_unsync_reads_unsupported.rs:3:21
+  |
+3 | #[concurrent_cached(unsync_reads = true)]
+  |                     ^^^^^^^^^^^^

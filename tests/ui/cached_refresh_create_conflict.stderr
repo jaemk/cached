@@ -1,0 +1,5 @@
+error: cannot specify `refresh` when passing a `create` block - `create` fully constructs the store, so these store-builder attributes would be silently ignored
+  --> tests/ui/cached_refresh_create_conflict.rs:12:4
+   |
+12 | fn my_fn(k: i32) -> i32 {
+   |    ^^^^^

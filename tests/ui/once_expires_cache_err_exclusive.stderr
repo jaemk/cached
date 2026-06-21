@@ -1,4 +1,4 @@
-error: `expires = true` and `cache_err = true` are incompatible — `expires` requires the cache value type to implement `Expires`, but `cache_err = true` stores `Result<V, E>` as the value, which does not implement `Expires`. Remove `cache_err = true` (Err values are not cached by default with `expires = true`).
+error: `expires = true` and `cache_err = true` are incompatible - `expires` requires the cache value type to implement `Expires`, but `cache_err = true` stores `Result<V, E>` as the value, which does not implement `Expires`. Remove `cache_err = true` (Err values are not cached by default with `expires = true`).
   --> tests/ui/once_expires_cache_err_exclusive.rs:10:4
    |
 10 | fn my_fn() -> Result<Val, String> {

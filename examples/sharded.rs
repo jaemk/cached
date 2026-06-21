@@ -1,14 +1,14 @@
 /*
 In-memory concurrent memoization with zero boilerplate.
 
-`#[concurrent_cached]` defaults to a sharded in-memory store — no Redis,
+`#[concurrent_cached]` defaults to a sharded in-memory store - no Redis,
 no disk, no `map_error`, no `ty`/`create`. The right variant is selected
-automatically based on `max_size` and `ttl` attributes:
+automatically based on `max_size` and `ttl_secs` attributes:
 
-  (no attrs)              → ShardedCache        (unbounded, no TTL)
-  max_size = N            → ShardedLruCache     (LRU, no TTL)
-  ttl = T                 → ShardedTtlCache     (unbounded, with TTL)
-  max_size = N, ttl = T   → ShardedLruTtlCache  (LRU, with TTL)
+  (no attrs)                       -> ShardedUnboundCache  (unbounded, no TTL)
+  max_size = N                     -> ShardedLruCache     (LRU, no TTL)
+  ttl_secs = T                     -> ShardedTtlCache     (unbounded, with TTL)
+  max_size = N, ttl_secs = T       -> ShardedLruTtlCache  (LRU, with TTL)
 
 For per-value expiry (`expires = true`), see `examples/sharded_expiring.rs`.
 
@@ -27,17 +27,17 @@ Run:
 */
 
 use cached::macros::concurrent_cached;
-use cached::{ConcurrentCached, ShardedCache, ShardedLruCache};
+use cached::{ShardedLruCache, ShardedUnboundCache};
 use std::thread;
 
-// Bare default: ShardedCache (unbounded, no TTL)
+// Bare default: ShardedUnboundCache (unbounded, no TTL)
 #[concurrent_cached]
 fn compute(x: u64) -> u64 {
     x * x
 }
 
 // LRU: ShardedLruCache (max_size = 128 requested; actual capacity is ≥ 128 because each shard
-// gets ceiling(max_size/shards) slots with a minimum of 16 — so max_size=128 with 8 shards is
+// gets ceiling(max_size/shards) slots with a minimum of 16 - so max_size=128 with 8 shards is
 // exactly 128, but max_size=10 with 8 shards would yield 128 slots (8 × 16 minimum).
 // See the `max_size` attribute docs for details.)
 #[concurrent_cached(max_size = 128)]
@@ -46,13 +46,13 @@ fn compute_lru(x: u64) -> u64 {
 }
 
 // TTL: ShardedTtlCache (expires after 60 s)
-#[concurrent_cached(ttl = 60)]
+#[concurrent_cached(ttl_secs = 60)]
 fn compute_ttl(x: u64) -> u64 {
     x * x
 }
 
 // LRU + TTL: ShardedLruTtlCache
-#[concurrent_cached(max_size = 64, ttl = 30)]
+#[concurrent_cached(max_size = 64, ttl_secs = 30)]
 fn compute_lru_ttl(x: u64) -> u64 {
     x * x
 }
@@ -63,14 +63,14 @@ fn compute_shards(x: u64) -> u64 {
     x * x
 }
 
-// Only cache successful lookups — Err is returned but not stored, so the
+// Only cache successful lookups - Err is returned but not stored, so the
 // function is retried on the next call.
 #[concurrent_cached]
 fn load_record(id: u64) -> Result<String, std::io::Error> {
     Ok(format!("record_{id}"))
 }
 
-// Cache Option — only Some values are stored; None is returned without being
+// Cache Option - only Some values are stored; None is returned without being
 // cached, so find_record(0) will re-execute on every call.
 #[concurrent_cached]
 fn find_record(id: u64) -> Option<String> {
@@ -92,8 +92,8 @@ fn main() {
     // Result: only Ok is cached
     let r1 = load_record(42);
     let r2 = load_record(42);
-    assert_eq!(r1.as_deref().expect("infallible"), "record_42");
-    assert_eq!(r2.as_deref().expect("infallible"), "record_42");
+    assert_eq!(r1.as_deref().expect("load_record returns Ok"), "record_42");
+    assert_eq!(r2.as_deref().expect("load_record returns Ok"), "record_42");
     println!("load_record(42) = {:?} (cached)", r1);
 
     // Option: None is NOT cached by default; the function re-executes each time
@@ -133,36 +133,33 @@ fn main() {
         h.join().expect("thread panicked");
     }
 
-    // Inspect the cache directly. The `cache_get`/`cache_set`/... methods come from the
-    // `ConcurrentCached` trait (it must be in scope). The async trait's operations are
-    // `async_`-prefixed: `COMPUTE.async_cache_get(&7).await`.
+    // Inspect the cache directly via the inherent `get` method — returns `Option<V>` directly,
+    // no `.expect("infallible")` needed. The async trait's operations are `async_`-prefixed:
+    // `COMPUTE.async_cache_get(&7).await` - the async trait provides no short alias,
+    // so `async_cache_get` is the only spelling available there.
     {
-        let val = COMPUTE.cache_get(&7).expect("infallible");
+        let val = COMPUTE.get(&7);
         assert_eq!(val, Some(49));
-        println!("cache_get(7) = {val:?}");
+        println!("get(7) = {val:?}");
     }
 
-    // Build a ShardedCache manually and use it without a macro
-    let cache: ShardedCache<u32, String> = ShardedCache::builder().build().unwrap();
-    cache.cache_set(1, "hello".to_string()).expect("infallible");
-    cache.cache_set(2, "world".to_string()).expect("infallible");
-    assert_eq!(
-        cache.cache_get(&1).expect("infallible").as_deref(),
-        Some("hello")
-    );
-    println!(
-        "manual ShardedCache: {:?}",
-        cache.cache_get(&1).expect("infallible")
-    );
+    // Build a ShardedUnboundCache manually and use it without a macro.
+    // The inherent `get`/`set`/`remove` methods return unwrapped values directly.
+    let cache: ShardedUnboundCache<u32, String> = ShardedUnboundCache::builder().build().unwrap();
+    cache.set(1, "hello".to_string());
+    cache.set(2, "world".to_string());
+    assert_eq!(cache.get(&1).as_deref(), Some("hello"));
+    println!("manual ShardedUnboundCache: {:?}", cache.get(&1));
 
-    // ShardedLruCache with explicit shard count
+    // ShardedLruCache with explicit shard count.
+    // Inherent `set`/`get` return unwrapped values.
     let lru: ShardedLruCache<u32, u32> = ShardedLruCache::builder()
         .max_size(256)
         .shards(8)
         .build()
         .expect("valid config");
     for i in 0..256u32 {
-        lru.cache_set(i, i * 2).expect("infallible");
+        lru.set(i, i * 2);
     }
     println!("ShardedLruCache len = {}", lru.len());
     println!("ShardedLruCache shard_sizes = {:?}", lru.shard_sizes());

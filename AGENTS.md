@@ -54,10 +54,10 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `TtlSortedCache<K,V>` | `cached::stores` | TTL-ordered, optional size limit; requires `time_stores` |
 | `ExpiringLruCache<K,V>` | `cached::stores` | LRU, size-bounded, per-value expiry via `Expires` trait |
 | `ExpiringCache<K,V>` | `cached::stores` | Unbounded HashMap-backed, per-value expiry via `Expires` trait; default store for `#[cached(expires = true)]` |
-| `ShardedCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
+| `ShardedUnboundCache<K,V>` | `cached::stores` | Fully concurrent, sharded `Arc`-backed unbounded cache; default for `#[concurrent_cached]` (no extra attrs) |
 | `ShardedLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU; default for `#[concurrent_cached(max_size = N)]` |
-| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl = T)]`; requires `time_stores` |
-| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl = T)]`; requires `time_stores` |
+| `ShardedTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded TTL cache; default for `#[concurrent_cached(ttl_secs = N)]` (also selected by `ttl_millis` and `ttl = "<expr>"`); requires `time_stores` |
+| `ShardedLruTtlCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + TTL; default for `#[concurrent_cached(max_size = N, ttl_secs = N)]` (also selected by `ttl_millis` and `ttl = "<expr>"`); requires `time_stores` |
 | `ShardedExpiringCache<K,V>` | `cached::stores` | Fully concurrent, sharded per-value expiry (unbounded); default for `#[concurrent_cached(expires = true)]` |
 | `ShardedExpiringLruCache<K,V>` | `cached::stores` | Fully concurrent, sharded LRU + per-value expiry; default for `#[concurrent_cached(expires = true, max_size = N)]` |
 
@@ -77,7 +77,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 
 **Builder APIs**: All stores are constructed exclusively through a `::builder()` constructor (e.g., `LruCache::builder()`, `TtlCache::builder()`). `build()` returns `Result<Store, BuildError>` (fallible) — the direct constructors (`new`, `with_*`) and the `try_build()` alias were removed in 2.0. The size-bound setter is `.max_size(n)` (renamed from `.size(n)` in 2.0). Builders support an `on_evict(|k, v| { ... })` callback fired on every evicted entry.
 
-**`TimedEntry<V>`**: Exposed from `TtlCache::store()` and `LruTtlCache::store()` for direct introspection; fields `instant: Instant` and `value: V`.
+**`TimedEntry<V>`**: Now `pub(crate)` -- no longer exposed in the public API. The `store()` accessors on `TtlCache` and `LruTtlCache` were removed in a prior batch; `TimedEntry` followed as `pub(crate)` once there was no public surface that returned it. Use the `Cached` trait API for inspection.
 
 ---
 
@@ -93,11 +93,13 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `CloneCached<K,V>` | `cache_get_with_expiry_status` for timed caches returning owned values |
 | `CacheEvict` | `evict() -> usize` to sweep expired entries; fires `on_evict` |
 | `Expires` | Implemented by values in `ExpiringLruCache`; provides `is_expired()` |
-| `ConcurrentCached<K,V>` | Self-synchronizing cache with a shared `&self` API (Redis, Disk) |
-| `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache |
-| `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on timed stores |
+| `ConcurrentCacheBase` | Shared base of both concurrent traits: owns `type Error` + `cache_size`/`len`/`is_empty` |
+| `ConcurrentCached<K,V>` | Self-synchronizing cache with a shared `&self` API (Redis, Disk); supertrait `ConcurrentCacheBase` |
+| `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache; supertrait `ConcurrentCacheBase` |
+| `ConcurrentCacheTtl` | `&self` `ttl()`/`set_ttl()`/`unset_ttl()`/`try_set_ttl()`/`refresh_on_hit()` on concurrent TTL stores |
+| `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on single-owner timed stores |
 
-**`CacheMetrics`**: Snapshot struct returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `size: usize`, `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
+**`CacheMetrics`**: Snapshot struct returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `entry_count: usize`, `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
 
 ---
 
@@ -112,18 +114,22 @@ use cached::macros::concurrent_cached;
 
 **Renamed from pre-1.0**: was `cached::proc_macro`. The Cargo feature flag is still named `proc_macro`.
 
-The macro attributes use `ttl =` (not `time =`) and `refresh =` (not `time_refresh =`). Note: `#[once]` supports `ttl =` but has never had a `refresh =` attribute (single-value cache, refresh-on-hit is not applicable).
+The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseconds), or `ttl = "<Duration expr>"` (not `time =`); and `refresh =` (not `time_refresh =`). Note: `#[once]` supports `ttl_secs`/`ttl_millis`/`ttl` but has never had a `refresh =` attribute (single-value cache, refresh-on-hit is not applicable).
 
-**2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **deprecated alias** for the preferred `max_size = N` (emits a deprecation warning).
+**2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **hard rename error** — the macro rejects it with "`size` was renamed to `max_size`; use `max_size = ...`" and does not compile. Use `max_size = N`.
 
-**Additional `#[cached]` / `#[once]` attributes** (beyond `name`, `max_size`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`):
-- `sync_writes`: `false` (default), `true` / `"default"` (whole-cache lock), or `"by_key"` (per-key bucketed locks; `#[cached]` only)
+**Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `cache_err`, `cache_none`, `with_cached_flag`):
+- `sync_writes`: `"by_key"` (default for `#[cached]`; per-key bucketed locks), `false` (no synchronization; old default), `true` / `"default"` (whole-cache lock). `#[once]` defaults to `false`; `#[concurrent_cached]` does not support `sync_writes`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled`.
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
 - `unsync_reads`: `bool` — use a shared read lock for cache hits; only works for stores implementing `CachedRead` (e.g. `UnboundCache`, `TtlSortedCache`, `HashMap`)
 - `result_fallback`: `bool` — on `Err`, return the last cached `Ok` value instead; requires a `Result<T, E>` return type
+- `force_refresh`: unquoted block `{ <bool expr> }` or quoted string `"{ <bool expr> }"` over the function args -- when true, bypasses the cache and recomputes unconditionally. `force_refresh = true` (bare bool) is also accepted.
+- `in_impl`: `bool` — generates a `<fn>_no_cache` sibling and a function-local cache static; suppresses the `_prime_cache` companion (the cache static is function-local and cannot be shared with a sibling)
+- `companions_vis`: string — visibility of the generated `{fn}_no_cache` and `{fn}_prime_cache` companions (e.g. `"pub(crate)"`, `""` for private); defaults to the cached function's own visibility
+- `map_error` (disk/redis `#[concurrent_cached]` only): unquoted closure `|e| MyErr(e)` or quoted string `"|e| MyErr(e)"` — converts the store error into the function's error type. Optional: when omitted, `.map_err(Into::into)?` is generated, requiring `E: From<StoreError>`.
 
-**`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution). `#[once]` functions emit `foo_prime_cache()` with no arguments.
+**`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution), except `in_impl` methods, for which the `_prime_cache` companion is not generated (the cache static is function-local). `#[once]` functions emit `foo_prime_cache()` with no arguments.
 
 **Generics**: generic functions with `where` clauses are supported. The macros clone the original `syn::Signature` (preserving the `where` clause, lifetimes, const generics) for the generated origin/`inner` helper — quoting `#generics` alone would drop the `where` clause. Because `#[cached]`/`#[concurrent_cached]` store the cache in a `static`, a generic parameter that would land in the derived key/value type must be pinned via `key` + `convert` (and `ty`); `#[once]`'s static only holds the concrete value type, so it is unconstrained.
 
@@ -186,10 +192,11 @@ This runs: `make check` (fmt + clippy + readme) -> `make tests` -> `make example
 ---
 
 ## README Sync
-`README.md` is auto-generated from `src/lib.rs` doc comments — **never edit README.md directly**.
+`README.md` is generated from `src/lib.rs` doc comments by `cargo-readme` — **never edit `README.md` directly**. Any change to the README (wording, tables, examples) must be made in the `src/lib.rs` doc comments and then regenerated; a hand-edit to `README.md` is overwritten on the next regeneration and will fail `make check/readme`.
 ```bash
-make docs          # regenerate
-make check/readme  # verify in sync
+cargo install cargo-readme   # one-time, if not already installed
+make docs          # regenerate README.md from src/lib.rs via cargo-readme (cargo readme)
+make check/readme  # verify README.md matches the generated output
 ```
 
 ---
@@ -237,15 +244,17 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `ahash` (default) | ahash hasher for internal hash maps |
 | `time_stores` (default) | `TtlCache`, `LruTtlCache`, `TtlSortedCache` |
 | `async_core` | Async support marker (no runtime); use with custom async runtimes |
-| `async` | Async support via Tokio (enables `async_core` + `tokio`) |
-| `async_tokio_rt_multi_thread` | Tokio multi-thread runtime (required for `#[tokio::test]`) |
+| `async` | Async support (runtime-agnostic; pulls `async-lock` and `blocking`, no tokio) |
 | `redis_store` | Synchronous Redis backend |
-| `redis_tokio` | Async Redis backend (Tokio) |
-| `redis_smol` | Async Redis backend (smol); implies `redis_store` + `async` |
-| `redis_connection_manager` | Redis connection-manager support |
-| `redis_async_cache` | Redis client-side caching over RESP3 for async caches |
-| `disk_store` | Disk-backed cache via `redb` |
-| `wasm` | WASM compatibility |
+| `redis_tokio` | Async Redis backend (Tokio, no TLS); implies `redis_store` + `async` |
+| `redis_tokio_native_tls` | `redis_tokio` + TLS via `native-tls` |
+| `redis_tokio_rustls` | `redis_tokio` + TLS via `rustls` |
+| `redis_smol` | Async Redis backend (smol, no TLS); implies `redis_store` + `async` |
+| `redis_smol_native_tls` | `redis_smol` + TLS via `native-tls` |
+| `redis_smol_rustls` | `redis_smol` + TLS via `rustls` |
+| `redis_connection_manager` | Redis connection-manager support (no TLS; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
+| `redis_async_cache` | Redis client-side caching over RESP3 for async caches (TLS-agnostic; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
+| `redb_store` | Disk-backed cache via `redb` |
 
 ---
 

@@ -1,4 +1,4 @@
-error: `expires` and `create` are mutually exclusive — `expires` generates the store constructor automatically
+error: `expires` and `create` are mutually exclusive - `expires` generates the store constructor automatically
  --> tests/ui/concurrent_cached_expires_create_exclusive.rs:4:4
   |
 4 | fn my_fn(x: u32) -> Result<u32, String> {

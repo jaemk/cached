@@ -1,4 +1,4 @@
-error: AsyncRedisCache requires a `ttl` when `create` block is not specified
+error: AsyncRedisCache requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) when `create` block is not specified
  --> tests/ui/concurrent_cached_async_redis_no_ttl.rs:4:10
   |
 4 | async fn my_fn(k: i32) -> Result<i32, String> {

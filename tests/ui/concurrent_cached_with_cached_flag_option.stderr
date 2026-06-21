@@ -1,4 +1,4 @@
-error: `with_cached_flag = true` and `cache_none = true` are structurally incompatible on `Option<T>` returns: `with_cached_flag` unwraps `Return<T>` and stores `T`, while `cache_none = true` stores `Option<T>` as the cached value — the same store cannot satisfy both. Remove one: use `with_cached_flag = true` alone to receive a `Return<T>` that signals cache hits, or use `cache_none = true` alone (without `with_cached_flag`) to cache `None` values.
+error: `with_cached_flag = true` and `cache_none = true` are structurally incompatible on `Option<T>` returns: `with_cached_flag` unwraps `Return<T>` and stores `T`, while `cache_none = true` stores `Option<T>` as the cached value - the same store cannot satisfy both. Remove one: use `with_cached_flag = true` alone to receive a `Return<T>` that signals cache hits, or use `cache_none = true` alone (without `with_cached_flag`) to cache `None` values.
  --> tests/ui/concurrent_cached_with_cached_flag_option.rs:5:21
   |
 5 | fn my_fn(k: i32) -> Option<cached::Return<i32>> {

@@ -1,4 +1,4 @@
-error: #[cached] cannot be applied to methods that take `self`
+error: #[cached] cannot be applied to methods that take `self`. Set `in_impl = true` to cache the method inside its `impl` block (a `convert` block alone is not sufficient: the generated cache static cannot live at `impl` scope).
  --> tests/ui/cached_self_method.rs:4:4
   |
 4 | fn my_fn(&self, k: i32) -> i32 {
