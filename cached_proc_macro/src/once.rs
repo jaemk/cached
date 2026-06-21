@@ -95,6 +95,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
+    if let Err(e) = reject_concurrent_only_attrs("once", &attr_args) {
+        return e.to_compile_error().into();
+    }
     let args = match OnceMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {

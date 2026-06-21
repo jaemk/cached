@@ -1,0 +1,5 @@
+error: `disk` is not supported on `#[cached]`; `disk` selects the redb disk-backed concurrent store. Use `#[concurrent_cached(disk = true)]` instead.
+ --> tests/ui/cached_disk_concurrent_only.rs:3:10
+  |
+3 | #[cached(disk = true)]
+  |          ^^^^

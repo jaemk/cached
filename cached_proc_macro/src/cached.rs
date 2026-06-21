@@ -169,6 +169,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             return TokenStream::from(darling::Error::from(e).write_errors());
         }
     };
+    if let Err(e) = reject_concurrent_only_attrs("cached", &attr_args) {
+        return e.to_compile_error().into();
+    }
     let args = match CachedMacroArgs::from_list(&attr_args) {
         Ok(v) => v,
         Err(e) => {
@@ -672,7 +675,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let (set_cache_block, return_cache_block) = match (is_smart_result, is_smart_option) {
         (false, false) => {
             let set_cache_block =
-                quote! { __cached_cache.set(__cached_key, __cached_result.clone()); };
+                quote! { __cached_cache.cache_set(__cached_key, __cached_result.clone()); };
             let return_cache_block = if args.with_cached_flag {
                 quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.was_cached = true; return __cached_r }
             } else {
@@ -683,7 +686,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (true, false) => {
             let set_cache_block = quote! {
                 if let Ok(__cached_inner) = &__cached_result {
-                    __cached_cache.set(__cached_key, __cached_inner.clone());
+                    __cached_cache.cache_set(__cached_key, __cached_inner.clone());
                 }
             };
             let return_cache_block = if args.with_cached_flag {
@@ -696,7 +699,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (false, true) => {
             let set_cache_block = quote! {
                 if let Some(__cached_inner) = &__cached_result {
-                    __cached_cache.set(__cached_key, __cached_inner.clone());
+                    __cached_cache.cache_set(__cached_key, __cached_inner.clone());
                 }
             };
             let return_cache_block = if args.with_cached_flag {

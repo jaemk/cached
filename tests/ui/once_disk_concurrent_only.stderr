@@ -1,0 +1,5 @@
+error: `disk` is not supported on `#[once]`; `disk` selects the redb disk-backed concurrent store. Use `#[concurrent_cached(disk = true)]` instead.
+ --> tests/ui/once_disk_concurrent_only.rs:3:8
+  |
+3 | #[once(disk = true)]
+  |        ^^^^

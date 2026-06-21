@@ -1,0 +1,5 @@
+error: `redis` is not supported on `#[once]`; `redis` selects the Redis-backed concurrent store. Use `#[concurrent_cached(redis = true)]` instead.
+ --> tests/ui/once_redis_concurrent_only.rs:3:8
+  |
+3 | #[once(redis = true)]
+  |        ^^^^^

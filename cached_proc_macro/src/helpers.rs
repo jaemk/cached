@@ -1,3 +1,4 @@
+use darling::ast::NestedMeta;
 use darling::{Error, FromMeta};
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
@@ -6,11 +7,60 @@ use quote::__private::Span;
 use quote::{format_ident, quote};
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::token::Comma;
 use syn::{
     Attribute, Block, FnArg, GenericArgument, Pat, PatType, PathArguments, ReturnType, Signature,
     Type, parse_quote, parse_str,
 };
+
+/// Scan the raw attribute arguments for `#[cached]` and `#[once]` and reject
+/// any that are only valid on `#[concurrent_cached]` with a clear message
+/// directing the user to the correct macro. This runs before `FromMeta::from_list`
+/// so the friendly message replaces darling's generic "Unknown field" error.
+///
+/// The concurrent-only attributes are the I/O-backed store selectors:
+/// - `disk` - selects the redb disk-backed store
+/// - `redis` - selects the Redis-backed store
+/// - `map_error` - converts the store error; only meaningful with `disk`/`redis`
+pub(super) fn reject_concurrent_only_attrs(
+    macro_name: &str,
+    attr_args: &[NestedMeta],
+) -> Result<(), syn::Error> {
+    for arg in attr_args {
+        let Some(meta) = (match arg {
+            NestedMeta::Meta(meta) => Some(meta),
+            NestedMeta::Lit(_) => None,
+        }) else {
+            continue;
+        };
+        let Some(ident) = meta.path().get_ident().map(ToString::to_string) else {
+            continue;
+        };
+        let message = match ident.as_str() {
+            "disk" => Some(format!(
+                "`disk` is not supported on `#[{macro_name}]`; \
+                 `disk` selects the redb disk-backed concurrent store. \
+                 Use `#[concurrent_cached(disk = true)]` instead."
+            )),
+            "redis" => Some(format!(
+                "`redis` is not supported on `#[{macro_name}]`; \
+                 `redis` selects the Redis-backed concurrent store. \
+                 Use `#[concurrent_cached(redis = true)]` instead."
+            )),
+            "map_error" => Some(format!(
+                "`map_error` is not supported on `#[{macro_name}]`; \
+                 `map_error` converts the store error on the `disk` or `redis` concurrent store. \
+                 Use `#[concurrent_cached]` with `disk = true` or `redis = true`."
+            )),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(syn::Error::new(meta.span(), message));
+        }
+    }
+    Ok(())
+}
 
 /// Resolve the path to the `cached` crate for use in generated code.
 ///
