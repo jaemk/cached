@@ -24,12 +24,9 @@ tunable with `sync_writes_buckets = N` (default 64).
 - See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
 
-> **Upgrading from 2.x?** The next major contains breaking changes (the disk cache backend
-> changed from sled to redb, async Redis TLS support split into explicit features,
-> `ConcurrentCachedAsync` cache methods renamed with an `async_` prefix, MSRV raised to 1.89,
-> and more). See the
+> **Upgrading from 2.x?** See the
 > [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-unreleased.md)
-> for a step-by-step walkthrough.
+> for all breaking changes and a step-by-step walkthrough.
 >
 > **Upgrading from 1.x?** 2.0 contains breaking changes (new `cache_remove_entry` required method,
 > `Result`/`Option` caching behavior flipped to smart-by-default, `result`/`option` attributes
@@ -53,14 +50,17 @@ The short aliases are the preferred spelling. Use the `cache_`-prefixed names wh
 would collide with another in-scope trait's method of the same name (for example, your type also
 implements a trait with its own `get`).
 
-The short alias methods live on the extension traits `CachedExt` (for `Cached` stores) and
-`ConcurrentCachedExt` (for `ConcurrentCached` stores). These extension traits have blanket
-implementations for every type that implements `Cached` / `ConcurrentCached`, so the short
-names are always available when the extension trait is in scope. The simplest way to get them
-is `use cached::prelude::*;`, which re-exports both extension traits. Alternatively, import them
-directly: `use cached::{Cached, CachedExt};`. Custom store implementations only need to
-implement the `cache_`-prefixed required methods on the core trait; the short aliases come
-for free via the blanket extension trait impl.
+The `get`/`set`/`remove` short aliases for `Cached` stores live on `CachedExt`; those for
+`ConcurrentCached` stores live on `ConcurrentCachedExt`. Both extension traits have blanket
+implementations, so the short names are always available when the extension trait is in scope.
+The simplest way to get them is `use cached::prelude::*;`, which re-exports both extension traits.
+Alternatively, import them directly: `use cached::{Cached, CachedExt};`. Custom store
+implementations only need to implement the `cache_`-prefixed required methods on the core trait;
+the short aliases come for free via the blanket extension trait impl.
+
+For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCached` stores,
+`len`/`is_empty` are defined on `ConcurrentCacheBase` (the shared base trait), not on
+`ConcurrentCachedExt` — bring `ConcurrentCacheBase` into scope to call them on a generic bound.
 
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
 `async_cache_get`, `async_cache_set`, `async_cache_remove`, ...; `CachedAsync` has
@@ -112,7 +112,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | LRU-bounded — evict past N entries | `#[cached(max_size = 1_000)] fn lookup(id: u32) -> Row` |
 | TTL — expire results after N whole seconds | `#[cached(ttl_secs = 60)] fn config() -> Config` |
 | TTL as a Duration expression (inlined verbatim, so `Duration` must be in scope; see note below) | `#[cached(ttl = "Duration::from_secs(60)")] fn config() -> Config` |
-| TTL in milliseconds (sub-second capable; Redis rounds up to whole seconds) | `#[cached(ttl_millis = 500)] fn poll(id: u64) -> Status` |
+| TTL in milliseconds (sub-second capable; Redis honors millisecond TTL via PSETEX/PEXPIRE) | `#[cached(ttl_millis = 500)] fn poll(id: u64) -> Status` |
 | LRU + TTL | `#[cached(max_size = 500, ttl_secs = 300)] fn search(q: String) -> Vec<Hit>` |
 | Don't cache `None` returns (implicit for `Option<T>`) | `#[cached] fn find(id: u64) -> Option<User>` |
 | Don't cache `Err` returns (implicit for `Result<T, E>`) | `#[cached] fn load(id: u64) -> Result<Data, E>` |
@@ -138,7 +138,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Sharded with LRU | `#[concurrent_cached(max_size = 1_000)] fn lookup(id: u64) -> Row` |
 | Sharded with TTL | `#[concurrent_cached(ttl_secs = 60)] fn fetch(url: String) -> Body` |
 | Sharded LRU + TTL with custom shard count | `#[concurrent_cached(max_size = 1_000, ttl_secs = 60, shards = 32)] fn query(id: u64) -> Row` |
-| TTL in milliseconds (sub-second; Redis rounds up to whole seconds) | `#[concurrent_cached(ttl_millis = 500)] fn poll(id: u64) -> Status` |
+| TTL in milliseconds (sub-second; Redis honors millisecond TTL via PSETEX/PEXPIRE) | `#[concurrent_cached(ttl_millis = 500)] fn poll(id: u64) -> Status` |
 | Per-value expiry, thread-safe | `#[concurrent_cached(expires = true)] fn session(id: u32) -> Token` |
 | Per-value expiry with LRU bound | `#[concurrent_cached(expires = true, max_size = 1_000)] fn session(id: u32) -> Token` |
 | Cache only successful results (implicit for `Result<T, E>`) | `#[concurrent_cached] fn load(id: u64) -> Result<Row, DbError>` |
@@ -152,7 +152,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 
 On `#[cached]` and `#[concurrent_cached]`, the LRU bound is set with `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The `size = N` spelling — a deprecated alias in 2.x — has been removed; only `max_size = N` is accepted.
 
-The `ttl` attribute accepts a Duration expression as a quoted string: `ttl = "Duration::from_secs(60)"`. The expression is inlined verbatim, so `Duration` must be in scope at the call site (e.g. `use cached::time::Duration;`); the `ttl_secs` / `ttl_millis` forms need no import. For whole seconds, the shorter `ttl_secs = N` form is preferred. `ttl_millis = N` sets a TTL in milliseconds. The three attributes `ttl`, `ttl_secs`, and `ttl_millis` are mutually exclusive; using more than one is a compile error. All three are mutually exclusive with `expires`. Sub-second precision for `ttl_millis` is honored by the in-memory and disk (redb) stores; Redis applies TTL at whole-second granularity, so `ttl_millis` is rounded up to the next whole second on a Redis-backed store (500ms becomes 1s, 1500ms becomes 2s).
+The `ttl` attribute accepts a Duration expression as a quoted string: `ttl = "Duration::from_secs(60)"`. The expression is inlined verbatim, so `Duration` must be in scope at the call site (e.g. `use cached::time::Duration;`); the `ttl_secs` / `ttl_millis` forms need no import. For whole seconds, the shorter `ttl_secs = N` form is preferred. `ttl_millis = N` sets a TTL in milliseconds. The three attributes `ttl`, `ttl_secs`, and `ttl_millis` are mutually exclusive; using more than one is a compile error. All three are mutually exclusive with `expires`. Sub-second precision for `ttl_millis` is honored by the in-memory, disk (redb), and Redis stores; Redis applies the TTL with millisecond precision via PSETEX/PEXPIRE.
 
 For the default in-memory sharded stores, `#[concurrent_cached]` accepts any return type — plain values, `Option<T>`, or `Result<T, E>`.
 Plain values are always cached as-is. `Option<T>` returns skip caching `None` by default; use `cache_none = true` to also cache `None` values. `Result<T, E>` only caches `Ok` values; `Err` is returned without being stored. Use `cache_err = true` to also cache `Err` values.
@@ -197,12 +197,14 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   managing these stores directly must add their own synchronization when sharing across threads.
   `Sharded*` stores are internally synchronized (per-shard `parking_lot::RwLock`) and implement
   `ConcurrentCached`/`ConcurrentCachedAsync` — no external lock is needed.
-  The synchronous `get` / `set` / `remove` (and their `cache_get` / `cache_set` / `cache_remove`
-  aliases) come from the `ConcurrentCached` trait (it must be in scope — `use cached::ConcurrentCached;` or
-  `use cached::prelude::*;`), not from inherent methods. The async trait operations are
+  The synchronous `get` / `set` / `remove` short aliases come from the `ConcurrentCachedExt`
+  extension trait (bring it into scope with `use cached::prelude::*;` or
+  `use cached::{ConcurrentCached, ConcurrentCachedExt};`); the `cache_get` / `cache_set` /
+  `cache_remove` spellings come from `ConcurrentCached` directly. For sharded stores, inherent
+  methods with the same names take priority at the call site. The async trait operations are
   `async_`-prefixed, so they never collide (e.g., `STORE.async_cache_get(&key).await.expect("ShardedUnboundCache is infallible")`).
-- `Cached::get` (and its `cache_get` alias) requires mutable access because some
-  stores update recency, expiration timestamps, or metrics during reads.
+- `CachedExt::get` (and the `Cached::cache_get` required method it wraps) requires mutable access
+  because some stores update recency, expiration timestamps, or metrics during reads.
 - **`len` / `size` vs `iter` vs `evict` contract for timed and expiring stores:**
   `len()` (and `cache_size()`, `is_empty()`) return the raw stored entry count without
   scanning for expiry. On lazy-eviction stores (`TtlCache`, `LruTtlCache`,
@@ -637,6 +639,11 @@ pub use stores::{
     ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder, ShardedUnboundCache,
     ShardedUnboundCacheBase, ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
+#[cfg(feature = "redis_store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
+pub use stores::{
+    ConnectionString, RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
+};
 #[cfg(feature = "time_stores")]
 #[doc(hidden)]
 pub use stores::{HasEvict, NoEvict};
@@ -650,9 +657,6 @@ pub use stores::{
 #[cfg(feature = "redb_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
 pub use stores::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
-#[cfg(feature = "redis_store")]
-#[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
-pub use stores::{RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError};
 
 mod lru_list;
 #[cfg(feature = "proc_macro")]
@@ -1500,8 +1504,8 @@ pub trait CacheTtl {
 pub trait CachedAsync<K, V> {
     /// Get the value for `k`, or compute and insert it by awaiting `f` on a miss.
     ///
-    /// The async counterpart of [`Cached::get_or_set_with`]. It is `async_`-prefixed
-    /// so that importing both [`Cached`] and [`CachedAsync`] (common, since the
+    /// The async counterpart of [`CachedExt::get_or_set_with`]. It is `async_`-prefixed
+    /// so that importing both [`CachedExt`] and [`CachedAsync`] (common, since the
     /// in-memory stores implement both) does not make `get_or_set_with` ambiguous
     /// at the call site.
     ///

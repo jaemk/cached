@@ -27,7 +27,7 @@ proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
 async = ["async_core", "dep:async-lock", "dep:blocking"]
-redis_store = ["redis", "r2d2", "serde", "rmp-serde"]
+redis_store = ["redis", "r2d2", "serde", "rmp-serde", "serde_json"]
 redis_connection_manager = ["redis_tokio", "redis/connection-manager"]
 redis_smol = [
   "redis_store",
@@ -98,6 +98,10 @@ optional = true
 [dependencies.serde]
 version = "1.0"
 features = ["derive"]
+optional = true
+
+[dependencies.serde_json]
+version = "1"
 optional = true
 
 [dependencies.async-lock]

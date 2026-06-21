@@ -36,9 +36,13 @@ fn ttl_millis(ttl: Duration) -> Result<u64, RedisCacheError> {
     // Convert to milliseconds with saturating arithmetic so pathologically large
     // durations do not overflow. Clamp to `i64::MAX` milliseconds so the same
     // bounded value can be used for both `PSETEX` (u64) and `PEXPIRE` (i64)
-    // without a second clamp at the call site.
+    // without a second clamp at the call site. Clamp the low end to 1ms: a
+    // non-zero sub-millisecond Duration truncates to 0ms, which `PSETEX`/`PEXPIRE`
+    // reject (or treat as immediate-delete). The `is_zero` guard above already
+    // rejects an actually-zero Duration, so the `.max(1)` only lifts a truncated
+    // (but non-zero) sub-millisecond value up to the minimum valid TTL.
     let millis = ttl.as_millis();
-    Ok(millis.min(i64::MAX as u128) as u64)
+    Ok(millis.min(i64::MAX as u128).max(1) as u64)
 }
 
 fn ttl_millis_i64(ttl: Duration) -> Result<i64, RedisCacheError> {
@@ -189,18 +193,30 @@ mod ttl_millis_tests {
         assert_eq!(ttl_millis(Duration::from_millis(1)).unwrap(), 1);
         assert_eq!(ttl_millis(Duration::from_millis(250)).unwrap(), 250);
         assert_eq!(ttl_millis(Duration::from_millis(999)).unwrap(), 999);
-        // 1ns rounds to 0ms, but 0ms is rejected by the is_zero check -- a
-        // 1-nanosecond Duration is not zero, so it maps to 0ms then... actually
-        // Duration::from_nanos(1).as_millis() == 0, but the duration is not zero.
-        // The function checks is_zero(), not whether millis==0, so 1ns passes
-        // the guard but maps to 0ms. That is a degenerate edge case; document it.
+    }
+
+    #[test]
+    fn nonzero_submillisecond_clamps_to_one() {
+        // A non-zero Duration under 1ms truncates to 0ms, which PSETEX/PEXPIRE
+        // reject (or treat as immediate-delete). The low-end clamp lifts it to 1ms.
         let one_ns = Duration::from_nanos(1);
         assert!(!one_ns.is_zero());
-        // 1 nanosecond maps to 0 milliseconds (truncation).
+        // Truncation to milliseconds is still 0...
         assert_eq!(one_ns.as_millis(), 0);
-        // ttl_millis accepts it (not zero) but returns 0ms -- callers should
-        // use durations >= 1ms for sensible TTL behavior.
-        assert_eq!(ttl_millis(one_ns).unwrap(), 0);
+        // ...but ttl_millis clamps a non-zero sub-ms Duration up to 1ms.
+        assert_eq!(ttl_millis(one_ns).unwrap(), 1);
+        assert_eq!(ttl_millis_i64(one_ns).unwrap(), 1);
+        // Other sub-millisecond, non-zero durations also clamp to 1.
+        assert_eq!(ttl_millis(Duration::from_nanos(999_999)).unwrap(), 1);
+        assert_eq!(ttl_millis(Duration::from_micros(500)).unwrap(), 1);
+    }
+
+    #[test]
+    fn zero_never_reaches_the_clamp() {
+        // The is_zero guard rejects an actually-zero Duration before the
+        // low-end `.max(1)` clamp can lift it to 1ms.
+        assert!(ttl_millis(Duration::ZERO).is_err());
+        assert!(ttl_millis_i64(Duration::ZERO).is_err());
     }
 
     #[test]
@@ -315,13 +331,23 @@ mod builder_empty_scope_tests {
 
 /// A Redis connection URL stored in memory with credentials redacted in `Debug`/`Display`.
 ///
-/// The inner string (accessible via `.as_str()`) is the full URL including any password
-/// and should not be logged or exposed in error messages.
+/// Both [`Debug`](std::fmt::Debug) and [`Display`](std::fmt::Display) render the placeholder
+/// `[REDACTED connection string]`, so the value is safe to log or include in error messages.
+/// The raw URL (including any password) is available via [`reveal`](Self::reveal) and must not
+/// be logged or exposed in error messages.
 #[derive(Clone)]
-struct ConnectionString(String);
+pub struct ConnectionString(String);
 
 impl ConnectionString {
-    fn as_str(&self) -> &str {
+    /// Return the raw connection URL, including any embedded credentials.
+    ///
+    /// **Warning:** the returned string may contain credentials
+    /// (e.g. `redis://:password@host`). Do not log or expose it in error messages.
+    /// The redacting [`Debug`](std::fmt::Debug)/[`Display`](std::fmt::Display) impls exist
+    /// precisely to keep this value out of logs; only call `reveal` when the full
+    /// credentials are genuinely required.
+    #[must_use]
+    pub fn reveal(&self) -> &str {
         &self.0
     }
 }
@@ -684,23 +710,15 @@ where
         clear_match_pattern(&self.namespace, &self.prefix)
     }
 
-    /// Return the redis connection string with credentials redacted.
+    /// Return the redis connection string as a [`ConnectionString`].
     ///
-    /// The returned string is safe to log or include in error messages.
-    /// Use [`connection_string_unredacted`](Self::connection_string_unredacted) to
-    /// retrieve the raw URL when the full credentials are required.
+    /// `ConnectionString`'s `Debug`/`Display` render `[REDACTED connection string]`,
+    /// so the returned value is safe to log or include in error messages.
+    /// Call [`ConnectionString::reveal`] to retrieve the raw URL when the full
+    /// credentials are required.
     #[must_use]
-    pub fn connection_string(&self) -> String {
-        self.connection_string.to_string()
-    }
-
-    /// Return the raw redis connection string including any credentials.
-    ///
-    /// **Warning:** the returned string may contain credentials
-    /// (e.g. `redis://:password@host`). Do not log or expose it in error messages.
-    #[must_use]
-    pub fn connection_string_unredacted(&self) -> String {
-        self.connection_string.as_str().to_string()
+    pub fn connection_string(&self) -> ConnectionString {
+        self.connection_string.clone()
     }
 }
 
@@ -724,6 +742,11 @@ pub enum RedisCacheError {
     },
 }
 
+/// On-disk schema version stamped into every value written by this store.
+/// Shared by [`CachedRedisValue::new`] and [`CachedRedisValueRef::new`] so the
+/// two constructors cannot drift. The field type is `Option<u64>`.
+const REDIS_VALUE_VERSION: Option<u64> = Some(1);
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedRedisValue<V> {
     value: V,
@@ -733,7 +756,7 @@ impl<V> CachedRedisValue<V> {
     fn new(value: V) -> Self {
         Self {
             value,
-            version: Some(1),
+            version: REDIS_VALUE_VERSION,
         }
     }
 }
@@ -750,7 +773,46 @@ impl<'a, V> CachedRedisValueRef<'a, V> {
     fn new(value: &'a V) -> Self {
         Self {
             value,
-            version: Some(1),
+            version: REDIS_VALUE_VERSION,
+        }
+    }
+}
+
+/// Deserialize a stored [`CachedRedisValue`] from its raw Redis bytes, reading
+/// both the current MessagePack format and the pre-3.0 JSON format.
+///
+/// Single source of truth for every value-deserialize site (sync and async) so
+/// the backward-read behavior cannot drift between them.
+///
+/// Logic:
+/// 1. Try MessagePack (`rmp_serde`) — the format written since 3.0.
+/// 2. On failure, attempt the legacy pre-3.0 JSON encoding: parse the bytes as a
+///    generic JSON value and, only if it carries a `version` key (the shape this
+///    store always wrote), deserialize it into a [`CachedRedisValue`]. This
+///    transparently reads entries written by cached 2.x.
+/// 3. If neither path succeeds, return
+///    [`RedisCacheError::CacheDeserialization`] preserving the *original*
+///    MessagePack error as `source` and the raw bytes in `cached_value`.
+fn deserialize_cached_redis_value<V: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<CachedRedisValue<V>, RedisCacheError> {
+    match rmp_serde::from_slice::<CachedRedisValue<V>>(bytes) {
+        Ok(v) => Ok(v),
+        Err(msgpack_err) => {
+            // Fall back to the pre-3.0 JSON format. Only treat the bytes as the
+            // legacy format if they parse as JSON AND carry the `version` key the
+            // old store always wrote — otherwise this is genuinely corrupt data
+            // and we should surface the original MessagePack error.
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes)
+                && json.get("version").is_some()
+                && let Ok(v) = serde_json::from_value::<CachedRedisValue<V>>(json)
+            {
+                return Ok(v);
+            }
+            Err(RedisCacheError::CacheDeserialization {
+                source: msgpack_err,
+                cached_value: bytes.to_vec(),
+            })
         }
     }
 }
@@ -822,12 +884,7 @@ where
         match res.0 {
             None => Ok(None),
             Some(bytes) => {
-                let v: CachedRedisValue<V> = rmp_serde::from_slice(&bytes).map_err(|source| {
-                    RedisCacheError::CacheDeserialization {
-                        source,
-                        cached_value: bytes,
-                    }
-                })?;
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -855,12 +912,7 @@ where
         match res.0 {
             None => Ok(None),
             Some(bytes) => {
-                let v: CachedRedisValue<V> = rmp_serde::from_slice(&bytes).map_err(|source| {
-                    RedisCacheError::CacheDeserialization {
-                        source,
-                        cached_value: bytes,
-                    }
-                })?;
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -877,12 +929,7 @@ where
         match res.0 {
             None => Ok(None),
             Some(bytes) => {
-                let v: CachedRedisValue<V> = rmp_serde::from_slice(&bytes).map_err(|source| {
-                    RedisCacheError::CacheDeserialization {
-                        source,
-                        cached_value: bytes,
-                    }
-                })?;
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -983,12 +1030,7 @@ where
         match res.0 {
             None => Ok(None),
             Some(bytes) => {
-                let v: CachedRedisValue<V> = rmp_serde::from_slice(&bytes).map_err(|source| {
-                    RedisCacheError::CacheDeserialization {
-                        source,
-                        cached_value: bytes,
-                    }
-                })?;
+                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
                 Ok(Some(v.value))
             }
         }
@@ -1355,23 +1397,15 @@ mod async_redis {
             super::clear_match_pattern(&self.namespace, &self.prefix)
         }
 
-        /// Return the redis connection string with credentials redacted.
+        /// Return the redis connection string as a [`ConnectionString`].
         ///
-        /// The returned string is safe to log or include in error messages.
-        /// Use [`connection_string_unredacted`](Self::connection_string_unredacted) to
+        /// `ConnectionString`'s `Debug`/`Display` render `[REDACTED connection string]`,
+        /// so the returned value is safe to log or include in error messages.
+        /// Call [`ConnectionString::reveal`](super::ConnectionString::reveal) to
         /// retrieve the raw URL when the full credentials are required.
         #[must_use]
-        pub fn connection_string(&self) -> String {
-            self.connection_string.to_string()
-        }
-
-        /// Return the raw redis connection string including any credentials.
-        ///
-        /// **Warning:** the returned string may contain credentials
-        /// (e.g. `redis://:password@host`). Do not log or expose it in error messages.
-        #[must_use]
-        pub fn connection_string_unredacted(&self) -> String {
-            self.connection_string.as_str().to_string()
+        pub fn connection_string(&self) -> ConnectionString {
+            self.connection_string.clone()
         }
     }
 
@@ -1446,13 +1480,7 @@ mod async_redis {
             match res.0 {
                 None => Ok(None),
                 Some(bytes) => {
-                    let v: CachedRedisValue<V> =
-                        rmp_serde::from_slice(&bytes).map_err(|source| {
-                            RedisCacheError::CacheDeserialization {
-                                source,
-                                cached_value: bytes,
-                            }
-                        })?;
+                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                     Ok(Some(v.value))
                 }
             }
@@ -1481,13 +1509,7 @@ mod async_redis {
             match res.0 {
                 None => Ok(None),
                 Some(bytes) => {
-                    let v: CachedRedisValue<V> =
-                        rmp_serde::from_slice(&bytes).map_err(|source| {
-                            RedisCacheError::CacheDeserialization {
-                                source,
-                                cached_value: bytes,
-                            }
-                        })?;
+                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                     Ok(Some(v.value))
                 }
             }
@@ -1505,13 +1527,7 @@ mod async_redis {
             match res.0 {
                 None => Ok(None),
                 Some(bytes) => {
-                    let v: CachedRedisValue<V> =
-                        rmp_serde::from_slice(&bytes).map_err(|source| {
-                            RedisCacheError::CacheDeserialization {
-                                source,
-                                cached_value: bytes,
-                            }
-                        })?;
+                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                     Ok(Some(v.value))
                 }
             }
@@ -1632,13 +1648,7 @@ mod async_redis {
                 match res.0 {
                     None => Ok(None),
                     Some(bytes) => {
-                        let v: CachedRedisValue<V> =
-                            rmp_serde::from_slice(&bytes).map_err(|source| {
-                                RedisCacheError::CacheDeserialization {
-                                    source,
-                                    cached_value: bytes,
-                                }
-                            })?;
+                        let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
                         Ok(Some(v.value))
                     }
                 }
@@ -1948,6 +1958,77 @@ mod error_source_tests {
         assert_eq!(recovered.value, original);
     }
 
+    /// The shared backward-read helper round-trips the current MessagePack format.
+    #[test]
+    fn deserialize_helper_reads_msgpack() {
+        use super::{CachedRedisValue, deserialize_cached_redis_value};
+
+        let bytes = rmp_serde::to_vec(&CachedRedisValue::new(7u64)).expect("serialize");
+        let recovered: CachedRedisValue<u64> =
+            deserialize_cached_redis_value(&bytes).expect("msgpack must deserialize");
+        assert_eq!(recovered.value, 7u64);
+        assert_eq!(recovered.version, Some(1));
+    }
+
+    /// The helper transparently reads the legacy pre-3.0 JSON format: a
+    /// `CachedRedisValue` serialized with `serde_json` (the cached 2.x on-disk
+    /// shape, carrying a `version` key) must deserialize via the helper.
+    #[test]
+    fn deserialize_helper_reads_legacy_json() {
+        use super::{CachedRedisValue, deserialize_cached_redis_value};
+
+        // Old format: JSON object with `value` and `version` keys.
+        let json = serde_json::to_vec(&CachedRedisValue::new("legacy".to_string()))
+            .expect("json serialize");
+        // Sanity: this is JSON text, not msgpack, so the msgpack path must fail
+        // first and the helper must fall through to the JSON path.
+        assert!(json.starts_with(b"{"));
+        assert!(rmp_serde::from_slice::<CachedRedisValue<String>>(&json).is_err());
+
+        let recovered: CachedRedisValue<String> =
+            deserialize_cached_redis_value(&json).expect("legacy JSON must deserialize");
+        assert_eq!(recovered.value, "legacy");
+        assert_eq!(recovered.version, Some(1));
+    }
+
+    /// A legacy JSON object that lacks the `version` key is NOT treated as the
+    /// old format: the helper must surface a `CacheDeserialization` error
+    /// (preserving the original msgpack error) rather than silently coercing.
+    #[test]
+    fn deserialize_helper_rejects_json_without_version() {
+        use super::{RedisCacheError, deserialize_cached_redis_value};
+
+        // `{"value": 1}` parses as JSON but has no `version` key.
+        let bytes = br#"{"value": 1}"#.to_vec();
+        match deserialize_cached_redis_value::<u64>(&bytes) {
+            Ok(_) => panic!("JSON without a version key must not be accepted"),
+            Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
+                assert_eq!(cached_value, bytes, "raw bytes must be preserved");
+            }
+            Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
+        }
+    }
+
+    /// Corrupt bytes (neither valid msgpack nor legacy JSON) yield a
+    /// `CacheDeserialization` error that preserves the original raw bytes.
+    #[test]
+    fn deserialize_helper_corrupt_bytes_preserve_value() {
+        use super::{RedisCacheError, deserialize_cached_redis_value};
+
+        // 0xc1 is an unused/reserved msgpack byte and is not valid JSON either.
+        let bytes: Vec<u8> = vec![0xc1, 0x00, 0xff];
+        match deserialize_cached_redis_value::<u64>(&bytes) {
+            Ok(_) => panic!("corrupt bytes must not deserialize"),
+            Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
+                assert_eq!(
+                    cached_value, bytes,
+                    "the original corrupt bytes must be preserved in the error"
+                );
+            }
+            Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
+        }
+    }
+
     /// `RedisCache` is `Clone` - compile-time bound check.
     #[allow(dead_code)]
     fn assert_clone<T: Clone>() {}
@@ -1978,16 +2059,14 @@ mod error_source_tests {
 #[cfg(test)]
 mod connection_string_tests {
     // No Redis server needed -- verifies the redaction behavior of
-    // `connection_string()` and the raw form from `connection_string_unredacted()`.
+    // `ConnectionString` (returned by `connection_string()`) and that `reveal()`
+    // exposes the raw URL.
     use super::ConnectionString;
 
-    /// `connection_string()` returns the redacted placeholder, not the raw URL.
+    /// `Display` of `ConnectionString` returns the redacted placeholder, not the raw URL.
     #[test]
-    fn connection_string_is_redacted() {
-        // Build a ConnectionString directly (the struct is private, but the
-        // Display impl is what we are testing here).
+    fn display_is_redacted() {
         let cs = ConnectionString("redis://:secret@127.0.0.1:6379".to_string());
-        // Display must be the redacted placeholder.
         let displayed = cs.to_string();
         assert_eq!(
             displayed, "[REDACTED connection string]",
@@ -1999,28 +2078,40 @@ mod connection_string_tests {
         );
     }
 
-    /// `connection_string_unredacted()` returns the raw URL.
+    /// `Debug` of `ConnectionString` also returns the redacted placeholder.
     #[test]
-    fn connection_string_unredacted_returns_raw() {
-        let raw = "redis://:secret@127.0.0.1:6379";
-        let cs = ConnectionString(raw.to_string());
-        assert_eq!(cs.as_str(), raw);
+    fn debug_is_redacted() {
+        let cs = ConnectionString("redis://:secret@127.0.0.1:6379".to_string());
+        let debugged = format!("{cs:?}");
+        assert_eq!(
+            debugged, "[REDACTED connection string]",
+            "Debug must return the redacted placeholder, got: {debugged}"
+        );
+        assert!(
+            !debugged.contains("secret"),
+            "Debug must not expose the password; got: {debugged}"
+        );
     }
 
-    /// `RedisCache::connection_string()` returns the redacted form.
-    /// This test exercises the method via the `Display` of the inner
-    /// `ConnectionString` -- no live server needed.
+    /// `reveal()` returns the raw URL, including credentials.
     #[test]
-    fn redis_cache_connection_string_redacted_via_display() {
-        // We can't build a full RedisCache without a server, but we can verify
-        // ConnectionString's Display independently since that is what the method
-        // delegates to.
+    fn reveal_returns_raw() {
+        let raw = "redis://:secret@127.0.0.1:6379";
+        let cs = ConnectionString(raw.to_string());
+        assert_eq!(cs.reveal(), raw);
+        assert!(cs.reveal().contains("secret"));
+    }
+
+    /// Both `Debug` and `Display` redact while `reveal()` still exposes the raw value.
+    #[test]
+    fn debug_and_display_redact_but_reveal_does_not() {
         let cs = ConnectionString("redis://:s3cr3t@localhost:6379/0".to_string());
-        let redacted = cs.to_string();
-        assert_eq!(redacted, "[REDACTED connection string]");
-        assert!(!redacted.contains("s3cr3t"));
-        // The raw value is accessible via as_str().
-        assert!(cs.as_str().contains("s3cr3t"));
+        assert_eq!(cs.to_string(), "[REDACTED connection string]");
+        assert_eq!(format!("{cs:?}"), "[REDACTED connection string]");
+        assert!(!cs.to_string().contains("s3cr3t"));
+        assert!(!format!("{cs:?}").contains("s3cr3t"));
+        // The raw value is still recoverable via reveal().
+        assert!(cs.reveal().contains("s3cr3t"));
     }
 }
 

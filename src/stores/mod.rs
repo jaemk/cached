@@ -309,7 +309,7 @@ pub use crate::stores::redb::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, 
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{
-    RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
+    ConnectionString, RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
 pub use expiring::{ExpiringCache, ExpiringCacheBuilder};
 pub use expiring_lru::{Expires, ExpiringLruCache, ExpiringLruCacheBuilder};
