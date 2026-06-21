@@ -7,6 +7,6 @@ error[E0277]: the trait bound `u32: Expires` is not satisfied
 note: required by a bound in `ExpiringCache`
  --> src/stores/expiring.rs
   |
-  | pub struct ExpiringCache<K: Hash + Eq, V: Expires> {
+  | pub struct ExpiringCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
   |                                           ^^^^^^^ required by this bound in `ExpiringCache`
   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)
