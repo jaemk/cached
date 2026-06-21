@@ -4612,8 +4612,8 @@ mod redis_tests {
             // Probe the raw Redis TTL synchronously (-1 == persistent, no expiry).
             let conn_str = cache.connection_string();
             let raw_ttl = |key: &str| -> i64 {
-                let client =
-                    redis::Client::open(conn_str.clone()).expect("open redis client for TTL probe");
+                let client = redis::Client::open(conn_str.reveal())
+                    .expect("open redis client for TTL probe");
                 let mut conn = client
                     .get_connection()
                     .expect("redis connection for TTL probe");
@@ -4689,8 +4689,8 @@ mod redis_tests {
 
             let conn_str = cache.connection_string();
             let raw_ttl = move |key: &str| -> i64 {
-                let client =
-                    redis::Client::open(conn_str.clone()).expect("open redis client for TTL probe");
+                let client = redis::Client::open(conn_str.reveal())
+                    .expect("open redis client for TTL probe");
                 let mut conn = client
                     .get_connection()
                     .expect("redis connection for TTL probe");
@@ -4770,8 +4770,8 @@ mod redis_tests {
 
             let conn_str = cache.connection_string();
             let raw_ttl = move |key: &str| -> i64 {
-                let client =
-                    redis::Client::open(conn_str.clone()).expect("open redis client for TTL probe");
+                let client = redis::Client::open(conn_str.reveal())
+                    .expect("open redis client for TTL probe");
                 let mut conn = client
                     .get_connection()
                     .expect("redis connection for TTL probe");
@@ -5072,8 +5072,9 @@ mod redis_tests {
     // persistent (no-expiry) key, -2 if the key is absent, or the remaining
     // seconds otherwise.
     fn raw_ttl_secs(cache: &RedisCache<String, String>, prefix: &str, key: &str) -> i64 {
-        let client = redis::Client::open(cache.connection_string())
-            .expect("open redis client for TTL probe");
+        let conn_str = cache.connection_string();
+        let client =
+            redis::Client::open(conn_str.reveal()).expect("open redis client for TTL probe");
         let mut conn = client
             .get_connection()
             .expect("redis connection for TTL probe");

@@ -14,8 +14,10 @@ contractual guarantees the macro tests cannot fully observe:
   2. Returns the live value as `(Some(v), false)` and absent keys as `(None, false)`.
   3. Produces NO read side effects: no hit/miss counter change, no LRU recency
      promotion, no TTL renewal.
-  4. The defaulted trait method returns `(None, false)` for a `CloneCached`
-     implementor that does not override it (documented non-breaking behavior).
+  4. A plain (non-TTL) `CloneCached` implementor must provide a required
+     implementation of `cache_peek_with_expiry_status`; for stores with no
+     expiry the method simply returns `(Some(v), false)` for present keys and
+     `(None, false)` for absent keys.
 
 `TtlSortedCache` is covered here too: it implements `CloneCached` and overrides the
 method, but is NOT reachable through any `#[cached]` attribute combination, so a

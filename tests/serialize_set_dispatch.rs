@@ -237,12 +237,11 @@ mod clone_count_tests {
         );
     }
 
-    /// Proves the owned fallback arm is taken: the shim clones the value once
-    /// (to call the owned cache_set), so CLONES == 1 after a cache miss.
-    /// On a cache hit, OwnedStore::cache_get calls `.cloned()` to return an owned
-    /// value from the locked map. The counter is reset to 0 before the hit call,
-    /// so the assertion CLONES == 1 measures exactly that one get-path clone, not
-    /// any clone from the set-site shim (which is not invoked on a hit).
+    /// Proves the owned fallback arm is taken on a cache miss: the shim clones
+    /// the value exactly once (to call the owned cache_set), so CLONES == 1
+    /// after the first (miss) call. The hit-path clone count is an implementation
+    /// detail of OwnedStore::cache_get and is not asserted here; only the
+    /// returned value is checked for correctness.
     #[test]
     fn owned_store_clones_once() {
         let _guard = CLONE_TEST_LOCK.lock().unwrap();
@@ -260,17 +259,12 @@ mod clone_count_tests {
             "Owned fallback path must clone the value exactly once at the set site"
         );
 
-        // Second call: cache hit; the set-site shim is not invoked. CLONES is reset
-        // to 0 here, so the assertion below measures the one clone from
-        // OwnedStore::cache_get (which calls `.cloned()` to return an owned value).
+        // Second call: cache hit; the set-site shim is not invoked.
+        // Assert only the returned value — the clone count on the hit path is
+        // an OwnedStore implementation detail and not part of the dispatch contract.
         CLONES.store(0, Ordering::SeqCst);
         let hit = via_owned(7).unwrap();
-        assert_eq!(hit, Counted(7));
-        assert_eq!(
-            CLONES.load(Ordering::SeqCst),
-            1,
-            "Cache hit: set-site shim not called; the one clone comes from cache_get returning an owned value"
-        );
+        assert_eq!(hit, Counted(7), "Cache hit must return the correct value");
     }
 }
 
@@ -575,8 +569,11 @@ mod async_serialize_store {
         assert_eq!(ASYNC_CLONES.load(Ordering::SeqCst), 0);
     }
 
-    /// Proves the owned async fallback arm is taken when the store does not implement
-    /// SerializeCachedAsync: the shim clones the value once before async_cache_set.
+    /// Proves the owned async fallback arm is taken on a cache miss: the shim
+    /// clones the value exactly once before async_cache_set, so ASYNC_CLONES == 1
+    /// after the first (miss) call. The hit-path clone count is an implementation
+    /// detail of AsyncOwnedStore::async_cache_get and is not asserted here; only
+    /// the returned value is checked for correctness.
     #[tokio::test]
     #[serial_test::serial(async_clones)]
     async fn async_owned_store_clones_once() {
@@ -597,17 +594,11 @@ mod async_serialize_store {
             "Owned async fallback path must clone the value exactly once at the set site"
         );
 
-        // Second call: cache hit; the set-site shim is not invoked. ASYNC_CLONES is
-        // reset to 0 here, so the assertion below measures only the one clone from
-        // AsyncOwnedStore::async_cache_get (which calls `.cloned()` to return an owned
-        // value from the locked map).
+        // Second call: cache hit; the set-site shim is not invoked.
+        // Assert only the returned value — the clone count on the hit path is
+        // an AsyncOwnedStore implementation detail and not part of the dispatch contract.
         ASYNC_CLONES.store(0, Ordering::SeqCst);
         let hit = async_via_owned(7).await.unwrap();
-        assert_eq!(hit, AsyncVal(7));
-        assert_eq!(
-            ASYNC_CLONES.load(Ordering::SeqCst),
-            1,
-            "Cache hit: set-site shim not called; the one clone comes from async_cache_get returning an owned value"
-        );
+        assert_eq!(hit, AsyncVal(7), "Cache hit must return the correct value");
     }
 }

@@ -18,9 +18,10 @@ use cached::time::Duration;
 use cached::{CacheTtl, Cached, ConcurrentCached, LruTtlCache, ShardedTtlCache, TtlCache};
 
 // Enough time to let a SHORT-ttl entry expire; chosen to be comfortably > SHORT.
-const SHORT: Duration = Duration::from_millis(30);
+// Use a generously wide TTL so CI runners under load don't race the wall-clock.
+const SHORT: Duration = Duration::from_millis(200);
 const LONG: Duration = Duration::from_secs(60);
-const SLEEP: std::time::Duration = std::time::Duration::from_millis(80);
+const SLEEP: std::time::Duration = std::time::Duration::from_millis(500);
 
 // ─────────────────────────── TtlCache: set_ttl is future-only ────────────────
 
@@ -80,19 +81,19 @@ fn ttl_cache_refresh_on_hit_extends_expires_at() {
         .build()
         .expect("build TtlCache");
 
-    c.cache_set(1, 10); // expires_at = now + 30ms
+    c.cache_set(1, 10); // expires_at = now + SHORT
 
-    // Sleep half of SHORT, then read: refresh extends to now+30ms again.
-    std::thread::sleep(std::time::Duration::from_millis(15));
+    // Sleep half of SHORT, then read: refresh extends to now+SHORT again.
+    std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         c.cache_get(&1),
         Some(&10),
-        "entry must still be live at 15ms (< 30ms)"
+        "entry must still be live at half-SHORT (< SHORT)"
     );
 
-    // Sleep half of SHORT again (15ms more from the read = 30ms from read,
-    // but only 30ms from insert via the refreshed deadline).
-    std::thread::sleep(std::time::Duration::from_millis(15));
+    // Sleep half of SHORT again (100ms more from the read = 200ms from read,
+    // but the refreshed deadline is now+SHORT from the read, so still live).
+    std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         c.cache_get(&1),
         Some(&10),
@@ -185,16 +186,16 @@ fn lru_ttl_cache_refresh_on_hit_extends_expires_at() {
         .build()
         .expect("build LruTtlCache");
 
-    c.cache_set(1, 10); // expires_at = now + 30ms
+    c.cache_set(1, 10); // expires_at = now + SHORT
 
-    std::thread::sleep(std::time::Duration::from_millis(15));
+    std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         c.cache_get(&1),
         Some(&10),
-        "LRU: entry must still be live at 15ms"
+        "LRU: entry must still be live at half-SHORT"
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(15));
+    std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         c.cache_get(&1),
         Some(&10),
@@ -258,16 +259,16 @@ fn sharded_ttl_cache_refresh_on_hit_extends_expires_at() {
         .build()
         .expect("build ShardedTtlCache");
 
-    c.cache_set(1, 10).unwrap(); // expires_at = now + 30ms
+    c.cache_set(1, 10).unwrap(); // expires_at = now + SHORT
 
-    std::thread::sleep(std::time::Duration::from_millis(15));
+    std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         c.cache_get(&1),
         Ok(Some(10)),
-        "Sharded: entry must still be live at 15ms"
+        "Sharded: entry must still be live at half-SHORT"
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(15));
+    std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         c.cache_get(&1),
         Ok(Some(10)),
