@@ -93,4 +93,12 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/cached_convert_malformed_unquoted.rs");
     // Item #2: map_error = 5 (non-closure expression) rejected.
     t.compile_fail("tests/ui/concurrent_cached_map_error_non_closure.rs");
+    // G1: generic `#[once]` whose value type names a function type parameter.
+    t.compile_fail("tests/ui/once_generic_value_type_rejected.rs");
+    // G2: `name` beginning with `__cached` is reserved on all three macros.
+    t.compile_fail("tests/ui/cached_name_reserved_prefix.rs");
+    t.compile_fail("tests/ui/once_name_reserved_prefix.rs");
+    t.compile_fail("tests/ui/concurrent_cached_name_reserved_prefix.rs");
+    // D11: `sync_writes_buckets` is inert on `#[once]` (no `by_key` support).
+    t.compile_fail("tests/ui/once_sync_writes_buckets_inert.rs");
 }

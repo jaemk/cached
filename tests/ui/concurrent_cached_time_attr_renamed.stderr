@@ -1,4 +1,4 @@
-error: `time` (whole seconds) was renamed in cached 1.0; use `ttl_secs = ...` (or `ttl = "Duration::from_secs(...)"` / `ttl_millis = ...`)
+error: `time` was renamed in a prior major release; use `ttl_secs = ...` (or `ttl = "Duration::from_secs(...)"` / `ttl_millis = ...`)
  --> tests/ui/concurrent_cached_time_attr_renamed.rs:4:4
   |
 4 | fn my_fn(k: i32) -> Result<i32, String> {

@@ -29,8 +29,12 @@ struct OnceMacroArgs {
     /// `None` = not specified by user (defaults to `Disabled` for `#[once]`).
     #[darling(default)]
     sync_writes: Option<SyncWriteMode>,
-    #[darling(default = "default_sync_writes_buckets")]
-    sync_writes_buckets: usize,
+    /// D11: On `#[once]`, `sync_writes_buckets` is inert (buckets only apply to
+    /// `sync_writes = "by_key"`, which `#[once]` does not support). The field is
+    /// `Option<usize>` so the macro can detect whether the user explicitly supplied
+    /// it and emit a clear error, rather than silently ignoring the value.
+    #[darling(default)]
+    sync_writes_buckets: Option<usize>,
     #[darling(default)]
     cache_err: bool,
     #[darling(default)]
@@ -82,10 +86,6 @@ struct OnceMacroArgs {
     key: Option<String>,
     #[darling(default)]
     convert: Option<syn::Expr>,
-}
-
-fn default_sync_writes_buckets() -> usize {
-    64
 }
 
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -156,15 +156,14 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Note: `#[once]` supports generic functions. Its static only holds the
-    // (concrete) value type, never the function's type parameters, so no
-    // generic-rejection check is needed here (unlike `#[cached]` /
-    // `#[concurrent_cached]`, whose key/value types can leak generics) (#80).
+    // Note: `#[once]` supports generic functions, but only when the cache value
+    // type is concrete (does not name any of the function's own type or const
+    // params). The guard below (after `cache_value_ty` is resolved) enforces this.
 
     if args.time.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`time` (whole seconds) was renamed in cached 1.0; use `ttl_secs = ...` \
+            "`time` was renamed in a prior major release; use `ttl_secs = ...` \
              (or `ttl = \"Duration::from_secs(...)\"` / `ttl_millis = ...`)",
         )
         .to_compile_error()
@@ -421,6 +420,45 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // G1: Reject a generic `#[once]` whose cache value type names one of the
+    // function's own type or const parameters. The cache static is
+    // monomorphic, so it cannot contain a bare type/const param in its type.
+    // A generic `#[once]` is fine as long as the value type is concrete
+    // (e.g. `fn foo<T>(x: T) -> usize` is allowed; `fn foo<T>() -> T` is not).
+    {
+        let generic_param_idents: Vec<String> = signature
+            .generics
+            .type_params()
+            .map(|tp| tp.ident.to_string())
+            .chain(
+                signature
+                    .generics
+                    .const_params()
+                    .map(|cp| cp.ident.to_string()),
+            )
+            .collect();
+        if !generic_param_idents.is_empty() {
+            let value_ty_str = cache_value_ty.to_string().replace(' ', "");
+            if let Some(param) = generic_param_idents
+                .iter()
+                .find(|p| value_ty_str.contains(p.as_str()))
+            {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    format!(
+                        "#[once]'s cache value type cannot name the function's generic \
+                         parameter `{param}`: the generated cache static is monomorphic \
+                         and cannot hold a value of a type that names a function-level \
+                         type or const parameter. Make the return type concrete, or use \
+                         `#[cached]` with `key`/`convert` to handle generic functions.",
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+
     // make the cache identifier
     let cache_ident = match args.name {
         Some(ref name) => {
@@ -429,13 +467,32 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                     .to_compile_error()
                     .into();
             }
+            // G2: `__cached` prefix is reserved for macro-generated bindings.
+            if name.starts_with("__cached") {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    "cache names beginning with `__cached` are reserved for macro-generated \
+                     bindings and cannot be used as a `name` value",
+                )
+                .to_compile_error()
+                .into();
+            }
             Ident::new(name, fn_ident.span())
         }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
 
-    if let Err(error) = validate_sync_writes_buckets(args.sync_writes_buckets, fn_ident.span()) {
-        return error.to_compile_error().into();
+    // D11: `sync_writes_buckets` is inert on `#[once]` — buckets only apply to
+    // `sync_writes = "by_key"`, which `#[once]` does not support. Reject an
+    // explicitly supplied value with a clear error rather than silently ignoring it.
+    if args.sync_writes_buckets.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`sync_writes_buckets` is not supported on `#[once]`: buckets only apply \
+             to `sync_writes = \"by_key\"`, which `#[once]` does not support",
+        )
+        .to_compile_error()
+        .into();
     }
     if sync_writes == SyncWriteMode::ByKey {
         return syn::Error::new(
@@ -445,7 +502,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    let sync_writes_buckets = args.sync_writes_buckets;
+    // `sync_writes_buckets` is unused on `#[once]` (no `by_key` path), but the
+    // static generator still references the binding for the (rejected) `is_by_key`
+    // branch below; provide the default so the branches compile.
+    let sync_writes_buckets = 64_usize;
 
     // `has_ttl` / `ttl_duration` were resolved above (from `ttl` expr, `ttl_secs`,
     // or `ttl_millis`); `has_ttl` gates the timestamped storage shape (#149).
@@ -484,7 +544,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             };
 
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.was_cached = true; return __cached_r }
+                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.set_was_cached(true); return __cached_r }
             } else {
                 quote! { return __cached_result.clone() }
             };
@@ -512,7 +572,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             };
 
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.was_cached = true; return Ok(__cached_r) }
+                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.set_was_cached(true); return Ok(__cached_r) }
             } else {
                 quote! { return Ok(__cached_result.clone()) }
             };
@@ -540,7 +600,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             };
 
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.was_cached = true; return Some(__cached_r) }
+                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.set_was_cached(true); return Some(__cached_r) }
             } else {
                 quote! { return Some(__cached_result.clone()) }
             };

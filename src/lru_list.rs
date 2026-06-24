@@ -1,6 +1,5 @@
 /// Limited functionality doubly linked list using Vec as storage.
 #[derive(Clone, Debug)]
-
 pub struct LRUList<T> {
     values: Vec<ListEntry<T>>,
 }
@@ -20,7 +19,8 @@ impl<T> LRUList<T> {
     const OCCUPIED: usize = 1;
 
     pub(crate) fn with_capacity(capacity: usize) -> LRUList<T> {
-        let mut values = Vec::with_capacity(capacity + 2);
+        let cap = capacity.saturating_add(2);
+        let mut values = Vec::with_capacity(cap);
         values.push(ListEntry::<T> {
             value: None,
             next: 0,

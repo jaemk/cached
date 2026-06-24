@@ -329,6 +329,107 @@ mod builder_empty_scope_tests {
     }
 }
 
+#[cfg(test)]
+mod credential_leak_tests {
+    // No Redis server needed -- verifies that a bad connection URL containing a
+    // password does not surface the password in the build error's Display/Debug.
+    // Guards against the S3 credential-leak finding: the `#[from] redis::RedisError`
+    // path used to propagate raw connection errors before we started sanitizing them.
+    use super::{RedisCacheBuildError, RedisCacheBuilder};
+    use crate::time::Duration;
+
+    /// Building with a URL that contains an embedded password but has an invalid
+    /// scheme (so `Client::open` fails immediately) must not include the password
+    /// in the resulting error's `Display` or `Debug`.
+    #[test]
+    fn bad_url_with_password_does_not_leak_password_in_build_error() {
+        // `not-redis` is not a valid redis scheme, so `Client::open` / `into_connection_info`
+        // will fail before any network connection is attempted. The URL contains a
+        // plaintext password that must not appear in the error message.
+        let secret = "super_secret_password_xyz";
+        let bad_url = format!("not-redis://:{secret}@nonexistent-host:9999");
+
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&bad_url)
+            .build();
+
+        let err = result.expect_err("build must fail with a bad URL");
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+
+        assert!(
+            !display.contains(secret),
+            "Display must not expose the password; got: {display}"
+        );
+        assert!(
+            !debug.contains(secret),
+            "Debug must not expose the password; got: {debug}"
+        );
+        // The error must be a Connection variant (the sanitized one).
+        assert!(
+            matches!(err, RedisCacheBuildError::Connection(_)),
+            "expected Connection error, got: {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod legacy_json_version_gate_tests {
+    // No Redis server needed -- verifies that the S4 backward-read gate requires
+    // the `version` key to equal the known version constant, not merely exist.
+    use super::{RedisCacheError, deserialize_cached_redis_value};
+
+    /// A JSON object whose `version` key exists but holds an unexpected value must
+    /// NOT be accepted as a legacy entry — it falls through to `CacheDeserialization`.
+    #[test]
+    fn json_with_wrong_version_value_is_rejected() {
+        // `version: 99` is not the known REDIS_VALUE_VERSION (Some(1)).
+        // Before the fix, `json.get("version").is_some()` would have accepted this.
+        let bytes = br#"{"value": "hello", "version": 99}"#.to_vec();
+        match deserialize_cached_redis_value::<String>(&bytes) {
+            Ok(_) => panic!(
+                "JSON with an unexpected `version` value must not be accepted as a legacy entry"
+            ),
+            Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
+                assert_eq!(
+                    cached_value, bytes,
+                    "raw bytes must be preserved in the error"
+                );
+            }
+            Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
+        }
+    }
+
+    /// A JSON object with `version: null` (the JSON encoding of `None`) is also
+    /// not the expected version (`Some(1)`) and must be rejected.
+    #[test]
+    fn json_with_null_version_is_rejected() {
+        let bytes = br#"{"value": 42, "version": null}"#.to_vec();
+        match deserialize_cached_redis_value::<u64>(&bytes) {
+            Ok(_) => panic!("JSON with version=null must not be accepted as a legacy entry"),
+            Err(RedisCacheError::CacheDeserialization { .. }) => {}
+            Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
+        }
+    }
+
+    /// A JSON object with `version: 1` (the known version, matches `Some(1)`) IS
+    /// accepted as a valid legacy entry. This confirms the gate is a value-check,
+    /// not just a presence-check, and that the correct version still passes through.
+    #[test]
+    fn json_with_correct_version_one_is_accepted() {
+        // `{"value": "ok", "version": 1}` is the pre-3.0 JSON format with the known version.
+        let bytes = br#"{"value": "ok", "version": 1}"#.to_vec();
+        let result = deserialize_cached_redis_value::<String>(&bytes);
+        assert!(
+            result.is_ok(),
+            "JSON with version=1 must be accepted as a legacy entry"
+        );
+        assert_eq!(result.unwrap().value, "ok");
+    }
+}
+
 /// A Redis connection URL stored in memory with credentials redacted in `Debug`/`Display`.
 ///
 /// Both [`Debug`](std::fmt::Debug) and [`Display`](std::fmt::Display) render the placeholder
@@ -399,6 +500,15 @@ pub enum RedisCacheBuildError {
         Set a non-empty namespace or prefix."
     )]
     EmptyScope,
+    /// The connection URL explicitly pins the RESP2 protocol (`?protocol=resp2`)
+    /// while `client_side_caching` is enabled. Client-side caching requires
+    /// RESP3; the combination is rejected at build time to prevent the
+    /// invalidation listener from silently no-oping and serving stale data.
+    #[error(
+        "client_side_caching requires RESP3 but the connection URL explicitly pins \
+        protocol=resp2; remove the protocol parameter or set it to resp3"
+    )]
+    Resp2DowngradeWithClientSideCaching,
 }
 
 impl<K, V> Default for RedisCacheBuilder<K, V>
@@ -558,7 +668,17 @@ where
 
     fn create_pool(&self) -> Result<r2d2::Pool<redis::Client>, RedisCacheBuildError> {
         let s = self.resolve_connection_string()?;
-        let client: redis::Client = redis::Client::open(s)?;
+        // Open the client, catching any error before it can propagate through
+        // the `#[from] redis::RedisError` impl on `RedisCacheBuildError::Connection`.
+        // A malformed URL such as `redis://:password@host` would otherwise surface
+        // the raw connection string (including the password) in the error's
+        // `Display`/`Debug`. Replace any error payload with a sanitized message.
+        let client: redis::Client = redis::Client::open(s).map_err(|_| {
+            redis::RedisError::from((
+                redis::ErrorKind::InvalidClientConfig,
+                "failed to open redis client (connection string redacted)",
+            ))
+        })?;
         // some pool-builder defaults are set when the builder is initialized
         // so we can't overwrite any values with Nones...
         let pool_builder = r2d2::Pool::builder();
@@ -729,6 +849,9 @@ pub enum RedisCacheError {
     Redis(#[from] redis::RedisError),
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
+    /// **Security note:** `cached_value` may contain sensitive application data
+    /// (it is the raw bytes retrieved from Redis). Do not log this variant or
+    /// expose `cached_value` in error messages or observability pipelines.
     #[error("Error deserializing cached value")]
     CacheDeserialization {
         #[source]
@@ -800,11 +923,14 @@ fn deserialize_cached_redis_value<V: serde::de::DeserializeOwned>(
         Ok(v) => Ok(v),
         Err(msgpack_err) => {
             // Fall back to the pre-3.0 JSON format. Only treat the bytes as the
-            // legacy format if they parse as JSON AND carry the `version` key the
-            // old store always wrote — otherwise this is genuinely corrupt data
-            // and we should surface the original MessagePack error.
+            // legacy format if they parse as JSON AND carry a `version` key whose
+            // value matches the known version constant — otherwise this is genuinely
+            // corrupt data and we should surface the original MessagePack error.
+            // Checking the exact version value (not merely `is_some`) prevents a
+            // JSON object with an unexpected `version` (e.g. a future incompatible
+            // schema) from being silently accepted as a legacy entry.
             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes)
-                && json.get("version").is_some()
+                && json.get("version") == Some(&serde_json::json!(REDIS_VALUE_VERSION))
                 && let Ok(v) = serde_json::from_value::<CachedRedisValue<V>>(json)
             {
                 return Ok(v);
@@ -1064,6 +1190,27 @@ mod async_redis {
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
 
+    /// Builder for [`AsyncRedisCache`].
+    ///
+    /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
+    /// `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`,
+    /// `redis_smol_rustls`, `redis_async_cache`, or `redis_connection_manager`.
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(all(
+            feature = "async",
+            any(
+                feature = "redis_smol",
+                feature = "redis_smol_native_tls",
+                feature = "redis_smol_rustls",
+                feature = "redis_tokio",
+                feature = "redis_tokio_native_tls",
+                feature = "redis_tokio_rustls",
+                feature = "redis_async_cache",
+                feature = "redis_connection_manager"
+            )
+        )))
+    )]
     pub struct AsyncRedisCacheBuilder<K, V> {
         ttl: Option<Duration>,
         refresh: bool,
@@ -1209,6 +1356,30 @@ mod async_redis {
             }
         }
 
+        /// Returns `true` when the connection string URL explicitly pins `protocol=resp2`
+        /// (or `protocol=2`) in the query string.
+        ///
+        /// The redis crate defaults to RESP2 when no `protocol=` param is present, so
+        /// checking the parsed `ProtocolVersion` would incorrectly reject plain URLs.
+        /// This helper inspects the raw query string instead and only rejects URLs that
+        /// actively opt in to RESP2 — the scenarios where the user has explicitly
+        /// signalled an intent incompatible with client-side caching.
+        #[cfg(feature = "redis_async_cache")]
+        fn url_pins_resp2(s: &str) -> bool {
+            // Extract the query string fragment after `?` (if any) and scan for
+            // `protocol=resp2` or `protocol=2` as a key=value pair.  A simple
+            // string scan is sufficient because the redis crate's own `parse_protocol`
+            // uses the same comparison logic.
+            if let Some(query) = s.split('?').nth(1) {
+                for pair in query.split('&') {
+                    if let Some(val) = pair.strip_prefix("protocol=") {
+                        return val == "resp2" || val == "2";
+                    }
+                }
+            }
+            false
+        }
+
         /// Create a multiplexed redis connection. This is a single connection that can
         /// be used asynchronously by multiple futures.
         #[cfg(not(feature = "redis_connection_manager"))]
@@ -1219,7 +1390,21 @@ mod async_redis {
 
             #[cfg(feature = "redis_async_cache")]
             if self.client_side_caching {
-                let mut connection_info = s.into_connection_info()?;
+                // Reject URLs that explicitly pin RESP2 before parsing — client-side
+                // caching requires RESP3 and silently downgrading would cause the
+                // invalidation listener to no-op, serving stale data.
+                if Self::url_pins_resp2(&s) {
+                    return Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching);
+                }
+
+                // Sanitize any parse error so the raw URL (which may contain a
+                // password) is not surfaced in the error's Display/Debug.
+                let mut connection_info = s.into_connection_info().map_err(|_| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::InvalidClientConfig,
+                        "failed to parse redis connection info (connection string redacted)",
+                    ))
+                })?;
 
                 let mut config = redis::AsyncConnectionConfig::default();
                 let redis_settings = connection_info
@@ -1228,14 +1413,25 @@ mod async_redis {
                     .set_protocol(redis::ProtocolVersion::RESP3);
                 connection_info = connection_info.set_redis_settings(redis_settings);
                 config = config.set_cache_config(redis::caching::CacheConfig::default());
-                let client = redis::Client::open(connection_info)?;
+                let client = redis::Client::open(connection_info).map_err(|_| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::InvalidClientConfig,
+                        "failed to open redis client (connection string redacted)",
+                    ))
+                })?;
                 let conn = client
                     .get_multiplexed_async_connection_with_config(&config)
                     .await?;
                 return Ok(conn);
             }
 
-            let client = redis::Client::open(s)?;
+            // Non-client-side-caching path: sanitize the Client::open error too.
+            let client = redis::Client::open(s).map_err(|_| {
+                redis::RedisError::from((
+                    redis::ErrorKind::InvalidClientConfig,
+                    "failed to open redis client (connection string redacted)",
+                ))
+            })?;
             let conn = client.get_multiplexed_async_connection().await?;
             Ok(conn)
         }
@@ -1250,7 +1446,22 @@ mod async_redis {
             let s = self.resolve_connection_string()?;
             #[cfg(feature = "redis_async_cache")]
             if self.client_side_caching {
-                let mut connection_info = s.into_connection_info()?;
+                // Reject URLs that explicitly pin RESP2 before parsing — client-side
+                // caching requires RESP3 and silently downgrading would cause the
+                // invalidation listener to no-op, serving stale data.
+                if Self::url_pins_resp2(&s) {
+                    return Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching);
+                }
+
+                // Sanitize any parse error so the raw URL (which may contain a
+                // password) is not surfaced in the error's Display/Debug.
+                let mut connection_info = s.into_connection_info().map_err(|_| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::InvalidClientConfig,
+                        "failed to parse redis connection info (connection string redacted)",
+                    ))
+                })?;
+
                 let redis_settings = connection_info
                     .redis_settings()
                     .clone()
@@ -1258,12 +1469,23 @@ mod async_redis {
                 connection_info = connection_info.set_redis_settings(redis_settings);
                 let config = redis::aio::ConnectionManagerConfig::default()
                     .set_cache_config(redis::caching::CacheConfig::default());
-                let client = redis::Client::open(connection_info)?;
+                let client = redis::Client::open(connection_info).map_err(|_| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::InvalidClientConfig,
+                        "failed to open redis client (connection string redacted)",
+                    ))
+                })?;
                 let conn = redis::aio::ConnectionManager::new_with_config(client, config).await?;
                 return Ok(conn);
             }
 
-            let client = redis::Client::open(s)?;
+            // Non-client-side-caching path: sanitize the Client::open error too.
+            let client = redis::Client::open(s).map_err(|_| {
+                redis::RedisError::from((
+                    redis::ErrorKind::InvalidClientConfig,
+                    "failed to open redis client (connection string redacted)",
+                ))
+            })?;
             let conn = redis::aio::ConnectionManager::new(client).await?;
             Ok(conn)
         }
@@ -1313,11 +1535,32 @@ mod async_redis {
         }
     }
 
-    /// Cache store backed by redis
+    /// Async cache store backed by redis.
     ///
-    /// Values have a ttl applied and enforced by redis.
+    /// Values have a TTL applied and enforced by Redis.
     /// Uses a `redis::aio::MultiplexedConnection` or `redis::aio::ConnectionManager`
-    /// under the hood depending if feature `redis_connection_manager` is used or not.
+    /// under the hood depending on whether the `redis_connection_manager` feature is
+    /// enabled.
+    ///
+    /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
+    /// `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`,
+    /// `redis_smol_rustls`, `redis_async_cache`, or `redis_connection_manager`.
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(all(
+            feature = "async",
+            any(
+                feature = "redis_smol",
+                feature = "redis_smol_native_tls",
+                feature = "redis_smol_rustls",
+                feature = "redis_tokio",
+                feature = "redis_tokio_native_tls",
+                feature = "redis_tokio_rustls",
+                feature = "redis_async_cache",
+                feature = "redis_connection_manager"
+            )
+        )))
+    )]
     pub struct AsyncRedisCache<K, V> {
         pub(super) ttl: Mutex<Duration>,
         pub(super) refresh: AtomicBool,
@@ -1681,6 +1924,113 @@ mod async_redis {
             assert!(
                 matches!(result, Err(RedisCacheBuildError::EmptyScope)),
                 "expected EmptyScope"
+            );
+        }
+
+        /// S3: bad async URL with embedded password must not leak the password in
+        /// the build error's Display or Debug. No Redis server needed.
+        #[tokio::test]
+        async fn async_bad_url_with_password_does_not_leak_password() {
+            let secret = "async_super_secret_xyz";
+            let bad_url = format!("not-redis://:{secret}@nonexistent-host:9999");
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(&bad_url)
+                .build()
+                .await;
+
+            let err = result.expect_err("build must fail with a bad async URL");
+            let display = err.to_string();
+            let debug = format!("{err:?}");
+
+            assert!(
+                !display.contains(secret),
+                "Display must not expose the password; got: {display}"
+            );
+            assert!(
+                !debug.contains(secret),
+                "Debug must not expose the password; got: {debug}"
+            );
+        }
+
+        /// S5: building an AsyncRedisCache with `client_side_caching` enabled and a
+        /// URL that pins `protocol=resp2` must be rejected with
+        /// `Resp2DowngradeWithClientSideCaching`. No Redis server needed.
+        #[cfg(feature = "redis_async_cache")]
+        #[tokio::test]
+        async fn client_side_caching_rejects_resp2_url() {
+            // A valid redis URL that explicitly pins RESP2 via the query parameter.
+            let url_with_resp2 = "redis://127.0.0.1:6399?protocol=resp2";
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(url_with_resp2)
+                .client_side_caching(true)
+                .build()
+                .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching)
+                ),
+                "expected Resp2DowngradeWithClientSideCaching, got: {result:?}"
+            );
+        }
+
+        /// S5: building an AsyncRedisCache with `client_side_caching` enabled and a
+        /// URL that does NOT pin RESP2 must NOT be rejected for protocol reasons.
+        /// (It may fail for other reasons like no server, but not for the RESP2 guard.)
+        #[cfg(feature = "redis_async_cache")]
+        #[tokio::test]
+        async fn client_side_caching_accepts_resp3_url() {
+            // A URL with `protocol=resp3` must pass the RESP2 guard.
+            let url_with_resp3 = "redis://127.0.0.1:6399?protocol=resp3";
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(url_with_resp3)
+                .client_side_caching(true)
+                .build()
+                .await;
+
+            // Must NOT be the RESP2 guard error. May fail for other reasons (no server).
+            assert!(
+                !matches!(
+                    result,
+                    Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching)
+                ),
+                "resp3 URL must not trigger the RESP2 guard; got: {result:?}"
+            );
+        }
+
+        /// S5: a URL without an explicit protocol query param also passes the RESP2 guard
+        /// (the default is RESP2 inside the redis crate, but the guard only fires when
+        /// the URL EXPLICITLY pins resp2).
+        #[cfg(feature = "redis_async_cache")]
+        #[tokio::test]
+        async fn client_side_caching_accepts_url_without_protocol_param() {
+            // No `protocol=` query param — must not trigger the guard.
+            let url_plain = "redis://127.0.0.1:6399";
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(url_plain)
+                .client_side_caching(true)
+                .build()
+                .await;
+
+            assert!(
+                !matches!(
+                    result,
+                    Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching)
+                ),
+                "plain URL must not trigger the RESP2 guard; got: {result:?}"
             );
         }
 

@@ -29,7 +29,7 @@ fn fib(n: u32) -> u32 {
 // Note that the cache key type is a tuple of function argument types.
 #[cached(
     ty = "UnboundCache<u32, u32>",
-    create = UnboundCache::builder().capacity(50).build().unwrap()
+    create = UnboundCache::builder().initial_capacity(50).build().unwrap()
 )]
 fn fib_specific(n: u32) -> u32 {
     if n == 0 || n == 1 {

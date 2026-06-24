@@ -2,6 +2,102 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+#### `capacity()` builder method renamed to `initial_capacity()` on allocation-hint builders
+- `UnboundCacheBuilder`, `TtlCacheBuilder`, `TtlSortedCacheBuilder`, and `ExpiringCacheBuilder`
+  had a `.capacity(n)` method that pre-allocates the backing `HashMap` without bounding entry
+  count. The name was ambiguous next to `.max_size(n)` (the eviction bound on the LRU builders).
+  It is now `.initial_capacity(n)`.
+- **Migration:** rename `.capacity(n)` to `.initial_capacity(n)` on those four builders.
+  `max_size` on the LRU builders is unchanged.
+
+#### `Return<T>` fields are now private (`cached_proc_macro_types`)
+- `Return<T>::value` and `Return<T>::was_cached` are now private fields. Code that accessed
+  them directly no longer compiles.
+- **Migration:** use `*r` / `r.into_inner()` to get the inner value and `r.was_cached()` for
+  the flag. Pattern-matching on the struct fields (`Return { value, was_cached }`) must switch
+  to the accessor methods.
+
+#### `set_max_size` returns `Option<usize>` on LRU stores
+- `LruCache::set_max_size`, `LruTtlCache::set_max_size`, and `ExpiringLruCache::set_max_size`
+  now return `Option<usize>` (the previous bound) instead of `usize`, matching
+  `TtlSortedCache::set_max_size` and unifying the return type across all four stores.
+- **Migration:** the returned value is now wrapped in `Some(..)`; update any pattern or type
+  annotation that expected a bare `usize`.
+
+#### ahash default hasher enables `runtime-rng` on non-wasm targets
+- The `ahash` feature now enables the `ahash/runtime-rng` sub-feature on non-wasm targets,
+  seeding hash maps from the OS RNG at startup. Previously ahash used a compile-time seed,
+  which left hash maps vulnerable to hash-flood denial-of-service attacks.
+- No source change is required. On wasm32 targets `runtime-rng` is not enabled (it would
+  require a `getrandom` backend); the compile-time seed is kept there.
+- **Migration:** transparent to code. No rename or API change. wasm targets using `ahash`
+  retain compile-time seeding; non-wasm targets get OS-seeded hashing automatically.
+
+### Security
+
+#### redb: cache directory and file permissions hardened (Unix)
+- The cache directory is now created with mode `0700` and the redb database file with mode
+  `0600` on Unix, preventing other local users from reading cached data.
+- The system-temp-dir fallback path is rejected if it resolves to a symlink or is
+  group/world-writable, closing a symlink-attack and shared-temp-dir interception vector.
+
+#### Redis: credential and error hardening
+- Connection-string parse errors no longer include the URL or embedded password in the error
+  message, preventing accidental credential leakage in logs.
+- The legacy-JSON backward-read fallback now requires the exact version field value; a JSON
+  object without the precise version marker is not treated as a cached entry.
+- Client-side caching (`redis_async_cache`) rejects a connection URL that pins RESP2 (via the
+  `?protocol=resp2` query parameter); RESP2 does not support client-side invalidation messages,
+  so accepting it would silently serve stale data.
+- `RedbCacheError::CacheDeserialization` and `RedisCacheError::CacheDeserialization` are
+  documented as potentially sensitive (the `cached_value` bytes field may contain raw
+  application data); callers should not log the full error in production.
+
+### Fixed
+
+#### `LruCache::cache_reset` no longer risks allocation panic after `set_max_size` grows the bound
+- After `set_max_size` increased the capacity, a subsequent `cache_reset` could request a
+  `HashMap` capacity larger than `isize::MAX / mem::size_of::<Entry>()`, causing an allocation
+  panic. `cache_reset` now uses a fallible allocation path.
+
+#### `lru_list::with_capacity` uses saturating arithmetic
+- Internal LRU list pre-allocation used unchecked arithmetic that could overflow on extreme
+  capacity values. The computation now saturates.
+
+### Changed
+
+#### `#[once]` emits a clear compile error when the value type names a function generic parameter
+- Previously using `#[once]` with a value type that referenced a generic parameter of the
+  annotated function produced a confusing downstream error. The macro now emits a clear
+  compile-time diagnostic explaining that `#[once]` requires a concrete value type (generics
+  are supported only when the value type itself does not reference a generic parameter).
+- The docs are corrected to state that generics are supported only with a concrete value type.
+
+#### Reserved name prefix `__cached` enforced across all three macros
+- `#[cached]`, `#[once]`, and `#[concurrent_cached]` now reject a `name` attribute that starts
+  with `__cached` (the prefix reserved for generated bindings).
+
+#### `#[once]` rejects `sync_writes_buckets`
+- `sync_writes_buckets` is inert on `#[once]` (which has no per-key lock). The macro now
+  emits a clear error instead of silently ignoring the attribute.
+
+#### Generated by-key lock bindings renamed to the `__cached_` hygiene convention
+- Internal generated bindings used by the per-key (`by_key`) lock path are renamed to follow
+  the `__cached_` prefix, consistent with the rest of the generated hygiene convention
+  introduced in the main rc.1 batch.
+
+#### Documentation corrections
+- `#[cached]` `sync_writes` default is documented as `"by_key"` (was incorrectly documented
+  as `false`).
+- `refresh = true` requiring a TTL is noted at the attribute documentation.
+- `ty` / `expires` interaction is documented.
+- Sharded store `len` / `metrics` are documented as approximate (may include expired entries).
+- Several method-doc and inline comment fixes.
+- `#[must_use]` added to `CacheEvict::evict`.
+- Macro error messages aligned for consistency.
+
 ## [3.0.0-rc.1] - 2026-06-21
 > First 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-unreleased.md).
 

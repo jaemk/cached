@@ -1,7 +1,10 @@
-error[E0609]: no field `was_cached` on type `Return<i32>`
+error[E0599]: no method named `set_was_cached` found for struct `Return<T>` in the current scope
   --> tests/ui/cached_with_cached_flag_unqualified_return.rs:13:1
    |
+ 9 | struct Return<T> {
+   | ---------------- method `set_was_cached` not found for this struct
+...
 13 | #[cached(with_cached_flag = true)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `Return<i32>`
    |
    = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

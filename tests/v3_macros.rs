@@ -2425,3 +2425,60 @@ mod companions_vis_tests {
         );
     }
 }
+
+// ── G1 positive: generic `#[once]` with a concrete value type ────────────────
+// A generic `#[once]` function is valid as long as the return type does not name
+// any of the function's own type or const parameters. The guard added in G1
+// must not affect this case.
+
+static CONCRETE_ONCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+// `T` is used only as an input parameter; the return type `usize` is concrete.
+#[once]
+fn generic_once_concrete_return<T: std::fmt::Debug>(_x: T) -> usize {
+    CONCRETE_ONCE_CALLS.fetch_add(1, Ordering::SeqCst);
+    42
+}
+
+#[test]
+fn generic_once_concrete_value_type_compiles_and_caches() {
+    CONCRETE_ONCE_CALLS.store(0, Ordering::SeqCst);
+    // First call: body runs.
+    assert_eq!(generic_once_concrete_return::<i32>(1), 42);
+    assert_eq!(CONCRETE_ONCE_CALLS.load(Ordering::SeqCst), 1);
+    // Second call with different type/arg: cached hit, body does not re-run.
+    assert_eq!(
+        generic_once_concrete_return::<String>("hello".to_string()),
+        42
+    );
+    assert_eq!(
+        CONCRETE_ONCE_CALLS.load(Ordering::SeqCst),
+        1,
+        "#[once] with concrete return type: subsequent calls must be cache hits"
+    );
+}
+
+// ── G2 positive: valid custom `name` on `#[once]` still works ────────────────
+// A `name` that does NOT begin with `__cached` must compile and be usable as
+// the cache static identifier on `#[once]` (the G2 guard must not over-reject).
+
+static NAMED_ONCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[once(name = "MY_CUSTOM_ONCE_CACHE")]
+fn named_once_fn() -> usize {
+    NAMED_ONCE_CALLS.fetch_add(1, Ordering::SeqCst);
+    99
+}
+
+#[test]
+fn once_valid_name_compiles_and_caches() {
+    NAMED_ONCE_CALLS.store(0, Ordering::SeqCst);
+    assert_eq!(named_once_fn(), 99);
+    assert_eq!(NAMED_ONCE_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(named_once_fn(), 99);
+    assert_eq!(
+        NAMED_ONCE_CALLS.load(Ordering::SeqCst),
+        1,
+        "valid custom name on #[once]: second call must be a cache hit"
+    );
+}

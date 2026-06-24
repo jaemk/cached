@@ -132,6 +132,10 @@ impl<K, V> Entry<K, V> {
         }
     }
 
+    /// Returns `true` if the entry's expiry instant has passed.
+    /// Expires strictly AFTER `expiry` (`now > expiry`, i.e. `expiry < now`),
+    /// in contrast to [`TtlCache`](super::TtlCache) / `LruTtlCache` which expire
+    /// at-or-after (`now >= expires_at`).
     fn is_expired(&self) -> bool {
         self.expiry.is_some_and(|e| e < Instant::now())
     }
@@ -294,9 +298,9 @@ impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
     /// count. Only the backing map is pre-allocated; the `BTreeSet` TTL index is not.
     ///
     /// Note that [`set_max_size`](TtlSortedCache::set_max_size) on a live cache may re-grow
-    /// the backing map to `max_size + 1`, overriding a smaller `capacity` set here.
+    /// the backing map to `max_size + 1`, overriding a smaller `initial_capacity` set here.
     #[must_use]
-    pub fn capacity(mut self, capacity: usize) -> Self {
+    pub fn initial_capacity(mut self, capacity: usize) -> Self {
         self.capacity = Some(capacity);
         self
     }
@@ -452,7 +456,7 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Returns the previous value if one was set.
     ///
     /// This grows the backing map to hold at least `max_size + 1` entries, so calling it on a
-    /// cache built with a deliberately small [`capacity`](TtlSortedCacheBuilder::capacity) will
+    /// cache built with a deliberately small [`initial_capacity`](TtlSortedCacheBuilder::initial_capacity) will
     /// override that smaller allocation.
     ///
     /// # Panics
@@ -1306,7 +1310,7 @@ mod test {
     fn borrow_keys() {
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(100))
-            .capacity(100)
+            .initial_capacity(100)
             .build()
             .unwrap();
         cache.insert(String::from("a"), "a").unwrap();
@@ -1314,7 +1318,7 @@ mod test {
 
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(100))
-            .capacity(100)
+            .initial_capacity(100)
             .build()
             .unwrap();
         cache.insert(vec![0], "a").unwrap();
@@ -1326,7 +1330,7 @@ mod test {
         let key = CountingKey::new("live");
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_secs(60))
-            .capacity(1)
+            .initial_capacity(1)
             .build()
             .unwrap();
         cache.insert(key.clone(), 10).unwrap();
@@ -1343,7 +1347,7 @@ mod test {
         let key = CountingKey::new("live-mut");
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_secs(60))
-            .capacity(1)
+            .initial_capacity(1)
             .build()
             .unwrap();
         cache.insert(key.clone(), 10).unwrap();
@@ -1428,7 +1432,7 @@ mod test {
     fn kitchen_sink() {
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(100))
-            .capacity(100)
+            .initial_capacity(100)
             .build()
             .unwrap();
         assert_eq!(0, cache.evict());
@@ -1522,7 +1526,7 @@ mod test {
     fn set_max_size() {
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(100))
-            .capacity(100)
+            .initial_capacity(100)
             .build()
             .unwrap();
         cache.set_max_size(2);
@@ -1547,7 +1551,7 @@ mod test {
     fn updating_existing_key_at_size_limit_does_not_evict_another_key() {
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(1_000))
-            .capacity(2)
+            .initial_capacity(2)
             .build()
             .unwrap();
         cache.set_max_size(2);
@@ -1612,14 +1616,14 @@ mod test {
         let cache = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(300))
             .max_size(65_536)
-            .capacity(16)
+            .initial_capacity(16)
             .build()
             .unwrap();
         // The backing map must not have taken the max_size path, which would reserve
         // for max_size + 1 (= 65_537) entries.
         assert!(
             cache.map.capacity() < 65_537,
-            "expected the explicit capacity(16) to take precedence, got {}",
+            "expected the explicit initial_capacity(16) to take precedence, got {}",
             cache.map.capacity()
         );
         assert!(cache.map.capacity() >= 16);
@@ -2407,5 +2411,17 @@ mod test {
         std::thread::sleep(std::time::Duration::from_millis(100));
         // After TTL, entry should expire (lazy removal on cache_get).
         assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
+    }
+
+    #[test]
+    fn builder_initial_capacity_method_exists_and_preallocates() {
+        // Verifies the renamed builder method: initial_capacity() sets a preallocation hint.
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .initial_capacity(32)
+            .build()
+            .unwrap();
+        // The backing map must have at least the requested capacity.
+        assert!(cache.map.capacity() >= 32);
     }
 }

@@ -380,7 +380,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
             .collect()
     }
 
-    /// Return an iterator of keys in the current order from most
+    /// Return a `Vec` of keys in the current order from most
     /// to least recently used.
     /// Items past their expiry will be excluded.
     pub fn key_order(&self) -> Vec<K>
@@ -400,7 +400,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
             .collect()
     }
 
-    /// Return an iterator of (expiry, value) pairs in the current order
+    /// Return a `Vec` of (expiry, value) pairs in the current order
     /// from most to least recently used.
     /// Items past their expiry will be excluded.
     pub fn value_order(&self) -> Vec<(Option<Instant>, V)>
@@ -454,7 +454,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// [`TtlSortedCache::set_max_size`](super::TtlSortedCache::set_max_size) are
     /// parallel methods on the other LRU-family stores. All stores also provide a
     /// fallible `try_set_max_size` counterpart.
-    pub fn set_max_size(&mut self, max_size: usize) -> usize {
+    pub fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
         assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.store.set_max_size(max_size);
         self.size = self.store.capacity;
@@ -463,12 +463,15 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
 
     /// Fallible counterpart of [`set_max_size`](LruTtlCache::set_max_size): validates
     /// that `max_size` is non-zero and then delegates to `set_max_size`.
-    /// Returns the previous capacity on success.
+    /// Returns the previous capacity wrapped in `Some` on success.
     ///
     /// # Errors
     ///
     /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
-    pub fn try_set_max_size(&mut self, max_size: usize) -> Result<usize, super::SetMaxSizeError> {
+    pub fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
         if max_size == 0 {
             return Err(super::SetMaxSizeError::ZeroSize);
         }
@@ -1307,7 +1310,7 @@ mod tests {
 
         // Shrink to 2: LRU entry (1) should be evicted.
         let prev = cache.set_max_size(2);
-        assert_eq!(prev, 3);
+        assert_eq!(prev, Some(3));
         assert_eq!(cache.capacity(), 2);
         assert_eq!(cache.cache_size(), 2);
 
@@ -1340,7 +1343,7 @@ mod tests {
 
         let evictions_before = cache.cache_evictions().expect("evictions tracked");
         let prev = cache.set_max_size(2);
-        assert_eq!(prev, 4);
+        assert_eq!(prev, Some(4));
         assert_eq!(cache.capacity(), 2);
         assert_eq!(cache.cache_size(), 2);
 
@@ -1378,7 +1381,7 @@ mod tests {
             cache.try_set_max_size(0),
             Err(super::super::SetMaxSizeError::ZeroSize)
         );
-        assert_eq!(cache.try_set_max_size(5).unwrap(), 3);
+        assert_eq!(cache.try_set_max_size(5).unwrap(), Some(3));
     }
 
     #[test]

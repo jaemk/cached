@@ -1,4 +1,4 @@
-error: `time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`
+error: `time_refresh` was renamed in a prior major release; use `refresh = ...`
  --> tests/ui/time_refresh_attr_renamed.rs:4:4
   |
 4 | fn my_fn(k: i32) -> i32 {

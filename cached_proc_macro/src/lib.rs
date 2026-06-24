@@ -23,6 +23,8 @@ use proc_macro::TokenStream;
 ///   in-memory store, so sub-second TTLs are honored exactly; a custom `ty`/`create` store honors them
 ///   only if that store itself supports sub-second granularity.
 /// - `refresh`: (optional, bool) specify whether to refresh the TTL on cache hits.
+///   Requires a TTL (`ttl`, `ttl_secs`, or `ttl_millis`); setting `refresh = true` without a TTL
+///   is a compile error.
 /// - `force_refresh`: (optional, expression block) a boolean expression over the function arguments,
 ///   written in curly braces like `convert` (it is evaluated, not a magic flag and not a required
 ///   bool parameter). When it evaluates to `true`, any cached value is bypassed and the function body
@@ -54,9 +56,12 @@ use proc_macro::TokenStream;
 ///   origin function) is still generated and inherits the method's visibility, so a `pub` cached
 ///   method exposes a `pub {fn}_no_cache` cache-bypass sibling on the same `impl`.
 /// - `sync_writes`: (optional, bool or string) specify whether to synchronize the execution and writing of uncached values.
-///   When not specified or set to `false`, uncached calls execute without write synchronization. When set to `true`
-///   or `"default"`, all keys synchronize by locking the whole cache during uncached execution. When set to
-///   `"by_key"`, a per-key lock synchronizes uncached execution of duplicate keys only.
+///   **Default: `"by_key"`** - when not specified, a per-key lock synchronizes concurrent uncached
+///   calls for the same key (duplicate first-call serialization). When set to `false` or
+///   `"disabled"`, synchronization is disabled entirely and concurrent uncached calls for the same key
+///   may all execute and overwrite each other. When set to `true` or `"default"`, all keys
+///   synchronize by locking the whole cache during uncached execution. When set to `"by_key"`,
+///   the same per-key behavior as the default is applied explicitly.
 /// - `sync_writes_buckets`: (optional, usize) number of per-key lock buckets used by
 ///   `sync_writes = "by_key"`; defaults to 64. Each bucket is one `Arc<RwLock<()>>`. Keys
 ///   hash into a bucket, so two different keys may share a bucket and serialize unnecessarily
@@ -73,6 +78,8 @@ use proc_macro::TokenStream;
 ///   When `ttl` is specified, defaults to `TtlCache`.
 ///   When `max_size` and `ttl` are specified, defaults to `LruTtlCache`. When `ty` is
 ///   specified, `create` must also be specified.
+///   Setting `expires = true` auto-selects `ExpiringCache` (unbounded) or `ExpiringLruCache`
+///   (when `max_size` is also set); `expires` is mutually exclusive with `ty`.
 /// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
 /// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `key = "u32"`.
 ///   When `key` is specified, `convert` must also be specified.
@@ -89,13 +96,13 @@ use proc_macro::TokenStream;
 ///   `Option` is the cache hit/miss, the inner `Option` is the stored value.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return`,
 ///   `Result<cached::Return<T>, E>`, or `Option<cached::Return<T>>`,
-///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
+///   the `cached::Return.was_cached()` flag will be updated when a cached value is returned.
 ///   The wrapper type **must** be `cached::Return` - either written fully
 ///   qualified, or imported from `cached` (`use cached::Return;`). A proc macro
 ///   only sees tokens, not resolved types: an unrelated type that merely happens
 ///   to be named `Return<T>` passes the attribute check but then fails to
 ///   compile in the generated body (it calls `::cached::Return::new` /
-///   `.was_cached`). Use a different name for any non-`cached` `Return` type.
+///   `.set_was_cached`). Use a different name for any non-`cached` `Return` type.
 /// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead refresh the recently expired `Ok` value.
 ///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
 ///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
@@ -170,20 +177,22 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   (the uncached origin function) is still generated and inherits the method's visibility, so a
 ///   `pub` cached method exposes a `pub {fn}_no_cache` cache-bypass sibling on the same `impl`.
 /// - `sync_writes`: (optional, bool or string) specify whether to synchronize the execution of writing of uncached values.
-///   When set to `true` or `"default"`, uncached execution is synchronized with the whole cache.
-///   When omitted or set to `false`, uncached calls are not synchronized. `sync_writes = "by_key"`
-///   is not supported by `#[once]` because a `#[once]` cache stores a single value for all arguments.
+///   **Default: `"disabled"`** - when not specified, uncached calls are not synchronized.
+///   When set to `true` or `"default"`, uncached execution is synchronized by locking the whole
+///   cache. When set to `false` or `"disabled"`, uncached calls are explicitly unsynchronized.
+///   `sync_writes = "by_key"` is not supported by `#[once]` because a `#[once]` cache stores a
+///   single value for all arguments.
 /// - `cache_err`: (optional, bool) If your function returns a `Result`, also cache `Err` values (by default only `Ok` is cached).
 /// - `cache_none`: (optional, bool) If your function returns an `Option`, also cache `None` values (by default only `Some` is cached).
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return`,
 ///   `Result<cached::Return<T>, E>`, or `Option<cached::Return<T>>`,
-///   the `cached::Return.was_cached` flag will be updated when a cached value is returned.
+///   the `cached::Return.was_cached()` flag will be updated when a cached value is returned.
 ///   The wrapper type **must** be `cached::Return` - either written fully
 ///   qualified, or imported from `cached` (`use cached::Return;`). A proc macro
 ///   only sees tokens, not resolved types: an unrelated type that merely happens
 ///   to be named `Return<T>` passes the attribute check but then fails to
 ///   compile in the generated body (it calls `::cached::Return::new` /
-///   `.was_cached`). Use a different name for any non-`cached` `Return` type.
+///   `.set_was_cached`). Use a different name for any non-`cached` `Return` type.
 /// - `expires`: (optional, bool) Delegate expiry to the cached value instead of a fixed TTL.
 ///   The return type must implement `Expires`; for `Result<T, E>` or `Option<T>` returns, the inner `T` must implement `Expires`.
 ///   When a lookup finds the cached value reports `is_expired() == true`, the cached value is
@@ -198,8 +207,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 /// is treated as a plain return value and its `Err` / `None` will be cached. Return
 /// `Result<T, E>` / `Option<T>` directly when you need the default Ok-only / Some-only behavior.
 ///
-/// **Generic functions are supported** by `#[once]`: its static only holds the (concrete) value
-/// type, never the function's type parameters, so no `key`/`convert` is required.
+/// **Generic functions** are supported by `#[once]` only when the cached value type is concrete
+/// (does not name the function's type parameters). The static holds one value of a fixed type;
+/// if the inferred value type references a type parameter, the macro emits a compile error.
+/// In that case, annotate the return type concretely (e.g. via a trait object or newtype) or use
+/// a non-generic wrapper function. No `key`/`convert` is required.
 #[proc_macro_attribute]
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     once::once(args, input)
@@ -332,7 +344,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   by default (implicit smart-option), and the inner `T` (not `Option<T>`)
 ///   must implement `Expires`. When a cached entry is found but `is_expired()` returns `true`,
 ///   the function re-executes and the result is treated as a fresh uncached value; the returned
-///   `Return<T>` will have `was_cached = false` in this case.
+///   `Return<T>` will have `was_cached()` returning `false` in this case.
 /// - `ty`: (optional, string type) explicitly specify the cache store type to use.
 /// - `cache_prefix_block`: (optional, string expr) specify an expression used to create the string used as a
 ///   prefix for all cache keys of this function, e.g. `cache_prefix_block = r##"{ "my_prefix" }"##`.
@@ -376,13 +388,13 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   default key already satisfies this, so it only matters with a custom non-`Clone` `key`/`convert`.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return`,
 ///   `Result<cached::Return<T>, E>`, or `Option<cached::Return<T>>`, the
-///   `cached::Return.was_cached` flag will be updated when a cached value is returned.
+///   `cached::Return.was_cached()` flag will be updated when a cached value is returned.
 ///   The wrapper type **must** be `cached::Return` - either written fully
 ///   qualified, or imported from `cached` (`use cached::Return;`). A proc macro
 ///   only sees tokens, not resolved types: an unrelated type that merely happens
 ///   to be named `Return<T>` passes the attribute check but then fails to
 ///   compile in the generated body (it calls `::cached::Return::new` /
-///   `.was_cached`). Use a different name for any non-`cached` `Return` type.
+///   `.set_was_cached`). Use a different name for any non-`cached` `Return` type.
 /// - `disk_dir`: (optional, string) in the case of `RedbCache` specify the directory in which the redb
 ///   database file is stored. Defaults to a system cache directory. Requires `disk = true`; mutually
 ///   exclusive with `create`. Using it on the in-memory or `redis` path is a compile error.

@@ -66,10 +66,10 @@ fn disk_with_cached_flag_round_trips_via_cache_set_ref() {
     FLAG_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
     let first = disk_flag(100).unwrap();
     assert_eq!(*first, 101);
-    assert!(!first.was_cached);
+    assert!(!first.was_cached());
     let second = disk_flag(100).unwrap();
     assert_eq!(*second, 101);
-    assert!(second.was_cached);
+    assert!(second.was_cached());
     // Body must have run exactly once: the second call is a cache hit.
     assert_eq!(FLAG_CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

@@ -96,7 +96,7 @@ impl<K, V> Default for UnboundCacheBuilder<K, V, DefaultHashBuilder> {
 impl<K, V, S> UnboundCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional, purely a hint).
     #[must_use]
-    pub fn capacity(mut self, capacity: usize) -> Self {
+    pub fn initial_capacity(mut self, capacity: usize) -> Self {
         self.capacity = Some(capacity);
         self
     }
@@ -489,7 +489,10 @@ mod tests {
         assert!(3 <= c.store.capacity()); // Keeps the allocated memory for reuse.
 
         let capacity = 1;
-        let mut c = UnboundCache::builder().capacity(capacity).build().unwrap();
+        let mut c = UnboundCache::builder()
+            .initial_capacity(capacity)
+            .build()
+            .unwrap();
         assert!(capacity <= c.store.capacity());
 
         assert_eq!(c.cache_set(1, 100), None);
@@ -520,7 +523,7 @@ mod tests {
 
         let init_capacity = 1;
         let mut c = UnboundCache::builder()
-            .capacity(init_capacity)
+            .initial_capacity(init_capacity)
             .build()
             .unwrap();
         assert_eq!(c.cache_set(1, 100), None);
@@ -659,7 +662,10 @@ mod tests {
 
     #[test]
     fn test_diagnostics_and_traits() {
-        let mut cache = UnboundCache::builder().capacity(10).build().unwrap();
+        let mut cache = UnboundCache::builder()
+            .initial_capacity(10)
+            .build()
+            .unwrap();
         cache.cache_set(1, 100);
         cache.cache_set(2, 200);
 
@@ -817,7 +823,7 @@ mod tests {
     fn custom_hasher_with_capacity_builder() {
         use std::collections::hash_map::RandomState;
         let mut c = UnboundCache::<u32, u32>::builder()
-            .capacity(16)
+            .initial_capacity(16)
             .hasher(RandomState::new())
             .build()
             .unwrap();
@@ -828,5 +834,16 @@ mod tests {
             assert_eq!(c.cache_get(&i), Some(&(i * 2)));
         }
         assert_eq!(c.cache_size(), 10);
+    }
+
+    #[test]
+    fn builder_initial_capacity_method_exists_and_preallocates() {
+        // Verifies the renamed builder method: initial_capacity() sets a preallocation hint.
+        let c = UnboundCache::<u32, u32>::builder()
+            .initial_capacity(32)
+            .build()
+            .unwrap();
+        // The backing store must have at least the requested capacity.
+        assert!(c.store.capacity() >= 32);
     }
 }

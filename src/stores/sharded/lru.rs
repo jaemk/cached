@@ -219,6 +219,9 @@ where
     /// explicit removes via [`ConcurrentCached::cache_remove`].
     /// `capacity` reflects the effective total capacity — may exceed the requested
     /// `size` when the 16-per-shard minimum floor is applied; see [`capacity`](Self::capacity).
+    ///
+    /// Approximate under concurrent mutation: no global lock is held across shards; each shard is
+    /// locked and read one at a time.
     #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
         let mut hits = 0u64;
@@ -261,6 +264,9 @@ where
     }
 
     /// Total number of live entries across all shards.
+    ///
+    /// Approximate under concurrent mutation: no global lock is held across shards; each shard is
+    /// locked and read one at a time.
     #[must_use]
     pub fn len(&self) -> usize {
         self.inner
@@ -271,6 +277,9 @@ where
     }
 
     /// `true` if no entries are present.
+    ///
+    /// Approximate under concurrent mutation: no global lock is held across shards; each shard is
+    /// locked and read one at a time.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner

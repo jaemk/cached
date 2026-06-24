@@ -73,6 +73,18 @@ version = "0.8"
 default-features = false
 optional = true
 
+# On non-wasm targets, enable runtime-rng so RandomState seeds from the OS RNG
+# (closes a hash-flood DoS gap). On wasm32-unknown-unknown, getrandom has no
+# usable backend unless the caller wires up wasm_js, so we leave runtime-rng
+# out there. Cargo additively merges features across target-gated and
+# unconditional sections for the same dep, so non-wasm gets runtime-rng while
+# wasm falls back to compile-time seeding only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.ahash]
+version = "0.8"
+default-features = false
+features = ["runtime-rng"]
+optional = true
+
 
 [dependencies.redis]
 version = "1.0"

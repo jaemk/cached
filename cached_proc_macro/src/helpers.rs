@@ -260,7 +260,11 @@ pub(super) fn by_key_lock_block(
     await_if_async: TokenStream2,
 ) -> TokenStream2 {
     quote! {
-        let lock = {
+        // G3: renamed from `lock` / `_key_lock` to `__cached_bucket_lock` /
+        // `__cached_key_lock` to match the `__cached_` hygiene convention and
+        // eliminate the shadow window against user-defined `lock` / `_key_lock`
+        // bindings.
+        let __cached_bucket_lock = {
             use std::hash::{Hash, Hasher};
             // DefaultHasher is used for bucket selection only. It is not cryptographic and
             // has no cross-version stability guarantees, but only within-process consistency
@@ -269,7 +273,7 @@ pub(super) fn by_key_lock_block(
             #key.hash(&mut hasher);
             #locks[(hasher.finish() as usize) % #locks.len()].clone()
         };
-        let _key_lock = lock.#lock_method()#await_if_async;
+        let __cached_key_lock = __cached_bucket_lock.#lock_method()#await_if_async;
     }
 }
 

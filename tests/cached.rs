@@ -337,10 +337,10 @@ fn cached_return_flag(n: i32) -> cached::Return<i32> {
 #[test]
 fn test_cached_return_flag() {
     let r = cached_return_flag(1);
-    assert!(!r.was_cached);
+    assert!(!r.was_cached());
     assert_eq!(*r, 1);
     let r = cached_return_flag(1);
-    assert!(r.was_cached);
+    assert!(r.was_cached());
     // derefs to inner
     assert_eq!(*r, 1);
     assert!(r.is_positive());
@@ -364,10 +364,10 @@ fn cached_return_flag_result(n: i32) -> Result<cached::Return<i32>, ()> {
 #[test]
 fn test_cached_return_flag_result() {
     let r = cached_return_flag_result(1).unwrap();
-    assert!(!r.was_cached);
+    assert!(!r.was_cached());
     assert_eq!(*r, 1);
     let r = cached_return_flag_result(1).unwrap();
-    assert!(r.was_cached);
+    assert!(r.was_cached());
     // derefs to inner
     assert_eq!(*r, 1);
     assert!(r.is_positive());
@@ -394,10 +394,10 @@ fn cached_return_flag_option(n: i32) -> Option<cached::Return<i32>> {
 #[test]
 fn test_cached_return_flag_option() {
     let r = cached_return_flag_option(1).unwrap();
-    assert!(!r.was_cached);
+    assert!(!r.was_cached());
     assert_eq!(*r, 1);
     let r = cached_return_flag_option(1).unwrap();
-    assert!(r.was_cached);
+    assert!(r.was_cached());
     // derefs to inner
     assert_eq!(*r, 1);
     assert!(r.is_positive());
@@ -2523,8 +2523,8 @@ mod disk_tests {
 
     #[test]
     fn test_cached_disk_cached_flag() {
-        assert!(!cached_disk_cached_flag(1).unwrap().was_cached);
-        assert!(cached_disk_cached_flag(1).unwrap().was_cached);
+        assert!(!cached_disk_cached_flag(1).unwrap().was_cached());
+        assert!(cached_disk_cached_flag(1).unwrap().was_cached());
         assert!(cached_disk_cached_flag(5).is_err());
         assert!(cached_disk_cached_flag(6).is_err());
     }
@@ -3564,10 +3564,10 @@ mod concurrent_cached_default_with_cached_flag {
         FLAG_CALLS.store(0, Ordering::Relaxed);
         let first = flagged_double(7).unwrap();
         assert_eq!(*first, 14);
-        assert!(!first.was_cached, "first call should not be cached");
+        assert!(!first.was_cached(), "first call should not be cached");
         let second = flagged_double(7).unwrap();
         assert_eq!(*second, 14);
-        assert!(second.was_cached, "second call should be cached");
+        assert!(second.was_cached(), "second call should be cached");
         assert_eq!(FLAG_CALLS.load(Ordering::Relaxed), 1);
     }
 
@@ -3576,10 +3576,10 @@ mod concurrent_cached_default_with_cached_flag {
         PLAIN_FLAG_CALLS.store(0, Ordering::Relaxed);
         let first = flagged_plain_double(8);
         assert_eq!(*first, 16);
-        assert!(!first.was_cached, "first call should not be cached");
+        assert!(!first.was_cached(), "first call should not be cached");
         let second = flagged_plain_double(8);
         assert_eq!(*second, 16);
-        assert!(second.was_cached, "second call should be cached");
+        assert!(second.was_cached(), "second call should be cached");
         assert_eq!(PLAIN_FLAG_CALLS.load(Ordering::Relaxed), 1);
     }
 }
@@ -3644,10 +3644,10 @@ mod concurrent_cached_option {
         // Some — first call not cached, second is.
         let first = flagged_maybe_double(5).expect("should return Some");
         assert_eq!(*first, 10);
-        assert!(!first.was_cached, "first Some call should not be cached");
+        assert!(!first.was_cached(), "first Some call should not be cached");
         let second = flagged_maybe_double(5).expect("should return Some");
         assert_eq!(*second, 10);
-        assert!(second.was_cached, "second Some call should be cached");
+        assert!(second.was_cached(), "second Some call should be cached");
         assert_eq!(OPT_FLAG_CALLS.load(Ordering::Relaxed), 3);
     }
 }
@@ -3710,12 +3710,12 @@ mod concurrent_cached_async_option {
             .await
             .expect("should return Some");
         assert_eq!(*first, 12);
-        assert!(!first.was_cached, "first Some call should not be cached");
+        assert!(!first.was_cached(), "first Some call should not be cached");
         let second = async_flagged_maybe_double(6)
             .await
             .expect("should return Some");
         assert_eq!(*second, 12);
-        assert!(second.was_cached, "second Some call should be cached");
+        assert!(second.was_cached(), "second Some call should be cached");
         assert_eq!(ASYNC_OPT_FLAG_CALLS.load(Ordering::Relaxed), 3);
     }
 }
@@ -3746,10 +3746,10 @@ mod concurrent_cached_default_async_with_cached_flag {
         ASYNC_FLAG_CALLS.store(0, Ordering::Relaxed);
         let first = async_flagged_double(7).await.unwrap();
         assert_eq!(*first, 14);
-        assert!(!first.was_cached, "first call should not be cached");
+        assert!(!first.was_cached(), "first call should not be cached");
         let second = async_flagged_double(7).await.unwrap();
         assert_eq!(*second, 14);
-        assert!(second.was_cached, "second call should be cached");
+        assert!(second.was_cached(), "second call should be cached");
         assert_eq!(ASYNC_FLAG_CALLS.load(Ordering::Relaxed), 1);
     }
 
@@ -3758,10 +3758,10 @@ mod concurrent_cached_default_async_with_cached_flag {
         ASYNC_PLAIN_FLAG_CALLS.store(0, Ordering::Relaxed);
         let first = async_flagged_plain_double(8).await;
         assert_eq!(*first, 16);
-        assert!(!first.was_cached, "first call should not be cached");
+        assert!(!first.was_cached(), "first call should not be cached");
         let second = async_flagged_plain_double(8).await;
         assert_eq!(*second, 16);
-        assert!(second.was_cached, "second call should be cached");
+        assert!(second.was_cached(), "second call should be cached");
         assert_eq!(ASYNC_PLAIN_FLAG_CALLS.load(Ordering::Relaxed), 1);
     }
 }
@@ -4318,18 +4318,18 @@ mod sharded_expiring_tests {
 
             // First call: not cached.
             let r1 = get_flagged_expiring(42, flag.clone()).unwrap();
-            assert!(!r1.was_cached, "first call should not be cached");
+            assert!(!r1.was_cached(), "first call should not be cached");
             assert_eq!(r1.val, 42);
 
             // Second call: cached hit.
             let r2 = get_flagged_expiring(42, flag.clone()).unwrap();
-            assert!(r2.was_cached, "second call should be a cache hit");
+            assert!(r2.was_cached(), "second call should be a cache hit");
             assert_eq!(EXPIRES_FLAG_CALLS.load(Ordering::Relaxed), 1);
 
             // After expiry: function re-executes, was_cached = false.
             flag.store(true, Ordering::Relaxed);
             let r3 = get_flagged_expiring(42, flag.clone()).unwrap();
-            assert!(!r3.was_cached, "call after expiry should not be cached");
+            assert!(!r3.was_cached(), "call after expiry should not be cached");
             assert_eq!(EXPIRES_FLAG_CALLS.load(Ordering::Relaxed), 2);
         }
     }
@@ -4474,8 +4474,8 @@ mod redis_tests {
 
     #[test]
     fn test_cached_redis_cached_flag() {
-        assert!(!cached_redis_cached_flag(1).unwrap().was_cached);
-        assert!(cached_redis_cached_flag(1).unwrap().was_cached);
+        assert!(!cached_redis_cached_flag(1).unwrap().was_cached());
+        assert!(cached_redis_cached_flag(1).unwrap().was_cached());
         assert!(cached_redis_cached_flag(5).is_err());
         assert!(cached_redis_cached_flag(6).is_err());
     }
@@ -4543,8 +4543,18 @@ mod redis_tests {
 
         #[tokio::test]
         async fn test_async_cached_redis_cached_flag() {
-            assert!(!async_cached_redis_cached_flag(1).await.unwrap().was_cached);
-            assert!(async_cached_redis_cached_flag(1).await.unwrap().was_cached,);
+            assert!(
+                !async_cached_redis_cached_flag(1)
+                    .await
+                    .unwrap()
+                    .was_cached()
+            );
+            assert!(
+                async_cached_redis_cached_flag(1)
+                    .await
+                    .unwrap()
+                    .was_cached(),
+            );
             assert!(async_cached_redis_cached_flag(5).await.is_err());
             assert!(async_cached_redis_cached_flag(6).await.is_err());
         }
@@ -7520,10 +7530,10 @@ mod macro_arg_pairwise {
     #[test]
     fn test_once_with_cached_flag() {
         let first = once_flag(10);
-        assert!(!first.was_cached);
+        assert!(!first.was_cached());
         assert_eq!(*first, 11);
         let second = once_flag(999);
-        assert!(second.was_cached);
+        assert!(second.was_cached());
         assert_eq!(*second, 11);
     }
 
@@ -7541,9 +7551,9 @@ mod macro_arg_pairwise {
     fn test_once_result_with_cached_flag() {
         assert!(once_result_flag(false).is_err());
         let ok = once_result_flag(true).unwrap();
-        assert!(!ok.was_cached);
+        assert!(!ok.was_cached());
         let cached_ok = once_result_flag(true).unwrap();
-        assert!(cached_ok.was_cached);
+        assert!(cached_ok.was_cached());
         assert_eq!(*cached_ok, 1);
     }
 
@@ -7561,9 +7571,9 @@ mod macro_arg_pairwise {
     fn test_once_option_with_cached_flag() {
         assert!(once_option_flag(false).is_none());
         let s = once_option_flag(true).unwrap();
-        assert!(!s.was_cached);
+        assert!(!s.was_cached());
         let c = once_option_flag(true).unwrap();
-        assert!(c.was_cached);
+        assert!(c.was_cached());
         assert_eq!(*c, 2);
     }
 

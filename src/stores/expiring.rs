@@ -18,7 +18,7 @@ use {super::CachedAsync, std::collections::hash_map::Entry, std::future::Future}
 /// When using the `#[cached]` proc macro, `expires = true` automatically selects this store
 /// (or `ExpiringLruCache` when `size` is also specified).
 ///
-/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// **`cache_size` / `iter` / `evict` contract**: `cache_size()` returns the raw stored entry count
 /// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
 /// from the view but does not remove them. Call `evict()` (via [`CacheEvict`](crate::CacheEvict))
 /// to physically remove expired entries, reclaim memory, and obtain an accurate live count.
@@ -135,7 +135,7 @@ impl<K, V: Expires> Default for ExpiringCacheBuilder<K, V, DefaultHashBuilder> {
 impl<K, V: Expires, S> ExpiringCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional).
     #[must_use]
-    pub fn capacity(mut self, capacity: usize) -> Self {
+    pub fn initial_capacity(mut self, capacity: usize) -> Self {
         self.capacity = Some(capacity);
         self
     }
@@ -204,7 +204,7 @@ impl<K, V: Expires, S> ExpiringCacheBuilder<K, V, S> {
     {
         let store = match self.capacity {
             Some(cap) => UnboundCache::builder()
-                .capacity(cap)
+                .initial_capacity(cap)
                 .hasher(self.hasher)
                 .build()
                 .expect("infallible"),
@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn expiring_cache_builder() {
         let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder()
-            .capacity(10)
+            .initial_capacity(10)
             .on_evict(|_k: &u8, v: &ExpiredU8| {
                 assert!(v.0 > 10);
             })
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn expiring_cache_try_build() {
         let result: Result<ExpiringCache<u8, ExpiredU8>, _> =
-            ExpiringCache::builder().capacity(10).build();
+            ExpiringCache::builder().initial_capacity(10).build();
         assert!(result.is_ok());
         let c = result.unwrap();
         assert_eq!(c.cache_size(), 0);
@@ -1165,5 +1165,16 @@ mod tests {
         let empty2: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
         assert_eq!(empty1, empty2);
         assert_ne!(empty1, a);
+    }
+
+    #[test]
+    fn builder_initial_capacity_method_exists_and_preallocates() {
+        // Verifies the renamed builder method: initial_capacity() sets a preallocation hint.
+        let c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder()
+            .initial_capacity(32)
+            .build()
+            .unwrap();
+        // The backing store must have at least the requested capacity.
+        assert!(c.store.store.capacity() >= 32);
     }
 }

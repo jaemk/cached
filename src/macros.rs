@@ -150,7 +150,7 @@ use cached::Return;
 
 /// Get a `cached::Return` value that indicates
 /// whether the value returned came from the cache:
-/// `cached::Return.was_cached`.
+/// `cached::Return.was_cached()`.
 /// Use an LRU cache and a `String` cache key.
 #[cached(max_size=1, with_cached_flag = true)]
 fn calculate(a: String) -> Return<String> {
@@ -158,9 +158,9 @@ fn calculate(a: String) -> Return<String> {
 }
 pub fn main() {
     let r = calculate("a".to_string());
-    assert!(!r.was_cached);
+    assert!(!r.was_cached());
     let r = calculate("a".to_string());
-    assert!(r.was_cached);
+    assert!(r.was_cached());
     // Return<String> derefs to String
     assert_eq!(r.to_uppercase(), "A");
 }
@@ -186,7 +186,7 @@ pub fn main() {
     match calculate("a".to_string()) {
         Err(e) => eprintln!("error: {:?}", e),
         Ok(r) => {
-            println!("value: {:?}, was cached: {}", *r, r.was_cached);
+            println!("value: {:?}, was cached: {}", *r, r.was_cached());
             // value: "a", was cached: true
         }
     }
@@ -210,7 +210,7 @@ fn calculate(a: String) -> Option<Return<usize>> {
 }
 pub fn main() {
     if let Some(a) = calculate("a".to_string()) {
-        println!("value: {:?}, was cached: {}", *a, a.was_cached);
+        println!("value: {:?}, was cached: {}", *a, a.was_cached());
         // value: "a", was cached: true
     }
 }

@@ -37,9 +37,9 @@ async fn main() {
 
     let a = cached_was_cached(4).await.unwrap();
     assert_eq!(a.to_uppercase(), "AAAA");
-    assert!(!a.was_cached);
+    assert!(!a.was_cached());
     let a = cached_was_cached(4).await.unwrap();
-    assert!(a.was_cached);
+    assert!(a.was_cached());
 
     println!("done!");
 }
