@@ -127,7 +127,7 @@ impl<K, V, S> TtlCacheBuilder<K, V, S> {
 
     /// Set the initial allocation capacity (optional).
     #[must_use]
-    pub fn capacity(mut self, capacity: usize) -> Self {
+    pub fn initial_capacity(mut self, capacity: usize) -> Self {
         self.capacity = Some(capacity);
         self
     }
@@ -1127,5 +1127,17 @@ mod tests {
         assert_eq!(c.cache_get(&1), Some(&10));
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(c.cache_get(&1), None, "entry must expire after ttl");
+    }
+
+    #[test]
+    fn builder_initial_capacity_method_exists_and_preallocates() {
+        // Verifies the renamed builder method: initial_capacity() sets a preallocation hint.
+        let c = TtlCache::<u32, u32>::builder()
+            .ttl_secs(60)
+            .initial_capacity(32)
+            .build()
+            .unwrap();
+        // The backing store must have at least the requested capacity.
+        assert!(c.store.capacity() >= 32);
     }
 }

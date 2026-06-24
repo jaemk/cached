@@ -226,6 +226,9 @@ where
     K: Hash + Eq,
 {
     /// Return aggregate metrics across all shards.
+    ///
+    /// Note: the returned value is approximate under concurrent mutation — no global lock is held
+    /// across shards; each shard is locked and read one at a time.
     #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
         let mut hits = 0u64;
@@ -262,12 +265,18 @@ where
     }
 
     /// Total number of live entries across all shards.
+    ///
+    /// Note: the returned value is approximate under concurrent mutation — no global lock is held
+    /// across shards; each shard is locked and read one at a time.
     #[must_use]
     pub fn len(&self) -> usize {
         self.inner.shards.iter().map(|s| s.lock.read().len()).sum()
     }
 
     /// `true` if no entries are present.
+    ///
+    /// Note: the returned value is approximate under concurrent mutation — no global lock is held
+    /// across shards; each shard is locked and read one at a time.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.shards.iter().all(|s| s.lock.read().is_empty())

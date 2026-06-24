@@ -1,4 +1,4 @@
-error: `time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`
+error: `time_refresh` was renamed in a prior major release; use `refresh = ...`
  --> tests/ui/concurrent_cached_time_refresh_attr_renamed.rs:8:4
   |
 8 | fn my_fn(k: i32) -> Result<i32, String> {

@@ -1,4 +1,4 @@
-error: #[concurrent_cached] cache `create` block must be specified
+error: `ty` requires `create` to also be set
  --> tests/ui/concurrent_cached_custom_create_required.rs:4:4
   |
 4 | fn my_fn(k: i32) -> Result<i32, String> {

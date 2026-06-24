@@ -280,7 +280,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if args.time.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`time` (whole seconds) was renamed in cached 1.0; use `ttl_secs = ...` \
+            "`time` was renamed in a prior major release; use `ttl_secs = ...` \
              (or `ttl = \"Duration::from_secs(...)\"` / `ttl_millis = ...`)",
         )
         .to_compile_error()
@@ -290,7 +290,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if args.time_refresh.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`",
+            "`time_refresh` was renamed in a prior major release; use `refresh = ...`",
         )
         .to_compile_error()
         .into();
@@ -686,6 +686,16 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     .to_compile_error()
                     .into();
             }
+            // G2: `__cached` prefix is reserved for macro-generated bindings.
+            if name.starts_with("__cached") {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    "cache names beginning with `__cached` are reserved for macro-generated \
+                     bindings and cannot be used as a `name` value",
+                )
+                .to_compile_error()
+                .into();
+            }
             Ident::new(name, fn_ident.span())
         }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
@@ -981,32 +991,32 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // make the set cache and return cache blocks
     let (set_cache_block, return_cache_block) = if with_cached_flag_result {
         // Result<Return<T>, E>: cache the inner T from Ok(Return<T>).
-        let set = set_call(quote! { &__cached_inner.value });
+        let set = set_call(quote! { &**__cached_inner });
         (
             quote! {
                 if let Ok(__cached_inner) = &__cached_result {
                     #set
                 }
             },
-            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.was_cached = true; return Ok(__cached_r) },
+            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.set_was_cached(true); return Ok(__cached_r) },
         )
     } else if with_cached_flag_option {
         // Option<Return<T>>: cache the inner T from Some(Return<T>), skip None.
-        let set = set_call(quote! { &__cached_inner.value });
+        let set = set_call(quote! { &**__cached_inner });
         (
             quote! {
                 if let Some(__cached_inner) = &__cached_result {
                     #set
                 }
             },
-            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.was_cached = true; return Some(__cached_r) },
+            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.set_was_cached(true); return Some(__cached_r) },
         )
     } else if args.with_cached_flag {
         // Plain Return<T>: cache the inner T directly.
-        let set = set_call(quote! { &__cached_result.value });
+        let set = set_call(quote! { &*__cached_result });
         (
             set,
-            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.was_cached = true; return __cached_r },
+            quote! { let mut __cached_r = #krate::Return::new(__cached_result); __cached_r.set_was_cached(true); return __cached_r },
         )
     } else if is_smart_result {
         // Result<T, E> return type: cache only Ok(T), skip Err
@@ -1698,7 +1708,7 @@ fn get_custom_cache_type_and_create(
         None => {
             return Err(syn::Error::new(
                 fn_ident.span(),
-                "#[concurrent_cached] cache `ty` must be specified",
+                "`create` requires `ty` to also be set",
             ));
         }
     };
@@ -1710,7 +1720,7 @@ fn get_custom_cache_type_and_create(
         None => {
             return Err(syn::Error::new(
                 fn_ident.span(),
-                "#[concurrent_cached] cache `create` block must be specified",
+                "`ty` requires `create` to also be set",
             ));
         }
     };

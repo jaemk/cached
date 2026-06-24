@@ -70,7 +70,7 @@ pub trait Expires {
 ///
 /// Note: This cache is in-memory only.
 ///
-/// **`len` / `iter` / `evict` contract**: `len()` returns the raw stored entry count
+/// **`cache_size` / `iter` / `evict` contract**: `cache_size()` returns the raw stored entry count
 /// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
 /// from the view but does not remove them. Call `evict()` (via [`CacheEvict`](crate::CacheEvict))
 /// to physically remove expired entries and obtain an accurate live count.
@@ -303,18 +303,21 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     ///
     /// Panics if `max_size` is 0. Use [`try_set_max_size`](ExpiringLruCache::try_set_max_size)
     /// to validate first and avoid the panic.
-    pub fn set_max_size(&mut self, max_size: usize) -> usize {
+    pub fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
         self.store.set_max_size(max_size)
     }
 
     /// Fallible counterpart of [`set_max_size`](ExpiringLruCache::set_max_size): validates
     /// that `max_size` is non-zero and then delegates to `set_max_size`.
-    /// Returns the previous capacity on success.
+    /// Returns the previous capacity wrapped in `Some` on success.
     ///
     /// # Errors
     ///
     /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
-    pub fn try_set_max_size(&mut self, max_size: usize) -> Result<usize, super::SetMaxSizeError> {
+    pub fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
         self.store.try_set_max_size(max_size)
     }
 
@@ -1184,7 +1187,7 @@ mod tests {
 
         // Shrink to 2: LRU entry (1) should be evicted.
         let prev = c.set_max_size(2);
-        assert_eq!(prev, 3);
+        assert_eq!(prev, Some(3));
         assert_eq!(c.capacity(), 2);
         assert_eq!(c.cache_size(), 2);
 
@@ -1217,7 +1220,7 @@ mod tests {
 
         let evictions_before = c.cache_evictions().expect("evictions tracked");
         let prev = c.set_max_size(2);
-        assert_eq!(prev, 4);
+        assert_eq!(prev, Some(4));
         assert_eq!(c.capacity(), 2);
         assert_eq!(c.cache_size(), 2);
 
@@ -1252,7 +1255,7 @@ mod tests {
             c.try_set_max_size(0),
             Err(super::super::SetMaxSizeError::ZeroSize)
         );
-        assert_eq!(c.try_set_max_size(5).unwrap(), 3);
+        assert_eq!(c.try_set_max_size(5).unwrap(), Some(3));
     }
 
     #[test]

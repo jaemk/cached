@@ -262,13 +262,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         self.capacity
     }
 
-    /// Change the maximum number of entries, returning the previous capacity;
-    /// shrinking below the current entry count immediately evicts least-recently-used
-    /// entries.
+    /// Change the maximum number of entries, returning the previous bound as
+    /// `Some(prev_capacity)`.
     ///
-    /// Eviction on shrink fires `on_evict` and counts evictions until the cache
-    /// fits. Growing the capacity does not pre-allocate; the backing stores grow
-    /// on demand as entries are inserted.
+    /// Because `LruCache` is always bounded, this always returns `Some`. The
+    /// `Option` wrapper aligns the return type with `TtlSortedCache::set_max_size`,
+    /// which may have no prior bound and returns `None` in that case.
+    ///
+    /// Shrinking below the current entry count immediately evicts least-recently-used
+    /// entries. Eviction fires `on_evict` and counts evictions until the cache fits.
+    /// Growing the capacity does not pre-allocate; the backing stores grow on demand
+    /// as entries are inserted.
     ///
     /// This is useful for sizing a `#[cached(create = "{ ... }")]` cache from a value
     /// loaded at startup (e.g. config), then adjusting it later as load changes.
@@ -283,10 +287,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// [`LruTtlCache::set_max_size`](super::LruTtlCache::set_max_size),
     /// [`ExpiringLruCache::set_max_size`](super::ExpiringLruCache::set_max_size), and
     /// [`TtlSortedCache::set_max_size`](super::TtlSortedCache::set_max_size) are
-    /// parallel methods on the other LRU-family stores. Note that `TtlSortedCache::set_max_size`
-    /// returns `Option<usize>` (the previous bound, which is optional) rather than `usize`.
+    /// parallel methods on the other LRU-family stores.
     /// All stores also provide a fallible `try_set_max_size` counterpart.
-    pub fn set_max_size(&mut self, max_size: usize) -> usize {
+    pub fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
         assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.capacity;
         self.capacity = max_size;
@@ -295,17 +298,20 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         while self.store.len() > self.capacity {
             self.check_capacity();
         }
-        prev
+        Some(prev)
     }
 
     /// Fallible counterpart of [`set_max_size`](LruCache::set_max_size): validates
     /// that `max_size` is non-zero and then delegates to `set_max_size`.
-    /// Returns the previous capacity on success.
+    /// Returns the previous capacity wrapped in `Some` on success.
     ///
     /// # Errors
     ///
     /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
-    pub fn try_set_max_size(&mut self, max_size: usize) -> Result<usize, super::SetMaxSizeError> {
+    pub fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
         if max_size == 0 {
             return Err(super::SetMaxSizeError::ZeroSize);
         }
@@ -321,7 +327,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         self.order.iter().cloned().collect()
     }
 
-    /// Return an iterator of keys in the current order from most
+    /// Return a `Vec` of keys in the current order from most
     /// to least recently used.
     pub fn key_order(&self) -> Vec<K>
     where
@@ -330,7 +336,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         self.order.iter().map(|(k, _v)| k.clone()).collect()
     }
 
-    /// Return an iterator of values in the current order from most
+    /// Return a `Vec` of values in the current order from most
     /// to least recently used.
     pub fn value_order(&self) -> Vec<V>
     where
@@ -728,6 +734,15 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruCache<K, V, S>
         self.get_mut_if(key, |_| true)
     }
 
+    /// Insert or replace a cache entry.
+    ///
+    /// Returns the previous value if the key already existed, or `None` for a
+    /// new insertion.
+    ///
+    /// **Note:** overwriting an existing key replaces the value in-place
+    /// **without** refreshing the key's LRU recency. The entry stays at its
+    /// current position in the eviction order. Use `cache_get` before
+    /// `cache_set` if you need to promote the entry to most-recently-used.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let hash = self.hash(&key);
         let v = if let Some(index) = self.get_index(hash, &key) {
@@ -784,8 +799,18 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruCache<K, V, S>
     }
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
-        self.store = HashTable::with_capacity(self.capacity);
-        self.order = LRUList::<(K, V)>::with_capacity(self.capacity);
+        //
+        // Pre-allocate up to the live entry count to avoid a large allocation when
+        // `capacity` has been set to a very large value (e.g. `usize::MAX`). The
+        // live count is a safe ceiling: we cannot have more entries than that right
+        // now, and the backing stores grow on demand as new entries are inserted.
+        let live = self.store.len();
+        let mut new_store = HashTable::new();
+        let _ = new_store.try_reserve(live, |&index: &usize| self.hash_builder.hash_one(index));
+        let new_order = LRUList::<(K, V)>::try_with_capacity(live)
+            .unwrap_or_else(|_| LRUList::<(K, V)>::with_capacity(0));
+        self.store = new_store;
+        self.order = new_order;
         self.cache_reset_metrics();
     }
     fn cache_reset_metrics(&mut self) {
@@ -1469,7 +1494,7 @@ mod tests {
         c.cache_set(1u32, 10u32);
         c.cache_set(2u32, 20u32);
         let prev = c.set_max_size(4);
-        assert_eq!(prev, 2);
+        assert_eq!(prev, Some(2));
         assert_eq!(c.capacity(), 4);
         // Growing keeps existing entries.
         assert_eq!(c.cache_get(&1), Some(&10));
@@ -1502,7 +1527,7 @@ mod tests {
         assert_eq!(c.cache_get(&2), Some(&20));
 
         let prev = c.set_max_size(2);
-        assert_eq!(prev, 4);
+        assert_eq!(prev, Some(4));
         assert_eq!(c.capacity(), 2);
         assert_eq!(c.cache_size(), 2);
         // Shrinking fires on_evict for each evicted entry and counts evictions.
@@ -1529,8 +1554,22 @@ mod tests {
             c.try_set_max_size(0),
             Err(super::super::SetMaxSizeError::ZeroSize)
         );
-        assert_eq!(c.try_set_max_size(8).unwrap(), 2);
+        assert_eq!(c.try_set_max_size(8).unwrap(), Some(2));
         assert_eq!(c.capacity(), 8);
+    }
+
+    #[test]
+    fn cache_reset_after_usize_max_capacity_does_not_panic() {
+        // R1: after set_max_size(usize::MAX) the internal `capacity` field is huge,
+        // but cache_reset must not attempt to pre-allocate that many bytes.
+        // It should cap the pre-allocation to the live entry count and succeed.
+        let mut c: LruCache<u32, u32> = LruCache::builder().max_size(2).build().unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.set_max_size(usize::MAX);
+        // Must not panic/abort even though self.capacity == usize::MAX.
+        c.cache_reset();
+        assert_eq!(c.cache_size(), 0);
     }
 
     // --- custom hasher tests ---

@@ -135,6 +135,11 @@ where
 
     /// Specify the cache TTL as a `Duration`.
     ///
+    /// **TTL is optional.** When no TTL is set (the default), entries never
+    /// expire and are kept until explicitly removed or the cache is cleared.
+    /// This is the primary difference from [`RedisCache`](crate::stores::RedisCache),
+    /// where a TTL is required.
+    ///
     /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
@@ -215,11 +220,27 @@ where
     /// Find (and create) a writable default directory in which to place the
     /// redb database file, returning the directory path.
     fn default_disk_path() -> Result<PathBuf, std::io::Error> {
+        let candidates = Self::default_disk_dir_candidates();
+        // The last candidate is always the temp_dir fallback. All earlier
+        // candidates use the user's XDG cache dir and are treated as preferred.
+        let last_idx = candidates.len().saturating_sub(1);
         let mut last_error = None;
 
-        for disk_dir in Self::default_disk_dir_candidates() {
-            match std::fs::create_dir_all(&disk_dir) {
-                Ok(()) => return Ok(disk_dir),
+        for (idx, disk_dir) in candidates.into_iter().enumerate() {
+            let is_temp_fallback = idx == last_idx;
+            match create_cache_dir(&disk_dir) {
+                Ok(()) => {
+                    // On unix, when using the temp_dir fallback, validate the
+                    // resolved path to guard against symlink-based TOCTOU
+                    // attacks: reject symlinks and world/group-writable dirs.
+                    #[cfg(unix)]
+                    if is_temp_fallback {
+                        validate_temp_cache_dir(&disk_dir)?;
+                    }
+                    #[cfg(not(unix))]
+                    let _ = is_temp_fallback;
+                    return Ok(disk_dir);
+                }
                 Err(error) if error.kind() == ErrorKind::PermissionDenied => {
                     last_error = Some(error);
                 }
@@ -282,12 +303,30 @@ where
         // as the database file.
         let disk_dir = match self.disk_dir {
             Some(disk_dir) => {
-                std::fs::create_dir_all(&disk_dir)?;
+                create_cache_dir(&disk_dir)?;
                 disk_dir
             }
             None => Self::default_disk_path()?,
         };
         let disk_path = disk_dir.join(format!("{}.redb", cache_dir_name));
+
+        // On unix, pre-create the redb file with mode 0600 so that the
+        // database bytes are never readable by group or other. We use
+        // OpenOptions to create (or open) the file with the correct mode
+        // before redb opens it; redb will then open the existing file.
+        // On non-unix platforms we skip this step and let redb create the file
+        // with default OS permissions.
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(&disk_path)?;
+        }
 
         let db = Builder::new().create(&disk_path)?;
 
@@ -311,8 +350,67 @@ where
     }
 }
 
+/// Create a directory (and all parents) for storing the redb database file.
+///
+/// On unix the directory is created with mode 0700 (owner read/write/execute
+/// only) so that the database file is not visible to other users. On non-unix
+/// platforms `std::fs::create_dir_all` is used and the OS decides the mode.
+fn create_cache_dir(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// On unix, validate that the resolved cache directory path is not a symlink
+/// and is not group- or world-writable. This guards the `temp_dir` fallback
+/// path against symlink-based TOCTOU attacks where an adversary replaces the
+/// target directory with a symlink pointing elsewhere.
+///
+/// Uid ownership is not checked here because obtaining the process uid without
+/// a dependency (e.g. `libc` or `rustix`) would require unsafe platform calls.
+/// The symlink + permission-bits check is sufficient to reject the most
+/// common attack vectors (world-writable directory, symlink redirection).
+#[cfg(unix)]
+fn validate_temp_cache_dir(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "temp cache directory is a symlink; refusing to use it",
+        ));
+    }
+    // Reject group-writable (0o020) or other-writable (0o002) directories.
+    let mode = meta.mode();
+    if mode & 0o022 != 0 {
+        return Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "temp cache directory has insecure permissions (group- or world-writable)",
+        ));
+    }
+    Ok(())
+}
+
 /// Cache store backed by disk, using an embedded [`redb`](https://crates.io/crates/redb)
 /// database (one file per cache).
+///
+/// # TTL
+///
+/// TTL is **optional**. When no TTL is configured (the default), entries never expire and
+/// persist until explicitly removed or the cache is cleared. This differs from
+/// [`RedisCache`](crate::stores::RedisCache), where a TTL is required. Set a TTL via
+/// [`RedbCacheBuilder::ttl`] / [`RedbCacheBuilder::ttl_secs`] / [`RedbCacheBuilder::ttl_millis`]
+/// at build time, or update it at runtime with [`ConcurrentCacheTtl::set_ttl`].
 ///
 /// # Concurrency and performance
 ///
@@ -463,6 +561,12 @@ pub enum RedbCacheError {
         #[from]
         source: redb::Error,
     },
+    /// A stored value failed to deserialize.
+    ///
+    /// **Security note:** `cached_value` contains the raw bytes that were read
+    /// from disk and failed to decode. Those bytes may contain sensitive
+    /// application data. Do not log or display this error variant without
+    /// redacting or omitting the `cached_value` field.
     #[error("Error deserializing cached value")]
     CacheDeserialization {
         #[source]
@@ -2325,5 +2429,117 @@ mod tests {
             err.source().is_some(),
             "RedbCacheBuildError::Storage must expose its inner error via source()"
         );
+    }
+
+    // ── Unix permission / security tests ─────────────────────────────────────
+    //
+    // Verifies that the cache directory is created with mode 0700, that the
+    // redb database file is created with mode 0600, and that the temp_dir
+    // fallback path is rejected if it resolves to a symlink.
+
+    #[cfg(unix)]
+    mod unix_permissions {
+        use super::*;
+        use std::os::unix::fs::MetadataExt;
+
+        /// The cache directory created by `disk_directory(path)` must have
+        /// mode 0700 (owner rwx only).
+        #[test]
+        fn explicit_disk_dir_is_created_with_mode_0700() {
+            let parent = temp_dir!();
+            // Point to a non-existent subdirectory so create_cache_dir must create it.
+            let cache_dir = parent.path().join("sub").join("cache");
+            let cache: RedbCache<u32, u32> = RedbCache::builder()
+                .name("perm-dir-explicit")
+                .disk_directory(&cache_dir)
+                .build()
+                .expect("build must succeed");
+            let meta = std::fs::metadata(&cache_dir).expect("metadata");
+            // Lower 9 bits: 0700 = 0o700
+            assert_eq!(
+                meta.mode() & 0o777,
+                0o700,
+                "cache directory must be created with mode 0700; got {:o}",
+                meta.mode() & 0o777
+            );
+            drop(cache);
+        }
+
+        /// The redb database file must be created with mode 0600 (owner rw only).
+        #[test]
+        fn redb_file_is_created_with_mode_0600() {
+            let dir = temp_dir!();
+            let cache: RedbCache<u32, u32> = RedbCache::builder()
+                .name("perm-file")
+                .disk_directory(dir.path())
+                .build()
+                .expect("build must succeed");
+            let file_path = cache.disk_path().to_owned();
+            drop(cache); // release the redb exclusive lock before inspecting
+            let meta = std::fs::metadata(&file_path).expect("metadata");
+            assert_eq!(
+                meta.mode() & 0o777,
+                0o600,
+                "redb file must be created with mode 0600; got {:o}",
+                meta.mode() & 0o777
+            );
+        }
+
+        /// A symlinked temp fallback directory must be rejected by
+        /// `validate_temp_cache_dir` with a `PermissionDenied` error.
+        #[test]
+        fn symlinked_temp_fallback_dir_is_rejected() {
+            let real_dir = temp_dir!();
+            let link_dir = temp_dir!();
+            let link_path = link_dir.path().join("symlink_cache");
+            std::os::unix::fs::symlink(real_dir.path(), &link_path)
+                .expect("failed to create symlink");
+            // validate_temp_cache_dir must reject a symlink.
+            let result = super::super::validate_temp_cache_dir(&link_path);
+            assert!(
+                result.is_err(),
+                "validate_temp_cache_dir must reject a symlink"
+            );
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "rejection must be PermissionDenied, got {err}"
+            );
+        }
+
+        /// A real (non-symlink) temp fallback directory must be accepted by
+        /// `validate_temp_cache_dir`.
+        #[test]
+        fn real_temp_fallback_dir_is_accepted() {
+            let dir = temp_dir!();
+            // Ensure the directory has mode 0700 (which create_cache_dir produces).
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("set_permissions");
+            let result = super::super::validate_temp_cache_dir(dir.path());
+            assert!(
+                result.is_ok(),
+                "validate_temp_cache_dir must accept a real 0700 dir: {result:?}"
+            );
+        }
+
+        /// A world-writable temp fallback directory must be rejected.
+        #[test]
+        fn world_writable_temp_fallback_dir_is_rejected() {
+            let dir = temp_dir!();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+                .expect("set_permissions");
+            let result = super::super::validate_temp_cache_dir(dir.path());
+            assert!(
+                result.is_err(),
+                "validate_temp_cache_dir must reject a world-writable dir"
+            );
+            assert_eq!(
+                result.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
     }
 }

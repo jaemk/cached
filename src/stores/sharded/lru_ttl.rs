@@ -429,7 +429,7 @@ where
                     .collect();
                 let mut removed = Vec::new();
                 for k in expired {
-                    // Use cache_remove_entry (not cache_remove) to avoid double-counting:
+                    // Use pop_raw (not cache_remove) to avoid double-counting:
                     // the outer evict() handles on_evict and non_capacity_evictions itself.
                     if let Some((key, entry)) = guard.pop_raw(&k) {
                         removed.push((key, entry));

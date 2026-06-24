@@ -340,7 +340,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if args.time.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`time` (whole seconds) was renamed in cached 1.0; use `ttl_secs = ...` \
+            "`time` was renamed in a prior major release; use `ttl_secs = ...` \
              (or `ttl = \"Duration::from_secs(...)\"` / `ttl_millis = ...`)",
         )
         .to_compile_error()
@@ -350,7 +350,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if args.time_refresh.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`time_refresh` was renamed to `refresh` in cached 1.0; use `refresh = ...`",
+            "`time_refresh` was renamed in a prior major release; use `refresh = ...`",
         )
         .to_compile_error()
         .into();
@@ -565,6 +565,16 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     .to_compile_error()
                     .into();
             }
+            // G2: `__cached` prefix is reserved for macro-generated bindings.
+            if name.starts_with("__cached") {
+                return syn::Error::new(
+                    fn_ident.span(),
+                    "cache names beginning with `__cached` are reserved for macro-generated \
+                     bindings and cannot be used as a `name` value",
+                )
+                .to_compile_error()
+                .into();
+            }
             Ident::new(name, fn_ident.span())
         }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
@@ -677,7 +687,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             let set_cache_block =
                 quote! { __cached_cache.cache_set(__cached_key, __cached_result.clone()); };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.was_cached = true; return __cached_r }
+                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.set_was_cached(true); return __cached_r }
             } else {
                 quote! { return __cached_result.to_owned() }
             };
@@ -690,7 +700,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.was_cached = true; return Ok(__cached_r) }
+                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.set_was_cached(true); return Ok(__cached_r) }
             } else {
                 quote! { return Ok(__cached_result.to_owned()) }
             };
@@ -703,9 +713,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.was_cached = true; return Some(__cached_r) }
+                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.set_was_cached(true); return Some(__cached_r) }
             } else {
-                quote! { return Some(__cached_result.clone()) }
+                quote! { return Some(__cached_result.to_owned()) }
             };
             (set_cache_block, return_cache_block)
         }
