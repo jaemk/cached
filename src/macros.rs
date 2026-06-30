@@ -227,7 +227,7 @@ use cached::LruCache;
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
+    create = LruCache::builder().max_size(100).build().unwrap(),
     convert = r#"{ format!("{}{}", a, b) }"#
 )]
 fn keyed(a: &str, b: &str) -> usize {
