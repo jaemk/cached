@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.2 / cached_proc_macro 3.0.0-rc.2 / cached_proc_macro_types 3.0.0-rc.2] - 2026-07-02
+> Second 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-unreleased.md).
+
 ### Breaking Changes
 
 #### `capacity()` builder method renamed to `initial_capacity()` on allocation-hint builders
