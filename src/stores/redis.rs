@@ -1562,9 +1562,7 @@ mod async_redis {
         /// [`redis::aio::ConnectionManager`]; otherwise build a plain
         /// [`redis::aio::MultiplexedConnection`]. The default is multiplexed, so
         /// enabling the feature transitively never changes an existing cache.
-        async fn create_connection(
-            &self,
-        ) -> Result<AsyncRedisConnection, RedisCacheBuildError> {
+        async fn create_connection(&self) -> Result<AsyncRedisConnection, RedisCacheBuildError> {
             #[cfg(feature = "redis_connection_manager")]
             if self.connection_manager {
                 return Ok(AsyncRedisConnection::Manager(
@@ -2386,7 +2384,9 @@ mod async_redis {
         /// is a compile-time proof that `AsyncRedisConnection::Multiplexed` exists
         /// and that the enum is the connection type the default build path wraps.
         #[allow(dead_code)]
-        fn multiplexed_variant_exists(c: redis::aio::MultiplexedConnection) -> AsyncRedisConnection {
+        fn multiplexed_variant_exists(
+            c: redis::aio::MultiplexedConnection,
+        ) -> AsyncRedisConnection {
             AsyncRedisConnection::Multiplexed(c)
         }
 
