@@ -2,6 +2,26 @@
 Full tests of macro-defined functions
 */
 
+// Regression: a bare `#[cached]` (no `sync_writes`) must NOT deadlock on recursive calls.
+// Under the old `by_key` default the per-key bucket lock was held across the function body;
+// recursive calls for keys that hashed to the same bucket deadlocked. The default is now
+// `Disabled` (no synchronization), matching 2.x.
+#[cfg(feature = "proc_macro")]
+#[cached::macros::cached]
+fn fib_default(n: u64) -> u64 {
+    if n < 2 {
+        n
+    } else {
+        fib_default(n - 1) + fib_default(n - 2)
+    }
+}
+
+#[test]
+#[cfg(feature = "proc_macro")]
+fn bare_cached_recursion_does_not_deadlock() {
+    assert_eq!(fib_default(20), 6765);
+}
+
 #[cfg(feature = "time_stores")]
 use cached::time::Duration;
 use cached::{Cached, CachedExt, LruCache, UnboundCache};
@@ -203,7 +223,7 @@ fn test_proc_cached_result() {
     assert!(proc_cached_result(2).is_ok());
     assert!(proc_cached_result(4).is_ok());
     {
-        let cache = PROC_CACHED_RESULT.0.read();
+        let cache = PROC_CACHED_RESULT.read();
         assert_eq!(2, cache.cache_size());
         assert_eq!(2, cache.cache_hits().unwrap());
         assert_eq!(4, cache.cache_misses().unwrap());
@@ -228,7 +248,7 @@ fn test_proc_cached_option() {
     assert!(proc_cached_option(1).is_some());
     assert!(proc_cached_option(4).is_some());
     {
-        let cache = PROC_CACHED_OPTION.0.read();
+        let cache = PROC_CACHED_OPTION.read();
         assert_eq!(3, cache.cache_size());
         assert_eq!(3, cache.cache_hits().unwrap());
         assert_eq!(5, cache.cache_misses().unwrap());
@@ -345,7 +365,7 @@ fn test_cached_return_flag() {
     assert_eq!(*r, 1);
     assert!(r.is_positive());
     {
-        let cache = CACHED_RETURN_FLAG.0.read();
+        let cache = CACHED_RETURN_FLAG.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -375,7 +395,7 @@ fn test_cached_return_flag_result() {
     let r = cached_return_flag_result(10);
     assert!(r.is_err());
     {
-        let cache = CACHED_RETURN_FLAG_RESULT.0.read();
+        let cache = CACHED_RETURN_FLAG_RESULT.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -405,7 +425,7 @@ fn test_cached_return_flag_option() {
     let r = cached_return_flag_option(10);
     assert!(r.is_none());
     {
-        let cache = CACHED_RETURN_FLAG_OPTION.0.read();
+        let cache = CACHED_RETURN_FLAG_OPTION.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -514,14 +534,14 @@ fn test_cached_smartstring() {
     string.push_str("very stringy");
     assert_eq!("equal", cached_smartstring(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.0.read();
+        let cache = CACHED_SMARTSTRING.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert_eq!("equal", cached_smartstring(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.0.read();
+        let cache = CACHED_SMARTSTRING.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -529,7 +549,7 @@ fn test_cached_smartstring() {
     let string = smartstring::alias::String::from("also stringy");
     assert_eq!("not equal", cached_smartstring(string));
     {
-        let cache = CACHED_SMARTSTRING.0.read();
+        let cache = CACHED_SMARTSTRING.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -558,7 +578,7 @@ fn test_cached_max_size_alias_sets_bound() {
     assert_eq!(cached_max_size_alias(1), 2);
     assert_eq!(cached_max_size_alias(2), 4);
     assert_eq!(cached_max_size_alias(3), 6); // evicts the LRU entry
-    let cache = CACHED_MAX_SIZE_ALIAS.0.read();
+    let cache = CACHED_MAX_SIZE_ALIAS.read();
     // capacity reflects the `max_size = 2` bound, and the store never exceeds it
     assert_eq!(cache.capacity(), 2);
     assert_eq!(cache.cache_size(), 2);
@@ -587,21 +607,21 @@ fn sync_cached_remove_entry_and_delete_aliases() {
 fn test_cached_smartstring_from_str() {
     assert!(cached_smartstring_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.0.read();
+        let cache = CACHED_SMARTSTRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(cached_smartstring_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.0.read();
+        let cache = CACHED_SMARTSTRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
     assert!(!cached_smartstring_from_str("false"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.0.read();
+        let cache = CACHED_SMARTSTRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
@@ -730,7 +750,7 @@ mod expires_macro_tests {
     #[test]
     fn test_expires_macro_hit_and_miss() {
         {
-            let mut c = SM_CACHED_EXPIRES.0.write();
+            let mut c = SM_CACHED_EXPIRES.write();
             c.cache_clear();
             c.cache_reset_metrics();
         }
@@ -742,7 +762,7 @@ mod expires_macro_tests {
         let v2 = sm_cached_expires(1, false);
         assert!(!v2.expired);
         {
-            let c = SM_CACHED_EXPIRES.0.read();
+            let c = SM_CACHED_EXPIRES.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -754,7 +774,7 @@ mod expires_macro_tests {
         let v4 = sm_cached_expires(2, false);
         assert!(!v4.expired);
         {
-            let c = SM_CACHED_EXPIRES.0.read();
+            let c = SM_CACHED_EXPIRES.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -762,7 +782,7 @@ mod expires_macro_tests {
     #[test]
     fn test_expires_lru_macro_hit_and_miss() {
         {
-            let mut c = SM_CACHED_EXPIRES_LRU.0.write();
+            let mut c = SM_CACHED_EXPIRES_LRU.write();
             c.cache_clear();
             c.cache_reset_metrics();
         }
@@ -771,7 +791,7 @@ mod expires_macro_tests {
         let v2 = sm_cached_expires_lru(10, false);
         assert!(!v2.expired);
         {
-            let c = SM_CACHED_EXPIRES_LRU.0.read();
+            let c = SM_CACHED_EXPIRES_LRU.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -782,7 +802,7 @@ mod expires_macro_tests {
         let v4 = sm_cached_expires_lru(11, false);
         assert!(!v4.expired);
         {
-            let c = SM_CACHED_EXPIRES_LRU.0.read();
+            let c = SM_CACHED_EXPIRES_LRU.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -816,7 +836,7 @@ mod expires_macro_tests {
     #[test]
     fn test_expires_macro_dynamic_ttl_from_arg() {
         {
-            let mut c = DYN_TTL.0.write();
+            let mut c = DYN_TTL.write();
             c.cache_clear();
             c.cache_reset_metrics();
         }
@@ -829,7 +849,7 @@ mod expires_macro_tests {
         assert_eq!(dyn_ttl(1, 0).v, 1);
         assert_eq!(dyn_ttl(2, 60_000).v, 2);
 
-        let c = DYN_TTL.0.read();
+        let c = DYN_TTL.read();
         // Only the long-TTL key produced a live hit; the 0ms key never hits.
         assert_eq!(c.cache_hits(), Some(1));
     }
@@ -863,7 +883,7 @@ mod time_store_tests {
     fn test_expiring_sized_unsync_read_macro() {
         assert_eq!(3, expiring_sized_unsync_read("abc"));
         assert_eq!(3, expiring_sized_unsync_read("abc"));
-        let cache = EXPIRING_SIZED_UNSYNC_READ.0.read();
+        let cache = EXPIRING_SIZED_UNSYNC_READ.read();
         assert_eq!(Some(&3), cache.cache_peek("abc"));
         assert_eq!(Some(&3), cache.cache_get_read("abc"));
     }
@@ -886,7 +906,7 @@ mod time_store_tests {
         proc_timed_sized_sleeper(1);
         proc_timed_sized_sleeper(1);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.read();
             assert_eq!(1, cache.cache_misses().unwrap());
             assert_eq!(1, cache.cache_hits().unwrap());
         }
@@ -894,7 +914,7 @@ mod time_store_tests {
         sleep(Duration::new(1, 0));
         proc_timed_sized_sleeper(1);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.read();
             assert_eq!(2, cache.cache_misses().unwrap());
             assert_eq!(1, cache.cache_hits().unwrap());
             assert_eq!(cache.key_order(), vec![1]);
@@ -902,13 +922,13 @@ mod time_store_tests {
         // sleep to expire the one entry
         sleep(Duration::new(1, 0));
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.read();
             assert!(cache.key_order().is_empty());
         }
         proc_timed_sized_sleeper(1);
         proc_timed_sized_sleeper(1);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.read();
             assert_eq!(3, cache.cache_misses().unwrap());
             assert_eq!(2, cache.cache_hits().unwrap());
             assert_eq!(cache.key_order(), vec![1]);
@@ -916,7 +936,7 @@ mod time_store_tests {
         // lru size is 1, so this new thing evicts the existing key
         proc_timed_sized_sleeper(2);
         {
-            let cache = PROC_TIMED_SIZED_SLEEPER.0.read();
+            let cache = PROC_TIMED_SIZED_SLEEPER.read();
             assert_eq!(4, cache.cache_misses().unwrap());
             assert_eq!(2, cache.cache_hits().unwrap());
             assert_eq!(cache.key_order(), vec![2]);
@@ -1062,14 +1082,14 @@ mod time_store_tests {
     fn test_cached_timed_refresh() {
         assert!(cached_timed_refresh("true"));
         {
-            let cache = CACHED_TIMED_REFRESH.0.read();
+            let cache = CACHED_TIMED_REFRESH.read();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
 
         assert!(cached_timed_refresh("true"));
         {
-            let cache = CACHED_TIMED_REFRESH.0.read();
+            let cache = CACHED_TIMED_REFRESH.read();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1081,7 +1101,7 @@ mod time_store_tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(cached_timed_refresh("true"));
         {
-            let cache = CACHED_TIMED_REFRESH.0.read();
+            let cache = CACHED_TIMED_REFRESH.read();
             assert_eq!(cache.cache_hits(), Some(4));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1102,14 +1122,14 @@ mod time_store_tests {
     fn test_cached_timed_sized_refresh() {
         assert!(cached_timed_sized_refresh("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH.0.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH.read();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
 
         assert!(cached_timed_sized_refresh("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH.0.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH.read();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1121,7 +1141,7 @@ mod time_store_tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(cached_timed_sized_refresh("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH.0.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH.read();
             assert_eq!(cache.cache_hits(), Some(4));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1142,13 +1162,13 @@ mod time_store_tests {
     fn test_cached_timed_sized_refresh_prime() {
         assert!(cached_timed_sized_refresh_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.0.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.read();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
         assert!(cached_timed_sized_refresh_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.0.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.read();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1163,7 +1183,7 @@ mod time_store_tests {
         // stats unchanged (other than this new hit) since we kept priming
         assert!(cached_timed_sized_refresh_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.0.read();
+            let cache = CACHED_TIMED_SIZED_REFRESH_PRIME.read();
             assert_eq!(cache.cache_hits(), Some(2));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1183,13 +1203,13 @@ mod time_store_tests {
     fn test_cached_timed_sized_prime() {
         assert!(cached_timed_sized_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_PRIME.0.write();
+            let cache = CACHED_TIMED_SIZED_PRIME.write();
             assert_eq!(cache.cache_hits(), Some(0));
             assert_eq!(cache.cache_misses(), Some(1));
         }
         assert!(cached_timed_sized_prime("true"));
         {
-            let cache = CACHED_TIMED_SIZED_PRIME.0.write();
+            let cache = CACHED_TIMED_SIZED_PRIME.write();
             assert_eq!(cache.cache_hits(), Some(1));
             assert_eq!(cache.cache_misses(), Some(1));
         }
@@ -1204,7 +1224,7 @@ mod time_store_tests {
         // stats unchanged (other than this new hit) since we kept priming
         assert!(cached_timed_sized_prime("true"));
         {
-            let mut cache = CACHED_TIMED_SIZED_PRIME.0.write();
+            let mut cache = CACHED_TIMED_SIZED_PRIME.write();
             assert_eq!(cache.cache_hits(), Some(2));
             assert_eq!(cache.cache_misses(), Some(1));
             assert!(cache.cache_size() > 0);
@@ -1940,7 +1960,7 @@ mod time_store_tests {
         // hit — same key, returns cached value
         assert_eq!(cached_expires_basic(1, false).val, 1);
         {
-            let c = CACHED_EXPIRES_BASIC.0.read();
+            let c = CACHED_EXPIRES_BASIC.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -1951,7 +1971,7 @@ mod time_store_tests {
         assert_eq!(r.val, 1);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_BASIC.0.read();
+            let c = CACHED_EXPIRES_BASIC.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(2));
             assert_eq!(c.cache_evictions(), Some(1));
@@ -1972,7 +1992,7 @@ mod time_store_tests {
         // hit
         assert_eq!(cached_expires_lru(10, false).val, 10);
         {
-            let c = CACHED_EXPIRES_LRU.0.read();
+            let c = CACHED_EXPIRES_LRU.read();
             assert_eq!(c.cache_hits(), Some(1));
             assert_eq!(c.cache_misses(), Some(1));
         }
@@ -1983,7 +2003,7 @@ mod time_store_tests {
         assert_eq!(r.val, 10);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_LRU.0.read();
+            let c = CACHED_EXPIRES_LRU.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -2013,7 +2033,7 @@ mod time_store_tests {
         assert_eq!(r.val, 1);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_RESULT.0.read();
+            let c = CACHED_EXPIRES_RESULT.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -2043,7 +2063,7 @@ mod time_store_tests {
         assert_eq!(r.val, 1);
         assert!(!r.expired);
         {
-            let c = CACHED_EXPIRES_OPTION.0.read();
+            let c = CACHED_EXPIRES_OPTION.read();
             assert_eq!(c.cache_evictions(), Some(1));
         }
     }
@@ -2358,6 +2378,33 @@ mod sharded_ttl_tests {
 #[cfg(all(feature = "async", feature = "proc_macro"))]
 mod async_tests {
     use super::*;
+
+    // Regression (async mirror of `bare_cached_recursion_does_not_deadlock`):
+    // a bare `#[cached]` async fn must NOT deadlock on recursion. The async ByKey
+    // default (per-key bucket lock) and the Default mode (global write lock) both
+    // held the lock across the `.await` of the recursive call, so recursion would
+    // deadlock. The reverted `Disabled` default drops the lock before the body
+    // runs, so recursion is safe. A timeout turns a regression into a fast failure
+    // instead of hanging the whole suite.
+    #[cached]
+    async fn fib_default_async(n: u64) -> u64 {
+        if n < 2 {
+            n
+        } else {
+            Box::pin(fib_default_async(n - 1)).await + Box::pin(fib_default_async(n - 2)).await
+        }
+    }
+
+    #[tokio::test]
+    async fn bare_cached_async_recursion_does_not_deadlock() {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), fib_default_async(20))
+            .await
+            .expect(
+                "bare async #[cached] recursion deadlocked: the default sync_writes \
+             mode must be Disabled (a lock held across .await regressed it)",
+            );
+        assert_eq!(res, 6765);
+    }
 
     #[once]
     async fn only_cached_result_once_a(
@@ -5454,7 +5501,7 @@ fn fetch_article(slug: String) -> Result<NewsArticle, ()> {
 #[serial(ExpiringCacheTest)]
 fn test_expiring_value_expired_article_returned_with_miss() {
     {
-        let mut cache = FETCH_ARTICLE.0.write();
+        let mut cache = FETCH_ARTICLE.write();
         cache.cache_reset();
         cache.cache_reset_metrics();
     }
@@ -5465,7 +5512,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 
     // The article was fetched due to a cache miss and the result cached.
     {
-        let cache = FETCH_ARTICLE.0.write();
+        let cache = FETCH_ARTICLE.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -5475,7 +5522,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 
     // The article was fetched again as it had expired.
     {
-        let cache = FETCH_ARTICLE.0.write();
+        let cache = FETCH_ARTICLE.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(2));
@@ -5487,7 +5534,7 @@ fn test_expiring_value_expired_article_returned_with_miss() {
 #[serial(ExpiringCacheTest)]
 fn test_expiring_value_unexpired_article_returned_with_hit() {
     {
-        let mut cache = FETCH_ARTICLE.0.write();
+        let mut cache = FETCH_ARTICLE.write();
         cache.cache_reset();
         cache.cache_reset_metrics();
     }
@@ -5498,7 +5545,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
     // The article was fetched due to a cache miss and the result cached.
     {
-        let cache = FETCH_ARTICLE.0.write();
+        let cache = FETCH_ARTICLE.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -5510,7 +5557,7 @@ fn test_expiring_value_unexpired_article_returned_with_hit() {
 
     // The article was not fetched but returned as a hit from the cache.
     {
-        let cache = FETCH_ARTICLE.0.write();
+        let cache = FETCH_ARTICLE.write();
         assert_eq!(1, cache.cache_size());
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
@@ -6104,11 +6151,11 @@ fn test_expiring_value_cache_on_evict_fires_on_cache_get() {
 #[cfg(feature = "proc_macro")]
 #[test]
 fn test_unsync_reads_unbound_cache() {
-    UNSYNC_DOUBLE.0.write().cache_reset();
+    UNSYNC_DOUBLE.write().cache_reset();
     assert_eq!(4, unsync_double(2));
     assert_eq!(4, unsync_double(2));
     assert_eq!(10, unsync_double(5));
-    let cache = UNSYNC_DOUBLE.0.read();
+    let cache = UNSYNC_DOUBLE.read();
     assert_eq!(2, cache.cache_size());
     assert_eq!(1, cache.cache_hits().unwrap());
     assert_eq!(2, cache.cache_misses().unwrap());
@@ -6152,14 +6199,14 @@ mod unsync_reads_ttl_sorted {
     #[test]
     fn test_unsync_reads_ttl_sorted_cache() {
         CALL_COUNT.store(0, Ordering::SeqCst);
-        UNSYNC_TTL_SORTED.0.write().cache_reset();
+        UNSYNC_TTL_SORTED.write().cache_reset();
 
         assert_eq!(unsync_ttl_sorted(4), 12);
         assert_eq!(unsync_ttl_sorted(4), 12); // cache hit — body not re-run
         assert_eq!(unsync_ttl_sorted(5), 15);
 
         assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 2);
-        let cache = UNSYNC_TTL_SORTED.0.read();
+        let cache = UNSYNC_TTL_SORTED.read();
         assert_eq!(cache.cache_size(), 2);
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
@@ -7438,7 +7485,7 @@ mod macro_arg_pairwise {
     fn test_name_with_unbound() {
         assert_eq!(named_unbound(2), 3);
         assert_eq!(named_unbound(2), 3);
-        let cache = PAIRWISE_NAMED_UNBOUND.0.write();
+        let cache = PAIRWISE_NAMED_UNBOUND.write();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -7453,7 +7500,7 @@ mod macro_arg_pairwise {
     fn test_size_with_sync_lock_mutex() {
         assert_eq!(sized_mutex(3), 6);
         assert_eq!(sized_mutex(3), 6);
-        let cache = SIZED_MUTEX.0.lock();
+        let cache = SIZED_MUTEX.lock();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
@@ -7497,8 +7544,8 @@ mod macro_arg_pairwise {
         assert_eq!(sync_lock_snake(1), 2);
         // `.write()` only exists on the RwLock wrapper; compiling+passing here
         // proves both spellings resolved to RwLock.
-        assert_eq!(SYNC_LOCK_DOC_SPELLING.0.write().cache_misses(), Some(1));
-        assert_eq!(SYNC_LOCK_SNAKE_SPELLING.0.write().cache_misses(), Some(1));
+        assert_eq!(SYNC_LOCK_DOC_SPELLING.write().cache_misses(), Some(1));
+        assert_eq!(SYNC_LOCK_SNAKE_SPELLING.write().cache_misses(), Some(1));
     }
 
     // sync_writes = "by_key" + explicit non-default sync_writes_buckets.

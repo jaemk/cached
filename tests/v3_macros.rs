@@ -2089,7 +2089,7 @@ fn valid_name_compiles_and_caches() {
     // The cache static is named exactly `MY_CACHE` (proves `name` took effect).
     // If the identifier were not honored this reference would not resolve.
     use cached::Cached;
-    assert!(MY_CACHE.0.read().cache_size() >= 2);
+    assert!(MY_CACHE.read().cache_size() >= 2);
 }
 
 // ── Item 9 positive guard: `sync_writes` is STILL valid on `#[once]` ─────────
@@ -2149,48 +2149,53 @@ fn once_sync_writes_true_compiles_and_caches() {
     );
 }
 
-// ── Item #1: sync_writes defaults to ByKey for #[cached] ─────────────────────
+// ── Item #1 (reverted): bare #[cached] defaults to Disabled sync_writes ───────
+//
+// The default `sync_writes` was reverted from ByKey back to `Disabled` (2.x
+// behavior): no write synchronization. A ByKey default deadlocks recursive
+// memoized fns (the per-key bucket lock is held across the body). This is pinned
+// two independent ways:
+//   1. Static shape (here): the Disabled/Default modes emit a plain
+//      `LazyLock<RwLock<Store>>`, while ByKey emits the tuple
+//      `LazyLock<(RwLock<Store>, Vec<..>)>`. Reading the static via `.read()`
+//      (NOT `.0.read()`) only compiles for the non-ByKey shape, so a revert to a
+//      ByKey default would fail to COMPILE at this line.
+//   2. Recursion does not deadlock: `bare_cached_recursion_does_not_deadlock`
+//      (sync) and `bare_cached_async_recursion_does_not_deadlock` (async) in
+//      tests/cached.rs. ByKey (per-key bucket lock) or Default (global write
+//      lock) held across the body would deadlock those; only Disabled does not.
+// Together (1) rules out a ByKey default and (2) rules out a Default default, so
+// the effective default is pinned to Disabled.
 
-// Counter proves whether the body ran once or twice for a given key.
-static CACHED_BY_KEY_DEFAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+// Counter proves the body ran exactly once across sequential miss+hit calls.
+static CACHED_DEFAULT_DISABLED_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-// Bare #[cached] must default to ByKey, so concurrent first-calls for the same
-// key produce only one body execution (the second waits for the first to write).
 #[cached(key = "u32", convert = { k })]
-fn cached_by_key_default(k: u32) -> u32 {
-    CACHED_BY_KEY_DEFAULT_CALLS.fetch_add(1, Ordering::SeqCst);
+fn cached_default_disabled(k: u32) -> u32 {
+    CACHED_DEFAULT_DISABLED_CALLS.fetch_add(1, Ordering::SeqCst);
     k * 2
 }
 
 #[test]
-fn test_cached_by_key_default_deduplicates() {
-    use std::sync::Arc;
-    use std::sync::Barrier;
-    use std::thread;
+fn test_cached_default_is_disabled_not_by_key() {
+    use cached::Cached;
+    CACHED_DEFAULT_DISABLED_CALLS.store(0, Ordering::SeqCst);
 
-    CACHED_BY_KEY_DEFAULT_CALLS.store(0, Ordering::SeqCst);
-
-    // Use a barrier to force threads to reach the call site simultaneously.
-    let barrier = Arc::new(Barrier::new(4));
-    let mut handles = vec![];
-    for _ in 0..4 {
-        let b = Arc::clone(&barrier);
-        handles.push(thread::spawn(move || {
-            b.wait();
-            cached_by_key_default(1)
-        }));
-    }
-    for h in handles {
-        h.join().expect("thread panicked");
-    }
-
-    let calls = CACHED_BY_KEY_DEFAULT_CALLS.load(Ordering::SeqCst);
-    // With ByKey default the body must run exactly once for key=1; all other
-    // threads wait on the key lock and return the cached value.
-    assert_eq!(
-        calls, 1,
-        "bare #[cached] must default to ByKey: body should run once, ran {calls}"
+    // Miss then hit: the bare default must still cache.
+    assert_eq!(cached_default_disabled(1), 2);
+    // `.read()` (NOT `.0.read()`) resolves only when the static is the plain
+    // `LazyLock<RwLock<Store>>` shape produced by the Disabled/Default modes.
+    // If the default regressed to ByKey, the static would be a tuple and this
+    // line would not compile (the whole test crate would fail to build).
+    let hits_before = CACHED_DEFAULT_DISABLED.read().cache_hits();
+    assert_eq!(cached_default_disabled(1), 2); // cache hit
+    let hits_after = CACHED_DEFAULT_DISABLED.read().cache_hits();
+    assert!(
+        hits_after > hits_before,
+        "bare #[cached] must still cache by default"
     );
+    // The body ran exactly once: first call missed and computed, second hit.
+    assert_eq!(CACHED_DEFAULT_DISABLED_CALLS.load(Ordering::SeqCst), 1);
 }
 
 // sync_writes = false restores the old Disabled behavior: concurrent threads

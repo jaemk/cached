@@ -12,14 +12,16 @@ Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe wi
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
 store's own internal synchronization: sharded stores use per-shard `parking_lot::RwLock`; Redis and
 disk stores rely on their respective server/file-system concurrency.
-By default, `#[cached]` uses `sync_writes = "by_key"`: concurrent first calls for the same key are
-deduplicated through bucketed per-key locks, so the function body runs at most once per key per miss
-window. To allow concurrent misses to each compute independently (the pre-3.0 default, which mirrored
-Python's `functools.lru_cache`), set `sync_writes = false`. To hold the whole-cache lock for the
-duration of each miss, use `sync_writes = true` (or `"default"`). `#[once]` defaults to no
-synchronization (add `sync_writes = true` to serialize concurrent first-calls); `#[concurrent_cached]`
-does not support `sync_writes`. For `#[cached]`, the number of per-key lock buckets for `"by_key"` is
-tunable with `sync_writes_buckets = N` (default 64).
+By default, `#[cached]` uses no write synchronization: concurrent uncached calls for the same key may
+each compute independently and overwrite each other, matching the 2.x behavior and Python's
+`functools.lru_cache`. Set `sync_writes = "by_key"` to deduplicate concurrent first calls for the same
+key through bucketed per-key locks. Set `sync_writes = true` (or `"default"`) to hold the whole-cache
+lock for the duration of each miss. Note: `"by_key"` holds the per-key bucket lock across the entire
+function body, so it must not be used on recursive or re-entrant memoized functions (deadlock risk when
+keys in the active call chain share a bucket). `#[once]` defaults to no synchronization (add
+`sync_writes = true` to serialize concurrent first-calls); `#[concurrent_cached]` does not support
+`sync_writes`. The number of per-key lock buckets for `"by_key"` is tunable with
+`sync_writes_buckets = N` (default 64).
 
 - See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
@@ -107,8 +109,8 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Use case | Annotated signature |
 |---|---|
 | **`#[cached]`** | |
-| Unbounded memoize (default; deduplicates concurrent misses per key) | `#[cached] fn fib(n: u64) -> u64` |
-| Unbounded memoize, allow concurrent misses per key (old default) | `#[cached(sync_writes = false)] fn fib(n: u64) -> u64` |
+| Unbounded memoize (default; concurrent misses each compute independently) | `#[cached] fn fib(n: u64) -> u64` |
+| Unbounded memoize, explicit no-sync (same as default) | `#[cached(sync_writes = false)] fn fib(n: u64) -> u64` |
 | LRU-bounded — evict past N entries | `#[cached(max_size = 1_000)] fn lookup(id: u32) -> Row` |
 | TTL — expire results after N whole seconds | `#[cached(ttl_secs = 60)] fn config() -> Config` |
 | TTL as a Duration expression (inlined verbatim, so `Duration` must be in scope; see note below) | `#[cached(ttl = "Duration::from_secs(60)")] fn config() -> Config` |
@@ -120,7 +122,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Force-cache `Err` returns | `#[cached(cache_err = true)] fn load(id: u64) -> Result<Data, E>` |
 | Serve stale value when function returns `Err` | `#[cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
 | Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
-| Deduplicate concurrent first calls for same key (explicit; same as bare `#[cached]`) | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
+| Deduplicate concurrent first calls per key (opt-in; do not use on recursive functions) | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
 | Recompute when an expression over the args is true | `#[cached(force_refresh = { id == 0 })] fn fetch(id: u64) -> Data` |
 | Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = { id }, force_refresh = { refresh })] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the function body still receives `refresh` as a normal parameter, so if your body does not otherwise use it, add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the unused-variable warning |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[cached(in_impl = true)] fn load(&self, id: u64) -> Data` |

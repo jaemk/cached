@@ -32,11 +32,14 @@ static UNSYNC_FR_BODY_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 // `bypass` is excluded from the cache key via `key`/`convert` so the same slot
 // is hit/refreshed regardless of the flag.
-// `unsync_reads` triggers the optimistic read-lock path under `SyncWriteMode::Default`.
+// `sync_writes = "default"` + `unsync_reads` triggers the optimistic read-lock path under
+// `SyncWriteMode::Default`. Explicit here because a bare `#[cached]` defaults to `Disabled`
+// (no synchronization), which does not exercise this code path.
 // The `force_refresh` predicate increments the counter so we can count evaluations.
 #[cached(
     key = "i32",
     convert = "{ x }",
+    sync_writes = "default",
     unsync_reads,
     force_refresh = "{ UNSYNC_FR_PREDICATE_EVALS.fetch_add(1, Ordering::SeqCst); bypass }"
 )]
