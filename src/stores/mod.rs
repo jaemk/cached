@@ -374,7 +374,7 @@ pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 impl<K, V, S> Cached<K, V> for HashMap<K, V, S>
 where
     K: Hash + Eq,
-    S: std::hash::BuildHasher + Default,
+    S: std::hash::BuildHasher,
 {
     type Error = std::convert::Infallible;
 
@@ -428,7 +428,12 @@ where
         HashMap::clear(self);
     }
     fn cache_reset(&mut self) {
-        *self = HashMap::default();
+        // Clear and release capacity without requiring `S: Default`, so stores built with a
+        // non-`Default` `BuildHasher` (e.g. a seeded hasher, or ahash on wasm where
+        // `RandomState: Default` is gated off) still implement `Cached`. The existing hasher
+        // instance is preserved, matching the "configuration preserved across reset" contract.
+        HashMap::clear(self);
+        self.shrink_to_fit();
         self.cache_reset_metrics();
     }
     fn cache_size(&self) -> usize {

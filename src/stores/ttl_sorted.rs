@@ -132,12 +132,19 @@ impl<K, V> Entry<K, V> {
         }
     }
 
-    /// Returns `true` if the entry's expiry instant has passed.
-    /// Expires strictly AFTER `expiry` (`now > expiry`, i.e. `expiry < now`),
-    /// in contrast to [`TtlCache`](super::TtlCache) / `LruTtlCache` which expire
-    /// at-or-after (`now >= expires_at`).
+    /// Returns `true` if the entry's expiry instant has passed as of `now`.
+    ///
+    /// Expiry is at-or-after the deadline (`now >= expiry`), matching
+    /// [`TtlCache`](super::TtlCache) / `LruTtlCache`. Split from [`is_expired`](Self::is_expired)
+    /// so the boundary can be unit-tested with a controlled `now` (the real monotonic clock
+    /// never yields an exact `now == expiry` tie deterministically).
+    fn is_expired_at(&self, now: Instant) -> bool {
+        self.expiry.is_some_and(|e| e <= now)
+    }
+
+    /// Returns `true` if the entry's expiry instant has passed as of the current time.
     fn is_expired(&self) -> bool {
-        self.expiry.is_some_and(|e| e < Instant::now())
+        self.is_expired_at(Instant::now())
     }
 }
 
@@ -529,6 +536,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         let min = Stamped::bound(self.min_instant);
         let max = Stamped::bound(cutoff);
         let min = Included(&min);
+        // `Stamped::bound(cutoff)` has `key: None`, which sorts below every real entry at the
+        // same expiry, so a real entry expiring exactly at `cutoff` is never in this range under
+        // either `Excluded` or `Included`. That matches `is_expired_at`'s at-or-after boundary in
+        // practice: `cutoff` is sampled here, so no stored expiry (computed at an earlier insert)
+        // ever equals it, and any entry that did tie is caught by the next `is_expired` get.
         let max = Excluded(&max);
         let remove = self.keys.range((min, max)).count();
 
@@ -1213,6 +1225,40 @@ mod test {
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn entry_is_expired_at_uses_at_or_after_boundary() {
+        // TtlSortedCache aligns with TtlCache / LruTtlCache: an entry is expired at-or-after its
+        // deadline (`now >= expiry`), not strictly-after. The real monotonic clock never yields a
+        // deterministic `now == expiry` tie, so exercise the boundary through `is_expired_at`.
+        use super::{CacheArc, Entry};
+        use crate::time::Instant;
+
+        let deadline = Instant::now();
+        let entry = Entry {
+            expiry: Some(deadline),
+            key: CacheArc::new(1u32),
+            value: 42u32,
+        };
+
+        // Exactly at the deadline: expired (at-or-after). Strictly-after would report `false`.
+        assert!(
+            entry.is_expired_at(deadline),
+            "entry must be expired at exactly its deadline (at-or-after)"
+        );
+        // One tick before: still live.
+        assert!(
+            !entry.is_expired_at(deadline - Duration::from_nanos(1)),
+            "entry must be live just before its deadline"
+        );
+        // A never-expiring entry (zero-TTL sentinel) is never expired.
+        let never = Entry {
+            expiry: None,
+            key: CacheArc::new(2u32),
+            value: 7u32,
+        };
+        assert!(!never.is_expired_at(deadline));
+    }
 
     #[test]
     fn ttl_sorted_cache_set_error_is_clone_eq() {

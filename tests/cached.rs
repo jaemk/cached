@@ -103,6 +103,7 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/cached_cache_err_requires_result_return.rs");
     t.compile_fail("tests/ui/cached_cache_none_requires_option_return.rs");
     t.compile_fail("tests/ui/cached_cache_err_result_fallback_exclusive.rs");
+    t.compile_fail("tests/ui/cached_result_fallback_with_cached_flag_exclusive.rs");
     t.compile_fail("tests/ui/cached_cache_none_with_cached_flag_exclusive.rs");
     t.compile_fail("tests/ui/cached_ttl_zero.rs");
     t.compile_fail("tests/ui/cached_max_size_zero.rs");

@@ -192,6 +192,20 @@ where
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
 
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// Infallible ergonomic API for the concrete type. As an inherent method it takes
+    /// resolution priority over
+    /// [`ConcurrentCachedExt::get_or_set_with`](crate::ConcurrentCachedExt::get_or_set_with)
+    /// (which returns `Result<V, Infallible>`), so no `.unwrap()` is needed at the call site.
+    ///
+    /// Non-atomic get-then-set: on a miss another thread may store a value for the same key
+    /// between the get and the set. See
+    /// [`ConcurrentCached::cache_get_or_set_with`](crate::ConcurrentCached::cache_get_or_set_with).
+    pub fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> V {
+        ConcurrentCached::cache_get_or_set_with(self, k, f).unwrap()
+    }
+
     /// Remove a cached value and return it if the entry was live.
     ///
     /// This is the infallible ergonomic API for the concrete type.
@@ -311,12 +325,10 @@ where
     /// Remove all entries from every shard, firing `on_evict` for each removed entry when a
     /// callback is configured.
     ///
-    /// If no `on_evict` callback is configured, this is equivalent to [`clear`](Self::clear).
-    /// Increments the evictions counter for each removed entry only when `on_evict` is set.
+    /// Unlike [`clear`](Self::clear), every removed entry is counted as an eviction
+    /// (`metrics().evictions`) whether or not an `on_evict` callback is configured; the callback
+    /// fires only when one is set.
     pub fn cache_clear_with_on_evict(&self) {
-        if self.inner.on_evict.is_none() {
-            return self.clear();
-        }
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
@@ -1228,6 +1240,35 @@ mod tests {
                 - before,
             20,
             "evictions counter must increment for each entry"
+        );
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_counts_evictions_without_callback() {
+        // metrics().evictions must not depend on an on_evict observer being attached.
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        for i in 0..20u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let before = c.metrics().evictions.expect("evictions tracked");
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.len(), 0);
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked") - before,
+            20,
+            "evictions must be counted even with no on_evict callback"
         );
     }
 

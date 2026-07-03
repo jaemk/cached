@@ -534,6 +534,19 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+    if args.result_fallback && args.with_cached_flag {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`result_fallback` and `with_cached_flag` are mutually exclusive: \
+             `result_fallback` stores the inner `Ok(T)` value directly, but \
+             `with_cached_flag` wraps the `Ok` value in `Return<T>` - the generated \
+             code cannot simultaneously store `T` and expose `Return<T>` through \
+             the cached function. Use `with_cached_flag = true` alone (without \
+             `result_fallback`) or `result_fallback = true` alone.",
+        )
+        .to_compile_error()
+        .into();
+    }
     if args.cache_none && args.with_cached_flag {
         return syn::Error::new(
             fn_ident.span(),

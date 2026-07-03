@@ -159,7 +159,7 @@ where
     /// hasher. `new` and `builder` exist only on the default-hasher alias, so a custom hasher
     /// is always introduced via `hasher`, never a `ShardedLruTtlCacheBase::<_, _, H>` turbofish.
     #[must_use]
-    pub fn builder() -> ShardedLruTtlCacheBuilder<K, V, DefaultShardHasher> {
+    pub fn builder() -> ShardedLruTtlCacheBuilder<K, V> {
         ShardedLruTtlCacheBuilder::default()
     }
 }
@@ -255,6 +255,20 @@ where
     /// This is the infallible ergonomic API for the concrete type.
     pub fn set(&self, k: K, v: V) -> Option<V> {
         ConcurrentCached::cache_set(self, k, v).unwrap()
+    }
+
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// Infallible ergonomic API for the concrete type. As an inherent method it takes
+    /// resolution priority over
+    /// [`ConcurrentCachedExt::get_or_set_with`](crate::ConcurrentCachedExt::get_or_set_with)
+    /// (which returns `Result<V, Infallible>`), so no `.unwrap()` is needed at the call site.
+    ///
+    /// Non-atomic get-then-set: on a miss another thread may store a value for the same key
+    /// between the get and the set. See
+    /// [`ConcurrentCached::cache_get_or_set_with`](crate::ConcurrentCached::cache_get_or_set_with).
+    pub fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> V {
+        ConcurrentCached::cache_get_or_set_with(self, k, f).unwrap()
     }
 
     /// Remove a cached value and return it if the entry was live.
@@ -370,12 +384,10 @@ where
     /// Remove all entries from every shard, firing `on_evict` for each removed entry when a
     /// callback is configured.
     ///
-    /// If no `on_evict` callback is configured, this is equivalent to [`clear`](Self::clear).
-    /// Increments the evictions counter for each removed entry only when `on_evict` is set.
+    /// Unlike [`clear`](Self::clear), every removed entry is counted as an eviction
+    /// (`metrics().evictions`) whether or not an `on_evict` callback is configured; the callback
+    /// fires only when one is set.
     pub fn cache_clear_with_on_evict(&self) {
-        if self.inner.on_evict.is_none() {
-            return self.clear();
-        }
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, TimedEntry<V>)> = {
                 let mut guard = shard.lock.write();
@@ -744,13 +756,14 @@ where
 
 /// Builder for [`ShardedLruTtlCacheBase`].
 ///
-/// The fourth type parameter `E` is a **typestate** marker: it starts as [`NoEvict`] and
+/// The third type parameter `E` is a **typestate** marker: it starts as [`NoEvict`] and
 /// transitions to [`HasEvict`] after `.on_evict(…)` is called. This encodes at compile time
 /// whether an eviction callback has been registered, allowing the two `build()` / `copy_from()`
 /// overloads to impose `K: 'static + V: 'static` bounds only when `on_evict` is set. You will
 /// see this parameter in IDE completions and compiler errors once you call `.on_evict(…)`;
-/// it is otherwise invisible.
-pub struct ShardedLruTtlCacheBuilder<K, V, H = DefaultShardHasher, E = NoEvict> {
+/// it is otherwise invisible. The hasher `H` is last, matching
+/// [`LruTtlCacheBuilder`](crate::LruTtlCacheBuilder)`<K, V, E, S>`.
+pub struct ShardedLruTtlCacheBuilder<K, V, E = NoEvict, H = DefaultShardHasher> {
     shards: Option<usize>,
     max_size: Option<usize>,
     per_shard_max_size: Option<usize>,
@@ -761,7 +774,7 @@ pub struct ShardedLruTtlCacheBuilder<K, V, H = DefaultShardHasher, E = NoEvict> 
     _evict: PhantomData<E>,
 }
 
-impl<K, V> Default for ShardedLruTtlCacheBuilder<K, V, DefaultShardHasher> {
+impl<K, V> Default for ShardedLruTtlCacheBuilder<K, V> {
     fn default() -> Self {
         Self {
             shards: None,
@@ -776,7 +789,7 @@ impl<K, V> Default for ShardedLruTtlCacheBuilder<K, V, DefaultShardHasher> {
     }
 }
 
-impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
+impl<K, V, E, H> ShardedLruTtlCacheBuilder<K, V, E, H> {
     /// Set the requested total capacity (divided across shards via `div_ceil`).
     ///
     /// Eviction is enforced independently per shard. Each shard gets
@@ -863,7 +876,7 @@ impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
     #[doc(alias = "with_hasher")]
     #[must_use]
-    pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruTtlCacheBuilder<K, V, H2, E> {
+    pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruTtlCacheBuilder<K, V, E, H2> {
         ShardedLruTtlCacheBuilder {
             shards: self.shards,
             max_size: self.max_size,
@@ -936,7 +949,7 @@ impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     }
 }
 
-impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, NoEvict> {
+impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, NoEvict, H> {
     /// Set a callback invoked when an entry is evicted by LRU capacity pressure,
     /// TTL-expiry sweeps via [`evict`](ShardedLruTtlCacheBase::evict), explicit
     /// [`cache_remove`](ConcurrentCached::cache_remove), or
@@ -961,7 +974,7 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, NoEvict> {
     pub fn on_evict(
         self,
         on_evict: impl Fn(&K, &V) + Send + Sync + 'static,
-    ) -> ShardedLruTtlCacheBuilder<K, V, H, HasEvict> {
+    ) -> ShardedLruTtlCacheBuilder<K, V, HasEvict, H> {
         ShardedLruTtlCacheBuilder {
             shards: self.shards,
             max_size: self.max_size,
@@ -1057,7 +1070,7 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, NoEvict> {
     }
 }
 
-impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, HasEvict> {
+impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, HasEvict, H> {
     /// Build the cache, returning an error if required fields are missing or invalid.
     ///
     /// Use [`ShardedLruTtlCache::builder()`] (or [`ShardedLruTtlCacheBase::builder()`]) to obtain
@@ -1249,6 +1262,27 @@ mod tests {
     use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
     use crate::ConcurrentCloneCached;
+
+    #[test]
+    fn builder_generic_param_order_is_eviction_typestate_then_hasher() {
+        // API-5: ShardedLruTtlCacheBuilder's params are <K, V, E, H> (eviction typestate
+        // before hasher, hasher last), matching LruTtlCacheBuilder<K, V, E, S>. Naming them
+        // positionally in that order must compile; this pins the order against reordering.
+        let _default: ShardedLruTtlCacheBuilder<u32, u32, NoEvict, DefaultShardHasher> =
+            ShardedLruTtlCache::<u32, u32>::builder();
+
+        // A custom hasher slots into the last position, and .on_evict flips the typestate to
+        // HasEvict (third position) while the hasher stays last.
+        let cache = ShardedLruTtlCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(8)
+            .ttl(Duration::from_secs(60))
+            .hasher(DefaultShardHasher::default())
+            .on_evict(|_, _| {})
+            .build()
+            .unwrap();
+        let _typed: ShardedLruTtlCacheBase<u32, u32, DefaultShardHasher> = cache;
+    }
 
     #[test]
     fn new_returns_ready_cache_respecting_max_size_and_ttl() {
@@ -1693,6 +1727,38 @@ mod tests {
                 - before,
             20,
             "evictions counter must increment for each entry"
+        );
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_counts_evictions_without_callback() {
+        // metrics().evictions must not depend on an on_evict observer being attached.
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+        for i in 0..20u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before = c.metrics().evictions.expect("evictions tracked");
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.len(), 0);
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked") - before,
+            20,
+            "evictions must be counted even with no on_evict callback"
+        );
+        for i in 0..5u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before_plain = c.metrics().evictions.expect("evictions tracked");
+        c.clear();
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked"),
+            before_plain,
+            "plain clear() must not count evictions"
         );
     }
 

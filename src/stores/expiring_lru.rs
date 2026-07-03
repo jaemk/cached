@@ -457,19 +457,27 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         f: F,
     ) -> Result<&mut V, E> {
         let key_for_evict = key.clone();
+        // Count the miss the instant the factory runs. The inner store calls it only on a miss
+        // (vacant slot or expired entry), so a hit never counts one; and because the increment
+        // lands before `f` returns, an `Err` still records the miss instead of losing it on the
+        // `?` early return. This matches `ExpiringCache`'s try-path accounting (EXP-2).
+        let counted_f = {
+            let misses = &self.misses;
+            move || {
+                misses.fetch_add(1, Ordering::Relaxed);
+                f()
+            }
+        };
         let (was_present, was_valid, old_val, v) =
             self.store
-                .try_get_or_set_with_if(key, f, |v| !v.is_expired())?;
+                .try_get_or_set_with_if(key, counted_f, |v| !v.is_expired())?;
         if was_present && was_valid {
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
-            if let Some(old) = old_val {
-                if let Some(on_evict) = &self.on_evict {
-                    on_evict(&key_for_evict, &old);
-                }
-                self.evictions.fetch_add(1, Ordering::Relaxed);
+        } else if let Some(old) = old_val {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&key_for_evict, &old);
             }
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         Ok(v)
     }
@@ -620,20 +628,27 @@ where
     {
         async move {
             let key_for_evict = k.clone();
+            // Count the miss when the factory is invoked (miss path only), so an `Err` from the
+            // async factory still records it instead of losing it on the `?` early return.
+            // Mirrors the sync try path and `ExpiringCache` (EXP-2).
+            let counted_f = {
+                let misses = &self.misses;
+                move || {
+                    misses.fetch_add(1, Ordering::Relaxed);
+                    f()
+                }
+            };
             let (was_present, was_valid, old_val, v) = self
                 .store
-                .try_get_or_set_with_if_async(k, f, |v| !v.is_expired())
+                .try_get_or_set_with_if_async(k, counted_f, |v| !v.is_expired())
                 .await?;
             if was_present && was_valid {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-            } else {
-                if let Some(old) = old_val {
-                    if let Some(on_evict) = &self.on_evict {
-                        on_evict(&key_for_evict, &old);
-                    }
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
+            } else if let Some(old) = old_val {
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(&key_for_evict, &old);
                 }
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
             }
             Ok(v)
         }
@@ -739,6 +754,36 @@ mod tests {
         // Getting a non-existent cache key.
         assert!(c.get(&1).is_none());
         assert_eq!(c.cache_hits(), Some(0));
+        assert_eq!(c.cache_misses(), Some(1));
+    }
+
+    #[test]
+    fn expiring_lru_try_get_or_set_with_err_keeps_expired_and_counts_miss() {
+        // EXP-2: on a factory Err over an expired entry, ExpiringLruCache counts a miss the
+        // instant the factory runs (matching ExpiringCache) instead of losing it on the `?`
+        // early return, and leaves the expired entry in place without firing on_evict.
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.set(1, 15); // expired (>10)
+        let result: Result<&ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Err("fail"));
+        assert!(result.is_err());
+        assert_eq!(c.cache_size(), 1, "expired entry must remain after Err");
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "miss must be counted before f() even on Err"
+        );
+    }
+
+    #[test]
+    fn expiring_lru_try_get_or_set_with_ok_evicts_and_counts_miss() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.set(1, 15); // expired
+        let result: Result<&ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Ok(3));
+        assert_eq!(*result.unwrap(), 3);
+        assert_eq!(c.cache_evictions(), Some(1));
         assert_eq!(c.cache_misses(), Some(1));
     }
 

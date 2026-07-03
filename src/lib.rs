@@ -1262,7 +1262,21 @@ pub trait CachedIter<K, V> {
 }
 
 /// A snapshot of cache hit/miss and size statistics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// This struct is `#[non_exhaustive]`: new metric fields may be added in future releases, so it
+/// cannot be constructed with struct-literal syntax (including `..Default::default()`) or
+/// destructured exhaustively from outside the crate. To build one (e.g. when overriding
+/// `metrics()` in an external store), start from [`Default`] and assign the fields you track:
+///
+/// ```
+/// use cached::CacheMetrics;
+/// let mut m = CacheMetrics::default();
+/// m.hits = Some(10);
+/// m.misses = Some(2);
+/// assert_eq!(m.hit_ratio(), Some(10.0 / 12.0));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct CacheMetrics {
     /// Number of successful cache lookups, if tracked.
     pub hits: Option<u64>,
@@ -1469,9 +1483,9 @@ pub trait ConcurrentCloneCached<K, V> {
 /// `&self` methods on the [`ConcurrentCacheTtl`] trait
 /// (`ttl`/`set_ttl`/`unset_ttl`/`set_refresh_on_hit`) instead.
 ///
-/// This trait requires the `time_stores` feature.
-#[cfg(feature = "time_stores")]
-#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+/// The trait itself is always available (mirroring [`ConcurrentCacheTtl`]), so external stores
+/// can implement it without enabling `time_stores`; the built-in implementations on
+/// [`TtlCache`], [`LruTtlCache`], and [`TtlSortedCache`] require the `time_stores` feature.
 pub trait CacheTtl {
     /// Return the TTL applied to newly inserted entries.
     #[must_use]
@@ -2024,8 +2038,13 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Returns `Self::Error` if `cache_get` or `cache_set` fails.
+    ///
+    /// The `where Self: Sized` bound keeps this generic method out of the vtable so
+    /// `ConcurrentCached` stays dyn-compatible (`dyn ConcurrentCached<K, V, Error = E>` is a
+    /// usable type). Call it through a concrete type or the [`ConcurrentCachedExt`] alias.
     fn cache_get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
     where
+        Self: Sized,
         V: Clone,
     {
         if let Some(v) = self.cache_get(&k)? {
