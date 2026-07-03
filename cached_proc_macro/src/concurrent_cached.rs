@@ -1405,6 +1405,19 @@ fn get_redis_cache_type_and_create(
         ));
     }
 
+    // A custom `ty` on the redis path is only honored when the user also supplies a
+    // matching `create` block. Without `create` the macro would build the DEFAULT store
+    // (`RedisCache`/`AsyncRedisCache`) via its default builder while declaring the cache
+    // as the custom `ty`, silently mispairing the two. Reject that up front instead.
+    if args.ty.is_some() && args.create.is_none() {
+        return Err(syn::Error::new(
+            cache_ident.span(),
+            "a custom `ty` on the redis path requires a matching `create` block: without \
+             `create` the macro would construct the default `RedisCache`/`AsyncRedisCache` \
+             store, which would not match `ty`",
+        ));
+    }
+
     let cache_ty = match &args.ty {
         Some(ty) => {
             let ty = parse_str::<Type>(ty).map_err(|e| {
@@ -1475,6 +1488,19 @@ fn get_disk_cache_type_and_create(
     cache_value_ty: &proc_macro2::TokenStream,
     fn_ident: &Ident,
 ) -> Result<(proc_macro2::TokenStream, proc_macro2::TokenStream), syn::Error> {
+    // A custom `ty` on the disk path is only honored when the user also supplies a
+    // matching `create` block. Without `create` the macro would build the DEFAULT store
+    // (`RedbCache`) via its default builder while declaring the cache as the custom `ty`,
+    // silently mispairing the two. Reject that up front instead.
+    if args.ty.is_some() && args.create.is_none() {
+        return Err(syn::Error::new(
+            fn_ident.span(),
+            "a custom `ty` on the disk path requires a matching `create` block: without \
+             `create` the macro would construct the default `RedbCache` store, which would \
+             not match `ty`",
+        ));
+    }
+
     let cache_ty = match &args.ty {
         Some(ty) => {
             let ty = parse_str::<Type>(ty).map_err(|e| {

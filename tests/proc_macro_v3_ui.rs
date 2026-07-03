@@ -33,4 +33,8 @@ fn compile_fail_proc_macro_v3() {
     t.compile_fail("tests/ui/cached_redis_concurrent_only.rs");
     t.compile_fail("tests/ui/once_disk_concurrent_only.rs");
     t.compile_fail("tests/ui/once_redis_concurrent_only.rs");
+    // A custom `ty` on the redis/disk `#[concurrent_cached]` paths without a matching
+    // `create` block is rejected up front (it would otherwise build the default store).
+    t.compile_fail("tests/ui/concurrent_cached_redis_ty_without_create.rs");
+    t.compile_fail("tests/ui/concurrent_cached_disk_ty_without_create.rs");
 }
