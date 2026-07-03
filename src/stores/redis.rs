@@ -367,10 +367,79 @@ mod credential_leak_tests {
             !debug.contains(secret),
             "Debug must not expose the password; got: {debug}"
         );
+        // The full raw URL (host included) must not appear in Display/Debug either.
+        assert!(
+            !display.contains(&bad_url) && !debug.contains(&bad_url),
+            "neither Display nor Debug may echo the raw URL; got display={display}, debug={debug}"
+        );
         // The error must be a Connection variant (the sanitized one).
         assert!(
             matches!(err, RedisCacheBuildError::Connection(_)),
             "expected Connection error, got: {err:?}"
+        );
+    }
+
+    /// `resolve_connection_string()` returns a redacting [`ConnectionString`]: its
+    /// `Debug`/`Display` render the placeholder (never the password) while
+    /// `reveal()` hands back the exact raw URL. This is the surface an external
+    /// caller sees, so it must not expose credentials by default.
+    #[test]
+    fn resolve_connection_string_returns_redacting_wrapper() {
+        let secret = "resolve_secret_abc";
+        let raw = format!("redis://:{secret}@127.0.0.1:6379/0");
+
+        let builder = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&raw);
+
+        let cs = builder
+            .resolve_connection_string()
+            .expect("connection string was set");
+
+        let display = cs.to_string();
+        let debug = format!("{cs:?}");
+        assert_eq!(display, "[REDACTED connection string]");
+        assert_eq!(debug, "[REDACTED connection string]");
+        assert!(
+            !display.contains(secret) && !debug.contains(secret),
+            "wrapper must not expose the password in Display/Debug"
+        );
+        // reveal() must return the exact raw URL, credentials included.
+        assert_eq!(cs.reveal(), raw);
+        assert!(cs.reveal().contains(secret));
+    }
+
+    /// The full derived `Debug` of a `Connection` error built from a
+    /// password-bearing bad URL (sync build path) must contain neither the
+    /// password nor the raw URL. Guards the removal of the blanket
+    /// `#[from] redis::RedisError` on the `Connection` variant, whose raw redis
+    /// error's `Debug` could otherwise echo the connection string.
+    #[test]
+    fn sync_connection_error_debug_does_not_leak_url_or_password() {
+        let secret = "sync_debug_secret_123";
+        let bad_url = format!("not-redis://:{secret}@nonexistent-host:9999");
+
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&bad_url)
+            .build();
+
+        let err = result.expect_err("build must fail with a bad URL");
+        assert!(
+            matches!(err, RedisCacheBuildError::Connection(_)),
+            "expected Connection error, got: {err:?}"
+        );
+        // Exercise the full enum Debug (which recurses into the inner redis error).
+        let debug = format!("{err:?}");
+        assert!(
+            !debug.contains(secret),
+            "enum Debug must not expose the password; got: {debug}"
+        );
+        assert!(
+            !debug.contains(&bad_url),
+            "enum Debug must not echo the raw URL; got: {debug}"
         );
     }
 }
@@ -483,7 +552,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum RedisCacheBuildError {
     #[error("redis connection error")]
-    Connection(#[from] redis::RedisError),
+    // No `#[from]`: an implicit `From<redis::RedisError>` would let any `?` in the
+    // build path auto-wrap a raw redis error, whose `Debug` (reachable via this
+    // enum's derived `Debug`) can echo the connection URL and its embedded
+    // password. Every site that produces a `Connection` error constructs it
+    // explicitly from a sanitized synthetic `redis::RedisError` so no raw error
+    // (parse- or connect-phase) can reach this variant.
+    Connection(redis::RedisError),
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
     #[error(transparent)]
@@ -649,35 +724,40 @@ where
         self
     }
 
-    /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`
+    /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
+    ///
+    /// The value is wrapped in a redacting [`ConnectionString`]: its
+    /// `Debug`/`Display` render `[REDACTED connection string]`, so it is safe to
+    /// log or include in error messages. Call [`ConnectionString::reveal`] to
+    /// obtain the raw URL (including any embedded credentials) when needed.
     ///
     /// # Errors
     ///
     /// Will return `RedisCacheBuildError::MissingConnectionString` if connection string is not set
-    pub fn resolve_connection_string(&self) -> Result<String, RedisCacheBuildError> {
+    pub fn resolve_connection_string(&self) -> Result<ConnectionString, RedisCacheBuildError> {
         match self.connection_string {
-            Some(ref s) => Ok(s.to_string()),
-            None => {
-                std::env::var(ENV_KEY).map_err(|e| RedisCacheBuildError::MissingConnectionString {
+            Some(ref s) => Ok(ConnectionString(s.to_string())),
+            None => std::env::var(ENV_KEY)
+                .map(ConnectionString)
+                .map_err(|e| RedisCacheBuildError::MissingConnectionString {
                     env_key: ENV_KEY.to_string(),
                     error: e,
-                })
-            }
+                }),
         }
     }
 
     fn create_pool(&self) -> Result<r2d2::Pool<redis::Client>, RedisCacheBuildError> {
         let s = self.resolve_connection_string()?;
-        // Open the client, catching any error before it can propagate through
-        // the `#[from] redis::RedisError` impl on `RedisCacheBuildError::Connection`.
-        // A malformed URL such as `redis://:password@host` would otherwise surface
-        // the raw connection string (including the password) in the error's
-        // `Display`/`Debug`. Replace any error payload with a sanitized message.
-        let client: redis::Client = redis::Client::open(s).map_err(|_| {
-            redis::RedisError::from((
+        // Open the client, catching any error and replacing it with a sanitized
+        // `Connection` error. A malformed URL such as `redis://:password@host`
+        // would otherwise surface the raw connection string (including the
+        // password) in the error's `Display`/`Debug`. `Connection` no longer has
+        // a blanket `#[from]`, so the error is constructed explicitly here.
+        let client: redis::Client = redis::Client::open(s.reveal()).map_err(|_| {
+            RedisCacheBuildError::Connection(redis::RedisError::from((
                 redis::ErrorKind::InvalidClientConfig,
                 "failed to open redis client (connection string redacted)",
-            ))
+            )))
         })?;
         // some pool-builder defaults are set when the builder is initialized
         // so we can't overwrite any values with Nones...
@@ -733,7 +813,7 @@ where
         if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
             return Err(RedisCacheBuildError::EmptyScope);
         }
-        let connection_string = ConnectionString(self.resolve_connection_string()?);
+        let connection_string = self.resolve_connection_string()?;
         let pool = self.create_pool()?;
         Ok(RedisCache {
             ttl: Mutex::new(ttl),
@@ -1339,15 +1419,21 @@ mod async_redis {
             self
         }
 
-        /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`
+        /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
+        ///
+        /// The value is wrapped in a redacting [`ConnectionString`](super::ConnectionString):
+        /// its `Debug`/`Display` render `[REDACTED connection string]`, so it is
+        /// safe to log or include in error messages. Call
+        /// [`ConnectionString::reveal`](super::ConnectionString::reveal) to obtain
+        /// the raw URL (including any embedded credentials) when needed.
         ///
         /// # Errors
         ///
         /// Will return `RedisCacheBuildError::MissingConnectionString` if connection string is not set
-        pub fn resolve_connection_string(&self) -> Result<String, RedisCacheBuildError> {
+        pub fn resolve_connection_string(&self) -> Result<ConnectionString, RedisCacheBuildError> {
             match self.connection_string {
-                Some(ref s) => Ok(s.to_string()),
-                None => std::env::var(ENV_KEY).map_err(|e| {
+                Some(ref s) => Ok(ConnectionString(s.to_string())),
+                None => std::env::var(ENV_KEY).map(ConnectionString).map_err(|e| {
                     RedisCacheBuildError::MissingConnectionString {
                         env_key: ENV_KEY.to_string(),
                         error: e,
@@ -1393,17 +1479,17 @@ mod async_redis {
                 // Reject URLs that explicitly pin RESP2 before parsing — client-side
                 // caching requires RESP3 and silently downgrading would cause the
                 // invalidation listener to no-op, serving stale data.
-                if Self::url_pins_resp2(&s) {
+                if Self::url_pins_resp2(s.reveal()) {
                     return Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching);
                 }
 
                 // Sanitize any parse error so the raw URL (which may contain a
                 // password) is not surfaced in the error's Display/Debug.
-                let mut connection_info = s.into_connection_info().map_err(|_| {
-                    redis::RedisError::from((
+                let mut connection_info = s.reveal().into_connection_info().map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to parse redis connection info (connection string redacted)",
-                    ))
+                    )))
                 })?;
 
                 let mut config = redis::AsyncConnectionConfig::default();
@@ -1414,25 +1500,42 @@ mod async_redis {
                 connection_info = connection_info.set_redis_settings(redis_settings);
                 config = config.set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info).map_err(|_| {
-                    redis::RedisError::from((
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to open redis client (connection string redacted)",
-                    ))
+                    )))
                 })?;
+                // Sanitize the live-connection error: `Connection` has no blanket
+                // `#[from]`, and a raw redis connect error's Debug can echo the URL.
                 let conn = client
                     .get_multiplexed_async_connection_with_config(&config)
-                    .await?;
+                    .await
+                    .map_err(|_| {
+                        RedisCacheBuildError::Connection(redis::RedisError::from((
+                            redis::ErrorKind::Io,
+                            "failed to establish redis connection (connection string redacted)",
+                        )))
+                    })?;
                 return Ok(conn);
             }
 
             // Non-client-side-caching path: sanitize the Client::open error too.
-            let client = redis::Client::open(s).map_err(|_| {
-                redis::RedisError::from((
+            let client = redis::Client::open(s.reveal()).map_err(|_| {
+                RedisCacheBuildError::Connection(redis::RedisError::from((
                     redis::ErrorKind::InvalidClientConfig,
                     "failed to open redis client (connection string redacted)",
-                ))
+                )))
             })?;
-            let conn = client.get_multiplexed_async_connection().await?;
+            // Sanitize the live-connection error (see the note above).
+            let conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                        redis::ErrorKind::Io,
+                        "failed to establish redis connection (connection string redacted)",
+                    )))
+                })?;
             Ok(conn)
         }
 
@@ -1449,17 +1552,17 @@ mod async_redis {
                 // Reject URLs that explicitly pin RESP2 before parsing — client-side
                 // caching requires RESP3 and silently downgrading would cause the
                 // invalidation listener to no-op, serving stale data.
-                if Self::url_pins_resp2(&s) {
+                if Self::url_pins_resp2(s.reveal()) {
                     return Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching);
                 }
 
                 // Sanitize any parse error so the raw URL (which may contain a
                 // password) is not surfaced in the error's Display/Debug.
-                let mut connection_info = s.into_connection_info().map_err(|_| {
-                    redis::RedisError::from((
+                let mut connection_info = s.reveal().into_connection_info().map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to parse redis connection info (connection string redacted)",
-                    ))
+                    )))
                 })?;
 
                 let redis_settings = connection_info
@@ -1470,23 +1573,40 @@ mod async_redis {
                 let config = redis::aio::ConnectionManagerConfig::default()
                     .set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info).map_err(|_| {
-                    redis::RedisError::from((
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to open redis client (connection string redacted)",
-                    ))
+                    )))
                 })?;
-                let conn = redis::aio::ConnectionManager::new_with_config(client, config).await?;
+                // Sanitize the live-connection error: `Connection` has no blanket
+                // `#[from]`, and a raw redis connect error's Debug can echo the URL.
+                let conn = redis::aio::ConnectionManager::new_with_config(client, config)
+                    .await
+                    .map_err(|_| {
+                        RedisCacheBuildError::Connection(redis::RedisError::from((
+                            redis::ErrorKind::Io,
+                            "failed to establish redis connection (connection string redacted)",
+                        )))
+                    })?;
                 return Ok(conn);
             }
 
             // Non-client-side-caching path: sanitize the Client::open error too.
-            let client = redis::Client::open(s).map_err(|_| {
-                redis::RedisError::from((
+            let client = redis::Client::open(s.reveal()).map_err(|_| {
+                RedisCacheBuildError::Connection(redis::RedisError::from((
                     redis::ErrorKind::InvalidClientConfig,
                     "failed to open redis client (connection string redacted)",
-                ))
+                )))
             })?;
-            let conn = redis::aio::ConnectionManager::new(client).await?;
+            // Sanitize the live-connection error (see the note above).
+            let conn = redis::aio::ConnectionManager::new(client)
+                .await
+                .map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                        redis::ErrorKind::Io,
+                        "failed to establish redis connection (connection string redacted)",
+                    )))
+                })?;
             Ok(conn)
         }
 
@@ -1518,7 +1638,7 @@ mod async_redis {
             if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
                 return Err(RedisCacheBuildError::EmptyScope);
             }
-            let connection_string = ConnectionString(self.resolve_connection_string()?);
+            let connection_string = self.resolve_connection_string()?;
             #[cfg(not(feature = "redis_connection_manager"))]
             let connection = self.create_multiplexed_connection().await?;
             #[cfg(feature = "redis_connection_manager")]
@@ -1952,6 +2072,17 @@ mod async_redis {
             assert!(
                 !debug.contains(secret),
                 "Debug must not expose the password; got: {debug}"
+            );
+            // Neither the full enum Display nor its Debug may echo the raw URL.
+            assert!(
+                !display.contains(&bad_url) && !debug.contains(&bad_url),
+                "neither Display nor Debug may echo the raw URL; got display={display}, debug={debug}"
+            );
+            // A bad scheme fails at parse time and must surface as the sanitized
+            // Connection variant (no server required).
+            assert!(
+                matches!(err, RedisCacheBuildError::Connection(_)),
+                "expected Connection error, got: {err:?}"
             );
         }
 
