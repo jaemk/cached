@@ -1207,7 +1207,7 @@ impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
             hits: self.cache_hits(),
             misses: self.cache_misses(),
             evictions: self.cache_evictions(),
-            entry_count: self.cache_size(),
+            entry_count: Some(self.cache_size()),
             capacity: self.cache_capacity(),
         }
     }
@@ -1267,7 +1267,10 @@ pub struct CacheMetrics {
     /// Number of entries evicted from the cache, if tracked.
     pub evictions: Option<u64>,
     /// Current number of entries in the cache.
-    pub entry_count: usize,
+    ///
+    /// `None` means the count is unknown or unavailable for this store (e.g. redis/redb,
+    /// whose `cache_size` returns `Ok(None)`); `Some(n)` is the exact live entry count.
+    pub entry_count: Option<usize>,
     /// Maximum capacity, if bounded.
     pub capacity: Option<usize>,
 }
@@ -1348,13 +1351,15 @@ pub trait CloneCached<K, V> {
     fn cache_get_with_expiry_status<Q>(&mut self, key: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized;
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone;
 
     /// Ergonomic alias for [`cache_get_with_expiry_status`](Self::cache_get_with_expiry_status).
     fn get_with_expiry_status<Q>(&mut self, key: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
     {
         self.cache_get_with_expiry_status(key)
     }
@@ -1775,7 +1780,7 @@ pub trait ConcurrentCacheBase {
     /// This mirrors the default [`CachedExt::metrics`] on the non-concurrent family.
     #[must_use]
     fn metrics(&self) -> CacheMetrics {
-        let entry_count = self.cache_size().ok().flatten().unwrap_or(0);
+        let entry_count = self.cache_size().ok().flatten();
         CacheMetrics {
             hits: self.cache_hits(),
             misses: self.cache_misses(),
@@ -2115,6 +2120,14 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
     /// [`cache_delete`](ConcurrentCached::cache_delete).
     fn delete(&self, k: &K) -> Result<bool, Self::Error>;
 
+    /// Remove all entries from the cache. Delegates to
+    /// [`cache_clear`](ConcurrentCached::cache_clear).
+    fn clear(&self) -> Result<(), Self::Error>;
+
+    /// Remove all entries and reset the cache to its initial state. Delegates to
+    /// [`cache_reset`](ConcurrentCached::cache_reset).
+    fn reset(&self) -> Result<(), Self::Error>;
+
     /// Return the cached value for `k`, or compute and store `f()`. Delegates to
     /// [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with).
     fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
@@ -2141,6 +2154,14 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
 
     fn delete(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_delete(k)
+    }
+
+    fn clear(&self) -> Result<(), Self::Error> {
+        self.cache_clear()
+    }
+
+    fn reset(&self) -> Result<(), Self::Error> {
+        self.cache_reset()
     }
 
     fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>

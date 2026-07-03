@@ -243,7 +243,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: None,
-            entry_count: size,
+            entry_count: Some(size),
             capacity: None,
         }
     }
@@ -560,19 +560,22 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
     ///
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)).
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedUnboundCacheBase<K, V, H2>,
-    ) -> ShardedUnboundCacheBase<K, V, H>
+    ) -> Result<ShardedUnboundCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
         H: ShardHasher<K>,
     {
-        let new_cache = self
-            .build()
-            .unwrap_or_else(|e| panic!("ShardedUnboundCache build failed: {e}"));
+        let new_cache = self.build()?;
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, V)> = {
                 let guard = shard.lock.read();
@@ -582,7 +585,7 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
                 let _ = ConcurrentCached::cache_set(&new_cache, k, v);
             }
         }
-        new_cache
+        Ok(new_cache)
     }
 }
 
@@ -729,7 +732,8 @@ mod tests {
         }
         let new_cache = ShardedUnboundCacheBase::<u32, u32>::builder()
             .shards(4)
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         for i in 0..50u32 {
             assert_eq!(
                 SyncConcurrentCached::cache_get(&new_cache, &i).expect("key was just inserted"),

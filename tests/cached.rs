@@ -7232,7 +7232,7 @@ fn test_cache_metrics_and_hit_ratio() {
     let m = cache.metrics();
     assert_eq!(m.hits, Some(0));
     assert_eq!(m.misses, Some(0));
-    assert_eq!(m.entry_count, 0);
+    assert_eq!(m.entry_count, Some(0));
     assert!(m.capacity.is_none());
     assert!(m.hit_ratio().is_none(), "no lookups yet → None");
 
@@ -7244,7 +7244,7 @@ fn test_cache_metrics_and_hit_ratio() {
     let m = cache.metrics();
     assert_eq!(m.hits, Some(2));
     assert_eq!(m.misses, Some(1));
-    assert_eq!(m.entry_count, 1);
+    assert_eq!(m.entry_count, Some(1));
     let ratio = m.hit_ratio().expect("should have ratio after lookups");
     assert!((ratio - 2.0 / 3.0).abs() < 1e-9);
 

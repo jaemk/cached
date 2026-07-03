@@ -801,10 +801,10 @@ fn sharded_ttl_concurrent_ttl_flips_stay_consistent() {
     );
 
     let m = cache.metrics();
+    let entry_count = m.entry_count.expect("sharded stores report an exact entry count");
     assert!(
-        m.entry_count <= KEYS as usize,
-        "size must never exceed the distinct key count, got {}",
-        m.entry_count
+        entry_count <= KEYS as usize,
+        "size must never exceed the distinct key count, got {entry_count}"
     );
 }
 
@@ -881,9 +881,9 @@ fn sharded_lru_ttl_concurrent_ttl_flips_stay_consistent() {
     assert_eq!(cache.cache_get(&1), Ok(Some(10)));
 
     let m = cache.metrics();
+    let entry_count = m.entry_count.expect("sharded stores report an exact entry count");
     assert!(
-        m.entry_count <= KEYS as usize,
-        "size must never exceed the distinct key count, got {}",
-        m.entry_count
+        entry_count <= KEYS as usize,
+        "size must never exceed the distinct key count, got {entry_count}"
     );
 }

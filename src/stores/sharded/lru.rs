@@ -242,7 +242,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(evictions),
-            entry_count: size,
+            entry_count: Some(size),
             capacity: Some(self.inner.total_capacity),
         }
     }
@@ -709,19 +709,22 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
     ///
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)).
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedLruCacheBase<K, V, H2>,
-    ) -> ShardedLruCacheBase<K, V, H>
+    ) -> Result<ShardedLruCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
         H: ShardHasher<K>,
     {
-        let new_cache = self
-            .build()
-            .unwrap_or_else(|e| panic!("ShardedLruCache build failed: {e}"));
+        let new_cache = self.build()?;
         for shard in existing.inner.shards.iter() {
             // iter_order returns MRU-first; insert in reverse (LRU-first)
             // so that the MRU entries are pushed in last and land at the head.
@@ -733,7 +736,7 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
                 let _ = ConcurrentCached::cache_set(&new_cache, k, v);
             }
         }
-        new_cache
+        Ok(new_cache)
     }
 }
 
@@ -941,7 +944,8 @@ mod tests {
         let new_cache = ShardedLruCacheBase::<u32, u32>::builder()
             .max_size(1024)
             .shards(4)
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         for i in 0..50u32 {
             assert_eq!(
                 SyncConcurrentCached::cache_get(&new_cache, &i).expect("key was just inserted"),
@@ -964,7 +968,8 @@ mod tests {
         let new_cache = ShardedLruCacheBase::<u32, u32>::builder()
             .max_size(16)
             .shards(1)
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         assert!(new_cache.len() <= 16);
     }
 
