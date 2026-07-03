@@ -106,6 +106,12 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/cached_name_reserved_prefix.rs");
     t.compile_fail("tests/ui/once_name_reserved_prefix.rs");
     t.compile_fail("tests/ui/concurrent_cached_name_reserved_prefix.rs");
+    // Raw-ident fix: the reserved-`__cached`-prefix check runs on the STRIPPED name,
+    // so `name = "r#__cachedfoo"` must still be rejected with the reserved-prefix
+    // error on all three macros (and must NOT panic via `Ident::new_raw`).
+    t.compile_fail("tests/ui/cached_name_reserved_raw_prefix.rs");
+    t.compile_fail("tests/ui/once_name_reserved_raw_prefix.rs");
+    t.compile_fail("tests/ui/concurrent_cached_name_reserved_raw_prefix.rs");
     // D11: `sync_writes_buckets` is inert on `#[once]` (no `by_key` support).
     t.compile_fail("tests/ui/once_sync_writes_buckets_inert.rs");
 }

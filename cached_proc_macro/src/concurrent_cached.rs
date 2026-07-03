@@ -687,7 +687,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     .into();
             }
             // G2: `__cached` prefix is reserved for macro-generated bindings.
-            if name.starts_with("__cached") {
+            // Strip any leading `r#` before checking the reserved prefix so that
+            // raw identifiers like `r#__cachedfoo` are also rejected.
+            let bare = name.strip_prefix("r#").unwrap_or(name);
+            if bare.starts_with("__cached") {
                 return syn::Error::new(
                     fn_ident.span(),
                     "cache names beginning with `__cached` are reserved for macro-generated \
@@ -696,7 +699,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            Ident::new(name, fn_ident.span())
+            match name.strip_prefix("r#") {
+                Some(stripped) => Ident::new_raw(stripped, fn_ident.span()),
+                None => Ident::new(name, fn_ident.span()),
+            }
         }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
