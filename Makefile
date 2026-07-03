@@ -132,6 +132,8 @@ help: ## List all supported Make targets
 			tests/redis-async-cache-rustls) desc="Check redis_async_cache with redis_tokio_rustls" ;; \
 			tests/redis-store) desc="Run synchronous Redis store tests" ;; \
 			tests/redis-store-standalone) desc="Check redis_store feature compilation without proc_macro" ;; \
+			tests/redis-runtime-axes) desc="Check each redis async runtime feature compiles on its own" ;; \
+			tests/redis-capability-requires-runtime) desc="Assert capability-only redis features fail without a runtime" ;; \
 			tests/redis-tokio) desc="Run async Redis Tokio tests" ;; \
 			tests/all-features) desc="Run tests with all features enabled" ;; \
 			docker/status) desc="Check whether the Docker engine is available" ;; \
@@ -242,11 +244,25 @@ tests/disk-store-sync:
 # ordering on the aggregate below is not honored under parallel make. The
 # standalone `*-async-cache*`/`connection-manager` targets are compile-only
 # `cargo check`s and need no container.
-tests/redis: tests/redis-connection-manager tests/redis-async-cache tests/redis-async-cache-tokio tests/redis-async-cache-rustls tests/redis-store-standalone tests/redis-store tests/redis-tokio tests/all-features
+tests/redis: tests/redis-connection-manager tests/redis-async-cache tests/redis-async-cache-tokio tests/redis-async-cache-rustls tests/redis-store-standalone tests/redis-runtime-axes tests/redis-capability-requires-runtime tests/redis-store tests/redis-tokio tests/all-features
 
 tests/redis-store-standalone:
 	@echo "[$@]: Checking standalone redis_store feature compilation..."
 	$(CARGO_COMMAND) check --no-default-features --features redis_store
+
+tests/redis-runtime-axes:
+	@echo "[$@]: Checking each redis async runtime feature compiles on its own..."
+	$(CARGO_COMMAND) check --no-default-features --features redis_tokio
+	$(CARGO_COMMAND) check --no-default-features --features redis_smol
+	$(CARGO_COMMAND) check --no-default-features --features redis_tokio_native_tls
+	$(CARGO_COMMAND) check --no-default-features --features redis_tokio_rustls
+	$(CARGO_COMMAND) check --no-default-features --features redis_smol_native_tls
+	$(CARGO_COMMAND) check --no-default-features --features redis_smol_rustls
+
+tests/redis-capability-requires-runtime:
+	@echo "[$@]: Asserting capability-only features fail to compile without a runtime..."
+	@! $(CARGO_COMMAND) check --no-default-features --features redis_connection_manager >/dev/null 2>&1 || (>&2 echo 'redis_connection_manager must not compile without a runtime feature'; exit 1)
+	@! $(CARGO_COMMAND) check --no-default-features --features redis_async_cache >/dev/null 2>&1 || (>&2 echo 'redis_async_cache must not compile without a runtime feature'; exit 1)
 
 tests/redis-connection-manager:
 	@echo "[$@]: Checking redis_connection_manager composes with each runtime..."

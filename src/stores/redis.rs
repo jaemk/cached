@@ -1243,18 +1243,17 @@ where
     }
 }
 
-#[cfg(all(
-    feature = "async",
-    any(
-        feature = "redis_smol",
-        feature = "redis_smol_native_tls",
-        feature = "redis_smol_rustls",
-        feature = "redis_tokio",
-        feature = "redis_tokio_native_tls",
-        feature = "redis_tokio_rustls",
-        feature = "redis_async_cache",
-        feature = "redis_connection_manager"
-    )
+// Canonical `AsyncRedisCache` availability gate (kept in sync with src/lib.rs and
+// src/stores/mod.rs): a redis async runtime feature must be enabled. The six runtime features
+// each imply `redis_store` + `async`; the capability-only features are excluded because they
+// carry no runtime.
+#[cfg(any(
+    feature = "redis_smol",
+    feature = "redis_smol_native_tls",
+    feature = "redis_smol_rustls",
+    feature = "redis_tokio",
+    feature = "redis_tokio_native_tls",
+    feature = "redis_tokio_rustls",
 ))]
 mod async_redis {
     use crate::time::Duration;
@@ -1330,23 +1329,20 @@ mod async_redis {
 
     /// Builder for [`AsyncRedisCache`].
     ///
-    /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
-    /// `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`,
-    /// `redis_smol_rustls`, `redis_async_cache`, or `redis_connection_manager`.
+    /// **Feature:** requires an async runtime feature: one of `redis_tokio`,
+    /// `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or
+    /// `redis_smol_rustls`. The capability features `redis_async_cache` /
+    /// `redis_connection_manager` are additive opt-ins layered on top of a runtime; they do not
+    /// provide `AsyncRedisCache` on their own.
     #[cfg_attr(
         docsrs,
-        doc(cfg(all(
-            feature = "async",
-            any(
-                feature = "redis_smol",
-                feature = "redis_smol_native_tls",
-                feature = "redis_smol_rustls",
-                feature = "redis_tokio",
-                feature = "redis_tokio_native_tls",
-                feature = "redis_tokio_rustls",
-                feature = "redis_async_cache",
-                feature = "redis_connection_manager"
-            )
+        doc(cfg(any(
+            feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
+            feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
         )))
     )]
     pub struct AsyncRedisCacheBuilder<K, V> {
@@ -1769,23 +1765,20 @@ mod async_redis {
     /// (requires the `redis_connection_manager` feature). Enabling that feature
     /// only makes the option available; it does not change the default.
     ///
-    /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
-    /// `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`,
-    /// `redis_smol_rustls`, `redis_async_cache`, or `redis_connection_manager`.
+    /// **Feature:** requires an async runtime feature: one of `redis_tokio`,
+    /// `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or
+    /// `redis_smol_rustls`. The capability features `redis_async_cache` /
+    /// `redis_connection_manager` are additive opt-ins layered on top of a runtime; they do not
+    /// provide `AsyncRedisCache` on their own.
     #[cfg_attr(
         docsrs,
-        doc(cfg(all(
-            feature = "async",
-            any(
-                feature = "redis_smol",
-                feature = "redis_smol_native_tls",
-                feature = "redis_smol_rustls",
-                feature = "redis_tokio",
-                feature = "redis_tokio_native_tls",
-                feature = "redis_tokio_rustls",
-                feature = "redis_async_cache",
-                feature = "redis_connection_manager"
-            )
+        doc(cfg(any(
+            feature = "redis_smol",
+            feature = "redis_smol_native_tls",
+            feature = "redis_smol_rustls",
+            feature = "redis_tokio",
+            feature = "redis_tokio_native_tls",
+            feature = "redis_tokio_rustls",
         )))
     )]
     pub struct AsyncRedisCache<K, V> {
@@ -2410,33 +2403,25 @@ mod async_redis {
     }
 }
 
-#[cfg(all(
-    feature = "async",
-    any(
+// Canonical `AsyncRedisCache` availability gate (kept in sync with src/lib.rs and
+// src/stores/mod.rs): a redis async runtime feature must be enabled.
+#[cfg(any(
+    feature = "redis_smol",
+    feature = "redis_smol_native_tls",
+    feature = "redis_smol_rustls",
+    feature = "redis_tokio",
+    feature = "redis_tokio_native_tls",
+    feature = "redis_tokio_rustls",
+))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(
         feature = "redis_smol",
         feature = "redis_smol_native_tls",
         feature = "redis_smol_rustls",
         feature = "redis_tokio",
         feature = "redis_tokio_native_tls",
         feature = "redis_tokio_rustls",
-        feature = "redis_async_cache",
-        feature = "redis_connection_manager"
-    )
-))]
-#[cfg_attr(
-    docsrs,
-    doc(cfg(all(
-        feature = "async",
-        any(
-            feature = "redis_smol",
-            feature = "redis_smol_native_tls",
-            feature = "redis_smol_rustls",
-            feature = "redis_tokio",
-            feature = "redis_tokio_native_tls",
-            feature = "redis_tokio_rustls",
-            feature = "redis_async_cache",
-            feature = "redis_connection_manager"
-        )
     )))
 )]
 pub use async_redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
@@ -2691,18 +2676,13 @@ mod error_source_tests {
         assert_clone::<super::RedisCache<String, String>>();
     }
     /// `AsyncRedisCache` is `Clone` - compile-time bound check.
-    #[cfg(all(
-        feature = "async",
-        any(
-            feature = "redis_smol",
-            feature = "redis_smol_native_tls",
-            feature = "redis_smol_rustls",
-            feature = "redis_tokio",
-            feature = "redis_tokio_native_tls",
-            feature = "redis_tokio_rustls",
-            feature = "redis_async_cache",
-            feature = "redis_connection_manager"
-        )
+    #[cfg(any(
+        feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
+        feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
     ))]
     #[allow(dead_code)]
     fn check_async_redis_cache_is_clone() {

@@ -612,6 +612,13 @@ pub use macros::{Return, cached, concurrent_cached, once};
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 use std::future::Future;
+// Canonical `AsyncRedisCache` availability gate: a redis async *runtime* must be enabled. The
+// six runtime features below each imply `redis_store` + `async` (see Cargo.toml), so the store
+// and its async plumbing are present. The capability-only features (`redis_async_cache`,
+// `redis_connection_manager`) are deliberately NOT in this list: they add a redis capability but
+// no runtime, so on their own they cannot compile `AsyncRedisCache` (redis-rs needs a `*-comp`).
+// This exact expression is repeated at the `async_redis` module gate (src/stores/redis.rs) and
+// the stores re-export (src/stores/mod.rs); keep the three in sync.
 #[cfg(any(
     feature = "redis_smol",
     feature = "redis_smol_native_tls",
@@ -619,8 +626,6 @@ use std::future::Future;
     feature = "redis_tokio",
     feature = "redis_tokio_native_tls",
     feature = "redis_tokio_rustls",
-    feature = "redis_async_cache",
-    feature = "redis_connection_manager"
 ))]
 #[cfg_attr(
     docsrs,
@@ -631,11 +636,16 @@ use std::future::Future;
         feature = "redis_tokio",
         feature = "redis_tokio_native_tls",
         feature = "redis_tokio_rustls",
-        feature = "redis_async_cache",
-        feature = "redis_connection_manager"
     )))
 )]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
+
+// A capability-only feature (`redis_async_cache` / `redis_connection_manager`) enabled without a
+// runtime feature pulls `redis/aio` with no `*-comp`, which makes the `redis` crate itself fail
+// to build ("tokio-comp or smol-comp features required for aio feature"). That error originates
+// in the dependency, which compiles before `cached`, so a `compile_error!` here could not
+// preempt it. The requirement is documented on each capability feature in Cargo.toml: pair it
+// with a `redis_tokio*` or `redis_smol*` runtime feature.
 pub use stores::{
     BuildError, CacheEvict, CacheSetError, ConcurrentCacheEvict, DefaultHashBuilder,
     DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,

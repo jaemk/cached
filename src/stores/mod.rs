@@ -338,35 +338,26 @@ pub use sharded::{
     ShardedTtlCacheBase, ShardedTtlCacheBuilder,
 };
 
-#[cfg(all(
-    feature = "async_core",
-    feature = "redis_store",
-    any(
+// Canonical `AsyncRedisCache` availability gate (kept in sync with src/lib.rs and
+// src/stores/redis.rs): a redis async runtime feature must be enabled. The six runtime features
+// each imply `redis_store` + `async`; the capability-only features are excluded (no runtime).
+#[cfg(any(
+    feature = "redis_smol",
+    feature = "redis_smol_native_tls",
+    feature = "redis_smol_rustls",
+    feature = "redis_tokio",
+    feature = "redis_tokio_native_tls",
+    feature = "redis_tokio_rustls",
+))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(
         feature = "redis_smol",
         feature = "redis_smol_native_tls",
         feature = "redis_smol_rustls",
         feature = "redis_tokio",
         feature = "redis_tokio_native_tls",
         feature = "redis_tokio_rustls",
-        feature = "redis_async_cache",
-        feature = "redis_connection_manager"
-    )
-))]
-#[cfg_attr(
-    docsrs,
-    doc(cfg(all(
-        feature = "async_core",
-        feature = "redis_store",
-        any(
-            feature = "redis_smol",
-            feature = "redis_smol_native_tls",
-            feature = "redis_smol_rustls",
-            feature = "redis_tokio",
-            feature = "redis_tokio_native_tls",
-            feature = "redis_tokio_rustls",
-            feature = "redis_async_cache",
-            feature = "redis_connection_manager"
-        )
     )))
 )]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
