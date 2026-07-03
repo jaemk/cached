@@ -480,13 +480,14 @@ where
     /// [`ConcurrentCacheEvict::evict`](crate::ConcurrentCacheEvict::evict), which
     /// also return `usize`).
     pub fn remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
-        let now = SystemTime::now();
         let ttl = *self.ttl.lock();
 
-        // Collect the keys to expire first: we cannot remove entries while
-        // holding the read iterator (the iterator borrows the read txn).
+        // Collect candidate expired keys under a read transaction. We cannot
+        // iterate and remove entries in the same transaction because the
+        // iterator borrows the read txn for its entire lifetime.
         let mut expired_keys: Vec<String> = Vec::new();
         {
+            let now = SystemTime::now();
             let rtxn = self.connection.begin_read()?;
             let table = rtxn.open_table(TABLE)?;
             for item in table.iter()? {
@@ -510,18 +511,60 @@ where
             }
         }
 
-        if !expired_keys.is_empty() {
-            let wtxn = begin_write(&self.connection, self.durable)?;
-            {
-                let mut table = wtxn.open_table(TABLE)?;
-                for key in &expired_keys {
-                    table.remove(key.as_str())?;
-                }
-            }
-            wtxn.commit()?;
+        if expired_keys.is_empty() {
+            return Ok(0);
         }
 
-        Ok(expired_keys.len())
+        // Re-check each candidate key inside the write txn before removing it.
+        // A concurrent `cache_set` may have replaced one of these entries with a
+        // fresh value between the read scan above and now; skipping such entries
+        // ensures we never delete a live entry. The returned count reflects the
+        // number of entries *actually* removed, not the number found in the scan.
+        let mut removed = 0usize;
+        let now_write = SystemTime::now();
+        let wtxn = begin_write(&self.connection, self.durable)?;
+        {
+            let mut table = wtxn.open_table(TABLE)?;
+            for key in &expired_keys {
+                // Re-read the entry under the write txn to obtain the
+                // authoritative state. Drop the access guard before mutating
+                // the table.
+                let current: Option<CachedDiskValue<V>> = match table.get(key.as_str())? {
+                    None => None,
+                    Some(guard) => {
+                        let raw = guard.value();
+                        Some(rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(
+                            |source| RedbCacheError::CacheDeserialization {
+                                source,
+                                cached_value: raw.to_vec(),
+                            },
+                        )?)
+                        // guard is dropped here; table can be mutated below.
+                    }
+                };
+
+                match current {
+                    None => {
+                        // Already removed by a concurrent operation; skip.
+                    }
+                    Some(entry) => {
+                        if let Some(ttl) = ttl
+                            && now_write
+                                .duration_since(entry.created_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                >= ttl
+                        {
+                            table.remove(key.as_str())?;
+                            removed += 1;
+                        }
+                        // else: entry was rewritten with a fresh timestamp by a
+                        // concurrent writer; leave it in place.
+                    }
+                }
+            }
+        }
+        wtxn.commit()?;
+        Ok(removed)
     }
 
     /// Force a durable (fsync) commit, persisting any writes made while
@@ -665,7 +708,10 @@ fn disk_cache_get<V>(
 where
     V: Serialize + DeserializeOwned,
 {
-    let mut cached = {
+    // Fast path: read the entry under a read transaction. For the common case
+    // where no mutation is required (no TTL, or a fresh entry with refresh
+    // disabled) we return immediately, keeping a single read txn with no write.
+    let cached = {
         let rtxn = connection.begin_read()?;
         let table = rtxn.open_table(TABLE)?;
         let Some(guard) = table.get(key)? else {
@@ -681,35 +727,89 @@ where
         })?
     };
 
-    if let Some(ttl) = ttl {
-        if SystemTime::now()
-            .duration_since(cached.created_at)
-            .unwrap_or(Duration::from_secs(0))
-            < ttl
-        {
-            if refresh {
-                cached.refresh_created_at();
-                let serialized = rmp_serde::to_vec(&cached)?;
-                let wtxn = begin_write(connection, durable)?;
-                {
-                    let mut table = wtxn.open_table(TABLE)?;
-                    table.insert(key, serialized.as_slice())?;
-                }
-                wtxn.commit()?;
-            }
-            Ok(Some(cached.value))
-        } else {
-            let wtxn = begin_write(connection, durable)?;
-            {
-                let mut table = wtxn.open_table(TABLE)?;
-                table.remove(key)?;
-            }
-            wtxn.commit()?;
-            Ok(None)
-        }
-    } else {
-        Ok(Some(cached.value))
+    let Some(ttl) = ttl else {
+        // No TTL: entries never expire; no mutation needed.
+        return Ok(Some(cached.value));
+    };
+
+    let age = SystemTime::now()
+        .duration_since(cached.created_at)
+        .unwrap_or(Duration::from_secs(0));
+
+    if age < ttl && !refresh {
+        // Entry is fresh and no refresh is requested: fast path, no write.
+        return Ok(Some(cached.value));
     }
+
+    // Mutation is required — either a refresh-on-hit write-back or an expiry
+    // eviction. To avoid two read-then-write races, we open a write transaction
+    // and re-read the entry atomically:
+    //
+    // Race 1 – refresh clobber: the naive path serialises the old value (read
+    //   under the now-dropped read txn) with a refreshed timestamp and blindly
+    //   inserts it, overwriting a newer value a concurrent `cache_set` may have
+    //   stored in between.
+    //
+    // Race 2 – stale eviction: the naive path removes the entry in a new write
+    //   txn, deleting a fresh value a concurrent `cache_set` may have just
+    //   written in between.
+    //
+    // redb serialises write transactions, so the re-read + conditional mutate
+    // below is atomic against any concurrent writer.
+    let wtxn = begin_write(connection, durable)?;
+    let result = {
+        let mut table = wtxn.open_table(TABLE)?;
+
+        // Re-read the current entry under the write txn. Drop the access guard
+        // immediately after copying the bytes so the table can be mutated.
+        let current: Option<CachedDiskValue<V>> = match table.get(key)? {
+            None => None,
+            Some(guard) => {
+                let raw = guard.value();
+                Some(
+                    rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
+                        RedbCacheError::CacheDeserialization {
+                            source,
+                            cached_value: raw.to_vec(),
+                        }
+                    })?,
+                )
+                // guard is dropped here; table can be mutated below.
+            }
+        };
+
+        match current {
+            None => {
+                // Entry vanished between the read txn and this write txn (a
+                // concurrent remove or clear). Do not resurrect it.
+                None
+            }
+            Some(mut current_entry) => {
+                let current_age = SystemTime::now()
+                    .duration_since(current_entry.created_at)
+                    .unwrap_or(Duration::from_secs(0));
+
+                if current_age < ttl {
+                    // Entry is still fresh under the write txn. The current
+                    // value is authoritative — it may differ from what the read
+                    // txn saw if a concurrent `cache_set` replaced it. Refresh
+                    // the current entry (not the stale read) if requested.
+                    if refresh {
+                        current_entry.refresh_created_at();
+                        let serialized = rmp_serde::to_vec(&current_entry)?;
+                        table.insert(key, serialized.as_slice())?;
+                    }
+                    Some(current_entry.value)
+                } else {
+                    // Still expired under the write txn: remove it.
+                    table.remove(key)?;
+                    None
+                }
+            }
+        }
+    };
+    wtxn.commit()?;
+    Ok(result)
 }
 
 fn disk_cache_set<V>(
