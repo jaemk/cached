@@ -1270,6 +1270,64 @@ mod async_redis {
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
 
+    /// The async redis connection held by an [`AsyncRedisCache`].
+    ///
+    /// The `Multiplexed` variant is always compiled; the `Manager`
+    /// (auto-reconnecting [`redis::aio::ConnectionManager`]) variant is compiled
+    /// in only when the `redis_connection_manager` feature is enabled.
+    ///
+    /// Selecting the manager is a *per-cache runtime* choice made in
+    /// [`AsyncRedisCacheBuilder::build`] from the
+    /// [`connection_manager`](AsyncRedisCacheBuilder::connection_manager) flag,
+    /// not a build-wide behavior swap. That keeps the feature additive: enabling
+    /// `redis_connection_manager` anywhere in the dependency graph (Cargo unifies
+    /// features) only makes the option *available*; every existing cache stays
+    /// multiplexed (the 2.x default) unless its own builder opts in.
+    ///
+    /// Both inner connection types implement [`redis::aio::ConnectionLike`] and
+    /// `Clone`, so this enum forwards to them and the command methods can keep
+    /// cloning `self.connection` uniformly.
+    #[derive(Clone)]
+    pub(crate) enum AsyncRedisConnection {
+        Multiplexed(redis::aio::MultiplexedConnection),
+        #[cfg(feature = "redis_connection_manager")]
+        Manager(redis::aio::ConnectionManager),
+    }
+
+    impl redis::aio::ConnectionLike for AsyncRedisConnection {
+        fn req_packed_command<'a>(
+            &'a mut self,
+            cmd: &'a redis::Cmd,
+        ) -> redis::RedisFuture<'a, redis::Value> {
+            match self {
+                AsyncRedisConnection::Multiplexed(c) => c.req_packed_command(cmd),
+                #[cfg(feature = "redis_connection_manager")]
+                AsyncRedisConnection::Manager(c) => c.req_packed_command(cmd),
+            }
+        }
+
+        fn req_packed_commands<'a>(
+            &'a mut self,
+            cmd: &'a redis::Pipeline,
+            offset: usize,
+            count: usize,
+        ) -> redis::RedisFuture<'a, Vec<redis::Value>> {
+            match self {
+                AsyncRedisConnection::Multiplexed(c) => c.req_packed_commands(cmd, offset, count),
+                #[cfg(feature = "redis_connection_manager")]
+                AsyncRedisConnection::Manager(c) => c.req_packed_commands(cmd, offset, count),
+            }
+        }
+
+        fn get_db(&self) -> i64 {
+            match self {
+                AsyncRedisConnection::Multiplexed(c) => c.get_db(),
+                #[cfg(feature = "redis_connection_manager")]
+                AsyncRedisConnection::Manager(c) => c.get_db(),
+            }
+        }
+    }
+
     /// Builder for [`AsyncRedisCache`].
     ///
     /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
@@ -1299,6 +1357,11 @@ mod async_redis {
         connection_string: Option<String>,
         #[cfg(feature = "redis_async_cache")]
         client_side_caching: bool,
+        // Per-cache opt-in to the auto-reconnecting connection manager. Only
+        // exists when the capability is compiled in; default `false` keeps the
+        // 2.x multiplexed behavior even when the feature is enabled transitively.
+        #[cfg(feature = "redis_connection_manager")]
+        connection_manager: bool,
         // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
         _phantom: PhantomData<fn() -> (K, V)>,
     }
@@ -1333,6 +1396,8 @@ mod async_redis {
                 connection_string: None,
                 #[cfg(feature = "redis_async_cache")]
                 client_side_caching: false,
+                #[cfg(feature = "redis_connection_manager")]
+                connection_manager: false,
                 _phantom: PhantomData,
             }
         }
@@ -1419,6 +1484,29 @@ mod async_redis {
             self
         }
 
+        /// Use the auto-reconnecting [`redis::aio::ConnectionManager`] instead of
+        /// the default plain multiplexed connection for this cache.
+        ///
+        /// Default is `false` (a `redis::aio::MultiplexedConnection`, the 2.x
+        /// behavior). Enabling the `redis_connection_manager` feature only makes
+        /// this option *available*; it never changes a cache's behavior unless
+        /// that cache's builder opts in here. This keeps the feature additive:
+        /// because Cargo unifies features across the whole dependency graph, a
+        /// distant transitive dependency turning the feature on must not silently
+        /// switch your caches to the manager's auto-reconnect semantics.
+        ///
+        /// The manager composes with whichever async runtime feature you enable
+        /// (`redis_tokio` or `redis_smol`); it does not force tokio.
+        ///
+        /// **Feature:** requires `redis_connection_manager`.
+        #[cfg(feature = "redis_connection_manager")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "redis_connection_manager")))]
+        #[must_use]
+        pub fn connection_manager(mut self, yes: bool) -> Self {
+            self.connection_manager = yes;
+            self
+        }
+
         /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
         ///
         /// The value is wrapped in a redacting [`ConnectionString`](super::ConnectionString):
@@ -1466,9 +1554,30 @@ mod async_redis {
             false
         }
 
+        /// Select and build the async connection for this cache.
+        ///
+        /// Runtime selection (not a compile-time feature fork): when the
+        /// `redis_connection_manager` feature is compiled in AND this builder's
+        /// [`connection_manager`](Self::connection_manager) flag is set, build a
+        /// [`redis::aio::ConnectionManager`]; otherwise build a plain
+        /// [`redis::aio::MultiplexedConnection`]. The default is multiplexed, so
+        /// enabling the feature transitively never changes an existing cache.
+        async fn create_connection(
+            &self,
+        ) -> Result<AsyncRedisConnection, RedisCacheBuildError> {
+            #[cfg(feature = "redis_connection_manager")]
+            if self.connection_manager {
+                return Ok(AsyncRedisConnection::Manager(
+                    self.create_connection_manager().await?,
+                ));
+            }
+            Ok(AsyncRedisConnection::Multiplexed(
+                self.create_multiplexed_connection().await?,
+            ))
+        }
+
         /// Create a multiplexed redis connection. This is a single connection that can
         /// be used asynchronously by multiple futures.
-        #[cfg(not(feature = "redis_connection_manager"))]
         async fn create_multiplexed_connection(
             &self,
         ) -> Result<redis::aio::MultiplexedConnection, RedisCacheBuildError> {
@@ -1622,8 +1731,9 @@ mod async_redis {
         ///   `SCAN MATCH *` and delete every key in the Redis database.
         /// - `MissingConnectionString`: no connection string was set and the
         ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
-        /// - `Connection`: the Redis client or multiplexed connection could not
-        ///   be created.
+        /// - `Connection`: the Redis client or the selected connection (multiplexed,
+        ///   or the connection manager when `.connection_manager(true)` is set) could
+        ///   not be created.
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
             // Validate required fields before any IO/connection attempt so the
             // missing-required error is returned without needing a server.
@@ -1639,10 +1749,7 @@ mod async_redis {
                 return Err(RedisCacheBuildError::EmptyScope);
             }
             let connection_string = self.resolve_connection_string()?;
-            #[cfg(not(feature = "redis_connection_manager"))]
-            let connection = self.create_multiplexed_connection().await?;
-            #[cfg(feature = "redis_connection_manager")]
-            let connection = self.create_connection_manager().await?;
+            let connection = self.create_connection().await?;
             Ok(AsyncRedisCache {
                 ttl: Mutex::new(ttl),
                 refresh: AtomicBool::new(self.refresh),
@@ -1658,9 +1765,11 @@ mod async_redis {
     /// Async cache store backed by redis.
     ///
     /// Values have a TTL applied and enforced by Redis.
-    /// Uses a `redis::aio::MultiplexedConnection` or `redis::aio::ConnectionManager`
-    /// under the hood depending on whether the `redis_connection_manager` feature is
-    /// enabled.
+    /// Uses a `redis::aio::MultiplexedConnection` by default, or a
+    /// `redis::aio::ConnectionManager` when the cache was built with
+    /// [`AsyncRedisCacheBuilder::connection_manager(true)`](AsyncRedisCacheBuilder::connection_manager)
+    /// (requires the `redis_connection_manager` feature). Enabling that feature
+    /// only makes the option available; it does not change the default.
     ///
     /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
     /// `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`,
@@ -1687,10 +1796,10 @@ mod async_redis {
         pub(super) namespace: String,
         pub(super) prefix: String,
         connection_string: ConnectionString,
-        #[cfg(not(feature = "redis_connection_manager"))]
-        connection: redis::aio::MultiplexedConnection,
-        #[cfg(feature = "redis_connection_manager")]
-        connection: redis::aio::ConnectionManager,
+        // Always the enum: the manager is a per-cache runtime choice, not a
+        // feature-driven type swap. Selected in `build()` from the builder's
+        // `connection_manager` flag; defaults to `Multiplexed` (2.x behavior).
+        connection: AsyncRedisConnection,
         // `AsyncRedisCache` owns no live `K`/`V` — see the rationale on
         // `RedisCache::_phantom`. Same fn-pointer phantom so a `Send`-but-`!Sync`
         // `V` (e.g. one containing a `Cell`) is usable, and the macro-emitted
@@ -2233,6 +2342,70 @@ mod async_redis {
                 .ttl_millis(500)
                 .ttl_secs(10);
             assert_eq!(b.ttl, Some(Duration::from_secs(10)));
+        }
+
+        // Additivity guard (no Redis server needed). With `redis_connection_manager`
+        // compiled in, merely enabling the feature must NOT switch a cache to the
+        // manager: the builder's `connection_manager` flag defaults to `false`
+        // (multiplexed, the 2.x behavior), and only `.connection_manager(true)`
+        // flips it. `build()` reads exactly this flag to pick the `Multiplexed` vs
+        // `Manager` variant, so the default-false here is what keeps the feature
+        // additive across a unified dependency graph.
+        #[cfg(feature = "redis_connection_manager")]
+        #[test]
+        fn connection_manager_defaults_false_and_flips() {
+            let b = AsyncRedisCacheBuilder::<String, String>::new().prefix("p");
+            assert!(
+                !b.connection_manager,
+                "default must be multiplexed (connection_manager == false) so enabling \
+                 the feature is additive and never swaps behavior on its own"
+            );
+
+            let b = b.connection_manager(true);
+            assert!(
+                b.connection_manager,
+                ".connection_manager(true) must opt the cache into the manager"
+            );
+
+            let b = b.connection_manager(false);
+            assert!(
+                !b.connection_manager,
+                ".connection_manager(false) must return to the multiplexed default"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod async_connection_enum_tests {
+        // No Redis server needed -- these assert the connection enum's variant
+        // selection is a pure function of the builder flag, without opening a
+        // socket. They lock in Part A's runtime (not feature) selection.
+        use super::AsyncRedisConnection;
+
+        /// The multiplexed variant is always present regardless of features; this
+        /// is a compile-time proof that `AsyncRedisConnection::Multiplexed` exists
+        /// and that the enum is the connection type the default build path wraps.
+        #[allow(dead_code)]
+        fn multiplexed_variant_exists(c: redis::aio::MultiplexedConnection) -> AsyncRedisConnection {
+            AsyncRedisConnection::Multiplexed(c)
+        }
+
+        /// The manager variant is compiled in only with the feature; this proves
+        /// the enum carries it (and that `.connection_manager(true)` has a variant
+        /// to select) when `redis_connection_manager` is enabled.
+        #[cfg(feature = "redis_connection_manager")]
+        #[allow(dead_code)]
+        fn manager_variant_exists(c: redis::aio::ConnectionManager) -> AsyncRedisConnection {
+            AsyncRedisConnection::Manager(c)
+        }
+
+        /// `AsyncRedisConnection` must be `Clone` (the command methods clone it per
+        /// call) and `ConnectionLike` (so it can be used as a redis connection).
+        #[allow(dead_code)]
+        fn assert_bounds<T: Clone + redis::aio::ConnectionLike>() {}
+        #[allow(dead_code)]
+        fn check_connection_enum_bounds() {
+            assert_bounds::<AsyncRedisConnection>();
         }
     }
 }

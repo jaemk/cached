@@ -28,7 +28,19 @@ ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
 async = ["async_core", "dep:async-lock"]
 redis_store = ["redis", "r2d2", "serde", "rmp-serde", "serde_json"]
-redis_connection_manager = ["redis_tokio", "redis/connection-manager"]
+# Runtime axis: the redis async capabilities below (`redis_connection_manager`,
+# `redis_async_cache`) express only the redis capability and are runtime-agnostic;
+# the async runtime is chosen separately via `redis_tokio` (or its TLS variants) or
+# `redis_smol`. A capability feature must be combined with a runtime feature to
+# yield a usable `AsyncRedisCache`; enabling it alone leaves you without a runtime
+# (redis-rs has nothing to drive the connection and will fail to build/connect).
+#
+# `redis/connection-manager` depends only on `redis/aio` (not `tokio-comp`), so the
+# auto-reconnecting connection manager composes with either runtime -- a `redis_smol`
+# user can enable it. Note it is now additive: it makes the manager *available* as a
+# per-cache builder opt-in (`.connection_manager(true)`) and no longer swaps every
+# `AsyncRedisCache` from multiplexed to manager.
+redis_connection_manager = ["redis/connection-manager"]
 redis_smol = [
   "redis_store",
   "async",
@@ -43,7 +55,12 @@ redis_tokio = [
 ]
 redis_tokio_native_tls = ["redis_tokio", "redis/tokio-native-tls-comp"]
 redis_tokio_rustls = ["redis_tokio", "redis/tokio-rustls-comp"]
-redis_async_cache = ["redis_store", "async", "redis_tokio", "redis/cache-aio"]
+# `redis/cache-aio` (client-side caching) depends only on `redis/aio` (not
+# `tokio-comp`) in redis 1.x, so it is runtime-agnostic like the connection manager.
+# It therefore no longer hard-wires tokio: pair it with a runtime feature
+# (`redis_tokio*` or `redis_smol*`). It keeps `redis_store`/`async` so the async
+# store compiles, but still needs a runtime feature to actually connect.
+redis_async_cache = ["redis_store", "async", "redis/cache-aio"]
 # `blocking` (and its async-channel/futures-lite deps) is only used to offload
 # the synchronous redb operations off the async executor, so it is pulled by
 # `redb_store` rather than `async`. Redis-only and in-memory async builds do not
