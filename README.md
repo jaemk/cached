@@ -13,14 +13,16 @@ Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe wi
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
 store's own internal synchronization: sharded stores use per-shard `parking_lot::RwLock`; Redis and
 disk stores rely on their respective server/file-system concurrency.
-By default, `#[cached]` uses `sync_writes = "by_key"`: concurrent first calls for the same key are
-deduplicated through bucketed per-key locks, so the function body runs at most once per key per miss
-window. To allow concurrent misses to each compute independently (the pre-3.0 default, which mirrored
-Python's `functools.lru_cache`), set `sync_writes = false`. To hold the whole-cache lock for the
-duration of each miss, use `sync_writes = true` (or `"default"`). `#[once]` defaults to no
-synchronization (add `sync_writes = true` to serialize concurrent first-calls); `#[concurrent_cached]`
-does not support `sync_writes`. For `#[cached]`, the number of per-key lock buckets for `"by_key"` is
-tunable with `sync_writes_buckets = N` (default 64).
+By default, `#[cached]` uses no write synchronization: concurrent uncached calls for the same key may
+each compute independently and overwrite each other, matching the 2.x behavior and Python's
+`functools.lru_cache`. Set `sync_writes = "by_key"` to deduplicate concurrent first calls for the same
+key through bucketed per-key locks. Set `sync_writes = true` (or `"default"`) to hold the whole-cache
+lock for the duration of each miss. Note: `"by_key"` holds the per-key bucket lock across the entire
+function body, so it must not be used on recursive or re-entrant memoized functions (deadlock risk when
+keys in the active call chain share a bucket). `#[once]` defaults to no synchronization (add
+`sync_writes = true` to serialize concurrent first-calls); `#[concurrent_cached]` does not support
+`sync_writes`. The number of per-key lock buckets for `"by_key"` is tunable with
+`sync_writes_buckets = N` (default 64).
 
 - See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
@@ -63,9 +65,10 @@ For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCa
 `len`/`is_empty` are defined on `ConcurrentCacheBase` (the shared base trait), not on
 `ConcurrentCachedExt` — bring `ConcurrentCacheBase` into scope to call them on a generic bound.
 
-Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...; `CachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
+Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` mirrors the sync
+`ConcurrentCached` surface (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) for
+IO-backed stores that manage their own synchronization. `CachedGetOrSetAsync` is narrower: it
+only memoizes an async closure over a synchronous in-memory `Cached` store, via the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
 `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
 the `async_` prefix already prevents collisions with the sync methods.
@@ -84,11 +87,14 @@ the `async_` prefix already prevents collisions with the sync methods.
 - `redis_tokio`: Include async Redis support using `tokio` (no TLS); implies `redis_store` and `async`
 - `redis_tokio_native_tls`: `redis_tokio` + TLS via `native-tls` (system TLS library)
 - `redis_tokio_rustls`: `redis_tokio` + TLS via `rustls` (pure-Rust TLS)
-- `redis_connection_manager`: Enable the optional `connection-manager` feature of `redis`. Any async redis caches created
-  will use a connection manager instead of a `MultiplexedConnection`. Implies `async` (Tokio runtime) and `redis_store`,
-  but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+- `redis_connection_manager`: Enable the optional `connection-manager` capability of `redis`. Additive: async redis
+  caches keep using a `MultiplexedConnection` by default; opt a specific cache into the auto-reconnecting connection
+  manager with `.connection_manager(true)` on its builder. Runtime-agnostic (`redis/connection-manager` needs only
+  `redis/aio`), so it composes with either runtime -- pair it with a runtime feature (`redis_tokio*` or `redis_smol*`),
+  which is what pulls in `redis_store` and `async`; enabling it alone leaves you without a runtime. Does **not** enable TLS.
 - `redis_async_cache`: Enable Redis client-side caching over RESP3 for async Redis caches.
-  Implies `redis_tokio`, `async`, and `redis_store`, but does not enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+  Implies `async` and `redis_store`, but is runtime-agnostic (`redis/cache-aio` needs only `redis/aio`): pair it with a
+  runtime feature (`redis_tokio*` or `redis_smol*`) or the build has no runtime to connect with. Does not enable TLS.
 - `redb_store`: Include disk cache store
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, `#[concurrent_cached(ttl_millis = ...)]`, `#[once(ttl_secs = ...)]`, `#[once(ttl = ...)]`, or `#[once(ttl_millis = ...)]` on the default in-memory path.
@@ -100,7 +106,7 @@ See the [`macros`](https://docs.rs/cached/latest/cached/macros/index.html) modul
 Project automation targets are documented by `make help`, and `make check/help` verifies that the
 help output stays in sync with supported Makefile targets.
 
-Any custom cache that implements `cached::Cached`/`cached::CachedAsync` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins.
+Any custom cache that implements `cached::Cached` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins (`cached::CachedGetOrSetAsync` additionally memoizes an async closure over such a store).
 Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentCachedAsync` can be used with the `#[concurrent_cached]` macro.
 
 **Macro quick reference**
@@ -108,8 +114,8 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Use case | Annotated signature |
 |---|---|
 | **`#[cached]`** | |
-| Unbounded memoize (default; deduplicates concurrent misses per key) | `#[cached] fn fib(n: u64) -> u64` |
-| Unbounded memoize, allow concurrent misses per key (old default) | `#[cached(sync_writes = false)] fn fib(n: u64) -> u64` |
+| Unbounded memoize (default; concurrent misses each compute independently) | `#[cached] fn fib(n: u64) -> u64` |
+| Unbounded memoize, explicit no-sync (same as default) | `#[cached(sync_writes = false)] fn fib(n: u64) -> u64` |
 | LRU-bounded — evict past N entries | `#[cached(max_size = 1_000)] fn lookup(id: u32) -> Row` |
 | TTL — expire results after N whole seconds | `#[cached(ttl_secs = 60)] fn config() -> Config` |
 | TTL as a Duration expression (inlined verbatim, so `Duration` must be in scope; see note below) | `#[cached(ttl = "Duration::from_secs(60)")] fn config() -> Config` |
@@ -121,7 +127,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Force-cache `Err` returns | `#[cached(cache_err = true)] fn load(id: u64) -> Result<Data, E>` |
 | Serve stale value when function returns `Err` | `#[cached(result_fallback = true, ttl_secs = 60)] fn fetch(id: u64) -> Result<Data, E>` |
 | Per-value / dynamic per-entry TTL (value carries its own expiry) | `#[cached(expires = true)] fn token(scope: String) -> Token` |
-| Deduplicate concurrent first calls for same key (explicit; same as bare `#[cached]`) | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
+| Deduplicate concurrent first calls per key (opt-in; do not use on recursive functions) | `#[cached(ttl_secs = 30, sync_writes = "by_key")] fn expensive(id: u64) -> Payload` |
 | Recompute when an expression over the args is true | `#[cached(force_refresh = { id == 0 })] fn fetch(id: u64) -> Data` |
 | Force-refresh via a dedicated flag (exclude it from the key) | `#[cached(key = "u64", convert = { id }, force_refresh = { refresh })] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the function body still receives `refresh` as a normal parameter, so if your body does not otherwise use it, add `let _ = refresh;` (or `#[allow(unused_variables)]`) to silence the unused-variable warning |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
@@ -246,7 +252,7 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
-  `Cached`/`CachedAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
+  `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
   Sharded stores also do not implement `CachedIter` or `CachedPeek`. Code that is generic over
   `CachedIter<K, V>` or uses `.iter()` / `cache_peek` must use non-sharded stores instead.

@@ -67,7 +67,7 @@ struct CachedMacroArgs {
     cache_err: bool,
     #[darling(default)]
     cache_none: bool,
-    /// `None` = not specified by user (defaults to `ByKey` for `#[cached]`).
+    /// `None` = not specified by user (defaults to `Disabled` for `#[cached]`, matching 2.x).
     /// `Some(Disabled)` = explicit `sync_writes = false`.
     /// `Some(Default)` = explicit `sync_writes = true` / `"default"`.
     /// `Some(ByKey)` = explicit `sync_writes = "by_key"`.
@@ -191,11 +191,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let krate = crate_path();
 
     // Resolve the effective sync_writes mode.
-    // `None` (unspecified by user) defaults to `ByKey` for `#[cached]`.
+    // `None` (unspecified by user) defaults to `Disabled` for `#[cached]`, matching 2.x behavior
+    // (no synchronization; concurrent uncached calls for the same key may each compute independently).
+    // `by_key` is an explicit opt-in: `sync_writes = "by_key"`.
     // Explicit `sync_writes = false` => Disabled; `= true`/`"default"` => Default;
     // `= "by_key"` => ByKey.
     let sync_writes_explicit = args.sync_writes.is_some();
-    let sync_writes = args.sync_writes.unwrap_or(SyncWriteMode::ByKey);
+    let sync_writes = args.sync_writes.unwrap_or(SyncWriteMode::Disabled);
 
     // pull out the parts of the function signature
     let fn_ident = signature.ident.clone();
@@ -566,7 +568,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     .into();
             }
             // G2: `__cached` prefix is reserved for macro-generated bindings.
-            if name.starts_with("__cached") {
+            // Strip any leading `r#` before checking the reserved prefix so that
+            // raw identifiers like `r#__cachedfoo` are also rejected.
+            let bare = name.strip_prefix("r#").unwrap_or(name);
+            if bare.starts_with("__cached") {
                 return syn::Error::new(
                     fn_ident.span(),
                     "cache names beginning with `__cached` are reserved for macro-generated \
@@ -575,7 +580,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            Ident::new(name, fn_ident.span())
+            match name.strip_prefix("r#") {
+                Some(stripped) => Ident::new_raw(stripped, fn_ident.span()),
+                None => Ident::new(name, fn_ident.span()),
+            }
         }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };
@@ -728,7 +736,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // `result_fallback` is only mutually exclusive with EXPLICITLY set non-Disabled
     // `sync_writes`. When `sync_writes` was not specified (unspecified, defaulting to
-    // `ByKey`), `result_fallback` implicitly selects `Disabled` instead (per spec).
+    // `Disabled`), `result_fallback` is compatible with it as-is; no override is needed.
     // This lets `#[cached(result_fallback = true, ttl_secs = N)]` compile without
     // needing the user to also write `sync_writes = false`.
     if args.result_fallback && sync_writes_explicit && sync_writes != SyncWriteMode::Disabled {
@@ -740,10 +748,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // When `result_fallback` is set and `sync_writes` was not explicitly specified,
-    // override the default-ByKey to Disabled (result_fallback and ByKey are also
-    // mutually exclusive, but we silently resolve the conflict for the unspecified case
-    // rather than erroring).
+    // The default is already `Disabled`, so when `result_fallback` is set and `sync_writes`
+    // was not explicitly specified, no override is required (the resolved value is already
+    // `Disabled`). This branch is a no-op but is kept for clarity and explicit-conflict
+    // detection above.
     let sync_writes = if args.result_fallback && !sync_writes_explicit {
         SyncWriteMode::Disabled
     } else {

@@ -367,10 +367,79 @@ mod credential_leak_tests {
             !debug.contains(secret),
             "Debug must not expose the password; got: {debug}"
         );
+        // The full raw URL (host included) must not appear in Display/Debug either.
+        assert!(
+            !display.contains(&bad_url) && !debug.contains(&bad_url),
+            "neither Display nor Debug may echo the raw URL; got display={display}, debug={debug}"
+        );
         // The error must be a Connection variant (the sanitized one).
         assert!(
             matches!(err, RedisCacheBuildError::Connection(_)),
             "expected Connection error, got: {err:?}"
+        );
+    }
+
+    /// `resolve_connection_string()` returns a redacting [`ConnectionString`]: its
+    /// `Debug`/`Display` render the placeholder (never the password) while
+    /// `reveal()` hands back the exact raw URL. This is the surface an external
+    /// caller sees, so it must not expose credentials by default.
+    #[test]
+    fn resolve_connection_string_returns_redacting_wrapper() {
+        let secret = "resolve_secret_abc";
+        let raw = format!("redis://:{secret}@127.0.0.1:6379/0");
+
+        let builder = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&raw);
+
+        let cs = builder
+            .resolve_connection_string()
+            .expect("connection string was set");
+
+        let display = cs.to_string();
+        let debug = format!("{cs:?}");
+        assert_eq!(display, "[REDACTED connection string]");
+        assert_eq!(debug, "[REDACTED connection string]");
+        assert!(
+            !display.contains(secret) && !debug.contains(secret),
+            "wrapper must not expose the password in Display/Debug"
+        );
+        // reveal() must return the exact raw URL, credentials included.
+        assert_eq!(cs.reveal(), raw);
+        assert!(cs.reveal().contains(secret));
+    }
+
+    /// The full derived `Debug` of a `Connection` error built from a
+    /// password-bearing bad URL (sync build path) must contain neither the
+    /// password nor the raw URL. Guards the removal of the blanket
+    /// `#[from] redis::RedisError` on the `Connection` variant, whose raw redis
+    /// error's `Debug` could otherwise echo the connection string.
+    #[test]
+    fn sync_connection_error_debug_does_not_leak_url_or_password() {
+        let secret = "sync_debug_secret_123";
+        let bad_url = format!("not-redis://:{secret}@nonexistent-host:9999");
+
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&bad_url)
+            .build();
+
+        let err = result.expect_err("build must fail with a bad URL");
+        assert!(
+            matches!(err, RedisCacheBuildError::Connection(_)),
+            "expected Connection error, got: {err:?}"
+        );
+        // Exercise the full enum Debug (which recurses into the inner redis error).
+        let debug = format!("{err:?}");
+        assert!(
+            !debug.contains(secret),
+            "enum Debug must not expose the password; got: {debug}"
+        );
+        assert!(
+            !debug.contains(&bad_url),
+            "enum Debug must not echo the raw URL; got: {debug}"
         );
     }
 }
@@ -483,7 +552,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum RedisCacheBuildError {
     #[error("redis connection error")]
-    Connection(#[from] redis::RedisError),
+    // No `#[from]`: an implicit `From<redis::RedisError>` would let any `?` in the
+    // build path auto-wrap a raw redis error, whose `Debug` (reachable via this
+    // enum's derived `Debug`) can echo the connection URL and its embedded
+    // password. Every site that produces a `Connection` error constructs it
+    // explicitly from a sanitized synthetic `redis::RedisError` so no raw error
+    // (parse- or connect-phase) can reach this variant.
+    Connection(redis::RedisError),
     #[error("redis pool error")]
     Pool(#[from] r2d2::Error),
     #[error(transparent)]
@@ -649,35 +724,40 @@ where
         self
     }
 
-    /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`
+    /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
+    ///
+    /// The value is wrapped in a redacting [`ConnectionString`]: its
+    /// `Debug`/`Display` render `[REDACTED connection string]`, so it is safe to
+    /// log or include in error messages. Call [`ConnectionString::reveal`] to
+    /// obtain the raw URL (including any embedded credentials) when needed.
     ///
     /// # Errors
     ///
     /// Will return `RedisCacheBuildError::MissingConnectionString` if connection string is not set
-    pub fn resolve_connection_string(&self) -> Result<String, RedisCacheBuildError> {
+    pub fn resolve_connection_string(&self) -> Result<ConnectionString, RedisCacheBuildError> {
         match self.connection_string {
-            Some(ref s) => Ok(s.to_string()),
-            None => {
-                std::env::var(ENV_KEY).map_err(|e| RedisCacheBuildError::MissingConnectionString {
+            Some(ref s) => Ok(ConnectionString(s.to_string())),
+            None => std::env::var(ENV_KEY).map(ConnectionString).map_err(|e| {
+                RedisCacheBuildError::MissingConnectionString {
                     env_key: ENV_KEY.to_string(),
                     error: e,
-                })
-            }
+                }
+            }),
         }
     }
 
     fn create_pool(&self) -> Result<r2d2::Pool<redis::Client>, RedisCacheBuildError> {
         let s = self.resolve_connection_string()?;
-        // Open the client, catching any error before it can propagate through
-        // the `#[from] redis::RedisError` impl on `RedisCacheBuildError::Connection`.
-        // A malformed URL such as `redis://:password@host` would otherwise surface
-        // the raw connection string (including the password) in the error's
-        // `Display`/`Debug`. Replace any error payload with a sanitized message.
-        let client: redis::Client = redis::Client::open(s).map_err(|_| {
-            redis::RedisError::from((
+        // Open the client, catching any error and replacing it with a sanitized
+        // `Connection` error. A malformed URL such as `redis://:password@host`
+        // would otherwise surface the raw connection string (including the
+        // password) in the error's `Display`/`Debug`. `Connection` no longer has
+        // a blanket `#[from]`, so the error is constructed explicitly here.
+        let client: redis::Client = redis::Client::open(s.reveal()).map_err(|_| {
+            RedisCacheBuildError::Connection(redis::RedisError::from((
                 redis::ErrorKind::InvalidClientConfig,
                 "failed to open redis client (connection string redacted)",
-            ))
+            )))
         })?;
         // some pool-builder defaults are set when the builder is initialized
         // so we can't overwrite any values with Nones...
@@ -733,7 +813,7 @@ where
         if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
             return Err(RedisCacheBuildError::EmptyScope);
         }
-        let connection_string = ConnectionString(self.resolve_connection_string()?);
+        let connection_string = self.resolve_connection_string()?;
         let pool = self.create_pool()?;
         Ok(RedisCache {
             ttl: Mutex::new(ttl),
@@ -1190,6 +1270,64 @@ mod async_redis {
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
 
+    /// The async redis connection held by an [`AsyncRedisCache`].
+    ///
+    /// The `Multiplexed` variant is always compiled; the `Manager`
+    /// (auto-reconnecting [`redis::aio::ConnectionManager`]) variant is compiled
+    /// in only when the `redis_connection_manager` feature is enabled.
+    ///
+    /// Selecting the manager is a *per-cache runtime* choice made in
+    /// [`AsyncRedisCacheBuilder::build`] from the
+    /// [`connection_manager`](AsyncRedisCacheBuilder::connection_manager) flag,
+    /// not a build-wide behavior swap. That keeps the feature additive: enabling
+    /// `redis_connection_manager` anywhere in the dependency graph (Cargo unifies
+    /// features) only makes the option *available*; every existing cache stays
+    /// multiplexed (the 2.x default) unless its own builder opts in.
+    ///
+    /// Both inner connection types implement [`redis::aio::ConnectionLike`] and
+    /// `Clone`, so this enum forwards to them and the command methods can keep
+    /// cloning `self.connection` uniformly.
+    #[derive(Clone)]
+    pub(crate) enum AsyncRedisConnection {
+        Multiplexed(redis::aio::MultiplexedConnection),
+        #[cfg(feature = "redis_connection_manager")]
+        Manager(redis::aio::ConnectionManager),
+    }
+
+    impl redis::aio::ConnectionLike for AsyncRedisConnection {
+        fn req_packed_command<'a>(
+            &'a mut self,
+            cmd: &'a redis::Cmd,
+        ) -> redis::RedisFuture<'a, redis::Value> {
+            match self {
+                AsyncRedisConnection::Multiplexed(c) => c.req_packed_command(cmd),
+                #[cfg(feature = "redis_connection_manager")]
+                AsyncRedisConnection::Manager(c) => c.req_packed_command(cmd),
+            }
+        }
+
+        fn req_packed_commands<'a>(
+            &'a mut self,
+            cmd: &'a redis::Pipeline,
+            offset: usize,
+            count: usize,
+        ) -> redis::RedisFuture<'a, Vec<redis::Value>> {
+            match self {
+                AsyncRedisConnection::Multiplexed(c) => c.req_packed_commands(cmd, offset, count),
+                #[cfg(feature = "redis_connection_manager")]
+                AsyncRedisConnection::Manager(c) => c.req_packed_commands(cmd, offset, count),
+            }
+        }
+
+        fn get_db(&self) -> i64 {
+            match self {
+                AsyncRedisConnection::Multiplexed(c) => c.get_db(),
+                #[cfg(feature = "redis_connection_manager")]
+                AsyncRedisConnection::Manager(c) => c.get_db(),
+            }
+        }
+    }
+
     /// Builder for [`AsyncRedisCache`].
     ///
     /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
@@ -1219,6 +1357,11 @@ mod async_redis {
         connection_string: Option<String>,
         #[cfg(feature = "redis_async_cache")]
         client_side_caching: bool,
+        // Per-cache opt-in to the auto-reconnecting connection manager. Only
+        // exists when the capability is compiled in; default `false` keeps the
+        // 2.x multiplexed behavior even when the feature is enabled transitively.
+        #[cfg(feature = "redis_connection_manager")]
+        connection_manager: bool,
         // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
         _phantom: PhantomData<fn() -> (K, V)>,
     }
@@ -1253,6 +1396,8 @@ mod async_redis {
                 connection_string: None,
                 #[cfg(feature = "redis_async_cache")]
                 client_side_caching: false,
+                #[cfg(feature = "redis_connection_manager")]
+                connection_manager: false,
                 _phantom: PhantomData,
             }
         }
@@ -1339,15 +1484,44 @@ mod async_redis {
             self
         }
 
-        /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`
+        /// Use the auto-reconnecting [`redis::aio::ConnectionManager`] instead of
+        /// the default plain multiplexed connection for this cache.
+        ///
+        /// Default is `false` (a `redis::aio::MultiplexedConnection`, the 2.x
+        /// behavior). Enabling the `redis_connection_manager` feature only makes
+        /// this option *available*; it never changes a cache's behavior unless
+        /// that cache's builder opts in here. This keeps the feature additive:
+        /// because Cargo unifies features across the whole dependency graph, a
+        /// distant transitive dependency turning the feature on must not silently
+        /// switch your caches to the manager's auto-reconnect semantics.
+        ///
+        /// The manager composes with whichever async runtime feature you enable
+        /// (`redis_tokio` or `redis_smol`); it does not force tokio.
+        ///
+        /// **Feature:** requires `redis_connection_manager`.
+        #[cfg(feature = "redis_connection_manager")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "redis_connection_manager")))]
+        #[must_use]
+        pub fn connection_manager(mut self, yes: bool) -> Self {
+            self.connection_manager = yes;
+            self
+        }
+
+        /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
+        ///
+        /// The value is wrapped in a redacting [`ConnectionString`](super::ConnectionString):
+        /// its `Debug`/`Display` render `[REDACTED connection string]`, so it is
+        /// safe to log or include in error messages. Call
+        /// [`ConnectionString::reveal`](super::ConnectionString::reveal) to obtain
+        /// the raw URL (including any embedded credentials) when needed.
         ///
         /// # Errors
         ///
         /// Will return `RedisCacheBuildError::MissingConnectionString` if connection string is not set
-        pub fn resolve_connection_string(&self) -> Result<String, RedisCacheBuildError> {
+        pub fn resolve_connection_string(&self) -> Result<ConnectionString, RedisCacheBuildError> {
             match self.connection_string {
-                Some(ref s) => Ok(s.to_string()),
-                None => std::env::var(ENV_KEY).map_err(|e| {
+                Some(ref s) => Ok(ConnectionString(s.to_string())),
+                None => std::env::var(ENV_KEY).map(ConnectionString).map_err(|e| {
                     RedisCacheBuildError::MissingConnectionString {
                         env_key: ENV_KEY.to_string(),
                         error: e,
@@ -1380,9 +1554,28 @@ mod async_redis {
             false
         }
 
+        /// Select and build the async connection for this cache.
+        ///
+        /// Runtime selection (not a compile-time feature fork): when the
+        /// `redis_connection_manager` feature is compiled in AND this builder's
+        /// [`connection_manager`](Self::connection_manager) flag is set, build a
+        /// [`redis::aio::ConnectionManager`]; otherwise build a plain
+        /// [`redis::aio::MultiplexedConnection`]. The default is multiplexed, so
+        /// enabling the feature transitively never changes an existing cache.
+        async fn create_connection(&self) -> Result<AsyncRedisConnection, RedisCacheBuildError> {
+            #[cfg(feature = "redis_connection_manager")]
+            if self.connection_manager {
+                return Ok(AsyncRedisConnection::Manager(
+                    self.create_connection_manager().await?,
+                ));
+            }
+            Ok(AsyncRedisConnection::Multiplexed(
+                self.create_multiplexed_connection().await?,
+            ))
+        }
+
         /// Create a multiplexed redis connection. This is a single connection that can
         /// be used asynchronously by multiple futures.
-        #[cfg(not(feature = "redis_connection_manager"))]
         async fn create_multiplexed_connection(
             &self,
         ) -> Result<redis::aio::MultiplexedConnection, RedisCacheBuildError> {
@@ -1393,17 +1586,17 @@ mod async_redis {
                 // Reject URLs that explicitly pin RESP2 before parsing — client-side
                 // caching requires RESP3 and silently downgrading would cause the
                 // invalidation listener to no-op, serving stale data.
-                if Self::url_pins_resp2(&s) {
+                if Self::url_pins_resp2(s.reveal()) {
                     return Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching);
                 }
 
                 // Sanitize any parse error so the raw URL (which may contain a
                 // password) is not surfaced in the error's Display/Debug.
-                let mut connection_info = s.into_connection_info().map_err(|_| {
-                    redis::RedisError::from((
+                let mut connection_info = s.reveal().into_connection_info().map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to parse redis connection info (connection string redacted)",
-                    ))
+                    )))
                 })?;
 
                 let mut config = redis::AsyncConnectionConfig::default();
@@ -1414,25 +1607,42 @@ mod async_redis {
                 connection_info = connection_info.set_redis_settings(redis_settings);
                 config = config.set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info).map_err(|_| {
-                    redis::RedisError::from((
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to open redis client (connection string redacted)",
-                    ))
+                    )))
                 })?;
+                // Sanitize the live-connection error: `Connection` has no blanket
+                // `#[from]`, and a raw redis connect error's Debug can echo the URL.
                 let conn = client
                     .get_multiplexed_async_connection_with_config(&config)
-                    .await?;
+                    .await
+                    .map_err(|_| {
+                        RedisCacheBuildError::Connection(redis::RedisError::from((
+                            redis::ErrorKind::Io,
+                            "failed to establish redis connection (connection string redacted)",
+                        )))
+                    })?;
                 return Ok(conn);
             }
 
             // Non-client-side-caching path: sanitize the Client::open error too.
-            let client = redis::Client::open(s).map_err(|_| {
-                redis::RedisError::from((
+            let client = redis::Client::open(s.reveal()).map_err(|_| {
+                RedisCacheBuildError::Connection(redis::RedisError::from((
                     redis::ErrorKind::InvalidClientConfig,
                     "failed to open redis client (connection string redacted)",
-                ))
+                )))
             })?;
-            let conn = client.get_multiplexed_async_connection().await?;
+            // Sanitize the live-connection error (see the note above).
+            let conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                        redis::ErrorKind::Io,
+                        "failed to establish redis connection (connection string redacted)",
+                    )))
+                })?;
             Ok(conn)
         }
 
@@ -1449,17 +1659,17 @@ mod async_redis {
                 // Reject URLs that explicitly pin RESP2 before parsing — client-side
                 // caching requires RESP3 and silently downgrading would cause the
                 // invalidation listener to no-op, serving stale data.
-                if Self::url_pins_resp2(&s) {
+                if Self::url_pins_resp2(s.reveal()) {
                     return Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching);
                 }
 
                 // Sanitize any parse error so the raw URL (which may contain a
                 // password) is not surfaced in the error's Display/Debug.
-                let mut connection_info = s.into_connection_info().map_err(|_| {
-                    redis::RedisError::from((
+                let mut connection_info = s.reveal().into_connection_info().map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to parse redis connection info (connection string redacted)",
-                    ))
+                    )))
                 })?;
 
                 let redis_settings = connection_info
@@ -1470,23 +1680,40 @@ mod async_redis {
                 let config = redis::aio::ConnectionManagerConfig::default()
                     .set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info).map_err(|_| {
-                    redis::RedisError::from((
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to open redis client (connection string redacted)",
-                    ))
+                    )))
                 })?;
-                let conn = redis::aio::ConnectionManager::new_with_config(client, config).await?;
+                // Sanitize the live-connection error: `Connection` has no blanket
+                // `#[from]`, and a raw redis connect error's Debug can echo the URL.
+                let conn = redis::aio::ConnectionManager::new_with_config(client, config)
+                    .await
+                    .map_err(|_| {
+                        RedisCacheBuildError::Connection(redis::RedisError::from((
+                            redis::ErrorKind::Io,
+                            "failed to establish redis connection (connection string redacted)",
+                        )))
+                    })?;
                 return Ok(conn);
             }
 
             // Non-client-side-caching path: sanitize the Client::open error too.
-            let client = redis::Client::open(s).map_err(|_| {
-                redis::RedisError::from((
+            let client = redis::Client::open(s.reveal()).map_err(|_| {
+                RedisCacheBuildError::Connection(redis::RedisError::from((
                     redis::ErrorKind::InvalidClientConfig,
                     "failed to open redis client (connection string redacted)",
-                ))
+                )))
             })?;
-            let conn = redis::aio::ConnectionManager::new(client).await?;
+            // Sanitize the live-connection error (see the note above).
+            let conn = redis::aio::ConnectionManager::new(client)
+                .await
+                .map_err(|_| {
+                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                        redis::ErrorKind::Io,
+                        "failed to establish redis connection (connection string redacted)",
+                    )))
+                })?;
             Ok(conn)
         }
 
@@ -1502,8 +1729,9 @@ mod async_redis {
         ///   `SCAN MATCH *` and delete every key in the Redis database.
         /// - `MissingConnectionString`: no connection string was set and the
         ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
-        /// - `Connection`: the Redis client or multiplexed connection could not
-        ///   be created.
+        /// - `Connection`: the Redis client or the selected connection (multiplexed,
+        ///   or the connection manager when `.connection_manager(true)` is set) could
+        ///   not be created.
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
             // Validate required fields before any IO/connection attempt so the
             // missing-required error is returned without needing a server.
@@ -1518,11 +1746,8 @@ mod async_redis {
             if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
                 return Err(RedisCacheBuildError::EmptyScope);
             }
-            let connection_string = ConnectionString(self.resolve_connection_string()?);
-            #[cfg(not(feature = "redis_connection_manager"))]
-            let connection = self.create_multiplexed_connection().await?;
-            #[cfg(feature = "redis_connection_manager")]
-            let connection = self.create_connection_manager().await?;
+            let connection_string = self.resolve_connection_string()?;
+            let connection = self.create_connection().await?;
             Ok(AsyncRedisCache {
                 ttl: Mutex::new(ttl),
                 refresh: AtomicBool::new(self.refresh),
@@ -1538,9 +1763,11 @@ mod async_redis {
     /// Async cache store backed by redis.
     ///
     /// Values have a TTL applied and enforced by Redis.
-    /// Uses a `redis::aio::MultiplexedConnection` or `redis::aio::ConnectionManager`
-    /// under the hood depending on whether the `redis_connection_manager` feature is
-    /// enabled.
+    /// Uses a `redis::aio::MultiplexedConnection` by default, or a
+    /// `redis::aio::ConnectionManager` when the cache was built with
+    /// [`AsyncRedisCacheBuilder::connection_manager(true)`](AsyncRedisCacheBuilder::connection_manager)
+    /// (requires the `redis_connection_manager` feature). Enabling that feature
+    /// only makes the option available; it does not change the default.
     ///
     /// **Feature:** requires one of `redis_tokio`, `redis_tokio_native_tls`,
     /// `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`,
@@ -1567,10 +1794,10 @@ mod async_redis {
         pub(super) namespace: String,
         pub(super) prefix: String,
         connection_string: ConnectionString,
-        #[cfg(not(feature = "redis_connection_manager"))]
-        connection: redis::aio::MultiplexedConnection,
-        #[cfg(feature = "redis_connection_manager")]
-        connection: redis::aio::ConnectionManager,
+        // Always the enum: the manager is a per-cache runtime choice, not a
+        // feature-driven type swap. Selected in `build()` from the builder's
+        // `connection_manager` flag; defaults to `Multiplexed` (2.x behavior).
+        connection: AsyncRedisConnection,
         // `AsyncRedisCache` owns no live `K`/`V` — see the rationale on
         // `RedisCache::_phantom`. Same fn-pointer phantom so a `Send`-but-`!Sync`
         // `V` (e.g. one containing a `Cell`) is usable, and the macro-emitted
@@ -1953,6 +2180,17 @@ mod async_redis {
                 !debug.contains(secret),
                 "Debug must not expose the password; got: {debug}"
             );
+            // Neither the full enum Display nor its Debug may echo the raw URL.
+            assert!(
+                !display.contains(&bad_url) && !debug.contains(&bad_url),
+                "neither Display nor Debug may echo the raw URL; got display={display}, debug={debug}"
+            );
+            // A bad scheme fails at parse time and must surface as the sanitized
+            // Connection variant (no server required).
+            assert!(
+                matches!(err, RedisCacheBuildError::Connection(_)),
+                "expected Connection error, got: {err:?}"
+            );
         }
 
         /// S5: building an AsyncRedisCache with `client_side_caching` enabled and a
@@ -2102,6 +2340,72 @@ mod async_redis {
                 .ttl_millis(500)
                 .ttl_secs(10);
             assert_eq!(b.ttl, Some(Duration::from_secs(10)));
+        }
+
+        // Additivity guard (no Redis server needed). With `redis_connection_manager`
+        // compiled in, merely enabling the feature must NOT switch a cache to the
+        // manager: the builder's `connection_manager` flag defaults to `false`
+        // (multiplexed, the 2.x behavior), and only `.connection_manager(true)`
+        // flips it. `build()` reads exactly this flag to pick the `Multiplexed` vs
+        // `Manager` variant, so the default-false here is what keeps the feature
+        // additive across a unified dependency graph.
+        #[cfg(feature = "redis_connection_manager")]
+        #[test]
+        fn connection_manager_defaults_false_and_flips() {
+            let b = AsyncRedisCacheBuilder::<String, String>::new().prefix("p");
+            assert!(
+                !b.connection_manager,
+                "default must be multiplexed (connection_manager == false) so enabling \
+                 the feature is additive and never swaps behavior on its own"
+            );
+
+            let b = b.connection_manager(true);
+            assert!(
+                b.connection_manager,
+                ".connection_manager(true) must opt the cache into the manager"
+            );
+
+            let b = b.connection_manager(false);
+            assert!(
+                !b.connection_manager,
+                ".connection_manager(false) must return to the multiplexed default"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod async_connection_enum_tests {
+        // No Redis server needed -- these assert the connection enum's variant
+        // selection is a pure function of the builder flag, without opening a
+        // socket. They lock in Part A's runtime (not feature) selection.
+        use super::AsyncRedisConnection;
+
+        /// The multiplexed variant is always present regardless of features; this
+        /// is a compile-time proof that `AsyncRedisConnection::Multiplexed` exists
+        /// and that the enum is the connection type the default build path wraps.
+        #[allow(dead_code)]
+        fn multiplexed_variant_exists(
+            c: redis::aio::MultiplexedConnection,
+        ) -> AsyncRedisConnection {
+            AsyncRedisConnection::Multiplexed(c)
+        }
+
+        /// The manager variant is compiled in only with the feature; this proves
+        /// the enum carries it (and that `.connection_manager(true)` has a variant
+        /// to select) when `redis_connection_manager` is enabled.
+        #[cfg(feature = "redis_connection_manager")]
+        #[allow(dead_code)]
+        fn manager_variant_exists(c: redis::aio::ConnectionManager) -> AsyncRedisConnection {
+            AsyncRedisConnection::Manager(c)
+        }
+
+        /// `AsyncRedisConnection` must be `Clone` (the command methods clone it per
+        /// call) and `ConnectionLike` (so it can be used as a redis connection).
+        #[allow(dead_code)]
+        fn assert_bounds<T: Clone + redis::aio::ConnectionLike>() {}
+        #[allow(dead_code)]
+        fn check_connection_enum_bounds() {
+            assert_bounds::<AsyncRedisConnection>();
         }
     }
 }

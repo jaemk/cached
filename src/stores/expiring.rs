@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::collections::hash_map::Entry, std::future::Future};
+use {super::CachedGetOrSetAsync, std::collections::hash_map::Entry, std::future::Future};
 
 /// Size-unbounded cache where each value controls its own expiry via [`Expires`].
 ///
@@ -508,7 +508,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> CachedPeek<K, V> for ExpiringCach
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for ExpiringCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for ExpiringCache<K, V, S>
 where
     K: Hash + Eq + Send,
     V: Expires + Send,

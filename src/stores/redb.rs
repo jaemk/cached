@@ -68,14 +68,15 @@ pub enum RedbCacheBuildError {
     Build(#[from] super::BuildError),
     #[error("I/O error preparing the disk cache directory")]
     Io(#[from] std::io::Error),
-    /// The `cache_name` passed to [`RedbCacheBuilder`] is invalid: it must not be empty,
-    /// must not contain a path separator (`/` or `\`), must not contain a NUL byte (`\0`),
-    /// and must not be `.` or `..`.
-    /// These characters would allow the name to escape the cache directory, embed a NUL
-    /// in the filename, or produce a meaningless filename when used as a filename component.
+    /// The `cache_name` passed to [`RedbCacheBuilder`] is invalid. It is used as a
+    /// cross-platform filename component, so it must not be empty, must not be `.` or `..`,
+    /// and must not contain any character that is invalid in a filename: a path separator
+    /// (`/` or `\`), any of the NTFS/Windows-reserved characters `:` `<` `>` `"` `|` `?` `*`,
+    /// or an ASCII control character (`0x00`-`0x1F` including NUL, and DEL `0x7F`).
     #[error(
-        "invalid cache_name: must not be empty, must not contain a path separator ('/' or '\\\\'), \
-        must not contain a NUL byte, and must not be '.' or '..'; cache_name is used as a filename component"
+        "invalid cache_name: must not be empty or '.'/'..', and must not contain characters \
+        invalid in a filename (a path separator '/' or '\\\\', any of ':' '<' '>' '\"' '|' '?' '*', \
+        or an ASCII control character); cache_name is used as a cross-platform filename component"
     )]
     InvalidCacheName,
 }
@@ -124,9 +125,11 @@ where
         }
     }
 
-    /// Set the cache name (required). Used as a filename component for the on-disk
-    /// database file, so it must not be empty, contain a path separator (`/` or `\`),
-    /// contain a NUL byte, or be `.` or `..`.
+    /// Set the cache name (required). Used as a cross-platform filename component for the
+    /// on-disk database file, so it must not be empty, must not be `.` or `..`, and must not
+    /// contain a character invalid in a filename: a path separator (`/` or `\`), any of the
+    /// NTFS/Windows-reserved characters `:` `<` `>` `"` `|` `?` `*`, or an ASCII control
+    /// character. Note a module-path-style name such as `a::b` is rejected because of the `:`.
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.cache_name = Some(name.into());
@@ -262,8 +265,10 @@ where
     /// # Errors
     ///
     /// - `Build(BuildError::MissingRequired("name"))`: no cache name was set.
-    /// - `InvalidCacheName`: `cache_name` is empty, contains a path separator
-    ///   (`/` or `\`), contains a NUL byte, or is the path-traversal component `.` or `..`.
+    /// - `InvalidCacheName`: `cache_name` is empty, is the component `.` or `..`, or contains
+    ///   a character invalid in a filename (a path separator `/` or `\`, one of the
+    ///   NTFS/Windows-reserved `:` `<` `>` `"` `|` `?` `*`, or an ASCII control character
+    ///   including DEL `0x7F`).
     /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
     /// - `Io`: the cache directory could not be created.
     /// - `Storage`: the redb database file could not be opened or initialized.
@@ -272,23 +277,27 @@ where
             .cache_name
             .ok_or(super::BuildError::MissingRequired("name"))?;
         // Validate cache_name before using it as a filename component.
-        // An empty name yields a meaningless filename. A name containing a path
-        // separator ('/' or '\\') or a NUL byte can silently escape the cache
-        // directory or create nested subdirectories; those are the checks that
-        // actually prevent traversal. The '.' and '..' checks are
-        // belt-and-suspenders: because the name is always suffixed with
-        // `_v<VERSION>.redb`, a bare '.' or '..' can never reach the filesystem
-        // as a traversal component, but they are rejected anyway as nonsensical
-        // names. (':' is allowed: it is established usage in
-        // module-path-derived names.)
+        // An empty name yields a meaningless filename. The name is always
+        // suffixed with `_v<VERSION>.redb` and used as a cross-platform filename
+        // component, so it is restricted to characters that are valid in a
+        // filename on every supported platform. A path separator ('/' or '\\')
+        // could silently escape the cache directory or create nested
+        // subdirectories, and the remaining reserved characters
+        // (':' '<' '>' '"' '|' '?' '*' and ASCII control bytes) are invalid in
+        // NTFS/Windows filenames. The bare '.' and '..' components are rejected
+        // as nonsensical names (and as belt-and-suspenders against traversal,
+        // though the version suffix already prevents that). Note ':' is rejected
+        // even though module-path-derived names ('a::b') used it: allowing it
+        // would make the on-disk file unwritable on Windows.
         {
             let n = &cache_name;
             if n.is_empty()
-                || n.contains('/')
-                || n.contains('\\')
-                || n.contains('\0')
                 || n == "."
                 || n == ".."
+                || n.chars().any(|c| {
+                    matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+                        || c.is_ascii_control()
+                })
             {
                 return Err(RedbCacheBuildError::InvalidCacheName);
             }
@@ -480,13 +489,14 @@ where
     /// [`ConcurrentCacheEvict::evict`](crate::ConcurrentCacheEvict::evict), which
     /// also return `usize`).
     pub fn remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
-        let now = SystemTime::now();
         let ttl = *self.ttl.lock();
 
-        // Collect the keys to expire first: we cannot remove entries while
-        // holding the read iterator (the iterator borrows the read txn).
+        // Collect candidate expired keys under a read transaction. We cannot
+        // iterate and remove entries in the same transaction because the
+        // iterator borrows the read txn for its entire lifetime.
         let mut expired_keys: Vec<String> = Vec::new();
         {
+            let now = SystemTime::now();
             let rtxn = self.connection.begin_read()?;
             let table = rtxn.open_table(TABLE)?;
             for item in table.iter()? {
@@ -510,18 +520,60 @@ where
             }
         }
 
-        if !expired_keys.is_empty() {
-            let wtxn = begin_write(&self.connection, self.durable)?;
-            {
-                let mut table = wtxn.open_table(TABLE)?;
-                for key in &expired_keys {
-                    table.remove(key.as_str())?;
-                }
-            }
-            wtxn.commit()?;
+        if expired_keys.is_empty() {
+            return Ok(0);
         }
 
-        Ok(expired_keys.len())
+        // Re-check each candidate key inside the write txn before removing it.
+        // A concurrent `cache_set` may have replaced one of these entries with a
+        // fresh value between the read scan above and now; skipping such entries
+        // ensures we never delete a live entry. The returned count reflects the
+        // number of entries *actually* removed, not the number found in the scan.
+        let mut removed = 0usize;
+        let now_write = SystemTime::now();
+        let wtxn = begin_write(&self.connection, self.durable)?;
+        {
+            let mut table = wtxn.open_table(TABLE)?;
+            for key in &expired_keys {
+                // Re-read the entry under the write txn to obtain the
+                // authoritative state. Drop the access guard before mutating
+                // the table.
+                let current: Option<CachedDiskValue<V>> = match table.get(key.as_str())? {
+                    None => None,
+                    Some(guard) => {
+                        let raw = guard.value();
+                        Some(rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(
+                            |source| RedbCacheError::CacheDeserialization {
+                                source,
+                                cached_value: raw.to_vec(),
+                            },
+                        )?)
+                        // guard is dropped here; table can be mutated below.
+                    }
+                };
+
+                match current {
+                    None => {
+                        // Already removed by a concurrent operation; skip.
+                    }
+                    Some(entry) => {
+                        if let Some(ttl) = ttl
+                            && now_write
+                                .duration_since(entry.created_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                >= ttl
+                        {
+                            table.remove(key.as_str())?;
+                            removed += 1;
+                        }
+                        // else: entry was rewritten with a fresh timestamp by a
+                        // concurrent writer; leave it in place.
+                    }
+                }
+            }
+        }
+        wtxn.commit()?;
+        Ok(removed)
     }
 
     /// Force a durable (fsync) commit, persisting any writes made while
@@ -665,7 +717,10 @@ fn disk_cache_get<V>(
 where
     V: Serialize + DeserializeOwned,
 {
-    let mut cached = {
+    // Fast path: read the entry under a read transaction. For the common case
+    // where no mutation is required (no TTL, or a fresh entry with refresh
+    // disabled) we return immediately, keeping a single read txn with no write.
+    let cached = {
         let rtxn = connection.begin_read()?;
         let table = rtxn.open_table(TABLE)?;
         let Some(guard) = table.get(key)? else {
@@ -681,35 +736,89 @@ where
         })?
     };
 
-    if let Some(ttl) = ttl {
-        if SystemTime::now()
-            .duration_since(cached.created_at)
-            .unwrap_or(Duration::from_secs(0))
-            < ttl
-        {
-            if refresh {
-                cached.refresh_created_at();
-                let serialized = rmp_serde::to_vec(&cached)?;
-                let wtxn = begin_write(connection, durable)?;
-                {
-                    let mut table = wtxn.open_table(TABLE)?;
-                    table.insert(key, serialized.as_slice())?;
-                }
-                wtxn.commit()?;
-            }
-            Ok(Some(cached.value))
-        } else {
-            let wtxn = begin_write(connection, durable)?;
-            {
-                let mut table = wtxn.open_table(TABLE)?;
-                table.remove(key)?;
-            }
-            wtxn.commit()?;
-            Ok(None)
-        }
-    } else {
-        Ok(Some(cached.value))
+    let Some(ttl) = ttl else {
+        // No TTL: entries never expire; no mutation needed.
+        return Ok(Some(cached.value));
+    };
+
+    let age = SystemTime::now()
+        .duration_since(cached.created_at)
+        .unwrap_or(Duration::from_secs(0));
+
+    if age < ttl && !refresh {
+        // Entry is fresh and no refresh is requested: fast path, no write.
+        return Ok(Some(cached.value));
     }
+
+    // Mutation is required — either a refresh-on-hit write-back or an expiry
+    // eviction. To avoid two read-then-write races, we open a write transaction
+    // and re-read the entry atomically:
+    //
+    // Race 1 – refresh clobber: the naive path serialises the old value (read
+    //   under the now-dropped read txn) with a refreshed timestamp and blindly
+    //   inserts it, overwriting a newer value a concurrent `cache_set` may have
+    //   stored in between.
+    //
+    // Race 2 – stale eviction: the naive path removes the entry in a new write
+    //   txn, deleting a fresh value a concurrent `cache_set` may have just
+    //   written in between.
+    //
+    // redb serialises write transactions, so the re-read + conditional mutate
+    // below is atomic against any concurrent writer.
+    let wtxn = begin_write(connection, durable)?;
+    let result = {
+        let mut table = wtxn.open_table(TABLE)?;
+
+        // Re-read the current entry under the write txn. Drop the access guard
+        // immediately after copying the bytes so the table can be mutated.
+        let current: Option<CachedDiskValue<V>> = match table.get(key)? {
+            None => None,
+            Some(guard) => {
+                let raw = guard.value();
+                Some(
+                    rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
+                        RedbCacheError::CacheDeserialization {
+                            source,
+                            cached_value: raw.to_vec(),
+                        }
+                    })?,
+                )
+                // guard is dropped here; table can be mutated below.
+            }
+        };
+
+        match current {
+            None => {
+                // Entry vanished between the read txn and this write txn (a
+                // concurrent remove or clear). Do not resurrect it.
+                None
+            }
+            Some(mut current_entry) => {
+                let current_age = SystemTime::now()
+                    .duration_since(current_entry.created_at)
+                    .unwrap_or(Duration::from_secs(0));
+
+                if current_age < ttl {
+                    // Entry is still fresh under the write txn. The current
+                    // value is authoritative — it may differ from what the read
+                    // txn saw if a concurrent `cache_set` replaced it. Refresh
+                    // the current entry (not the stale read) if requested.
+                    if refresh {
+                        current_entry.refresh_created_at();
+                        let serialized = rmp_serde::to_vec(&current_entry)?;
+                        table.insert(key, serialized.as_slice())?;
+                    }
+                    Some(current_entry.value)
+                } else {
+                    // Still expired under the write txn: remove it.
+                    table.remove(key)?;
+                    None
+                }
+            }
+        }
+    };
+    wtxn.commit()?;
+    Ok(result)
 }
 
 fn disk_cache_set<V>(
@@ -858,11 +967,17 @@ impl<K, V> ConcurrentCacheTtl for RedbCache<K, V> {
         *self.ttl.lock()
     }
 
-    /// Set the TTL applied to newly inserted entries, returning the previous TTL
+    /// Set the TTL applied when computing entry liveness, returning the previous TTL
     /// (`None` if expiry was disabled).
     ///
-    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: subsequent writes
-    /// store entries with no expiry. Existing entries keep the expiry they were written with.
+    /// The change is retroactive and applies to existing entries, not just future writes.
+    /// redb persists only each entry's `created_at` timestamp, never an absolute per-entry
+    /// expiry, so liveness is recomputed at read time as `now - created_at < ttl` against
+    /// whatever TTL is current. Lowering the TTL can immediately expire already-stored
+    /// entries; raising it can revive entries a shorter TTL would have expired.
+    ///
+    /// A zero `ttl` disables expiry, exactly equivalent to `unset_ttl`: with no TTL, every
+    /// stored entry is considered live regardless of age.
     fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
         let mut guard = self.ttl.lock();
         if ttl.is_zero() {
@@ -872,6 +987,11 @@ impl<K, V> ConcurrentCacheTtl for RedbCache<K, V> {
         }
     }
 
+    /// Disable expiry, returning the previous TTL (`None` if it was already disabled).
+    ///
+    /// This is retroactive: because liveness is recomputed at read time from each entry's
+    /// stored `created_at`, disabling the TTL makes every stored entry live regardless of
+    /// age, including entries the prior TTL would have expired.
     fn unset_ttl(&self) -> Option<Duration> {
         self.ttl.lock().take()
     }
@@ -1167,6 +1287,90 @@ mod tests {
         assert_eq!(cache.ttl(), None);
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(cache.cache_get(&1).unwrap(), Some(100));
+    }
+
+    #[test]
+    fn set_ttl_is_retroactive_for_existing_entries() {
+        // redb persists only each entry's `created_at`, never an absolute expiry, so
+        // liveness is recomputed at read time against the current ttl. Lowering the ttl
+        // retroactively expires already-stored entries, and raising it revives an entry
+        // the shorter ttl would have expired (as long as an expiring read has not already
+        // evicted it). Neither entry is ever rewritten.
+        let dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("set-ttl-retroactive")
+            .disk_directory(dir.path())
+            .ttl_secs(3600)
+            .build()
+            .expect("build must succeed");
+        assert_eq!(cache.cache_set(1, 100).unwrap(), None);
+        assert_eq!(cache.cache_set(2, 200).unwrap(), None);
+        assert_eq!(
+            cache.cache_get(&1).unwrap(),
+            Some(100),
+            "entry must be live under the long ttl"
+        );
+
+        // Lower the ttl below both entries' current age: they are now expired even
+        // though neither was rewritten.
+        std::thread::sleep(Duration::from_millis(15));
+        cache.set_ttl(Duration::from_millis(5));
+        assert_eq!(
+            cache.cache_get(&1).unwrap(),
+            None,
+            "lowering the ttl must retroactively expire the existing entry"
+        );
+
+        // Key 2 was not read while expired, so it is still on disk. Raise the ttl:
+        // liveness is recomputed at read time from `created_at`, reviving it.
+        cache.set_ttl(Duration::from_secs(3600));
+        assert_eq!(
+            cache.cache_get(&2).unwrap(),
+            Some(200),
+            "raising the ttl must revive an entry the shorter ttl would have expired"
+        );
+    }
+
+    #[test]
+    fn unset_ttl_is_retroactive_and_revives_aged_entries() {
+        // The `unset_ttl` doc claims disabling expiry is retroactive: it makes
+        // every stored entry live regardless of age, including entries the prior
+        // TTL would already have expired. This exercises the distinct
+        // `unset_ttl()` method (not `set_ttl(ZERO)`), on an entry whose age has
+        // clearly exceeded the TTL. Uses a never-read key so eviction-on-read
+        // cannot pre-delete the entry and mask the revival.
+        let dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("unset-ttl-retroactive")
+            .disk_directory(dir.path())
+            .ttl_millis(5)
+            .build()
+            .expect("build must succeed");
+        assert_eq!(cache.cache_set(1, 100).unwrap(), None);
+        assert_eq!(cache.cache_set(2, 200).unwrap(), None);
+
+        // Age both entries well past the 5ms TTL (sleep is a lower bound, so the
+        // margin only grows; not time-fragile).
+        std::thread::sleep(Duration::from_millis(40));
+
+        // Key 1: read while the TTL is still active proves the entries are
+        // genuinely expired (and evicts key 1).
+        assert_eq!(
+            cache.cache_get(&1).unwrap(),
+            None,
+            "entry older than the TTL must read as expired before unset"
+        );
+
+        // Key 2 was never read while expired, so it is still on disk. Disabling
+        // the TTL must revive it: liveness is recomputed at read time and, with
+        // no TTL, every stored entry is live.
+        assert_eq!(cache.unset_ttl(), Some(Duration::from_millis(5)));
+        assert_eq!(cache.ttl(), None);
+        assert_eq!(
+            cache.cache_get(&2).unwrap(),
+            Some(200),
+            "unset_ttl must retroactively revive an entry the prior TTL had expired"
+        );
     }
 
     // ── Test helpers for poking raw bytes into / out of the redb table ──────
@@ -1756,7 +1960,7 @@ mod tests {
     // round-trip succeeds when `disk_directory` is left at its default.
     fn does_not_break_when_constructed_using_default_disk_directory() {
         let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name(format!("{}:disk-cache-test-default-dir", now_millis()))
+            .name(format!("{}-disk-cache-test-default-dir", now_millis()))
             // use the default disk directory
             .build()
             .unwrap();
@@ -2111,14 +2315,51 @@ mod tests {
             "cache_name containing '/' must return InvalidCacheName"
         );
 
-        // ':' is allowed (established usage in module-path / timestamp-derived names).
+        // ':' is now rejected: it is invalid in NTFS/Windows filenames, so a
+        // module-path-derived name such as "a::b" no longer builds.
         assert!(
-            RedbCache::<u32, u32>::builder()
-                .name("ok:name")
-                .disk_directory(tmp_dir.path())
-                .build()
-                .is_ok(),
-            "cache_name containing ':' must be accepted"
+            matches!(
+                RedbCache::<u32, u32>::builder()
+                    .name("ok:name")
+                    .disk_directory(tmp_dir.path())
+                    .build(),
+                Err(RedbCacheBuildError::InvalidCacheName)
+            ),
+            "cache_name containing ':' must return InvalidCacheName"
+        );
+
+        // Other NTFS/Windows-reserved characters are rejected too.
+        assert!(
+            matches!(
+                RedbCache::<u32, u32>::builder()
+                    .name("star*name")
+                    .disk_directory(tmp_dir.path())
+                    .build(),
+                Err(RedbCacheBuildError::InvalidCacheName)
+            ),
+            "cache_name containing '*' must return InvalidCacheName"
+        );
+
+        assert!(
+            matches!(
+                RedbCache::<u32, u32>::builder()
+                    .name("q?name")
+                    .disk_directory(tmp_dir.path())
+                    .build(),
+                Err(RedbCacheBuildError::InvalidCacheName)
+            ),
+            "cache_name containing '?' must return InvalidCacheName"
+        );
+
+        assert!(
+            matches!(
+                RedbCache::<u32, u32>::builder()
+                    .name("lt<name")
+                    .disk_directory(tmp_dir.path())
+                    .build(),
+                Err(RedbCacheBuildError::InvalidCacheName)
+            ),
+            "cache_name containing '<' must return InvalidCacheName"
         );
 
         assert!(
@@ -2163,6 +2404,16 @@ mod tests {
                 .is_ok(),
             "a valid cache_name must build successfully"
         );
+
+        // Still-allowed characters (alphanumerics, '_', '-') must build.
+        assert!(
+            RedbCache::<u32, u32>::builder()
+                .name("My_Cache-Name_123")
+                .disk_directory(tmp_dir.path())
+                .build()
+                .is_ok(),
+            "cache_name of alphanumerics, '_' and '-' must build successfully"
+        );
     }
 
     #[test]
@@ -2178,6 +2429,88 @@ mod tests {
                 Err(RedbCacheBuildError::InvalidCacheName)
             ),
             "cache_name containing a NUL byte must return InvalidCacheName"
+        );
+    }
+
+    // Certification helper: assert a given cache_name is rejected with
+    // InvalidCacheName. Kept as a committed helper (not an inline probe) so the
+    // per-character rejection checks below stay uniform.
+    fn assert_name_rejected(name: &str, why: &str) {
+        let tmp_dir = temp_dir!();
+        assert!(
+            matches!(
+                RedbCache::<u32, u32>::builder()
+                    .name(name)
+                    .disk_directory(tmp_dir.path())
+                    .build(),
+                Err(RedbCacheBuildError::InvalidCacheName)
+            ),
+            "{why}"
+        );
+    }
+
+    // Certification helper: assert a given cache_name is accepted (build succeeds).
+    fn assert_name_accepted(name: &str, why: &str) {
+        let tmp_dir = temp_dir!();
+        assert!(
+            RedbCache::<u32, u32>::builder()
+                .name(name)
+                .disk_directory(tmp_dir.path())
+                .build()
+                .is_ok(),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn build_rejects_remaining_reserved_filename_chars() {
+        // The existing test covers '/', '\\', ':', '*', '?', '<'. These three
+        // reserved characters ('>', '"', '|') are the rest of the newly-rejected
+        // NTFS/Windows set and were previously untested.
+        assert_name_rejected("gt>name", "cache_name containing '>' must be rejected");
+        assert_name_rejected("quote\"name", "cache_name containing '\"' must be rejected");
+        assert_name_rejected("pipe|name", "cache_name containing '|' must be rejected");
+    }
+
+    #[test]
+    fn build_rejects_non_nul_control_chars() {
+        // Only NUL (0x00) was previously tested. Cover the rest of the ASCII
+        // control range that `is_ascii_control()` rejects: a mid-range control
+        // (TAB, 0x09), the top of the C0 range (Unit Separator, 0x1F), and DEL
+        // (0x7F).
+        assert_name_rejected(
+            "tab\tname",
+            "cache_name containing TAB (0x09) must be rejected",
+        );
+        assert_name_rejected(
+            "us\u{1f}name",
+            "cache_name containing 0x1F must be rejected",
+        );
+        // `char::is_ascii_control()` rejects DEL (U+007F) as well as the C0 range,
+        // which the doc calls out explicitly.
+        assert_name_rejected(
+            "del\u{7f}name",
+            "cache_name containing DEL (0x7F) is rejected by is_ascii_control()",
+        );
+    }
+
+    #[test]
+    fn build_does_not_over_reject_valid_names() {
+        // Guard against a naive tightening that would reject any '.' or other
+        // still-legal characters. Only the *bare* components "." and ".." are
+        // rejected; a dot INSIDE a name is fine.
+        assert_name_accepted(
+            "a.b",
+            "a '.' inside a name (not a bare '.'/'..') must build successfully",
+        );
+        assert_name_accepted("v1.2.3", "multiple interior dots must build successfully");
+        // '~' is not reserved and not a control char, so it is accepted.
+        assert_name_accepted("home~cache", "'~' must build successfully");
+        // A space is neither reserved nor a control char, so it is currently
+        // accepted. Locking this documents that spaces are not over-rejected.
+        assert_name_accepted(
+            "my cache",
+            "a space in the name is currently accepted and must not be over-rejected",
         );
     }
 

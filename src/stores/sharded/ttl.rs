@@ -299,7 +299,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(self.inner.evictions.load(Ordering::Relaxed)),
-            entry_count: size,
+            entry_count: Some(size),
             capacity: None,
         }
     }
@@ -873,22 +873,22 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `ttl` was not set or is zero, or if the shard count overflows.
-    #[must_use]
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)):
+    /// `ttl` was not set or is zero, or the shard count overflows.
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedTtlCacheBase<K, V, H2>,
-    ) -> ShardedTtlCacheBase<K, V, H>
+    ) -> Result<ShardedTtlCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
         H: ShardHasher<K>,
     {
-        let new_cache = self
-            .build()
-            .unwrap_or_else(|e| panic!("ShardedTtlCache build failed: {e}"));
+        let new_cache = self.build()?;
         let _existing_ttl = existing.ttl_duration();
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, TimedEntry<V>)> = {
@@ -909,7 +909,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
                 new_shard.lock.write().insert(k, entry);
             }
         }
-        new_cache
+        Ok(new_cache)
     }
 }
 
@@ -1149,7 +1149,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let new_cache = ShardedTtlCacheBase::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         // All original entries expired — new cache should be empty
         assert_eq!(new_cache.len(), 0);
     }
@@ -1165,7 +1166,8 @@ mod tests {
         }
         let new_cache = ShardedTtlCacheBase::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         for i in 0..20u32 {
             assert_eq!(
                 SyncConcurrentCached::cache_get(&new_cache, &i).expect("key was just inserted"),

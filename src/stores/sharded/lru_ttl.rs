@@ -319,7 +319,7 @@ where
             evictions: Some(
                 lru_evictions + self.inner.non_capacity_evictions.load(Ordering::Relaxed),
             ),
-            entry_count: size,
+            entry_count: Some(size),
             capacity: Some(self.inner.total_capacity),
         }
     }
@@ -1038,24 +1038,22 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, NoEvict> {
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `size` (or `per_shard_max_size`) or `ttl` was not set or is `0`.
-    #[must_use]
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)):
+    /// `size` (or `per_shard_max_size`) or `ttl` was not set or is `0`.
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedLruTtlCacheBase<K, V, H2>,
-    ) -> ShardedLruTtlCacheBase<K, V, H>
+    ) -> Result<ShardedLruTtlCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
         H: ShardHasher<K>,
     {
-        copy_from_lru_ttl(
-            self.build()
-                .unwrap_or_else(|e| panic!("ShardedLruTtlCache build failed: {e}")),
-            existing,
-        )
+        Ok(copy_from_lru_ttl(self.build()?, existing))
     }
 }
 
@@ -1135,24 +1133,22 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, HasEvict> {
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `size` (or `per_shard_max_size`) or `ttl` was not set or is `0`.
-    #[must_use]
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)):
+    /// `size` (or `per_shard_max_size`) or `ttl` was not set or is `0`.
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedLruTtlCacheBase<K, V, H2>,
-    ) -> ShardedLruTtlCacheBase<K, V, H>
+    ) -> Result<ShardedLruTtlCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq + 'static,
         V: Clone + 'static,
         H: ShardHasher<K>,
     {
-        copy_from_lru_ttl(
-            self.build()
-                .unwrap_or_else(|e| panic!("ShardedLruTtlCache build failed: {e}")),
-            existing,
-        )
+        Ok(copy_from_lru_ttl(self.build()?, existing))
     }
 }
 
@@ -1549,7 +1545,8 @@ mod tests {
         let new_cache = ShardedLruTtlCacheBase::<u32, u32>::builder()
             .max_size(64)
             .ttl(Duration::from_secs(60))
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         assert_eq!(new_cache.len(), 0);
     }
 
@@ -1569,7 +1566,8 @@ mod tests {
             .max_size(1024)
             .shards(4)
             .ttl(Duration::from_secs(60))
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         for i in 0..20u32 {
             assert_eq!(
                 SyncConcurrentCached::cache_get(&new_cache, &i).expect("key was just inserted"),
@@ -1593,7 +1591,8 @@ mod tests {
             .max_size(16)
             .shards(1)
             .ttl(Duration::from_secs(60))
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         assert!(new_cache.len() <= 16);
     }
 

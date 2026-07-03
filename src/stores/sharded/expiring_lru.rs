@@ -260,7 +260,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed)),
-            entry_count: size,
+            entry_count: Some(size),
             capacity: Some(self.inner.total_capacity),
         }
     }
@@ -784,24 +784,22 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the builder configuration is invalid (e.g. `max_size` / `per_shard_max_size`
-    /// not set or is `0`, or both set simultaneously). Prefer calling
-    /// [`build`](Self::build) directly to handle errors without panicking.
-    #[must_use]
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)):
+    /// `max_size` / `per_shard_max_size` not set or is `0`, or both set simultaneously.
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedExpiringLruCacheBase<K, V, H2>,
-    ) -> ShardedExpiringLruCacheBase<K, V, H>
+    ) -> Result<ShardedExpiringLruCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
         H: ShardHasher<K>,
     {
-        let new_cache = self
-            .build()
-            .unwrap_or_else(|e| panic!("ShardedExpiringLruCache build failed: {e}"));
+        let new_cache = self.build()?;
         for shard in existing.inner.shards.iter() {
             // iter_order returns MRU-first; insert in reverse (LRU-first) so
             // that MRU entries land at the head of the new cache.
@@ -815,7 +813,7 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
                 }
             }
         }
-        new_cache
+        Ok(new_cache)
     }
 
     /// Build the cache, returning an error if required fields are missing or invalid.
@@ -1032,7 +1030,8 @@ mod tests {
         }
         let new_cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
             .max_size(64)
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         assert_eq!(new_cache.len(), 0);
     }
 
@@ -1055,7 +1054,8 @@ mod tests {
         }
         let new_cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
             .max_size(64)
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         assert_eq!(new_cache.len(), 20);
         for i in 0..20u32 {
             let got =
@@ -1084,7 +1084,8 @@ mod tests {
         let new_cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
             .shards(1)
             .max_size(8)
-            .copy_from(&old);
+            .copy_from(&old)
+            .unwrap();
         assert!(
             new_cache.len() <= 8,
             "new cache should not exceed capacity; got {}",

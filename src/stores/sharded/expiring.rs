@@ -247,7 +247,7 @@ where
             hits: Some(hits),
             misses: Some(misses),
             evictions: Some(self.inner.evictions.load(Ordering::Relaxed)),
-            entry_count: size,
+            entry_count: Some(size),
             capacity: None,
         }
     }
@@ -628,19 +628,22 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
     ///
     /// **Note**: `on_evict` callbacks on `existing` do not fire — entries are read
     /// (not removed) from the source cache.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(BuildError)`](crate::stores::BuildError) if the builder
+    /// configuration is invalid (the same conditions as [`build`](Self::build)).
+    #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
         existing: &ShardedExpiringCacheBase<K, V, H2>,
-    ) -> ShardedExpiringCacheBase<K, V, H>
+    ) -> Result<ShardedExpiringCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
         H: ShardHasher<K>,
     {
-        let new_cache = self
-            .build()
-            .unwrap_or_else(|e| panic!("ShardedExpiringCache build failed: {e}"));
+        let new_cache = self.build()?;
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, V)> = {
                 let guard = shard.lock.read();
@@ -654,7 +657,7 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
                 let _ = ConcurrentCached::cache_set(&new_cache, k, v);
             }
         }
-        new_cache
+        Ok(new_cache)
     }
 
     /// Build the cache.
@@ -808,7 +811,9 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringCacheBase::<u32, Val>::builder().copy_from(&old);
+        let new_cache = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .copy_from(&old)
+            .unwrap();
         assert_eq!(new_cache.len(), 0);
     }
 
@@ -826,7 +831,9 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringCacheBase::<u32, Val>::builder().copy_from(&old);
+        let new_cache = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .copy_from(&old)
+            .unwrap();
         assert_eq!(new_cache.len(), 20);
         for i in 0..20u32 {
             let got =

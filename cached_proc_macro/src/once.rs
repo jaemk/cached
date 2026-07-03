@@ -438,11 +438,36 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             )
             .collect();
         if !generic_param_idents.is_empty() {
-            let value_ty_str = cache_value_ty.to_string().replace(' ', "");
-            if let Some(param) = generic_param_idents
-                .iter()
-                .find(|p| value_ty_str.contains(p.as_str()))
-            {
+            use proc_macro2::TokenTree;
+            use std::collections::HashSet;
+            let param_set: HashSet<String> = generic_param_idents.iter().cloned().collect();
+            // Walk the value type's token stream, descending into groups, and
+            // check each Ident token for an exact whole-ident match against the
+            // param set. A substring check (e.g. "String".contains("S")) was
+            // wrong and caused false rejections.
+            let found_param = {
+                let mut stack = vec![cache_value_ty.clone()];
+                let mut found: Option<String> = None;
+                'outer: while let Some(stream) = stack.pop() {
+                    for tt in stream {
+                        match tt {
+                            TokenTree::Ident(ident) => {
+                                let s = ident.to_string();
+                                if param_set.contains(&s) {
+                                    found = Some(s);
+                                    break 'outer;
+                                }
+                            }
+                            TokenTree::Group(group) => {
+                                stack.push(group.stream());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                found
+            };
+            if let Some(param) = found_param {
                 return syn::Error::new(
                     fn_ident.span(),
                     format!(
@@ -468,7 +493,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                     .into();
             }
             // G2: `__cached` prefix is reserved for macro-generated bindings.
-            if name.starts_with("__cached") {
+            // Strip any leading `r#` before checking the reserved prefix so that
+            // raw identifiers like `r#__cachedfoo` are also rejected.
+            let bare = name.strip_prefix("r#").unwrap_or(name);
+            if bare.starts_with("__cached") {
                 return syn::Error::new(
                     fn_ident.span(),
                     "cache names beginning with `__cached` are reserved for macro-generated \
@@ -477,7 +505,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            Ident::new(name, fn_ident.span())
+            match name.strip_prefix("r#") {
+                Some(stripped) => Ident::new_raw(stripped, fn_ident.span()),
+                None => Ident::new(name, fn_ident.span()),
+            }
         }
         None => Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span()),
     };

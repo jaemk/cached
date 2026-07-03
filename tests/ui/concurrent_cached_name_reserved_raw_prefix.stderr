@@ -1,0 +1,5 @@
+error: cache names beginning with `__cached` are reserved for macro-generated bindings and cannot be used as a `name` value
+ --> tests/ui/concurrent_cached_name_reserved_raw_prefix.rs:7:4
+  |
+7 | fn f(x: i32) -> i32 {
+  |    ^

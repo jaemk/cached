@@ -6,7 +6,7 @@ mod once;
 use proc_macro::TokenStream;
 
 /// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedAsync` for async functions)
+/// `cached::CachedGetOrSetAsync` for async functions)
 ///
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
@@ -56,12 +56,16 @@ use proc_macro::TokenStream;
 ///   origin function) is still generated and inherits the method's visibility, so a `pub` cached
 ///   method exposes a `pub {fn}_no_cache` cache-bypass sibling on the same `impl`.
 /// - `sync_writes`: (optional, bool or string) specify whether to synchronize the execution and writing of uncached values.
-///   **Default: `"by_key"`** - when not specified, a per-key lock synchronizes concurrent uncached
-///   calls for the same key (duplicate first-call serialization). When set to `false` or
-///   `"disabled"`, synchronization is disabled entirely and concurrent uncached calls for the same key
-///   may all execute and overwrite each other. When set to `true` or `"default"`, all keys
+///   **Default: no synchronization** (`false`/`"disabled"`) - when not specified, concurrent uncached
+///   calls for the same key may all execute and overwrite each other independently, matching the 2.x
+///   behavior and Python's `functools.lru_cache`. When set to `true` or `"default"`, all keys
 ///   synchronize by locking the whole cache during uncached execution. When set to `"by_key"`,
-///   the same per-key behavior as the default is applied explicitly.
+///   bucketed per-key locks deduplicate concurrent first calls for the same key.
+///   **WARNING for `"by_key"`**: the per-key bucket lock is held across the entire function body.
+///   Do NOT use `sync_writes = "by_key"` on recursive or re-entrant memoized functions - if two
+///   keys in the active call chain collide in the same bucket, the recursion will deadlock. Even
+///   cache hits under `"by_key"` take the per-key lock first, so concurrent readers of the same
+///   key serialize.
 /// - `sync_writes_buckets`: (optional, usize) number of per-key lock buckets used by
 ///   `sync_writes = "by_key"`; defaults to 64. Each bucket is one `Arc<RwLock<()>>`. Keys
 ///   hash into a bucket, so two different keys may share a bucket and serialize unnecessarily
@@ -148,7 +152,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 /// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedAsync` for async functions). Function arguments are not used to identify
+/// `cached::CachedGetOrSetAsync` for async functions). Function arguments are not used to identify
 /// a cached value, only one value is cached unless a `ttl` expiry is specified.
 ///
 /// # Attributes

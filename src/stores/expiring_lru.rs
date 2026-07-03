@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 /// Implemented by values stored in [`ExpiringLruCache`] and [`ExpiringCache`](crate::ExpiringCache)
 /// so the value itself decides when it is stale. Expired values are not returned by lookups
@@ -44,7 +44,7 @@ pub trait Expires {
     /// decide whether a cached value may be returned, not `expires_at`.
     fn is_expired(&self) -> bool;
 
-    /// Returns the [`std::time::Instant`] at which this value expires, or `None` if the
+    /// Returns the [`crate::time::Instant`] at which this value expires, or `None` if the
     /// expiry instant is unknown or not tracked by this type.
     ///
     /// The default implementation returns `None`. Override this in types that record a
@@ -53,7 +53,7 @@ pub trait Expires {
     ///
     /// `is_expired()` remains the authoritative liveness check; `expires_at` is advisory
     /// and must not be used as a substitute for `is_expired`.
-    fn expires_at(&self) -> Option<std::time::Instant> {
+    fn expires_at(&self) -> Option<crate::time::Instant> {
         None
     }
 }
@@ -568,7 +568,7 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> CachedPeek<K, V>
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for ExpiringLruCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for ExpiringLruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     V: Expires + Send,
@@ -1335,15 +1335,15 @@ mod tests {
 
     /// A type that overrides `expires_at` to return a concrete deadline.
     struct TimedValue {
-        deadline: std::time::Instant,
+        deadline: crate::time::Instant,
     }
 
     impl Expires for TimedValue {
         fn is_expired(&self) -> bool {
-            std::time::Instant::now() >= self.deadline
+            crate::time::Instant::now() >= self.deadline
         }
 
-        fn expires_at(&self) -> Option<std::time::Instant> {
+        fn expires_at(&self) -> Option<crate::time::Instant> {
             Some(self.deadline)
         }
     }
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[test]
     fn expires_at_override_returns_some_instant() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = crate::time::Instant::now() + std::time::Duration::from_secs(60);
         let v = TimedValue { deadline };
         assert_eq!(
             v.expires_at(),
@@ -1380,7 +1380,7 @@ mod tests {
     /// claiming to be live. A correct cache must consult `is_expired` (live), NOT
     /// `expires_at` (past), and therefore keep the entry.
     struct LiveDespitePastDeadline {
-        past: std::time::Instant,
+        past: crate::time::Instant,
     }
 
     impl Expires for LiveDespitePastDeadline {
@@ -1389,7 +1389,7 @@ mod tests {
             false
         }
 
-        fn expires_at(&self) -> Option<std::time::Instant> {
+        fn expires_at(&self) -> Option<crate::time::Instant> {
             // Advisory: a deadline in the past. Must not be used for liveness.
             Some(self.past)
         }
@@ -1399,7 +1399,7 @@ mod tests {
     fn expires_at_past_does_not_override_is_expired_for_value() {
         // Sanity at the value level: the two methods disagree on purpose.
         let v = LiveDespitePastDeadline {
-            past: std::time::Instant::now() - std::time::Duration::from_secs(3600),
+            past: crate::time::Instant::now() - std::time::Duration::from_secs(3600),
         };
         assert!(
             !v.is_expired(),
@@ -1407,7 +1407,7 @@ mod tests {
         );
         let reported = v.expires_at().expect("override returns Some");
         assert!(
-            reported < std::time::Instant::now(),
+            reported < crate::time::Instant::now(),
             "expires_at advisory deadline is in the past"
         );
     }
@@ -1417,7 +1417,7 @@ mod tests {
         // Contract: the cache must decide liveness from is_expired, not expires_at.
         // The stored value's expires_at is in the past, but is_expired() == false,
         // so the entry must be returned as a live hit and survive in the cache.
-        let past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let past = crate::time::Instant::now() - std::time::Duration::from_secs(3600);
         let mut c: ExpiringLruCache<u8, LiveDespitePastDeadline> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
         c.cache_set(1, LiveDespitePastDeadline { past });

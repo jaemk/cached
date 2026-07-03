@@ -1942,7 +1942,7 @@ mod concurrent_metrics_via_base_trait {
         assert_eq!(m.hits, Some(1));
         assert_eq!(m.misses, Some(1));
         assert_eq!(m.evictions, None);
-        assert_eq!(m.entry_count, 1);
+        assert_eq!(m.entry_count, Some(1));
         assert_eq!(m.capacity, None);
     }
 
@@ -2061,7 +2061,7 @@ mod extension_trait_blanket_impls {
         let m = cache.metrics();
         assert_eq!(m.hits, Some(1));
         assert_eq!(m.misses, Some(1));
-        assert_eq!(m.entry_count, 1);
+        assert_eq!(m.entry_count, Some(1));
     }
 
     // Only ConcurrentCachedExt in scope, not ConcurrentCached.
@@ -2089,6 +2089,80 @@ mod extension_trait_blanket_impls {
         assert_eq!(
             ConcurrentCachedExt::get(&cache, &1u32).expect("infallible"),
             None
+        );
+    }
+
+    // clear/reset aliases exposed through ConcurrentCachedExt (parity with CachedExt).
+    //
+    // The two aliases are NOT interchangeable: `clear` removes entries but PRESERVES the
+    // hit/miss metrics, while `reset` removes entries AND zeroes the metrics. This test
+    // drives the hit/miss counters non-zero first, then asserts each alias's distinct
+    // effect on `metrics()` — so a regression that wired `clear` to `cache_reset` (or vice
+    // versa) fails here, not just a "did it empty the map" check.
+    #[test]
+    fn concurrent_cached_ext_clear_reset_aliases() {
+        use cached::{ConcurrentCacheBase, ConcurrentCachedExt, ShardedUnboundCache};
+
+        let cache: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::builder()
+            .shards(1)
+            .build()
+            .expect("build");
+
+        ConcurrentCachedExt::set(&cache, 1u32, 10u32).expect("infallible");
+        ConcurrentCachedExt::set(&cache, 2u32, 20u32).expect("infallible");
+        assert_eq!(cache.cache_size().expect("infallible"), Some(2));
+
+        // Drive hits and misses so the metrics are observably non-zero.
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &1u32).expect("infallible"),
+            Some(10),
+            "hit"
+        );
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &999u32).expect("infallible"),
+            None,
+            "miss"
+        );
+        let before = cache.metrics();
+        assert_eq!(before.hits, Some(1), "one hit recorded");
+        assert_eq!(before.misses, Some(1), "one miss recorded");
+
+        // `clear` alias removes entries but must PRESERVE the hit/miss metrics.
+        ConcurrentCachedExt::clear(&cache).expect("infallible");
+        assert_eq!(cache.cache_size().expect("infallible"), Some(0));
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &1u32).expect("infallible"),
+            None
+        );
+        let after_clear = cache.metrics();
+        assert_eq!(
+            after_clear.hits, before.hits,
+            "clear must preserve the hit counter"
+        );
+        // The get(&1) above is a miss on the now-empty cache, so misses increments by one;
+        // the key point is clear did NOT zero the counter.
+        assert_eq!(
+            after_clear.misses,
+            Some(2),
+            "clear preserves misses (the prior 1 plus the post-clear miss), it does not zero them"
+        );
+
+        // Repopulate, then exercise the `reset` alias, which must ALSO zero the metrics.
+        ConcurrentCachedExt::set(&cache, 3u32, 30u32).expect("infallible");
+        assert_eq!(cache.cache_size().expect("infallible"), Some(1));
+        ConcurrentCachedExt::reset(&cache).expect("infallible");
+        assert_eq!(cache.cache_size().expect("infallible"), Some(0));
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &3u32).expect("infallible"),
+            None
+        );
+        let after_reset = cache.metrics();
+        // reset zeroes hits/misses; the single get(&3) above is a post-reset miss.
+        assert_eq!(after_reset.hits, Some(0), "reset must zero the hit counter");
+        assert_eq!(
+            after_reset.misses,
+            Some(1),
+            "reset zeroed misses; only the one post-reset miss remains"
         );
     }
 

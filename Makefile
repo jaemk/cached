@@ -126,8 +126,8 @@ help: ## List all supported Make targets
 			tests/disk-store) desc="Run redb_store tests with proc_macro and async runtime" ;; \
 			tests/disk-store-sync) desc="Run redb_store tests with proc_macro (no async runtime)" ;; \
 			tests/redis) desc="Run all Redis-backed test targets" ;; \
-			tests/redis-connection-manager) desc="Check standalone redis_connection_manager feature compilation" ;; \
-			tests/redis-async-cache) desc="Check standalone redis_async_cache feature compilation" ;; \
+			tests/redis-connection-manager) desc="Check redis_connection_manager composes with each runtime" ;; \
+			tests/redis-async-cache) desc="Check redis_async_cache composes with each runtime" ;; \
 			tests/redis-async-cache-tokio) desc="Check redis_async_cache with redis_tokio_native_tls" ;; \
 			tests/redis-async-cache-rustls) desc="Check redis_async_cache with redis_tokio_rustls" ;; \
 			tests/redis-store) desc="Run synchronous Redis store tests" ;; \
@@ -249,12 +249,14 @@ tests/redis-store-standalone:
 	$(CARGO_COMMAND) check --no-default-features --features redis_store
 
 tests/redis-connection-manager:
-	@echo "[$@]: Checking standalone redis_connection_manager feature compilation..."
-	$(CARGO_COMMAND) check --no-default-features --features redis_connection_manager
+	@echo "[$@]: Checking redis_connection_manager composes with each runtime..."
+	$(CARGO_COMMAND) check --no-default-features --features "redis_tokio,redis_connection_manager"
+	$(CARGO_COMMAND) check --no-default-features --features "redis_smol,redis_connection_manager"
 
 tests/redis-async-cache:
-	@echo "[$@]: Checking standalone redis_async_cache feature compilation..."
-	$(CARGO_COMMAND) check --no-default-features --features redis_async_cache
+	@echo "[$@]: Checking redis_async_cache composes with each runtime..."
+	$(CARGO_COMMAND) check --no-default-features --features "redis_tokio,redis_async_cache"
+	$(CARGO_COMMAND) check --no-default-features --features "redis_smol,redis_async_cache"
 
 tests/redis-async-cache-tokio:
 	@echo "[$@]: Checking redis_async_cache with redis_tokio_native_tls..."
