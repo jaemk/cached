@@ -1736,7 +1736,7 @@ mod time_store_tests {
 
         #[tokio::test]
         async fn test_expiring_cache_async() {
-            use cached::CachedAsync;
+            use cached::CachedGetOrSetAsync;
 
             #[derive(Clone, Debug)]
             struct AsyncValue {
@@ -6020,7 +6020,7 @@ fn test_timed_cache_on_evict_fires_on_cache_get_or_set() {
 #[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_timed_cache_async_on_evict_fires() {
-    use cached::CachedAsync;
+    use cached::CachedGetOrSetAsync;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -6037,7 +6037,8 @@ async fn test_timed_cache_async_on_evict_fires() {
     cache.cache_set(1, 10);
     tokio::time::sleep(cached::time::Duration::from_millis(100)).await;
 
-    let val = CachedAsync::async_cache_get_or_set_with(&mut cache, 1, || async { 99u32 }).await;
+    let val =
+        CachedGetOrSetAsync::async_cache_get_or_set_with(&mut cache, 1, || async { 99u32 }).await;
     assert_eq!(*val, 99);
     assert_eq!(
         evicted_count.load(Ordering::Relaxed),
@@ -6487,7 +6488,7 @@ fn test_ttl_sorted_cache_clone_cached() {
 #[cfg(all(feature = "time_stores", feature = "async"))]
 #[tokio::test]
 async fn test_ttl_sorted_cache_cached_async() {
-    use cached::CachedAsync;
+    use cached::CachedGetOrSetAsync;
     use cached::stores::TtlSortedCache;
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
@@ -6495,18 +6496,22 @@ async fn test_ttl_sorted_cache_cached_async() {
         .build()
         .unwrap();
 
-    let val = CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 42u32 }).await;
+    let val =
+        CachedGetOrSetAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 42u32 })
+            .await;
     assert_eq!(*val, 42);
 
     // Second call returns cached value.
-    let val2 = CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 99u32 }).await;
+    let val2 =
+        CachedGetOrSetAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { 99u32 })
+            .await;
     assert_eq!(*val2, 42);
 }
 
 #[cfg(feature = "async")]
 #[tokio::test]
 async fn test_expiring_lru_cache_cached_async() {
-    use cached::CachedAsync;
+    use cached::CachedGetOrSetAsync;
 
     #[derive(Clone)]
     struct NeverExpires(u32);
@@ -6521,15 +6526,17 @@ async fn test_expiring_lru_cache_cached_async() {
         .build()
         .unwrap();
 
-    let val =
-        CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(42) })
-            .await;
+    let val = CachedGetOrSetAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async {
+        NeverExpires(42)
+    })
+    .await;
     assert_eq!(val.0, 42);
 
     // Cache hit: factory not called.
-    let val2 =
-        CachedAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async { NeverExpires(99) })
-            .await;
+    let val2 = CachedGetOrSetAsync::async_cache_get_or_set_with(&mut cache, 1u32, || async {
+        NeverExpires(99)
+    })
+    .await;
     assert_eq!(val2.0, 42);
 
     assert_eq!(cache.cache_hits(), Some(1));
@@ -7646,7 +7653,7 @@ mod async_cache_store_tests {
     use cached::Expires;
     use cached::time::Duration;
     use cached::{
-        CachedAsync, ExpiringLruCache, LruTtlCache, TtlCache, TtlSortedCache, UnboundCache,
+        CachedGetOrSetAsync, ExpiringLruCache, LruTtlCache, TtlCache, TtlSortedCache, UnboundCache,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

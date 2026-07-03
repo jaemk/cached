@@ -134,7 +134,7 @@ fn thread_stripe() -> usize {
 }
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 mod expiring;
 mod expiring_lru;
@@ -472,7 +472,7 @@ where
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for HashMap<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for HashMap<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     S: std::hash::BuildHasher + Send,

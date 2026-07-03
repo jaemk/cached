@@ -181,7 +181,7 @@ fn ttl_cache_disabled_ttl_get_or_set_with_recomputes_expired_entry() {
 #[cfg(feature = "async")]
 #[tokio::test]
 async fn ttl_cache_disabled_ttl_async_get_or_set_recomputes_expired_entry() {
-    use cached::CachedAsync;
+    use cached::CachedGetOrSetAsync;
     let mut c = TtlCache::<u32, u32>::builder()
         .ttl(SHORT)
         .build()
@@ -425,7 +425,7 @@ fn lru_ttl_cache_disabled_ttl_get_or_set_with_recomputes_expired_entry() {
 #[cfg(feature = "async")]
 #[tokio::test]
 async fn lru_ttl_cache_disabled_ttl_async_get_or_set_recomputes_expired_entry() {
-    use cached::CachedAsync;
+    use cached::CachedGetOrSetAsync;
     let mut c = LruTtlCache::<u32, u32>::builder()
         .max_size(8)
         .ttl(SHORT)

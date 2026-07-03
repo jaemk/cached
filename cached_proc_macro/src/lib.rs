@@ -6,7 +6,7 @@ mod once;
 use proc_macro::TokenStream;
 
 /// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedAsync` for async functions)
+/// `cached::CachedGetOrSetAsync` for async functions)
 ///
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
@@ -152,7 +152,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 /// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedAsync` for async functions). Function arguments are not used to identify
+/// `cached::CachedGetOrSetAsync` for async functions). Function arguments are not used to identify
 /// a cached value, only one value is cached unless a `ttl` expiry is specified.
 ///
 /// # Attributes

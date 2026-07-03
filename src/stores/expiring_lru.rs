@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 /// Implemented by values stored in [`ExpiringLruCache`] and [`ExpiringCache`](crate::ExpiringCache)
 /// so the value itself decides when it is stale. Expired values are not returned by lookups
@@ -568,7 +568,7 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> CachedPeek<K, V>
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for ExpiringLruCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for ExpiringLruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     V: Expires + Send,

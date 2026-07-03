@@ -6,7 +6,7 @@ use std::hash::{BuildHasher, Hash};
 use std::collections::{HashMap, hash_map::Entry};
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 use crate::{CachedIter, CachedPeek, CloneCached};
 
@@ -687,7 +687,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for TtlCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for TtlCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     S: BuildHasher + Send,

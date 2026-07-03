@@ -7,7 +7,7 @@ use std::hash::{BuildHasher, Hash};
 use std::collections::{HashMap, hash_map::Entry};
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 use super::{DefaultHashBuilder, StripedCounter};
 
@@ -361,7 +361,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> CachedRead<K, V> for UnboundCache<K, V, S>
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for UnboundCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for UnboundCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     S: BuildHasher + Send,

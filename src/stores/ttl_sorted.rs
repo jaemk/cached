@@ -11,7 +11,7 @@ use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 use std::collections::HashMap;
 
@@ -1136,7 +1136,7 @@ impl<K: Hash + Eq + Ord + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for TtlSortedCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for TtlSortedCache<K, V, S>
 where
     K: Hash + Eq + Ord + Clone + Send + Sync,
     V: Send,
@@ -1734,7 +1734,7 @@ mod test {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn async_cache_get_or_set_with_max_size_limit_short_ttl_does_not_panic() {
-        use crate::CachedAsync;
+        use crate::CachedGetOrSetAsync;
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(1))
             .build()
@@ -2354,41 +2354,6 @@ mod test {
             Some(&7u32),
             "zero-ttl try_get_or_set entry must never expire"
         );
-    }
-
-    /// The four renamed single-owner `CachedAsync` default methods, exercised on a real
-    /// `TtlSortedCache` (not only `UnboundCache`). Confirms the rename works on a store
-    /// whose `cache_get`/`cache_set`/`cache_remove`/`cache_clear` carry TTL semantics.
-    #[cfg(feature = "async")]
-    #[tokio::test]
-    async fn async_cache_methods_on_ttl_sorted_cache() {
-        use crate::CachedAsync;
-        let mut cache: TtlSortedCache<String, u32> = TtlSortedCache::builder()
-            .ttl(Duration::from_secs(60))
-            .build()
-            .unwrap();
-
-        let prev = cache.async_cache_set("a".to_string(), 1u32).await;
-        assert_eq!(prev, None, "first insert returns None");
-
-        let prev = cache.async_cache_set("a".to_string(), 2u32).await;
-        assert_eq!(prev, Some(1u32), "overwrite returns previous value");
-
-        let got = cache.async_cache_get("a").await;
-        assert_eq!(got, Some(&2u32), "async_cache_get hit");
-
-        let missing = cache.async_cache_get("z").await;
-        assert_eq!(missing, None, "async_cache_get miss");
-
-        let removed = cache.async_cache_remove("a").await;
-        assert_eq!(removed, Some(2u32), "async_cache_remove returns value");
-        assert_eq!(cache.async_cache_get("a").await, None, "gone after remove");
-
-        cache.async_cache_set("x".to_string(), 10u32).await;
-        cache.async_cache_set("y".to_string(), 20u32).await;
-        assert_eq!(cache.cache_size(), 2);
-        cache.async_cache_clear().await;
-        assert_eq!(cache.cache_size(), 0, "async_cache_clear empties cache");
     }
 
     // --- custom hasher tests ---

@@ -64,9 +64,10 @@ For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCa
 `len`/`is_empty` are defined on `ConcurrentCacheBase` (the shared base trait), not on
 `ConcurrentCachedExt` — bring `ConcurrentCacheBase` into scope to call them on a generic bound.
 
-Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...; `CachedAsync` has
-`async_cache_get`, `async_cache_set`, `async_cache_remove`, `async_cache_clear`, plus the
+Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` mirrors the sync
+`ConcurrentCached` surface (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) for
+IO-backed stores that manage their own synchronization. `CachedGetOrSetAsync` is narrower: it
+only memoizes an async closure over a synchronous in-memory `Cached` store, via the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
 `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
 the `async_` prefix already prevents collisions with the sync methods.
@@ -85,11 +86,14 @@ the `async_` prefix already prevents collisions with the sync methods.
 - `redis_tokio`: Include async Redis support using `tokio` (no TLS); implies `redis_store` and `async`
 - `redis_tokio_native_tls`: `redis_tokio` + TLS via `native-tls` (system TLS library)
 - `redis_tokio_rustls`: `redis_tokio` + TLS via `rustls` (pure-Rust TLS)
-- `redis_connection_manager`: Enable the optional `connection-manager` feature of `redis`. Any async redis caches created
-  will use a connection manager instead of a `MultiplexedConnection`. Implies `async` (Tokio runtime) and `redis_store`,
-  but does **not** enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+- `redis_connection_manager`: Enable the optional `connection-manager` capability of `redis`. Additive: async redis
+  caches keep using a `MultiplexedConnection` by default; opt a specific cache into the auto-reconnecting connection
+  manager with `.connection_manager(true)` on its builder. Runtime-agnostic (`redis/connection-manager` needs only
+  `redis/aio`), so it composes with either runtime -- pair it with a runtime feature (`redis_tokio*` or `redis_smol*`),
+  which is what pulls in `redis_store` and `async`; enabling it alone leaves you without a runtime. Does **not** enable TLS.
 - `redis_async_cache`: Enable Redis client-side caching over RESP3 for async Redis caches.
-  Implies `redis_tokio`, `async`, and `redis_store`, but does not enable TLS. Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+  Implies `async` and `redis_store`, but is runtime-agnostic (`redis/cache-aio` needs only `redis/aio`): pair it with a
+  runtime feature (`redis_tokio*` or `redis_smol*`) or the build has no runtime to connect with. Does not enable TLS.
 - `redb_store`: Include disk cache store
 - `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, `#[concurrent_cached(ttl_millis = ...)]`, `#[once(ttl_secs = ...)]`, `#[once(ttl = ...)]`, or `#[once(ttl_millis = ...)]` on the default in-memory path.
@@ -101,7 +105,7 @@ See the [`macros`](https://docs.rs/cached/latest/cached/macros/index.html) modul
 Project automation targets are documented by `make help`, and `make check/help` verifies that the
 help output stays in sync with supported Makefile targets.
 
-Any custom cache that implements `cached::Cached`/`cached::CachedAsync` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins.
+Any custom cache that implements `cached::Cached` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins (`cached::CachedGetOrSetAsync` additionally memoizes an async closure over such a store).
 Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentCachedAsync` can be used with the `#[concurrent_cached]` macro.
 
 **Macro quick reference**
@@ -247,7 +251,7 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
-  `Cached`/`CachedAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
+  `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
   Sharded stores also do not implement `CachedIter` or `CachedPeek`. Code that is generic over
   `CachedIter<K, V>` or uses `.iter()` / `cache_peek` must use non-sharded stores instead.
@@ -705,7 +709,7 @@ pub mod prelude {
 
     #[cfg(feature = "async_core")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-    pub use crate::{CachedAsync, ConcurrentCachedAsync, SerializeCachedAsync};
+    pub use crate::{CachedGetOrSetAsync, ConcurrentCachedAsync, SerializeCachedAsync};
 }
 
 /// Core cache operations for single-owner (non-concurrent) stores.
@@ -716,7 +720,7 @@ pub mod prelude {
 /// implements `Cached`. Bring the short names into scope with
 /// `use cached::prelude::*;` or `use cached::CachedExt;`.
 ///
-/// The async traits (`CachedAsync`, `ConcurrentCachedAsync`) use the `async_cache_*` spelling
+/// The async traits (`CachedGetOrSetAsync`, `ConcurrentCachedAsync`) use the `async_cache_*` spelling
 /// (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) so they never collide
 /// with these synchronous methods. The async traits have no short aliases.
 ///
@@ -1506,24 +1510,35 @@ pub trait CacheTtl {
     fn set_refresh_on_hit(&mut self, refresh: bool) -> bool;
 }
 
+/// Memoize an async closure over a synchronous in-memory [`Cached`] store.
+///
+/// This is not a general async cache surface: in-memory [`Cached`] stores never touch IO, so
+/// they are fully synchronous. `CachedGetOrSetAsync` only adds the get-or-set pattern for an
+/// async closure - on a miss it awaits the caller's closure and inserts the result - and
+/// sidesteps the borrow-check friction a hand-rolled version hits. For an IO-backed store that
+/// is itself async (redis, redb, sharded), use [`ConcurrentCachedAsync`], which mirrors the full
+/// sync surface; do not reach for this trait there.
+///
+/// The methods are `async_`-prefixed so importing this alongside [`CachedExt`] (common, since the
+/// in-memory stores implement both) does not make `get_or_set_with` ambiguous at the call site.
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-pub trait CachedAsync<K, V> {
+pub trait CachedGetOrSetAsync<K, V> {
     /// Get the value for `k`, or compute and insert it by awaiting `f` on a miss.
     ///
     /// The async counterpart of [`CachedExt::get_or_set_with`]. It is `async_`-prefixed
-    /// so that importing both [`CachedExt`] and [`CachedAsync`] (common, since the
+    /// so that importing both [`CachedExt`] and [`CachedGetOrSetAsync`] (common, since the
     /// in-memory stores implement both) does not make `get_or_set_with` ambiguous
     /// at the call site.
     ///
     /// Returns `&V`. Use
-    /// [`async_cache_get_or_set_with_mut`](CachedAsync::async_cache_get_or_set_with_mut) for a
+    /// [`async_cache_get_or_set_with_mut`](CachedGetOrSetAsync::async_cache_get_or_set_with_mut) for a
     /// mutable reference.
     ///
     /// This default returns a `Send` future, so it carries `Self: Send, K: Send`
     /// (the future captures `&mut self` and `k` across the await). A store that is
     /// genuinely `!Send` cannot use this default and should implement
-    /// [`async_cache_get_or_set_with_mut`](CachedAsync::async_cache_get_or_set_with_mut)
+    /// [`async_cache_get_or_set_with_mut`](CachedGetOrSetAsync::async_cache_get_or_set_with_mut)
     /// directly; the `&V` wrapper is only a convenience over it.
     fn async_cache_get_or_set_with<'a, F, Fut>(
         &'a mut self,
@@ -1541,7 +1556,7 @@ pub trait CachedAsync<K, V> {
     }
 
     /// The mutable counterpart of
-    /// [`async_cache_get_or_set_with`](CachedAsync::async_cache_get_or_set_with): returns
+    /// [`async_cache_get_or_set_with`](CachedGetOrSetAsync::async_cache_get_or_set_with): returns
     /// `&mut V`. Stores implement this method; the shared-reference variant
     /// delegates to it.
     fn async_cache_get_or_set_with_mut<'a, F, Fut>(
@@ -1555,15 +1570,15 @@ pub trait CachedAsync<K, V> {
         F: FnOnce() -> Fut + Send + 'a,
         Fut: Future<Output = V> + Send + 'a;
 
-    /// Like [`async_cache_get_or_set_with`](CachedAsync::async_cache_get_or_set_with), but
+    /// Like [`async_cache_get_or_set_with`](CachedGetOrSetAsync::async_cache_get_or_set_with), but
     /// `f` is fallible: on a miss the value is cached only if `f` resolves to
     /// `Ok`, and an `Err` is returned without caching.
     ///
     /// Returns `Result<&V, E>`. Use
-    /// [`async_cache_try_get_or_set_with_mut`](CachedAsync::async_cache_try_get_or_set_with_mut)
+    /// [`async_cache_try_get_or_set_with_mut`](CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut)
     /// for a mutable reference.
     ///
-    /// Like [`async_cache_get_or_set_with`](CachedAsync::async_cache_get_or_set_with), this
+    /// Like [`async_cache_get_or_set_with`](CachedGetOrSetAsync::async_cache_get_or_set_with), this
     /// default returns a `Send` future and so carries `Self: Send, K: Send`; a
     /// `!Send` store should implement the `_mut` variant directly.
     fn async_cache_try_get_or_set_with<'a, F, Fut, E>(
@@ -1587,7 +1602,7 @@ pub trait CachedAsync<K, V> {
     }
 
     /// The mutable counterpart of
-    /// [`async_cache_try_get_or_set_with`](CachedAsync::async_cache_try_get_or_set_with):
+    /// [`async_cache_try_get_or_set_with`](CachedGetOrSetAsync::async_cache_try_get_or_set_with):
     /// returns `Result<&mut V, E>`.
     fn async_cache_try_get_or_set_with_mut<'a, F, Fut, E>(
         &'a mut self,
@@ -1600,61 +1615,6 @@ pub trait CachedAsync<K, V> {
         E: 'a,
         F: FnOnce() -> Fut + Send + 'a,
         Fut: Future<Output = Result<V, E>> + Send + 'a;
-
-    /// Retrieve a cached value asynchronously.
-    ///
-    /// Defaults to calling the synchronous [`Cached::cache_get`] implementation. Stores can
-    /// override to provide a truly async path.
-    fn async_cache_get<'a, Q>(
-        &'a mut self,
-        k: &'a Q,
-    ) -> impl Future<Output = Option<&'a V>> + Send + 'a
-    where
-        Self: Cached<K, V> + Send,
-        K: std::borrow::Borrow<Q> + 'a,
-        Q: std::hash::Hash + Eq + ?Sized + Sync,
-        V: 'a,
-    {
-        async move { self.cache_get(k) }
-    }
-
-    /// Insert a key-value pair asynchronously.
-    ///
-    /// Defaults to calling the synchronous [`Cached::cache_set`] implementation.
-    fn async_cache_set(&mut self, k: K, v: V) -> impl Future<Output = Option<V>> + Send
-    where
-        Self: Cached<K, V> + Send,
-        K: Send,
-        V: Send,
-    {
-        async move { self.cache_set(k, v) }
-    }
-
-    /// Remove a cached value asynchronously.
-    ///
-    /// Defaults to calling the synchronous [`Cached::cache_remove`] implementation.
-    fn async_cache_remove<'a, Q>(
-        &'a mut self,
-        k: &'a Q,
-    ) -> impl Future<Output = Option<V>> + Send + 'a
-    where
-        Self: Cached<K, V> + Send,
-        K: std::borrow::Borrow<Q> + 'a,
-        Q: std::hash::Hash + Eq + ?Sized + Sync,
-        V: 'a,
-    {
-        async move { self.cache_remove(k) }
-    }
-
-    /// Remove all entries asynchronously.
-    ///
-    /// Defaults to calling the synchronous [`Cached::cache_clear`] implementation.
-    fn async_cache_clear(&mut self) -> impl Future<Output = ()> + Send
-    where
-        Self: Cached<K, V> + Send,
-    {
-        async move { self.cache_clear() }
-    }
 }
 
 /// Shared base of the concurrent cache traits.
@@ -2526,64 +2486,3 @@ pub mod __set_dispatch_async {
 // bring your own lock or use a macro (`#[cached]`/`#[once]` generate the lock).
 // `ConcurrentCached`/`ConcurrentCachedAsync` is the contract for stores that
 // manage their own synchronization (`RedisCache`, `RedbCache`).
-
-#[cfg(all(test, feature = "async"))]
-mod cached_async_rename_tests {
-    //! Tests that the four renamed `CachedAsync` default methods exist and behave correctly.
-    //! These tests fail if the old names (`get_async`, `set_async`, etc.) are used instead,
-    //! because the new names (`async_cache_get`, `async_cache_set`, etc.) are what the trait
-    //! now declares.
-
-    use crate::{Cached, CachedAsync, UnboundCache};
-
-    /// Call all four renamed default methods on an in-memory `UnboundCache` and verify
-    /// that `async_cache_get`, `async_cache_set`, `async_cache_remove`, and
-    /// `async_cache_clear` behave like their synchronous counterparts.
-    #[tokio::test]
-    async fn async_cache_get_set_remove_clear_behavioral() {
-        let mut cache: UnboundCache<String, u32> = UnboundCache::builder().build().unwrap();
-
-        // async_cache_set inserts a value and returns None (no previous entry).
-        let prev = cache.async_cache_set("a".to_string(), 1u32).await;
-        assert_eq!(prev, None, "async_cache_set: first insert returns None");
-
-        // async_cache_set on existing key returns the old value.
-        let prev = cache.async_cache_set("a".to_string(), 2u32).await;
-        assert_eq!(
-            prev,
-            Some(1u32),
-            "async_cache_set: overwrite returns old value"
-        );
-
-        // async_cache_get returns the current value.
-        let got = cache.async_cache_get("a").await;
-        assert_eq!(got, Some(&2u32), "async_cache_get: hit returns Some");
-
-        // async_cache_get on a missing key returns None.
-        let missing = cache.async_cache_get("z").await;
-        assert_eq!(missing, None, "async_cache_get: miss returns None");
-
-        // async_cache_remove removes and returns the value.
-        let removed = cache.async_cache_remove("a").await;
-        assert_eq!(
-            removed,
-            Some(2u32),
-            "async_cache_remove: returns removed value"
-        );
-
-        // The entry is gone after removal.
-        let gone = cache.async_cache_get("a").await;
-        assert_eq!(gone, None, "async_cache_get: after removal returns None");
-
-        // async_cache_clear removes all entries.
-        cache.async_cache_set("x".to_string(), 10u32).await;
-        cache.async_cache_set("y".to_string(), 20u32).await;
-        assert_eq!(cache.cache_size(), 2);
-        cache.async_cache_clear().await;
-        assert_eq!(
-            cache.cache_size(),
-            0,
-            "async_cache_clear: empties the cache"
-        );
-    }
-}

@@ -8,7 +8,7 @@ use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 #[cfg(feature = "async_core")]
-use {super::CachedAsync, std::future::Future};
+use {super::CachedGetOrSetAsync, std::future::Future};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -859,7 +859,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> CachedPeek<K, V> for LruCache<K, V
 }
 
 #[cfg(feature = "async_core")]
-impl<K, V, S> CachedAsync<K, V> for LruCache<K, V, S>
+impl<K, V, S> CachedGetOrSetAsync<K, V> for LruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,
     S: BuildHasher + Send,
@@ -1240,7 +1240,7 @@ mod tests {
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_async_trait() {
-        use crate::CachedAsync;
+        use crate::CachedGetOrSetAsync;
         let mut c = LruCache::builder().max_size(5).build().unwrap();
 
         async fn _get(n: usize) -> usize {
@@ -1248,37 +1248,53 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(0).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(0).await })
+                .await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(1).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(1).await })
+                .await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(2).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(2).await })
+                .await,
             &2
         );
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(3).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(3).await })
+                .await,
             &3
         );
 
         // hits — should not re-evaluate
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 0, || async { _get(99).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 0, || async {
+                _get(99).await
+            })
+            .await,
             &0
         );
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 1, || async { _get(99).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 1, || async {
+                _get(99).await
+            })
+            .await,
             &1
         );
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 2, || async { _get(99).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 2, || async {
+                _get(99).await
+            })
+            .await,
             &2
         );
         assert_eq!(
-            CachedAsync::async_cache_get_or_set_with(&mut c, 3, || async { _get(99).await }).await,
+            CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 3, || async {
+                _get(99).await
+            })
+            .await,
             &3
         );
 
@@ -1292,21 +1308,25 @@ mod tests {
         }
 
         assert_eq!(
-            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(0).await })
-                .await
-                .unwrap(),
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+                _try_get(0).await
+            })
+            .await
+            .unwrap(),
             &0
         );
         assert_eq!(
-            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
-                .await
-                .unwrap(),
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+                _try_get(5).await
+            })
+            .await
+            .unwrap(),
             &0 // cached value, 5 never evaluated
         );
 
         c.cache_reset();
         let res: Result<&usize, String> =
-            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
                 _try_get(10).await
             })
             .await;
@@ -1314,12 +1334,16 @@ mod tests {
         assert!(c.key_order().is_empty());
 
         let res: Result<&usize, String> =
-            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(1).await })
-                .await;
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+                _try_get(1).await
+            })
+            .await;
         assert_eq!(res.unwrap(), &1);
         let res: Result<&usize, String> =
-            CachedAsync::async_cache_try_get_or_set_with(&mut c, 0, || async { _try_get(5).await })
-                .await;
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with(&mut c, 0, || async {
+                _try_get(5).await
+            })
+            .await;
         assert_eq!(res.unwrap(), &1);
     }
 
