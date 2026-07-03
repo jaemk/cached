@@ -533,11 +533,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    // `sync_writes_buckets` is unused on `#[once]` (no `by_key` path), but the
-    // static generator still references the binding for the (rejected) `is_by_key`
-    // branch below; provide the default so the branches compile.
-    let sync_writes_buckets = 64_usize;
-
     // `has_ttl` / `ttl_duration` were resolved above (from `ttl` expr, `ttl_secs`,
     // or `ttl_millis`); `has_ttl` gates the timestamped storage shape (#149).
 
@@ -728,16 +723,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         let cache_ty = cache_ty.clone();
         let cache_create = cache_create.clone();
         let krate = krate.clone();
-        let is_by_key = sync_writes == SyncWriteMode::ByKey;
+        // `#[once]` rejects `sync_writes = "by_key"` above, so there is no bucketed static here.
         make_static = Box::new(move |vis: &proc_macro2::TokenStream| {
-            if is_by_key {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<(#krate::async_sync::RwLock<#cache_ty>, Vec<std::sync::Arc<#krate::async_sync::RwLock<()>>>)> = ::std::sync::LazyLock::new(|| (#krate::async_sync::RwLock::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#krate::async_sync::RwLock::new(()))).collect()));
-                }
-            } else {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<#krate::async_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::async_sync::RwLock::new(#cache_create));
-                }
+            quote! {
+                #vis static #cache_ident: ::std::sync::LazyLock<#krate::async_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::async_sync::RwLock::new(#cache_create));
             }
         });
     } else {
@@ -760,16 +749,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         let cache_ty = cache_ty.clone();
         let cache_create = cache_create.clone();
         let krate = krate.clone();
-        let is_by_key = sync_writes == SyncWriteMode::ByKey;
+        // `#[once]` rejects `sync_writes = "by_key"` above, so there is no bucketed static here.
         make_static = Box::new(move |vis: &proc_macro2::TokenStream| {
-            if is_by_key {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<(#krate::sync_sync::RwLock<#cache_ty>, Vec<std::sync::Arc<#krate::sync_sync::RwLock<()>>>)> = ::std::sync::LazyLock::new(|| (#krate::sync_sync::RwLock::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#krate::sync_sync::RwLock::new(()))).collect()));
-                }
-            } else {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<#krate::sync_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::sync_sync::RwLock::new(#cache_create));
-                }
+            quote! {
+                #vis static #cache_ident: ::std::sync::LazyLock<#krate::sync_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::sync_sync::RwLock::new(#cache_create));
             }
         });
     }

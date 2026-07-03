@@ -321,6 +321,27 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
         expires_at.is_none_or(|t| Instant::now() < t)
     }
 
+    /// Insert `entry` for `key`, returning the previous value only if it was still live.
+    ///
+    /// A displaced expired value is filtered from the return (matching the get paths), so it is
+    /// dropped silently from the caller's view; in that case fire `on_evict` and count an
+    /// eviction. The inner `LruCache::cache_set` does not fire `on_evict` on an overwrite, so the
+    /// callback fires exactly once here. The key is cloned only when a callback is configured.
+    fn set_entry(&mut self, key: K, entry: TimedEntry<V>) -> Option<V> {
+        let key_for_evict = self.on_evict.as_ref().map(|_| key.clone());
+        match self.store.cache_set(key, entry) {
+            Some(old) if Self::entry_live(old.expires_at) => Some(old.value),
+            Some(old) => {
+                if let (Some(on_evict), Some(k)) = (&self.on_evict, &key_for_evict) {
+                    on_evict(k, &old.value);
+                }
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            None => None,
+        }
+    }
+
     /// Compute the expiry instant for a new or refreshed entry given the current TTL.
     /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
     /// Returns `Err(CacheSetError::TimeBounds)` on overflow.
@@ -705,38 +726,30 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
     }
 
     /// Insert a key-value pair. Returns the previous value only if it had not yet expired.
-    /// Expired previous values are silently discarded.
+    /// An expired previous value is filtered from the return; it fires `on_evict` and counts as
+    /// an eviction, matching the other removal paths.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
-        let entry = TimedEntry {
-            expires_at,
-            value: val,
-        };
-        let stamped = self.store.cache_set(key, entry);
-        stamped.and_then(|entry| {
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
-        })
+        self.set_entry(
+            key,
+            TimedEntry {
+                expires_at,
+                value: val,
+            },
+        )
     }
 
     fn cache_try_set(&mut self, key: K, val: V) -> Result<Option<V>, super::CacheSetError> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now)?;
-        let entry = TimedEntry {
-            expires_at,
-            value: val,
-        };
-        Ok(self.store.cache_set(key, entry).and_then(|entry| {
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
-        }))
+        Ok(self.set_entry(
+            key,
+            TimedEntry {
+                expires_at,
+                value: val,
+            },
+        ))
     }
 
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
@@ -1045,6 +1058,33 @@ mod tests {
     use super::*;
     use crate::{Cached, CachedExt};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, AtomicOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let before = c.cache_evictions().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // The previous value has expired: overwriting filters it (None), fires on_evict once,
+        // and counts one eviction.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(c.cache_evictions(), Some(before + 1));
+        assert_eq!(fired.load(AtomicOrdering::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(c.cache_evictions(), Some(before + 1));
+        assert_eq!(fired.load(AtomicOrdering::Relaxed), 1);
+    }
 
     #[test]
     fn new_returns_ready_cache_respecting_max_size_and_ttl() {

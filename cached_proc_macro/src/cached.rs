@@ -883,7 +883,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // function-local item is meaningless and trips `unreachable_pub` (#7).
     let make_static = |vis: &proc_macro2::TokenStream| match sync_writes {
         SyncWriteMode::ByKey => quote! {
-            #vis static #cache_ident: ::std::sync::LazyLock<(#lock_type<#cache_ty>, Vec<std::sync::Arc<#lock_type<()>>>)> = ::std::sync::LazyLock::new(|| (#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#lock_type::new(()))).collect()));
+            #vis static #cache_ident: ::std::sync::LazyLock<#krate::KeyedCache<#lock_type<#cache_ty>, #lock_type<()>>> = ::std::sync::LazyLock::new(|| #krate::KeyedCache::new(#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| ::std::sync::Arc::new(#lock_type::new(()))).collect()));
         },
         _ => quote! {
             #vis static #cache_ident: ::std::sync::LazyLock<#lock_type<#cache_ty>> = ::std::sync::LazyLock::new(|| #lock_type::new(#cache_create));
@@ -925,13 +925,15 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         let lock = match sync_writes {
             SyncWriteMode::ByKey => {
                 let key_lock_block = by_key_lock_block(
+                    quote! { #cache_ident },
                     quote! { __cached_key },
-                    quote! { __cached_locks },
                     lock_method.clone(),
                     await_if_async.clone(),
                 );
                 quote! {
-                    let (__cached_cache_mutex, __cached_locks) = &*#cache_ident;
+                    // `KeyedCache` derefs to the inner cache lock, so `&**` reaches the same
+                    // `RwLock`/`Mutex` a non-`by_key` static exposes directly.
+                    let __cached_cache_mutex = &**#cache_ident;
                     #key_lock_block
                     let mut __cached_cache = __cached_cache_mutex.#lock_method()#await_if_async;
                 }
@@ -989,13 +991,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         let do_set_return_block = match sync_writes {
             SyncWriteMode::ByKey => {
                 let key_lock_block = by_key_lock_block(
+                    quote! { #cache_ident },
                     quote! { __cached_key },
-                    quote! { __cached_locks },
                     lock_method.clone(),
                     await_if_async.clone(),
                 );
                 quote! {
-                    let (__cached_cache_mutex, __cached_locks) = &*#cache_ident;
+                    let __cached_cache_mutex = &**#cache_ident;
                     #key_lock_block
                     {
                         #by_key_cache_get_return_block

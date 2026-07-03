@@ -715,13 +715,20 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
                 self.keys.remove(&old_stamped);
             }
         }
-        let old_value = old.and_then(|entry| {
-            if entry.is_expired() {
+        let old_value = match old {
+            // A displaced expired value is filtered from the return (matching the get paths), so
+            // it is dropped silently from the caller's view; fire `on_evict` and count an
+            // eviction so cleanup and metrics stay consistent with the other removal paths.
+            Some(entry) if entry.is_expired() => {
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(entry.key.0.as_ref(), &entry.value);
+                }
+                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 None
-            } else {
-                Some(entry.value)
             }
-        });
+            Some(entry) => Some(entry.value),
+            None => None,
+        };
 
         // Skip size-limit eviction in two cases:
         // 1. The TTL overflowed and was saturated to `now` — the new entry has the earliest
@@ -1225,6 +1232,30 @@ mod test {
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // The previous value has expired: overwriting filters it (None), fires on_evict once,
+        // and counts one eviction.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn entry_is_expired_at_uses_at_or_after_boundary() {

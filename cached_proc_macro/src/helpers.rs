@@ -254,8 +254,8 @@ pub(super) fn validate_sync_writes_buckets(
 }
 
 pub(super) fn by_key_lock_block(
+    keyed: TokenStream2,
     key: TokenStream2,
-    locks: TokenStream2,
     lock_method: TokenStream2,
     await_if_async: TokenStream2,
 ) -> TokenStream2 {
@@ -264,15 +264,11 @@ pub(super) fn by_key_lock_block(
         // `__cached_key_lock` to match the `__cached_` hygiene convention and
         // eliminate the shadow window against user-defined `lock` / `_key_lock`
         // bindings.
-        let __cached_bucket_lock = {
-            use std::hash::{Hash, Hasher};
-            // DefaultHasher is used for bucket selection only. It is not cryptographic and
-            // has no cross-version stability guarantees, but only within-process consistency
-            // is required for runtime lock-bucket selection.
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            #key.hash(&mut hasher);
-            #locks[(hasher.finish() as usize) % #locks.len()].clone()
-        };
+        //
+        // `KeyedCache::bucket_for` selects the per-key bucket using a per-static randomly-seeded
+        // hasher, so the bucket assignment is not attacker-predictable (a fixed-seed hasher could
+        // be collapsed to a single bucket by crafted keys).
+        let __cached_bucket_lock = #keyed.bucket_for(&#key).clone();
         let __cached_key_lock = __cached_bucket_lock.#lock_method()#await_if_async;
     }
 }

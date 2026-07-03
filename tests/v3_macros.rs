@@ -2154,18 +2154,13 @@ fn once_sync_writes_true_compiles_and_caches() {
 // The default `sync_writes` was reverted from ByKey back to `Disabled` (2.x
 // behavior): no write synchronization. A ByKey default deadlocks recursive
 // memoized fns (the per-key bucket lock is held across the body). This is pinned
-// two independent ways:
-//   1. Static shape (here): the Disabled/Default modes emit a plain
-//      `LazyLock<RwLock<Store>>`, while ByKey emits the tuple
-//      `LazyLock<(RwLock<Store>, Vec<..>)>`. Reading the static via `.read()`
-//      (NOT `.0.read()`) only compiles for the non-ByKey shape, so a revert to a
-//      ByKey default would fail to COMPILE at this line.
-//   2. Recursion does not deadlock: `bare_cached_recursion_does_not_deadlock`
-//      (sync) and `bare_cached_async_recursion_does_not_deadlock` (async) in
-//      tests/cached.rs. ByKey (per-key bucket lock) or Default (global write
-//      lock) held across the body would deadlock those; only Disabled does not.
-// Together (1) rules out a ByKey default and (2) rules out a Default default, so
-// the effective default is pinned to Disabled.
+// via recursion: `bare_cached_recursion_does_not_deadlock` (sync) and
+// `bare_cached_async_recursion_does_not_deadlock` (async) in tests/cached.rs.
+// ByKey (per-key bucket lock) or Default (global write lock) held across the body
+// would deadlock those; only Disabled does not, which rules out both non-Disabled
+// defaults. (The static shape no longer distinguishes the modes: the ByKey static
+// is now a `KeyedCache` that derefs to the inner cache lock, so `.read()`/`.write()`
+// compile uniformly across sync_writes modes by design.)
 
 // Counter proves the body ran exactly once across sequential miss+hit calls.
 static CACHED_DEFAULT_DISABLED_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -2183,10 +2178,9 @@ fn test_cached_default_is_disabled_not_by_key() {
 
     // Miss then hit: the bare default must still cache.
     assert_eq!(cached_default_disabled(1), 2);
-    // `.read()` (NOT `.0.read()`) resolves only when the static is the plain
-    // `LazyLock<RwLock<Store>>` shape produced by the Disabled/Default modes.
-    // If the default regressed to ByKey, the static would be a tuple and this
-    // line would not compile (the whole test crate would fail to build).
+    // Named-static inspection via `.read()` works for every sync_writes mode (the ByKey static
+    // is a `KeyedCache` that derefs to the inner cache lock), so this exercises the documented
+    // inspection path; the deadlock guard above is what pins the default to Disabled.
     let hits_before = CACHED_DEFAULT_DISABLED.read().cache_hits();
     assert_eq!(cached_default_disabled(1), 2); // cache hit
     let hits_after = CACHED_DEFAULT_DISABLED.read().cache_hits();
@@ -2196,6 +2190,44 @@ fn test_cached_default_is_disabled_not_by_key() {
     );
     // The body ran exactly once: first call missed and computed, second hit.
     assert_eq!(CACHED_DEFAULT_DISABLED_CALLS.load(Ordering::SeqCst), 1);
+}
+
+// A `sync_writes = "by_key"` named static is inspected with the same `.read()`/`.write()` as any
+// other generated static: the static is a doc-hidden `KeyedCache` that derefs to the inner cache
+// lock, hiding the bucket vector. This is the MACRO-8 fix (previously the static was a tuple and
+// inspection required `.0.read()`).
+#[cached(sync_writes = "by_key", sync_writes_buckets = 8)]
+fn by_key_inspectable(x: u32) -> u32 {
+    x * 2
+}
+
+#[test]
+fn by_key_named_static_inspectable_via_read_and_write() {
+    use cached::{Cached, CachedRead};
+
+    assert_eq!(by_key_inspectable(2), 4);
+    assert_eq!(by_key_inspectable(3), 6);
+
+    // `.read()` on the static (no `.0` tuple access) gives shared access for read-only inspection.
+    {
+        let guard = BY_KEY_INSPECTABLE.read();
+        assert_eq!(CachedRead::cache_get_read(&*guard, &2), Some(&4));
+        assert_eq!(CachedRead::cache_get_read(&*guard, &3), Some(&6));
+    }
+    // `.write()` gives exclusive access; clear via the same handle.
+    {
+        let mut guard = BY_KEY_INSPECTABLE.write();
+        assert_eq!(guard.cache_get(&2), Some(&4));
+        guard.cache_clear();
+    }
+    assert_eq!(
+        CachedRead::cache_get_read(&*BY_KEY_INSPECTABLE.read(), &2),
+        None
+    );
+
+    // by_key still deduplicates and caches correctly after the manual clear.
+    assert_eq!(by_key_inspectable(2), 4);
+    assert!(BY_KEY_INSPECTABLE.write().cache_get(&2).is_some());
 }
 
 // sync_writes = false restores the old Disabled behavior: concurrent threads

@@ -459,7 +459,30 @@ where
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
-        Ok(shard.lock.write().insert(k, v))
+        // Capture the displaced value. When an `on_evict` callback is configured, remove-then-
+        // insert so the owned old key can fire the callback after the lock is released (the
+        // sharded on_evict-after-unlock invariant); otherwise a plain insert.
+        let old: Option<(Option<K>, V)> = if self.inner.on_evict.is_some() {
+            let mut guard = shard.lock.write();
+            let removed = guard.remove_entry(&k);
+            guard.insert(k, v);
+            removed.map(|(ok, v)| (Some(ok), v))
+        } else {
+            shard.lock.write().insert(k, v).map(|v| (None, v))
+        };
+        match old {
+            // A displaced expired value is filtered from the return (matching cache_remove and
+            // the single-owner expiring stores); fire on_evict and count an eviction for it.
+            Some((key, old_v)) if old_v.is_expired() => {
+                if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
+                    cb(key, &old_v);
+                }
+                self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+            Some((_, old_v)) => Ok(Some(old_v)),
+            None => Ok(None),
+        }
     }
 
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
@@ -774,6 +797,62 @@ mod tests {
         fn is_expired(&self) -> bool {
             self.expired
         }
+    }
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+        let count = Arc::new(AtomicU64::new(0));
+        let count2 = count.clone();
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .on_evict(move |_, _| {
+                count2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1,
+            Val {
+                v: 1,
+                expired: true,
+            },
+        )
+        .unwrap();
+        let before = c.metrics().evictions.unwrap();
+        // Overwriting an expired value: None returned, on_evict fires once, one eviction.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(
+                &c,
+                1,
+                Val {
+                    v: 2,
+                    expired: false
+                }
+            )
+            .unwrap()
+            .map(|v| v.v),
+            None
+        );
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
+        // Overwriting a live value returns it, no on_evict and no new eviction.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(
+                &c,
+                1,
+                Val {
+                    v: 3,
+                    expired: false
+                }
+            )
+            .unwrap()
+            .map(|v| v.v),
+            Some(2)
+        );
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
     }
 
     #[test]

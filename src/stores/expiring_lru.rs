@@ -482,7 +482,20 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         Ok(v)
     }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
-        self.store.cache_set(k, v)
+        // Clone the key only when a callback might need it. The inner `LruCache::cache_set` does
+        // not fire `on_evict` on an overwrite, so an expired displaced value would otherwise be
+        // dropped silently; filter it from the return and fire `on_evict` + count once here.
+        let key_for_evict = self.on_evict.as_ref().map(|_| k.clone());
+        match self.store.cache_set(k, v) {
+            Some(old) if old.is_expired() => {
+                if let (Some(on_evict), Some(key)) = (&self.on_evict, &key_for_evict) {
+                    on_evict(key, &old);
+                }
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            other => other,
+        }
     }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
@@ -758,6 +771,29 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::{Arc, Mutex};
+        let fired: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(vec![]));
+        let fired2 = fired.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &u8, _v: &ExpiredU8| fired2.lock().unwrap().push(*k))
+            .build()
+            .unwrap();
+        c.set(1, 15); // expired (>10)
+        let before = c.cache_evictions().unwrap();
+        // Overwriting an expired value: filtered from the return (None), fires on_evict once,
+        // counts one eviction.
+        assert_eq!(c.cache_set(1, 3), None);
+        assert_eq!(c.cache_evictions(), Some(before + 1));
+        assert_eq!(fired.lock().unwrap().clone(), vec![1]);
+        // Overwriting a live value returns it, and does not fire on_evict or count.
+        assert_eq!(c.cache_set(1, 4), Some(3));
+        assert_eq!(c.cache_evictions(), Some(before + 1));
+        assert_eq!(fired.lock().unwrap().clone(), vec![1]);
+    }
+
+    #[test]
     fn expiring_lru_try_get_or_set_with_err_keeps_expired_and_counts_miss() {
         // EXP-2: on a factory Err over an expired entry, ExpiringLruCache counts a miss the
         // instant the factory runs (matching ExpiringCache) instead of losing it on the `?`
@@ -942,7 +978,9 @@ mod tests {
             ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         assert_eq!(c.set(1, 100), None);
-        assert_eq!(c.set(1, 200), Some(100));
+        // The previous value 100 was expired (>10), so it is filtered from the return (None),
+        // matching the TTL stores' cache_set contract.
+        assert_eq!(c.set(1, 200), None);
         assert_eq!(c.set(2, 1), None);
         assert_eq!(c.cache_size(), 2);
 

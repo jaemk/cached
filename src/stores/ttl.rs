@@ -249,6 +249,34 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
         expires_at.is_none_or(|t| Instant::now() < t)
     }
 
+    /// Insert `entry` for `key`, returning the previous value only if it was still live.
+    ///
+    /// When the displaced previous value had already expired it is filtered from the return
+    /// (matching the get paths), so it is dropped silently from the caller's view; in that case
+    /// fire `on_evict` and count an eviction so resource cleanup and metrics stay consistent
+    /// with the other removal paths.
+    fn set_entry(&mut self, key: K, entry: TimedEntry<V>) -> Option<V> {
+        use std::collections::hash_map::Entry;
+        match self.store.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let old = occupied.insert(entry);
+                if Self::entry_live(old.expires_at) {
+                    Some(old.value)
+                } else {
+                    if let Some(on_evict) = &self.on_evict {
+                        on_evict(occupied.key(), &old.value);
+                    }
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+                None
+            }
+        }
+    }
+
     /// Compute the expiry instant for a new or refreshed entry given the current TTL.
     /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
     /// Returns `Err(CacheSetError::TimeBounds)` on overflow.
@@ -480,33 +508,25 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
-        let entry = TimedEntry {
-            expires_at,
-            value: val,
-        };
-        self.store.insert(key, entry).and_then(|entry| {
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
-        })
+        self.set_entry(
+            key,
+            TimedEntry {
+                expires_at,
+                value: val,
+            },
+        )
     }
 
     fn cache_try_set(&mut self, key: K, val: V) -> Result<Option<V>, super::CacheSetError> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now)?;
-        let entry = TimedEntry {
-            expires_at,
-            value: val,
-        };
-        Ok(self.store.insert(key, entry).and_then(|entry| {
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
-        }))
+        Ok(self.set_entry(
+            key,
+            TimedEntry {
+                expires_at,
+                value: val,
+            },
+        ))
     }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
@@ -815,6 +835,30 @@ mod tests {
     use crate::stores::Cached;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // The previous value has expired: overwriting filters it from the return (None), fires
+        // on_evict once, and counts one eviction.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn new_returns_ready_cache_respecting_ttl() {

@@ -413,7 +413,28 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
     }
 
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
-        self.store.cache_set(k, v)
+        use std::collections::hash_map::Entry;
+        match self.store.store.entry(k) {
+            Entry::Occupied(mut occupied) => {
+                let old = occupied.insert(v);
+                if old.is_expired() {
+                    // The previous value had expired, so it is filtered from the return
+                    // (matching `cache_remove`); fire `on_evict` and count an eviction so the
+                    // silently-dropped value is cleaned up like every other removal path.
+                    if let Some(on_evict) = &self.on_evict {
+                        on_evict(occupied.key(), &old);
+                    }
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                    None
+                } else {
+                    Some(old)
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(v);
+                None
+            }
+        }
     }
 
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
@@ -813,6 +834,27 @@ mod tests {
         let v = c.cache_get_or_set_with(1, || ExpiredU8(3));
         assert_eq!(*v, ExpiredU8(3));
         assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.lock().unwrap().clone(), vec![1]);
+    }
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::{Arc, Mutex};
+        let fired: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(vec![]));
+        let fired2 = fired.clone();
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder()
+            .on_evict(move |k: &u8, _v: &ExpiredU8| fired2.lock().unwrap().push(*k))
+            .build()
+            .unwrap();
+        c.set(1, ExpiredU8(15)); // expired (>10)
+        // Overwriting an expired value: filtered from the return (None), fires on_evict once,
+        // counts one eviction.
+        assert_eq!(c.cache_set(1, ExpiredU8(3)), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.lock().unwrap().clone(), vec![1]);
+        // Overwriting a live value returns it, and does not fire on_evict or count.
+        assert_eq!(c.cache_set(1, ExpiredU8(4)), Some(ExpiredU8(3)));
         assert_eq!(c.cache_evictions(), Some(1));
         assert_eq!(fired.lock().unwrap().clone(), vec![1]);
     }

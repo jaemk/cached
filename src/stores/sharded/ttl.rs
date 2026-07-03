@@ -631,8 +631,30 @@ where
             expires_at,
             value: v,
         };
-        let old = shard.lock.write().insert(k, new_entry);
-        Ok(old.map(|e| e.value))
+        // Capture the displaced entry. When an `on_evict` callback is configured, remove-then-
+        // insert so the owned old key is available to fire the callback after the lock is
+        // released (the sharded on_evict-after-unlock invariant); otherwise a plain insert.
+        let old: Option<(Option<K>, TimedEntry<V>)> = if self.inner.on_evict.is_some() {
+            let mut guard = shard.lock.write();
+            let removed = guard.remove_entry(&k);
+            guard.insert(k, new_entry);
+            removed.map(|(ok, e)| (Some(ok), e))
+        } else {
+            shard.lock.write().insert(k, new_entry).map(|e| (None, e))
+        };
+        match old {
+            // A displaced expired value is filtered from the return (matching cache_remove and
+            // the single-owner TTL stores); fire on_evict and count an eviction for it.
+            Some((key, entry)) if entry.expires_at.is_some_and(|t| Instant::now() >= t) => {
+                if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
+                    cb(key, &entry.value);
+                }
+                self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+            Some((_, entry)) => Ok(Some(entry.value)),
+            None => Ok(None),
+        }
     }
 
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
@@ -1027,6 +1049,35 @@ mod tests {
     #[should_panic(expected = "non-zero ttl")]
     fn new_zero_ttl_panics() {
         let _c = ShardedTtlCache::<u32, u32>::new(Duration::ZERO);
+    }
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+        let count = Arc::new(AtomicU64::new(0));
+        let count2 = count.clone();
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_, _| {
+                count2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).unwrap();
+        let before = c.metrics().evictions.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Overwriting the expired value: None returned, on_evict fires once, one eviction.
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 200).unwrap(), None);
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(&c, 1, 300).unwrap(),
+            Some(200)
+        );
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
     }
 
     #[test]

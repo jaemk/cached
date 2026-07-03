@@ -3261,7 +3261,7 @@ mod concurrent_cached_result_fallback {
     }
 
     #[test]
-    fn result_fallback_expired_err_path_counts_miss_no_eviction() {
+    fn result_fallback_expired_err_path_counts_miss_and_reset_eviction() {
         FAIL_METRIC.store(false, Ordering::Relaxed);
         // Prime: miss + cache_set.
         assert_eq!(maybe_triple(7), Ok(21));
@@ -3270,7 +3270,9 @@ mod concurrent_cached_result_fallback {
         // Wait for TTL to expire.
         sleep(Duration::from_millis(1100));
         // Expired + Err: cache_get_with_expiry_status returns (Some(21), true) →
-        // misses++; the expired entry is NOT evicted; stale Ok(21) is returned.
+        // misses++; the fallback re-caches the stale Ok(21) with a fresh TTL, which overwrites
+        // the expired entry. Under the aligned cache_set contract, replacing an expired value
+        // counts as one eviction.
         FAIL_METRIC.store(true, Ordering::Relaxed);
         assert_eq!(maybe_triple(7), Ok(21));
         // LazyLock<ShardedTtlCache> is initialized on first call; deref to access store.
@@ -3279,11 +3281,11 @@ mod concurrent_cached_result_fallback {
         assert_eq!(m.misses, Some(2), "expected 2 misses (absent + expired)");
         // within-TTL hit = 1
         assert_eq!(m.hits, Some(1), "expected 1 hit (within-TTL)");
-        // the expired entry is held in place — no eviction on the fallback path
+        // re-caching the stale value replaced the expired entry: one eviction.
         assert_eq!(
             m.evictions,
-            Some(0),
-            "no eviction must occur on expired→Err→stale path"
+            Some(1),
+            "re-caching the stale value over the expired entry counts as one eviction"
         );
         FAIL_METRIC.store(false, Ordering::Relaxed);
     }
@@ -3381,18 +3383,19 @@ mod concurrent_cached_result_fallback_lru_ttl {
         assert_eq!(lru_ttl_maybe_double(5), Ok(10));
         // Wait for TTL to expire.
         sleep(Duration::from_millis(1100));
-        // Expired + Err: stale Ok must be returned, entry held in place.
+        // Expired + Err: stale Ok is returned and re-cached with a fresh TTL, overwriting the
+        // expired entry (which counts as one eviction under the aligned cache_set contract).
         FAIL_LRU.store(true, Ordering::Relaxed);
         assert_eq!(lru_ttl_maybe_double(5), Ok(10));
         // Metrics before any new-key calls: 2 misses (initial absent + expired),
-        // 1 hit (within-TTL), 0 evictions.
+        // 1 hit (within-TTL), 1 eviction (stale re-cache replaced the expired entry).
         let m = LRU_TTL_MAYBE_DOUBLE.metrics();
         assert_eq!(m.misses, Some(2), "expected 2 misses (absent + expired)");
         assert_eq!(m.hits, Some(1), "expected 1 hit (within-TTL)");
         assert_eq!(
             m.evictions,
-            Some(0),
-            "no eviction must occur on expired→Err→stale path"
+            Some(1),
+            "re-caching the stale value over the expired entry counts as one eviction"
         );
         // Key with no prior Ok: Err propagated.
         assert_eq!(lru_ttl_maybe_double(99), Err("lru_ttl failure".to_string()));
@@ -3507,10 +3510,11 @@ mod concurrent_cached_result_fallback_async_lru_ttl {
         assert_eq!(lru_ttl_maybe_double_async(5).await, Ok(10));
         // Wait for TTL to expire.
         sleep(Duration::from_millis(1100)).await;
-        // Expired + Err: stale Ok must be returned, entry held in place.
+        // Expired + Err: stale Ok is returned and re-cached with a fresh TTL, overwriting the
+        // expired entry (one eviction under the aligned cache_set contract).
         FAIL_ASYNC_LRU.store(true, Ordering::Relaxed);
         assert_eq!(lru_ttl_maybe_double_async(5).await, Ok(10));
-        // Metrics: 2 misses (initial absent + expired), 1 hit (within-TTL), 0 evictions.
+        // Metrics: 2 misses (initial absent + expired), 1 hit (within-TTL), 1 eviction.
         // The async store lives in a `OnceCell`, initialized by the first call above.
         let m = LRU_TTL_MAYBE_DOUBLE_ASYNC
             .get()
@@ -3520,8 +3524,8 @@ mod concurrent_cached_result_fallback_async_lru_ttl {
         assert_eq!(m.hits, Some(1), "expected 1 hit (within-TTL)");
         assert_eq!(
             m.evictions,
-            Some(0),
-            "no eviction must occur on expired→Err→stale path"
+            Some(1),
+            "re-caching the stale value over the expired entry counts as one eviction"
         );
         // Key with no prior Ok: Err propagated.
         assert_eq!(
@@ -3868,11 +3872,11 @@ fn concurrent_cached_trait_short_aliases_work() {
     assert!(!ConcurrentCached::cache_delete(&cache, &"b".to_string()).unwrap());
 }
 
-// `cache_clear_with_on_evict` without a callback delegates to `clear()` and does NOT
-// increment the evictions counter. This test guards against regressions where the counter
-// increment gets moved before the early-return.
+// `cache_clear_with_on_evict` counts every removed entry as an eviction regardless of whether
+// an `on_evict` callback is configured, so metrics do not depend on an observer being attached.
+// Plain `clear()` remains silent (covered elsewhere).
 #[test]
-fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
+fn cache_clear_with_on_evict_counts_evictions_without_callback() {
     use cached::{ConcurrentCached, ShardedLruCache, ShardedUnboundCache};
 
     // ShardedUnboundCache (unbounded) — no on_evict; evictions metric is not tracked (returns None)
@@ -3884,7 +3888,7 @@ fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
     // ShardedUnboundCache does not track evictions — None is expected, not Some(0)
     assert_eq!(cache.metrics().evictions, None);
 
-    // ShardedLruCache tracks evictions; no on_evict means the counter stays at zero
+    // ShardedLruCache tracks evictions; with no callback the counter still increments per entry.
     let lru = ShardedLruCache::<u32, u32>::builder()
         .max_size(64)
         .build()
@@ -3894,8 +3898,8 @@ fn cache_clear_with_on_evict_no_callback_leaves_evictions_at_zero() {
     lru.cache_clear_with_on_evict();
     assert_eq!(
         lru.metrics().evictions,
-        Some(0),
-        "evictions should remain 0 when no on_evict callback is set"
+        Some(2),
+        "evictions are counted even without an on_evict callback"
     );
     assert_eq!(lru.len(), 0);
 }
