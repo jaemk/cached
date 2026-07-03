@@ -2103,8 +2103,10 @@ mod extension_trait_blanket_impls {
     fn concurrent_cached_ext_clear_reset_aliases() {
         use cached::{ConcurrentCacheBase, ConcurrentCachedExt, ShardedUnboundCache};
 
-        let cache: ShardedUnboundCache<u32, u32> =
-            ShardedUnboundCache::builder().shards(1).build().expect("build");
+        let cache: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::builder()
+            .shards(1)
+            .build()
+            .expect("build");
 
         ConcurrentCachedExt::set(&cache, 1u32, 10u32).expect("infallible");
         ConcurrentCachedExt::set(&cache, 2u32, 20u32).expect("infallible");

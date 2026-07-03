@@ -295,10 +295,8 @@ where
                 || n == "."
                 || n == ".."
                 || n.chars().any(|c| {
-                    matches!(
-                        c,
-                        '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'
-                    ) || c.is_ascii_control()
+                    matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+                        || c.is_ascii_control()
                 })
             {
                 return Err(RedbCacheBuildError::InvalidCacheName);
@@ -2470,10 +2468,7 @@ mod tests {
         // reserved characters ('>', '"', '|') are the rest of the newly-rejected
         // NTFS/Windows set and were previously untested.
         assert_name_rejected("gt>name", "cache_name containing '>' must be rejected");
-        assert_name_rejected(
-            "quote\"name",
-            "cache_name containing '\"' must be rejected",
-        );
+        assert_name_rejected("quote\"name", "cache_name containing '\"' must be rejected");
         assert_name_rejected("pipe|name", "cache_name containing '|' must be rejected");
     }
 
@@ -2508,10 +2503,7 @@ mod tests {
             "a.b",
             "a '.' inside a name (not a bare '.'/'..') must build successfully",
         );
-        assert_name_accepted(
-            "v1.2.3",
-            "multiple interior dots must build successfully",
-        );
+        assert_name_accepted("v1.2.3", "multiple interior dots must build successfully");
         // '~' is not reserved and not a control char, so it is accepted.
         assert_name_accepted("home~cache", "'~' must build successfully");
         // A space is neither reserved nor a control char, so it is currently

@@ -748,7 +748,10 @@ fn ttl_sorted_cache_try_set_ttl_rejects_zero_and_preserves_state() {
     assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(30)));
 
     // Now disable expiry so the previous ttl is zero and ttl() resolves to None.
-    assert_eq!(CacheTtl::set_ttl(&mut c, Duration::ZERO), Some(Duration::from_secs(30)));
+    assert_eq!(
+        CacheTtl::set_ttl(&mut c, Duration::ZERO),
+        Some(Duration::from_secs(30))
+    );
     assert_eq!(CacheTtl::ttl(&c), None);
 
     // try_set_ttl(ZERO) while ALREADY disabled: still Err, and ttl() must stay None.
@@ -804,14 +807,34 @@ fn ttl_sorted_cache_overflow_with_size_limit_stays_bounded() {
 
     // All-None expiries sort by key, so the two highest keys survive and the lowest were
     // evicted. This pins the deterministic eviction order under the NeverExpire policy.
-    assert_eq!(c.cache_get(&1), None, "lowest key must be evicted under size pressure");
-    assert_eq!(c.cache_get(&2), None, "next lowest key must be evicted under size pressure");
-    assert_eq!(c.cache_get(&3), Some(&30), "surviving never-expiring entry must be readable");
-    assert_eq!(c.cache_get(&4), Some(&40), "surviving never-expiring entry must be readable");
+    assert_eq!(
+        c.cache_get(&1),
+        None,
+        "lowest key must be evicted under size pressure"
+    );
+    assert_eq!(
+        c.cache_get(&2),
+        None,
+        "next lowest key must be evicted under size pressure"
+    );
+    assert_eq!(
+        c.cache_get(&3),
+        Some(&30),
+        "surviving never-expiring entry must be readable"
+    );
+    assert_eq!(
+        c.cache_get(&4),
+        Some(&40),
+        "surviving never-expiring entry must be readable"
+    );
 
     // The survivors truly never expire: still live after a wait.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    assert_eq!(c.cache_size(), 2, "no TTL sweep may drop the never-expiring survivors");
+    assert_eq!(
+        c.cache_size(),
+        2,
+        "no TTL sweep may drop the never-expiring survivors"
+    );
     assert_eq!(c.cache_get(&3), Some(&30));
     assert_eq!(c.cache_get(&4), Some(&40));
 

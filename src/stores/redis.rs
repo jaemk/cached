@@ -737,12 +737,12 @@ where
     pub fn resolve_connection_string(&self) -> Result<ConnectionString, RedisCacheBuildError> {
         match self.connection_string {
             Some(ref s) => Ok(ConnectionString(s.to_string())),
-            None => std::env::var(ENV_KEY)
-                .map(ConnectionString)
-                .map_err(|e| RedisCacheBuildError::MissingConnectionString {
+            None => std::env::var(ENV_KEY).map(ConnectionString).map_err(|e| {
+                RedisCacheBuildError::MissingConnectionString {
                     env_key: ENV_KEY.to_string(),
                     error: e,
-                }),
+                }
+            }),
         }
     }
 

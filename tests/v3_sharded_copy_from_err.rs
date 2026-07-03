@@ -33,8 +33,9 @@ impl cached::Expires for Never {
 /// would produce — instead of panicking.
 #[test]
 fn unbound_copy_from_zero_shards_is_err() {
-    let existing: ShardedUnboundCache<u32, u32> =
-        ShardedUnboundCache::builder().build().expect("valid existing");
+    let existing: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::builder()
+        .build()
+        .expect("valid existing");
     existing.cache_set(1, 10).unwrap();
 
     let result = ShardedUnboundCache::<u32, u32>::builder()
@@ -44,7 +45,10 @@ fn unbound_copy_from_zero_shards_is_err() {
     assert!(
         matches!(
             result,
-            Err(BuildError::InvalidValue { field: "shards", .. })
+            Err(BuildError::InvalidValue {
+                field: "shards",
+                ..
+            })
         ),
         "copy_from with shards(0) must return the shard-count BuildError, got a differing result",
     );
@@ -71,7 +75,10 @@ fn lru_copy_from_zero_shards_is_err() {
     assert!(
         matches!(
             result,
-            Err(BuildError::InvalidValue { field: "shards", .. })
+            Err(BuildError::InvalidValue {
+                field: "shards",
+                ..
+            })
         ),
         "LRU copy_from with shards(0) must return the shard-count BuildError",
     );
@@ -103,8 +110,9 @@ fn lru_copy_from_missing_max_size_is_err() {
 fn expiring_copy_from_zero_shards_is_err() {
     use cached::ShardedExpiringCache;
 
-    let existing: ShardedExpiringCache<u32, Never> =
-        ShardedExpiringCache::builder().build().expect("valid existing");
+    let existing: ShardedExpiringCache<u32, Never> = ShardedExpiringCache::builder()
+        .build()
+        .expect("valid existing");
     existing.cache_set(1, Never(10)).unwrap();
 
     let result = ShardedExpiringCache::<u32, Never>::builder()
@@ -114,7 +122,10 @@ fn expiring_copy_from_zero_shards_is_err() {
     assert!(
         matches!(
             result,
-            Err(BuildError::InvalidValue { field: "shards", .. })
+            Err(BuildError::InvalidValue {
+                field: "shards",
+                ..
+            })
         ),
         "ShardedExpiringCache copy_from with shards(0) must return the shard-count BuildError",
     );
@@ -141,7 +152,10 @@ fn expiring_lru_copy_from_zero_shards_is_err() {
     assert!(
         matches!(
             result,
-            Err(BuildError::InvalidValue { field: "shards", .. })
+            Err(BuildError::InvalidValue {
+                field: "shards",
+                ..
+            })
         ),
         "ShardedExpiringLruCache copy_from with shards(0) must return the shard-count BuildError",
     );
@@ -171,7 +185,10 @@ mod time_stores {
         assert!(
             matches!(
                 result,
-                Err(BuildError::InvalidValue { field: "shards", .. })
+                Err(BuildError::InvalidValue {
+                    field: "shards",
+                    ..
+                })
             ),
             "ShardedTtlCache copy_from with shards(0) must return the shard-count BuildError",
         );
@@ -197,7 +214,10 @@ mod time_stores {
         assert!(
             matches!(
                 result,
-                Err(BuildError::InvalidValue { field: "shards", .. })
+                Err(BuildError::InvalidValue {
+                    field: "shards",
+                    ..
+                })
             ),
             "ShardedLruTtlCache (NoEvict) copy_from with shards(0) must return the shard BuildError",
         );
@@ -227,7 +247,10 @@ mod time_stores {
         assert!(
             matches!(
                 result,
-                Err(BuildError::InvalidValue { field: "shards", .. })
+                Err(BuildError::InvalidValue {
+                    field: "shards",
+                    ..
+                })
             ),
             "ShardedLruTtlCache (HasEvict) copy_from with shards(0) must return the shard BuildError",
         );
