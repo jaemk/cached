@@ -71,7 +71,7 @@ where
 impl<K, V, S> Eq for UnboundCache<K, V, S>
 where
     K: Eq + Hash,
-    V: PartialEq,
+    V: Eq,
     S: BuildHasher,
 {
 }
@@ -684,6 +684,10 @@ mod tests {
         assert_eq!(cache, cloned);
         cloned.cache_set(3, 300);
         assert_ne!(cache, cloned);
+
+        // `Eq` requires `V: Eq`; it still applies for a value type that is `Eq`.
+        fn assert_eq_impl<T: Eq>() {}
+        assert_eq_impl::<UnboundCache<u32, u32>>();
 
         // Builder build always succeeds for UnboundCache
         let builder = UnboundCache::<u32, u32>::builder().on_evict(|_, _| {});
