@@ -158,6 +158,10 @@ enum TtlOverflow {
     Error,
     /// Saturate the expiry to "now" (immediately stale) and still store the entry.
     SaturateNow,
+    /// Store the entry with `expiry = None` (never expires) instead of failing. Matches
+    /// the infallible `cache_set` of `TtlCache` / `LruTtlCache`, which treat an
+    /// unrepresentable expiry as "no expiry" rather than dropping the value.
+    NeverExpire,
 }
 
 /// A cache enforcing time expiration and an optional maximum size.
@@ -506,13 +510,15 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
 
     /// Set the default ttl and return the previous value.
     ///
-    /// Returns `Some(previous_ttl)` to match [`CacheTtl::set_ttl`](crate::CacheTtl::set_ttl)
-    /// and the `set_ttl` of every other timed store, so the return type is consistent
-    /// regardless of which store a generic caller is using.
+    /// Returns the previous TTL, or `None` if expiry was already disabled (the previous
+    /// TTL was zero). This matches [`CacheTtl::set_ttl`](crate::CacheTtl::set_ttl) and the
+    /// `set_ttl` of every other timed store (`TtlCache`, `LruTtlCache`), so a zero
+    /// previous value is reported uniformly as `None` regardless of which store a generic
+    /// caller is using.
     pub fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let prev = self.ttl;
+        let old = self.ttl;
         self.ttl = ttl;
-        Some(prev)
+        if old.is_zero() { None } else { Some(old) }
     }
 
     /// Evict values that have expired.
@@ -641,6 +647,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     ///   immediately stale. Size-limit enforcement is skipped in this branch so the
     ///   just-inserted entry cannot be the one evicted, which lets the infallible
     ///   `get_or_set` paths return `&mut V` without a fallible re-lookup.
+    /// - [`TtlOverflow::NeverExpire`]: store the entry with `expiry = None` (never
+    ///   expires) so the value is retained and stays live, rather than being dropped or
+    ///   made immediately stale. Used by the infallible `cache_set` to match the
+    ///   never-expires-on-overflow behavior of `TtlCache` / `LruTtlCache`. Like the
+    ///   zero-TTL case, `overflowed` stays `false`, so normal size-limit eviction runs.
     ///
     /// When the effective TTL (explicit `ttl` arg or `self.ttl`) is zero, the entry is
     /// stored with `expiry = None` (never expires) rather than being given an immediate
@@ -668,6 +679,7 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
                 None => match on_overflow {
                     TtlOverflow::Error => return Err(super::CacheSetError::TimeBounds),
                     TtlOverflow::SaturateNow => (Some(now), true),
+                    TtlOverflow::NeverExpire => (None, false),
                 },
             }
         };
@@ -852,9 +864,13 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     }
 
     fn cache_set(&mut self, key: K, value: V) -> Option<V> {
-        // Silently treat an Instant overflow as a no-op; callers that need
-        // to distinguish this case should use cache_try_set instead.
-        self.insert(key, value).unwrap_or(None)
+        // On an (practically unreachable) Instant overflow, store the value with
+        // `expiry = None` (never expires) rather than dropping it, matching the
+        // infallible `cache_set` of TtlCache / LruTtlCache. Callers that need the
+        // overflow surfaced as an error should use cache_try_set instead, which stays
+        // on the `TtlOverflow::Error` path.
+        self.insert_inner(key, value, None, false, TtlOverflow::NeverExpire, false)
+            .unwrap_or(None)
     }
 
     fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, super::CacheSetError> {
@@ -998,34 +1014,41 @@ impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedIter<K, V> for TtlSortedCache<
 }
 
 impl<K: Hash + Eq + Ord, V, S: BuildHasher> CacheTtl for TtlSortedCache<K, V, S> {
-    /// Returns `Some(ttl)` — the currently configured TTL duration.
+    /// Returns the currently configured TTL, or `None` when expiry is disabled.
     ///
-    /// When `ttl` is `Duration::ZERO`, entries inserted while zero is set never expire
-    /// (they are stored with `expiry = None`). This method still reports `Some(Duration::ZERO)`
-    /// in that case so callers can observe the configured value.
+    /// When `ttl` is `Duration::ZERO`, expiry is disabled: entries inserted while zero is
+    /// set never expire (they are stored with `expiry = None`). This resolves a zero TTL to
+    /// `None`, consistent with `TtlCache` and `LruTtlCache`, rather than reporting the raw
+    /// `Some(Duration::ZERO)`.
     fn ttl(&self) -> Option<Duration> {
-        Some(self.ttl)
+        // A zero TTL means expiry is disabled.
+        if self.ttl.is_zero() {
+            None
+        } else {
+            Some(self.ttl)
+        }
     }
-    /// Set the global TTL for future inserts, returning the previous value.
+    /// Set the global TTL for future inserts, returning the previous value (or `None` if
+    /// expiry was already disabled).
     ///
     /// A zero `Duration` disables expiry for **future** inserts: entries inserted while the TTL
     /// is zero are stored with `expiry = None` and never expire. Pre-existing entries keep their
     /// original expiry and still expire on schedule. This is consistent with the other TTL stores
     /// (`TtlCache`, `LruTtlCache`). To restore expiry, call `set_ttl` with a non-zero duration.
     fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let prev = self.ttl;
+        let old = self.ttl;
         self.ttl = ttl;
-        Some(prev)
+        if old.is_zero() { None } else { Some(old) }
     }
     /// Disable expiry for future inserts by setting the TTL to `Duration::ZERO`.
     ///
     /// Equivalent to `set_ttl(Duration::ZERO)`: entries inserted after this call never expire.
-    /// Pre-existing entries keep their original expiry. Returns `None` (no "previous unset" state
-    /// to restore; use `ttl()` to capture the previous value before calling `unset_ttl` if
-    /// needed).
+    /// Pre-existing entries keep their original expiry. Returns the previous TTL, or `None` if
+    /// expiry was already disabled, matching `TtlCache` / `LruTtlCache`.
     fn unset_ttl(&mut self) -> Option<Duration> {
+        let old = self.ttl;
         self.ttl = Duration::ZERO;
-        None
+        if old.is_zero() { None } else { Some(old) }
     }
     /// `TtlSortedCache` does not refresh entries on hit; always returns `false`.
     fn refresh_on_hit(&self) -> bool {
@@ -1976,8 +1999,8 @@ mod test {
             Some(&10u32),
             "entry inserted with zero TTL must never expire"
         );
-        // ttl() still reports the configured value.
-        assert_eq!(CacheTtl::ttl(&cache), Some(Duration::ZERO));
+        // ttl() resolves the zero TTL to None (expiry disabled), like the sibling stores.
+        assert_eq!(CacheTtl::ttl(&cache), None);
     }
 
     /// Switching set_ttl to zero only affects entries inserted AFTER the change.
@@ -2061,8 +2084,8 @@ mod test {
         cache.unset_ttl();
         assert_eq!(
             CacheTtl::ttl(&cache),
-            Some(Duration::ZERO),
-            "unset_ttl sets internal ttl to zero"
+            None,
+            "unset_ttl disables expiry, so ttl() resolves to None"
         );
         cache.cache_set(1u32, 99u32);
         std::thread::sleep(std::time::Duration::from_millis(120));

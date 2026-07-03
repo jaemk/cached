@@ -519,11 +519,11 @@ fn single_owner_try_set_ttl_rejects_zero_but_set_ttl_disables() {
 }
 
 // gap 6: As of the v3 zero-ttl-disables change, TtlSortedCache is now IN SCOPE and
-// consistent with TtlCache / LruTtlCache: a zero ttl disables expiry for future
-// inserts (entries never expire). Its `ttl()` still reports the raw configured
-// duration (Some(ZERO), never resolved to None like the per-entry stores), and
-// `set_ttl` always returns `Some(prev)`. `unset_ttl` now sets the ttl to zero and
-// returns None. Guard the new never-expires semantic.
+// fully consistent with TtlCache / LruTtlCache: a zero ttl disables expiry for future
+// inserts (entries never expire), AND `ttl()` resolves a zero ttl to `None` (expiry
+// disabled) exactly like the per-entry stores. `set_ttl`/`unset_ttl` return the previous
+// ttl, or `None` when expiry was already disabled (previous ttl was zero). Guard both the
+// never-expires semantic and the None-resolving `ttl()` / return conventions.
 
 #[test]
 fn ttl_sorted_cache_zero_disables_expiry() {
@@ -533,33 +533,53 @@ fn ttl_sorted_cache_zero_disables_expiry() {
         .build()
         .expect("build TtlSortedCache");
 
-    // ttl() reports the raw value, including after a zero set, NOT None.
+    // ttl() reports the configured non-zero value.
     assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(60)));
     let prev = CacheTtl::set_ttl(&mut c, Duration::from_secs(30));
     assert_eq!(
         prev,
         Some(Duration::from_secs(60)),
-        "set_ttl always returns Some(prev)"
+        "set_ttl returns the previous (non-zero) ttl"
     );
 
     let prev_zero = CacheTtl::set_ttl(&mut c, Duration::ZERO);
     assert_eq!(prev_zero, Some(Duration::from_secs(30)));
     assert_eq!(
         CacheTtl::ttl(&c),
-        Some(Duration::ZERO),
-        "TtlSortedCache ttl() must report the raw zero, NOT resolve it to None"
+        None,
+        "TtlSortedCache ttl() must resolve a zero ttl to None (expiry disabled), \
+         matching TtlCache / LruTtlCache"
     );
 
-    // unset_ttl sets the stored ttl to zero and returns None.
+    // set_ttl while expiry is already disabled returns None (previous ttl was zero).
+    assert_eq!(
+        CacheTtl::set_ttl(&mut c, Duration::ZERO),
+        None,
+        "set_ttl returns None when the previous ttl was already zero (disabled)"
+    );
+
+    // unset_ttl on an already-disabled store returns None and leaves expiry disabled.
     assert_eq!(
         CacheTtl::unset_ttl(&mut c),
         None,
-        "unset_ttl returns None on TtlSortedCache"
+        "unset_ttl returns None when expiry was already disabled"
     );
     assert_eq!(
         CacheTtl::ttl(&c),
-        Some(Duration::ZERO),
-        "unset_ttl leaves the ttl at zero (disabled)"
+        None,
+        "unset_ttl leaves expiry disabled, so ttl() stays None"
+    );
+
+    // unset_ttl from a non-zero ttl returns the previous ttl (sibling convention).
+    assert_eq!(
+        CacheTtl::set_ttl(&mut c, Duration::from_secs(45)),
+        None,
+        "restoring a ttl from disabled returns None (previous was zero)"
+    );
+    assert_eq!(
+        CacheTtl::unset_ttl(&mut c),
+        Some(Duration::from_secs(45)),
+        "unset_ttl returns the previous non-zero ttl before disabling"
     );
 
     // set_ttl(0) disables expiry for future inserts: a freshly inserted entry is
@@ -576,4 +596,234 @@ fn ttl_sorted_cache_zero_disables_expiry() {
         Some(&10),
         "the entry must persist (never expires) under zero ttl"
     );
+}
+
+// Fix 2: the infallible `cache_set` must NOT drop the value when the computed expiry
+// `Instant` overflows. Siblings (`TtlCache` / `LruTtlCache`) store the value with no
+// expiry (never expires) on overflow rather than silently discarding it, and
+// `TtlSortedCache` must match. `cache_try_set` keeps surfacing the overflow as
+// `Err(CacheSetError::TimeBounds)` (the fallible path is unchanged).
+//
+// The overflow is triggered portably with a near-`Duration::MAX` default ttl: it is
+// non-zero (so `build()` succeeds and it is NOT treated as "expiry disabled"), yet
+// `Instant::now() + ttl` overflows on every platform because no real `Instant` is
+// anywhere near `Duration::MAX` from its epoch.
+#[test]
+fn ttl_sorted_cache_set_overflow_stores_never_expiring_value() {
+    use cached::{CacheSetError, TtlSortedCache};
+
+    let mut c = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::MAX)
+        .build()
+        .expect("Duration::MAX is non-zero so build() must succeed");
+
+    // Infallible cache_set with an unrepresentable expiry must STORE the value (never
+    // expires), not drop it. Prior to the fix this returned without inserting anything.
+    let prev = c.cache_set(1, 42);
+    assert_eq!(prev, None, "first cache_set has no previous value");
+    assert_eq!(
+        c.cache_get(&1),
+        Some(&42),
+        "cache_set on TTL overflow must store the value (never expires), not drop it"
+    );
+    assert_eq!(
+        c.cache_size(),
+        1,
+        "the overflowing cache_set must have inserted the entry"
+    );
+
+    // The stored entry never expires: it is still live after a wait.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(
+        c.cache_get(&1),
+        Some(&42),
+        "the overflow-stored entry must never expire"
+    );
+
+    // Overwriting returns the prior value, confirming the entry is a real live entry.
+    let prev = c.cache_set(1, 99);
+    assert_eq!(
+        prev,
+        Some(42),
+        "overwriting the never-expiring entry returns the prior value"
+    );
+
+    // The fallible cache_try_set path is unchanged: the same overflow still errors.
+    let result: Result<Option<u32>, CacheSetError> = c.cache_try_set(2, 7);
+    assert_eq!(
+        result,
+        Err(CacheSetError::TimeBounds),
+        "cache_try_set must still surface TimeBounds on overflow"
+    );
+    assert_eq!(
+        c.cache_get(&2),
+        None,
+        "the erroring cache_try_set must not insert anything"
+    );
+}
+
+// Gap A: `TtlSortedCache` has BOTH an inherent `set_ttl` (method-call syntax resolves to
+// it, shadowing the trait) and the `CacheTtl::set_ttl` trait method. They are two separate
+// implementations that must not diverge. In particular, the "previous ttl was zero"
+// contract (return `None`, not `Some(Duration::ZERO)`) must hold identically on both. The
+// existing suite only exercises the trait method via UFCS; nothing pins the inherent method
+// against the trait method, so a regression to only one of them would go unnoticed.
+#[test]
+fn ttl_sorted_cache_inherent_and_trait_set_ttl_agree() {
+    use cached::TtlSortedCache;
+
+    // ── previous-was-NONZERO: both must return Some(prev) ──
+    let mut a = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build a");
+    let mut b = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build b");
+
+    // `a.set_ttl(..)` binds the inherent method; UFCS pins the trait method on `b`.
+    let inherent_nonzero = a.set_ttl(Duration::ZERO);
+    let trait_nonzero = CacheTtl::set_ttl(&mut b, Duration::ZERO);
+    assert_eq!(
+        inherent_nonzero, trait_nonzero,
+        "inherent and trait set_ttl must agree when the previous ttl was non-zero"
+    );
+    assert_eq!(
+        inherent_nonzero,
+        Some(Duration::from_secs(60)),
+        "previous non-zero ttl must be reported as Some(prev)"
+    );
+
+    // Both stores are now disabled (ttl == zero); ttl() must resolve to None on each.
+    assert_eq!(CacheTtl::ttl(&a), None);
+    assert_eq!(CacheTtl::ttl(&b), None);
+
+    // ── previous-was-ZERO: both must return None (NOT Some(Duration::ZERO)) ──
+    // `a` and `b` currently have a zero (disabled) ttl, so the next set observes prev==zero.
+    let inherent_prev_zero = a.set_ttl(Duration::from_secs(5));
+    let trait_prev_zero = CacheTtl::set_ttl(&mut b, Duration::from_secs(5));
+    assert_eq!(
+        inherent_prev_zero, trait_prev_zero,
+        "inherent and trait set_ttl must agree when the previous ttl was zero"
+    );
+    assert_eq!(
+        inherent_prev_zero, None,
+        "a zero previous ttl must be reported as None by BOTH the inherent and trait set_ttl"
+    );
+
+    // Post-state must also agree: both re-armed to 5s.
+    assert_eq!(CacheTtl::ttl(&a), Some(Duration::from_secs(5)));
+    assert_eq!(CacheTtl::ttl(&b), CacheTtl::ttl(&a));
+}
+
+// Gap B: `try_set_ttl` (the `CacheTtl` default) on `TtlSortedCache` after the `ttl()`
+// change. A zero argument must still be rejected with `Err(SetTtlError::ZeroTtl)` without
+// mutating state, and crucially when expiry is ALREADY disabled the rejected call must
+// leave `ttl()` reporting `None` (not flip it to `Some(ZERO)` or otherwise perturb it).
+// The existing `single_owner_try_set_ttl_*` test covers only TtlCache / LruTtlCache.
+#[test]
+fn ttl_sorted_cache_try_set_ttl_rejects_zero_and_preserves_state() {
+    use cached::TtlSortedCache;
+
+    let mut c = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .expect("build TtlSortedCache");
+
+    // Live, non-zero ttl: try_set_ttl(ZERO) must error and NOT change the ttl.
+    assert_eq!(c.try_set_ttl(Duration::ZERO), Err(SetTtlError::ZeroTtl));
+    assert_eq!(
+        CacheTtl::ttl(&c),
+        Some(Duration::from_secs(60)),
+        "a rejected try_set_ttl must leave the live ttl untouched"
+    );
+
+    // A non-zero try_set_ttl succeeds and reports the previous (non-zero) ttl.
+    assert_eq!(
+        c.try_set_ttl(Duration::from_secs(30)),
+        Ok(Some(Duration::from_secs(60))),
+        "a valid try_set_ttl returns the previous ttl"
+    );
+    assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(30)));
+
+    // Now disable expiry so the previous ttl is zero and ttl() resolves to None.
+    assert_eq!(CacheTtl::set_ttl(&mut c, Duration::ZERO), Some(Duration::from_secs(30)));
+    assert_eq!(CacheTtl::ttl(&c), None);
+
+    // try_set_ttl(ZERO) while ALREADY disabled: still Err, and ttl() must stay None.
+    assert_eq!(
+        c.try_set_ttl(Duration::ZERO),
+        Err(SetTtlError::ZeroTtl),
+        "try_set_ttl(ZERO) must be rejected even when expiry is already disabled"
+    );
+    assert_eq!(
+        CacheTtl::ttl(&c),
+        None,
+        "a rejected try_set_ttl must leave a disabled cache reporting ttl() == None"
+    );
+
+    // Re-arming from the disabled state via the valid path returns None (previous was zero).
+    assert_eq!(
+        c.try_set_ttl(Duration::from_secs(15)),
+        Ok(None),
+        "re-arming a disabled cache reports no previous ttl (it was zero)"
+    );
+    assert_eq!(CacheTtl::ttl(&c), Some(Duration::from_secs(15)));
+}
+
+// Gap C: the `NeverExpire` overflow policy sets `overflowed = false`, so normal
+// size-limit eviction still runs on the overflowing `cache_set`. With a small `max_size`
+// and an overflowing (`Duration::MAX`) ttl, EVERY entry is stored with `expiry = None`
+// (never expires). Under size pressure `retain_latest` must still bound the store: with
+// all-`None` expiries the entries sort by key, so the lowest keys are dropped first. The
+// existing overflow test has no size bound, so this eviction interaction is uncovered.
+#[test]
+fn ttl_sorted_cache_overflow_with_size_limit_stays_bounded() {
+    use cached::TtlSortedCache;
+
+    let mut c = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::MAX) // non-zero => build ok; now + ttl overflows on every insert
+        .max_size(2)
+        .build()
+        .expect("Duration::MAX is non-zero so build() succeeds");
+
+    // Each cache_set overflows -> NeverExpire (expiry = None) and, because overflowed is
+    // false, size eviction runs. Insert past the limit.
+    assert_eq!(c.cache_set(1, 10), None);
+    assert_eq!(c.cache_set(2, 20), None);
+    assert_eq!(c.cache_set(3, 30), None); // size would be 3 -> evicts lowest key (1)
+    assert_eq!(c.cache_set(4, 40), None); // -> evicts next lowest (2)
+
+    // The store must never exceed max_size despite every entry being never-expiring.
+    assert_eq!(
+        c.cache_size(),
+        2,
+        "size_limit must be enforced even when overflow makes every entry never-expiring"
+    );
+
+    // All-None expiries sort by key, so the two highest keys survive and the lowest were
+    // evicted. This pins the deterministic eviction order under the NeverExpire policy.
+    assert_eq!(c.cache_get(&1), None, "lowest key must be evicted under size pressure");
+    assert_eq!(c.cache_get(&2), None, "next lowest key must be evicted under size pressure");
+    assert_eq!(c.cache_get(&3), Some(&30), "surviving never-expiring entry must be readable");
+    assert_eq!(c.cache_get(&4), Some(&40), "surviving never-expiring entry must be readable");
+
+    // The survivors truly never expire: still live after a wait.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(c.cache_size(), 2, "no TTL sweep may drop the never-expiring survivors");
+    assert_eq!(c.cache_get(&3), Some(&30));
+    assert_eq!(c.cache_get(&4), Some(&40));
+
+    // Overwriting a survivor returns its prior value (confirms a real live entry, not a
+    // phantom), and does not grow the store.
+    assert_eq!(
+        c.cache_set(4, 99),
+        Some(40),
+        "overwriting a never-expiring survivor returns its prior value"
+    );
+    assert_eq!(c.cache_size(), 2);
+
+    // ttl() reflects the configured (non-zero) Duration::MAX rather than resolving to None.
+    assert_eq!(CacheTtl::ttl(&c), Some(Duration::MAX));
 }
