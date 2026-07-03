@@ -1,0 +1,5 @@
+error: #[once]'s cache value type cannot name the function's generic parameter `N`: the generated cache static is monomorphic and cannot hold a value of a type that names a function-level type or const parameter. Make the return type concrete, or use `#[cached]` with `key`/`convert` to handle generic functions.
+ --> tests/ui/once_generic_const_value_type_rejected.rs:8:4
+  |
+8 | fn generic_once_const<const N: usize>() -> [u8; N] {
+  |    ^^^^^^^^^^^^^^^^^^

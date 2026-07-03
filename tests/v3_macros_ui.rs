@@ -95,6 +95,13 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/concurrent_cached_map_error_non_closure.rs");
     // G1: generic `#[once]` whose value type names a function type parameter.
     t.compile_fail("tests/ui/once_generic_value_type_rejected.rs");
+    // G1: value type names the param *nested* inside another generic (`Vec<T>`) -
+    // a genuine whole-ident match that the substring->whole-ident fix must keep
+    // catching (not a false-rejection).
+    t.compile_fail("tests/ui/once_generic_value_type_nested_rejected.rs");
+    // G1: value type names a function *const* parameter (`[u8; N]`); the walk
+    // descends into the bracket group to find `N`.
+    t.compile_fail("tests/ui/once_generic_const_value_type_rejected.rs");
     // G2: `name` beginning with `__cached` is reserved on all three macros.
     t.compile_fail("tests/ui/cached_name_reserved_prefix.rs");
     t.compile_fail("tests/ui/once_name_reserved_prefix.rs");
