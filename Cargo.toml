@@ -26,7 +26,7 @@ default = ["proc_macro", "ahash", "time_stores"]
 proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
-async = ["async_core", "dep:async-lock", "dep:blocking"]
+async = ["async_core", "dep:async-lock"]
 redis_store = ["redis", "r2d2", "serde", "rmp-serde", "serde_json"]
 redis_connection_manager = ["redis_tokio", "redis/connection-manager"]
 redis_smol = [
@@ -44,7 +44,12 @@ redis_tokio = [
 redis_tokio_native_tls = ["redis_tokio", "redis/tokio-native-tls-comp"]
 redis_tokio_rustls = ["redis_tokio", "redis/tokio-rustls-comp"]
 redis_async_cache = ["redis_store", "async", "redis_tokio", "redis/cache-aio"]
-redb_store = ["redb", "serde", "rmp-serde", "directories"]
+# `blocking` (and its async-channel/futures-lite deps) is only used to offload
+# the synchronous redb operations off the async executor, so it is pulled by
+# `redb_store` rather than `async`. Redis-only and in-memory async builds do not
+# pay for it. The `blocking::unblock` call sites are `#[cfg(feature = "async")]`,
+# so a sync-only `redb_store` build enables the dependency without invoking it.
+redb_store = ["redb", "serde", "rmp-serde", "directories", "dep:blocking"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
