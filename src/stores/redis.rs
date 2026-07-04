@@ -17,6 +17,7 @@ pub struct RedisCacheBuilder<K, V> {
     pool_min_idle: Option<u32>,
     pool_max_lifetime: Option<Duration>,
     pool_idle_timeout: Option<Duration>,
+    strict_deserialization: bool,
     // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
     _phantom: PhantomData<fn() -> (K, V)>,
 }
@@ -26,12 +27,11 @@ const DEFAULT_NAMESPACE: &str = "cached-redis-store:";
 
 fn ttl_millis(ttl: Duration) -> Result<u64, RedisCacheError> {
     if ttl.is_zero() {
-        return Err(redis::RedisError::from((
+        return Err(RedisCacheError::redis(redis::RedisError::from((
             redis::ErrorKind::InvalidClientConfig,
             "invalid ttl: must be greater than zero",
             format!("got {ttl:?}"),
-        ))
-        .into());
+        ))));
     }
     // Convert to milliseconds with saturating arithmetic so pathologically large
     // durations do not overflow. Clamp to `i64::MAX` milliseconds so the same
@@ -374,7 +374,7 @@ mod credential_leak_tests {
         );
         // The error must be a Connection variant (the sanitized one).
         assert!(
-            matches!(err, RedisCacheBuildError::Connection(_)),
+            matches!(err, RedisCacheBuildError::Connection { .. }),
             "expected Connection error, got: {err:?}"
         );
     }
@@ -428,7 +428,7 @@ mod credential_leak_tests {
 
         let err = result.expect_err("build must fail with a bad URL");
         assert!(
-            matches!(err, RedisCacheBuildError::Connection(_)),
+            matches!(err, RedisCacheBuildError::Connection { .. }),
             "expected Connection error, got: {err:?}"
         );
         // Exercise the full enum Debug (which recurses into the inner redis error).
@@ -441,6 +441,47 @@ mod credential_leak_tests {
             !debug.contains(&bad_url),
             "enum Debug must not echo the raw URL; got: {debug}"
         );
+    }
+
+    /// The boxed `source` inside `Connection { source }` must not expose the planted
+    /// password through its own `Debug` or `Display`. Verifies that the box wraps a
+    /// sanitized synthetic error, not the raw redis error that would echo the URL.
+    #[test]
+    fn connection_boxed_source_debug_does_not_leak_password() {
+        let secret = "boxed_source_secret_xyz999";
+        let bad_url = format!("not-redis://:{secret}@nonexistent-host:9999");
+
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&bad_url)
+            .build();
+
+        let err = result.expect_err("build must fail with a bad URL");
+        if let RedisCacheBuildError::Connection { ref source } = err {
+            let src_debug = format!("{source:?}");
+            let src_display = source.to_string();
+            assert!(
+                !src_debug.contains(secret),
+                "boxed source Debug must not expose the password; got: {src_debug}"
+            );
+            assert!(
+                !src_display.contains(secret),
+                "boxed source Display must not expose the password; got: {src_display}"
+            );
+            // Walk the full cause chain.
+            let mut cause = source.source();
+            while let Some(c) = cause {
+                let c_str = format!("{c:?}{c}");
+                assert!(
+                    !c_str.contains(secret),
+                    "cause chain must not expose the password; got: {c_str}"
+                );
+                cause = c.source();
+            }
+        } else {
+            panic!("expected Connection error, got: {err:?}");
+        }
     }
 }
 
@@ -548,19 +589,30 @@ use thiserror::Error;
 ///     _ => {}
 /// }
 /// ```
+///
+/// ## Semver note on error sources
+///
+/// The concrete type behind every `source` field is intentionally opaque: it is
+/// `Box<dyn std::error::Error + Send + Sync + 'static>`. The wrapped type is an
+/// implementation detail and is **not** part of the semver contract. Match on
+/// the variant (e.g. `Connection { .. }`, `Pool { .. }`) rather than
+/// downcast-inspecting the source.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedisCacheBuildError {
+    /// Redis client or connection failed to open.
+    ///
+    /// The `source` is always a *sanitized* synthetic error — no raw connection
+    /// URL or credential ever reaches this field. See the build-path comment in
+    /// `create_pool` / `create_multiplexed_connection` for details.
     #[error("redis connection error")]
-    // No `#[from]`: an implicit `From<redis::RedisError>` would let any `?` in the
-    // build path auto-wrap a raw redis error, whose `Debug` (reachable via this
-    // enum's derived `Debug`) can echo the connection URL and its embedded
-    // password. Every site that produces a `Connection` error constructs it
-    // explicitly from a sanitized synthetic `redis::RedisError` so no raw error
-    // (parse- or connect-phase) can reach this variant.
-    Connection(redis::RedisError),
+    Connection {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     #[error("redis pool error")]
-    Pool(#[from] r2d2::Error),
+    Pool {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     #[error(transparent)]
     Build(#[from] super::BuildError),
     #[error("Connection string not specified or invalid in env var {env_key:?}: {error}")]
@@ -584,6 +636,24 @@ pub enum RedisCacheBuildError {
         protocol=resp2; remove the protocol parameter or set it to resp3"
     )]
     Resp2DowngradeWithClientSideCaching,
+}
+
+impl RedisCacheBuildError {
+    /// Wrap a sanitized connection error.
+    ///
+    /// The caller is responsible for ensuring `e` does NOT carry the raw
+    /// connection URL or any credential. All build-path callers construct a
+    /// synthetic `redis::RedisError` with a redacted message before calling this.
+    pub(crate) fn connection(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Connection {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn pool_err(e: r2d2::Error) -> Self {
+        Self::Pool {
+            source: Box::new(e),
+        }
+    }
 }
 
 impl<K, V> Default for RedisCacheBuilder<K, V>
@@ -618,6 +688,7 @@ where
             pool_min_idle: None,
             pool_max_lifetime: None,
             pool_idle_timeout: None,
+            strict_deserialization: false,
             _phantom: PhantomData,
         }
     }
@@ -724,6 +795,23 @@ where
         self
     }
 
+    /// Enable strict deserialization mode.
+    ///
+    /// When `false` (the default), a corrupt or otherwise undecodable cached
+    /// value on the `cache_get` path is self-healed: the offending entry is
+    /// deleted and the call returns `Ok(None)` (a miss), allowing the cached
+    /// function to recompute and overwrite. The previous-value returned by
+    /// `cache_set` is also silently discarded when it cannot be decoded.
+    ///
+    /// When `true`, any deserialization failure returns
+    /// `Err(RedisCacheError::CacheDeserialization { .. })` immediately, matching
+    /// the behavior of versions prior to 3.0.
+    #[must_use]
+    pub fn strict_deserialization(mut self, strict: bool) -> Self {
+        self.strict_deserialization = strict;
+        self
+    }
+
     /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
     ///
     /// The value is wrapped in a redacting [`ConnectionString`]: its
@@ -751,10 +839,10 @@ where
         // Open the client, catching any error and replacing it with a sanitized
         // `Connection` error. A malformed URL such as `redis://:password@host`
         // would otherwise surface the raw connection string (including the
-        // password) in the error's `Display`/`Debug`. `Connection` no longer has
-        // a blanket `#[from]`, so the error is constructed explicitly here.
+        // password) in the error's `Display`/`Debug`. `Connection` is constructed
+        // explicitly here (no blanket `From` impl) so no raw error can reach it.
         let client: redis::Client = redis::Client::open(s.reveal()).map_err(|_| {
-            RedisCacheBuildError::Connection(redis::RedisError::from((
+            RedisCacheBuildError::connection(redis::RedisError::from((
                 redis::ErrorKind::InvalidClientConfig,
                 "failed to open redis client (connection string redacted)",
             )))
@@ -783,7 +871,9 @@ where
             pool_builder
         };
 
-        let pool: r2d2::Pool<redis::Client> = pool_builder.build(client)?;
+        let pool = pool_builder
+            .build(client)
+            .map_err(RedisCacheBuildError::pool_err)?;
         Ok(pool)
     }
 
@@ -822,6 +912,7 @@ where
             pool,
             namespace: self.namespace,
             prefix: self.prefix.unwrap_or_default(),
+            strict_deserialization: self.strict_deserialization,
             _phantom: PhantomData,
         })
     }
@@ -838,6 +929,7 @@ pub struct RedisCache<K, V> {
     pub(super) prefix: String,
     connection_string: ConnectionString,
     pool: r2d2::Pool<redis::Client>,
+    strict_deserialization: bool,
     // `RedisCache` owns no live `K`/`V` — values are serialized to Redis and
     // `K`/`V` appear only in method signatures. Use a fn-pointer phantom so the
     // type is unconditionally `Send + Sync` regardless of whether `K`/`V` are
@@ -872,6 +964,7 @@ impl<K, V> Clone for RedisCache<K, V> {
             prefix: self.prefix.clone(),
             connection_string: self.connection_string.clone(),
             pool: self.pool.clone(),
+            strict_deserialization: self.strict_deserialization,
             _phantom: PhantomData,
         }
     }
@@ -922,27 +1015,73 @@ where
     }
 }
 
+/// Error returned by Redis cache operations.
+///
+/// ## Semver note on error sources
+///
+/// The concrete type behind every `source` field is intentionally opaque:
+/// `Box<dyn std::error::Error + Send + Sync + 'static>`. The wrapped type is an
+/// implementation detail and is **not** part of the semver contract. Consumers
+/// should match on the variant (e.g. `Redis { .. }`, `CacheDeserialization { .. }`)
+/// rather than downcast-inspecting the source. Use [`is_deserialization`](Self::is_deserialization)
+/// as a stable classifier when you only need to distinguish decode failures.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedisCacheError {
     #[error("redis error")]
-    Redis(#[from] redis::RedisError),
+    Redis {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     #[error("redis pool error")]
-    Pool(#[from] r2d2::Error),
+    Pool {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     /// **Security note:** `cached_value` may contain sensitive application data
     /// (it is the raw bytes retrieved from Redis). Do not log this variant or
     /// expose `cached_value` in error messages or observability pipelines.
     #[error("Error deserializing cached value")]
     CacheDeserialization {
         #[source]
-        source: rmp_serde::decode::Error,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
         cached_value: Vec<u8>,
     },
     #[error("Error serializing cached value")]
     CacheSerialization {
-        #[from]
-        source: rmp_serde::encode::Error,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+}
+
+impl RedisCacheError {
+    pub(crate) fn redis(e: redis::RedisError) -> Self {
+        Self::Redis {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn pool_err(e: r2d2::Error) -> Self {
+        Self::Pool {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn serialization(e: rmp_serde::encode::Error) -> Self {
+        Self::CacheSerialization {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn deserialization(e: rmp_serde::decode::Error, cached_value: Vec<u8>) -> Self {
+        Self::CacheDeserialization {
+            source: Box::new(e),
+            cached_value,
+        }
+    }
+    /// Returns `true` when this error is a deserialization failure.
+    ///
+    /// Stable classifier for callers that need to distinguish corrupt-value errors
+    /// from network/pool errors without downcast-inspecting the opaque `source`.
+    #[must_use]
+    pub fn is_deserialization(&self) -> bool {
+        matches!(self, Self::CacheDeserialization { .. })
+    }
 }
 
 /// On-disk schema version stamped into every value written by this store.
@@ -1015,10 +1154,10 @@ fn deserialize_cached_redis_value<V: serde::de::DeserializeOwned>(
             {
                 return Ok(v);
             }
-            Err(RedisCacheError::CacheDeserialization {
-                source: msgpack_err,
-                cached_value: bytes.to_vec(),
-            })
+            Err(RedisCacheError::deserialization(
+                msgpack_err,
+                bytes.to_vec(),
+            ))
         }
     }
 }
@@ -1072,66 +1211,76 @@ where
     V: Serialize + DeserializeOwned,
 {
     fn cache_get(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get()?;
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
-        let key = self.generate_key(key);
+        let key_str = self.generate_key(key);
 
-        pipe.get(&key);
+        pipe.get(&key_str);
         if self.refresh.load(Ordering::Relaxed) {
             let ttl = *self.ttl.lock();
             // A zero (disabled) TTL means entries are stored without expiry; skip the
             // refresh `PEXPIRE` so the key stays persistent (no TTL to renew).
             if !ttl.is_zero() {
-                pipe.pexpire(key, ttl_millis_i64(ttl)?).ignore();
+                pipe.pexpire(&key_str, ttl_millis_i64(ttl)?).ignore();
             }
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
         match res.0 {
             None => Ok(None),
-            Some(bytes) => {
-                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
-                Ok(Some(v.value))
-            }
+            Some(bytes) => match deserialize_cached_redis_value(&bytes) {
+                Ok(v) => Ok(Some(v.value)),
+                Err(e) if !self.strict_deserialization => {
+                    // Self-heal: the stored bytes are corrupt or incompatible with V.
+                    // Delete the entry so the caller can recompute on the next call.
+                    let _: () = redis::cmd("DEL")
+                        .arg(&key_str)
+                        .query(&mut *conn)
+                        .map_err(RedisCacheError::redis)?;
+                    let _ = e;
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            },
         }
     }
 
     fn cache_set(&self, key: K, val: V) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get()?;
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
-        let key = self.generate_key(&key);
+        let key_str = self.generate_key(&key);
 
         let ttl = *self.ttl.lock();
 
         let val = CachedRedisValue::new(val);
-        let serialized = rmp_serde::to_vec(&val)?;
-        pipe.get(&key);
+        let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
+        pipe.get(&key_str);
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
-            pipe.set::<String, Vec<u8>>(key, serialized).ignore();
+            pipe.set::<String, Vec<u8>>(key_str, serialized).ignore();
         } else {
-            pipe.pset_ex::<String, Vec<u8>>(key, serialized, ttl_millis(ttl)?)
+            pipe.pset_ex::<String, Vec<u8>>(key_str, serialized, ttl_millis(ttl)?)
                 .ignore();
         }
 
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
-        match res.0 {
-            None => Ok(None),
-            Some(bytes) => {
-                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
-                Ok(Some(v.value))
-            }
-        }
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        // REDIS-10: if the displaced previous value fails to decode, the new write
+        // succeeded — return Ok(None) (garbage old value) rather than surfacing an error.
+        Ok(res.0.and_then(|bytes| {
+            deserialize_cached_redis_value::<V>(&bytes)
+                .ok()
+                .map(|v| v.value)
+        }))
     }
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get()?;
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
-        let key = self.generate_key(key);
+        let key_str = self.generate_key(key);
 
-        pipe.get(&key);
-        pipe.del::<String>(key).ignore();
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
+        pipe.get(&key_str);
+        pipe.del::<String>(key_str).ignore();
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
         match res.0 {
             None => Ok(None),
             Some(bytes) => {
@@ -1153,9 +1302,12 @@ where
     }
 
     fn cache_delete(&self, key: &K) -> Result<bool, RedisCacheError> {
-        let mut conn = self.pool.get()?;
-        let key = self.generate_key(key);
-        let removed: usize = redis::cmd("DEL").arg(key).query(&mut *conn)?;
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+        let key_str = self.generate_key(key);
+        let removed: usize = redis::cmd("DEL")
+            .arg(key_str)
+            .query(&mut *conn)
+            .map_err(RedisCacheError::redis)?;
         Ok(removed > 0)
     }
 
@@ -1176,7 +1328,7 @@ where
     /// includes entries written by every other cache that shares the same namespace.
     /// Set a unique prefix per logical cache to avoid this.
     fn cache_clear(&self) -> Result<(), RedisCacheError> {
-        let mut conn = self.pool.get()?;
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let pattern = self.clear_match_pattern();
         let mut cursor: u64 = 0;
         loop {
@@ -1186,9 +1338,13 @@ where
                 .arg(&pattern)
                 .arg("COUNT")
                 .arg(100)
-                .query(&mut *conn)?;
+                .query(&mut *conn)
+                .map_err(RedisCacheError::redis)?;
             if !keys.is_empty() {
-                redis::cmd("DEL").arg(keys).query::<()>(&mut *conn)?;
+                redis::cmd("DEL")
+                    .arg(keys)
+                    .query::<()>(&mut *conn)
+                    .map_err(RedisCacheError::redis)?;
             }
             if next == 0 {
                 break;
@@ -1215,31 +1371,30 @@ where
     /// previous value if any. Equivalent to [`ConcurrentCached::cache_set`] but
     /// avoids taking ownership of `val`.
     fn cache_set_ref(&self, key: &K, val: &V) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get()?;
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
-        let key = self.generate_key(key);
+        let key_str = self.generate_key(key);
 
         let ttl = *self.ttl.lock();
 
         let val = CachedRedisValueRef::new(val);
-        let serialized = rmp_serde::to_vec(&val)?;
-        pipe.get(&key);
+        let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
+        pipe.get(&key_str);
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
-            pipe.set::<String, Vec<u8>>(key, serialized).ignore();
+            pipe.set::<String, Vec<u8>>(key_str, serialized).ignore();
         } else {
-            pipe.pset_ex::<String, Vec<u8>>(key, serialized, ttl_millis(ttl)?)
+            pipe.pset_ex::<String, Vec<u8>>(key_str, serialized, ttl_millis(ttl)?)
                 .ignore();
         }
 
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn)?;
-        match res.0 {
-            None => Ok(None),
-            Some(bytes) => {
-                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
-                Ok(Some(v.value))
-            }
-        }
+        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        // REDIS-10: if the displaced previous value fails to decode, return Ok(None).
+        Ok(res.0.and_then(|bytes| {
+            deserialize_cached_redis_value::<V>(&bytes)
+                .ok()
+                .map(|v| v.value)
+        }))
     }
 }
 
@@ -1351,6 +1506,7 @@ mod async_redis {
         namespace: String,
         prefix: Option<String>,
         connection_string: Option<String>,
+        strict_deserialization: bool,
         #[cfg(feature = "redis_async_cache")]
         client_side_caching: bool,
         // Per-cache opt-in to the auto-reconnecting connection manager. Only
@@ -1390,6 +1546,7 @@ mod async_redis {
                 namespace: DEFAULT_NAMESPACE.to_string(),
                 prefix: None,
                 connection_string: None,
+                strict_deserialization: false,
                 #[cfg(feature = "redis_async_cache")]
                 client_side_caching: false,
                 #[cfg(feature = "redis_connection_manager")]
@@ -1503,6 +1660,18 @@ mod async_redis {
             self
         }
 
+        /// Enable strict deserialization mode (default `false`).
+        ///
+        /// When `false` (the default), a corrupt or undecodable cached value on the
+        /// `async_cache_get` path is self-healed: the entry is deleted and the call
+        /// returns `Ok(None)`. When `true`, any deserialization failure returns
+        /// `Err(RedisCacheError::CacheDeserialization { .. })`.
+        #[must_use]
+        pub fn strict_deserialization(mut self, strict: bool) -> Self {
+            self.strict_deserialization = strict;
+            self
+        }
+
         /// Return the current connection string or load from the env var: `CACHED_REDIS_CONNECTION_STRING`.
         ///
         /// The value is wrapped in a redacting [`ConnectionString`](super::ConnectionString):
@@ -1589,7 +1758,7 @@ mod async_redis {
                 // Sanitize any parse error so the raw URL (which may contain a
                 // password) is not surfaced in the error's Display/Debug.
                 let mut connection_info = s.reveal().into_connection_info().map_err(|_| {
-                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                    RedisCacheBuildError::connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to parse redis connection info (connection string redacted)",
                     )))
@@ -1603,7 +1772,7 @@ mod async_redis {
                 connection_info = connection_info.set_redis_settings(redis_settings);
                 config = config.set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info).map_err(|_| {
-                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                    RedisCacheBuildError::connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to open redis client (connection string redacted)",
                     )))
@@ -1614,7 +1783,7 @@ mod async_redis {
                     .get_multiplexed_async_connection_with_config(&config)
                     .await
                     .map_err(|_| {
-                        RedisCacheBuildError::Connection(redis::RedisError::from((
+                        RedisCacheBuildError::connection(redis::RedisError::from((
                             redis::ErrorKind::Io,
                             "failed to establish redis connection (connection string redacted)",
                         )))
@@ -1624,7 +1793,7 @@ mod async_redis {
 
             // Non-client-side-caching path: sanitize the Client::open error too.
             let client = redis::Client::open(s.reveal()).map_err(|_| {
-                RedisCacheBuildError::Connection(redis::RedisError::from((
+                RedisCacheBuildError::connection(redis::RedisError::from((
                     redis::ErrorKind::InvalidClientConfig,
                     "failed to open redis client (connection string redacted)",
                 )))
@@ -1634,7 +1803,7 @@ mod async_redis {
                 .get_multiplexed_async_connection()
                 .await
                 .map_err(|_| {
-                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                    RedisCacheBuildError::connection(redis::RedisError::from((
                         redis::ErrorKind::Io,
                         "failed to establish redis connection (connection string redacted)",
                     )))
@@ -1662,7 +1831,7 @@ mod async_redis {
                 // Sanitize any parse error so the raw URL (which may contain a
                 // password) is not surfaced in the error's Display/Debug.
                 let mut connection_info = s.reveal().into_connection_info().map_err(|_| {
-                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                    RedisCacheBuildError::connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to parse redis connection info (connection string redacted)",
                     )))
@@ -1676,7 +1845,7 @@ mod async_redis {
                 let config = redis::aio::ConnectionManagerConfig::default()
                     .set_cache_config(redis::caching::CacheConfig::default());
                 let client = redis::Client::open(connection_info).map_err(|_| {
-                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                    RedisCacheBuildError::connection(redis::RedisError::from((
                         redis::ErrorKind::InvalidClientConfig,
                         "failed to open redis client (connection string redacted)",
                     )))
@@ -1686,7 +1855,7 @@ mod async_redis {
                 let conn = redis::aio::ConnectionManager::new_with_config(client, config)
                     .await
                     .map_err(|_| {
-                        RedisCacheBuildError::Connection(redis::RedisError::from((
+                        RedisCacheBuildError::connection(redis::RedisError::from((
                             redis::ErrorKind::Io,
                             "failed to establish redis connection (connection string redacted)",
                         )))
@@ -1696,7 +1865,7 @@ mod async_redis {
 
             // Non-client-side-caching path: sanitize the Client::open error too.
             let client = redis::Client::open(s.reveal()).map_err(|_| {
-                RedisCacheBuildError::Connection(redis::RedisError::from((
+                RedisCacheBuildError::connection(redis::RedisError::from((
                     redis::ErrorKind::InvalidClientConfig,
                     "failed to open redis client (connection string redacted)",
                 )))
@@ -1705,7 +1874,7 @@ mod async_redis {
             let conn = redis::aio::ConnectionManager::new(client)
                 .await
                 .map_err(|_| {
-                    RedisCacheBuildError::Connection(redis::RedisError::from((
+                    RedisCacheBuildError::connection(redis::RedisError::from((
                         redis::ErrorKind::Io,
                         "failed to establish redis connection (connection string redacted)",
                     )))
@@ -1751,6 +1920,7 @@ mod async_redis {
                 connection,
                 namespace: self.namespace,
                 prefix: self.prefix.unwrap_or_default(),
+                strict_deserialization: self.strict_deserialization,
                 _phantom: PhantomData,
             })
         }
@@ -1791,6 +1961,7 @@ mod async_redis {
         // feature-driven type swap. Selected in `build()` from the builder's
         // `connection_manager` flag; defaults to `Multiplexed` (2.x behavior).
         connection: AsyncRedisConnection,
+        strict_deserialization: bool,
         // `AsyncRedisCache` owns no live `K`/`V` — see the rationale on
         // `RedisCache::_phantom`. Same fn-pointer phantom so a `Send`-but-`!Sync`
         // `V` (e.g. one containing a `Cell`) is usable, and the macro-emitted
@@ -1823,6 +1994,7 @@ mod async_redis {
                 prefix: self.prefix.clone(),
                 connection_string: self.connection_string.clone(),
                 connection: self.connection.clone(),
+                strict_deserialization: self.strict_deserialization,
                 _phantom: PhantomData,
             }
         }
@@ -1928,24 +2100,36 @@ mod async_redis {
         async fn async_cache_get(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
-            let key = self.generate_key(key);
+            let key_str = self.generate_key(key);
 
-            pipe.get(&key);
+            pipe.get(&key_str);
             if self.refresh.load(Ordering::Relaxed) {
                 let ttl = *self.ttl.lock();
                 // A zero (disabled) TTL means entries are stored without expiry; skip the
                 // refresh `PEXPIRE` so the key stays persistent (no TTL to renew).
                 if !ttl.is_zero() {
-                    pipe.pexpire(key, super::ttl_millis_i64(ttl)?).ignore();
+                    pipe.pexpire(&key_str, super::ttl_millis_i64(ttl)?).ignore();
                 }
             }
-            let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
+            let res: (Option<Vec<u8>>,) = pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(RedisCacheError::redis)?;
             match res.0 {
                 None => Ok(None),
-                Some(bytes) => {
-                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
-                    Ok(Some(v.value))
-                }
+                Some(bytes) => match super::deserialize_cached_redis_value(&bytes) {
+                    Ok(v) => Ok(Some(v.value)),
+                    Err(e) if !self.strict_deserialization => {
+                        let _: () = redis::cmd("DEL")
+                            .arg(&key_str)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(RedisCacheError::redis)?;
+                        let _ = e;
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                },
             }
         }
 
@@ -1953,40 +2137,45 @@ mod async_redis {
         async fn async_cache_set(&self, key: K, val: V) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
-            let key = self.generate_key(&key);
+            let key_str = self.generate_key(&key);
 
             let ttl = *self.ttl.lock();
 
             let val = CachedRedisValue::new(val);
-            let serialized = rmp_serde::to_vec(&val)?;
-            pipe.get(&key);
+            let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
+            pipe.get(&key_str);
             if ttl.is_zero() {
                 // Disabled TTL: write the key without expiry (plain `SET`).
-                pipe.set::<String, Vec<u8>>(key, serialized).ignore();
+                pipe.set::<String, Vec<u8>>(key_str, serialized).ignore();
             } else {
-                pipe.pset_ex::<String, Vec<u8>>(key, serialized, super::ttl_millis(ttl)?)
+                pipe.pset_ex::<String, Vec<u8>>(key_str, serialized, super::ttl_millis(ttl)?)
                     .ignore();
             }
 
-            let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
-            match res.0 {
-                None => Ok(None),
-                Some(bytes) => {
-                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
-                    Ok(Some(v.value))
-                }
-            }
+            let res: (Option<Vec<u8>>,) = pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(RedisCacheError::redis)?;
+            // REDIS-10: if the displaced previous value fails to decode, return Ok(None).
+            Ok(res.0.and_then(|bytes| {
+                super::deserialize_cached_redis_value::<V>(&bytes)
+                    .ok()
+                    .map(|v| v.value)
+            }))
         }
 
         /// Remove a cached value
         async fn async_cache_remove(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
-            let key = self.generate_key(key);
+            let key_str = self.generate_key(key);
 
-            pipe.get(&key);
-            pipe.del::<String>(key).ignore();
-            let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
+            pipe.get(&key_str);
+            pipe.del::<String>(key_str).ignore();
+            let res: (Option<Vec<u8>>,) = pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(RedisCacheError::redis)?;
             match res.0 {
                 None => Ok(None),
                 Some(bytes) => {
@@ -2010,8 +2199,12 @@ mod async_redis {
 
         async fn async_cache_delete(&self, key: &K) -> Result<bool, Self::Error> {
             let mut conn = self.connection.clone();
-            let key = self.generate_key(key);
-            let removed: usize = redis::cmd("DEL").arg(key).query_async(&mut conn).await?;
+            let key_str = self.generate_key(key);
+            let removed: usize = redis::cmd("DEL")
+                .arg(key_str)
+                .query_async(&mut conn)
+                .await
+                .map_err(RedisCacheError::redis)?;
             Ok(removed > 0)
         }
 
@@ -2040,12 +2233,14 @@ mod async_redis {
                     .arg("COUNT")
                     .arg(100)
                     .query_async(&mut conn)
-                    .await?;
+                    .await
+                    .map_err(RedisCacheError::redis)?;
                 if !keys.is_empty() {
                     redis::cmd("DEL")
                         .arg(keys)
                         .query_async::<()>(&mut conn)
-                        .await?;
+                        .await
+                        .map_err(RedisCacheError::redis)?;
                 }
                 if next == 0 {
                     break;
@@ -2093,7 +2288,7 @@ mod async_redis {
                 super::ttl_millis(ttl).map(Some)
             };
             let serialized = rmp_serde::to_vec(&CachedRedisValueRef::new(val))
-                .map_err(|source| RedisCacheError::CacheSerialization { source });
+                .map_err(RedisCacheError::serialization);
             async move {
                 let mut pipe = redis::pipe();
                 let serialized: Vec<u8> = serialized?;
@@ -2107,14 +2302,16 @@ mod async_redis {
                         .ignore(),
                 };
 
-                let res: (Option<Vec<u8>>,) = pipe.query_async(&mut conn).await?;
-                match res.0 {
-                    None => Ok(None),
-                    Some(bytes) => {
-                        let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
-                        Ok(Some(v.value))
-                    }
-                }
+                let res: (Option<Vec<u8>>,) = pipe
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(RedisCacheError::redis)?;
+                // REDIS-10: if the displaced previous value fails to decode, return Ok(None).
+                Ok(res.0.and_then(|bytes| {
+                    super::deserialize_cached_redis_value::<V>(&bytes)
+                        .ok()
+                        .map(|v| v.value)
+                }))
             }
         }
     }
@@ -2181,7 +2378,7 @@ mod async_redis {
             // A bad scheme fails at parse time and must surface as the sanitized
             // Connection variant (no server required).
             assert!(
-                matches!(err, RedisCacheBuildError::Connection(_)),
+                matches!(err, RedisCacheBuildError::Connection { .. }),
                 "expected Connection error, got: {err:?}"
             );
         }
@@ -2295,6 +2492,218 @@ mod async_redis {
             assert!(c.async_cache_set(2, 100).await.unwrap().is_none());
             assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
             assert_eq!(c.async_cache_get(&1).await.unwrap().unwrap(), 100);
+        }
+
+        // Plant raw bytes at the given fully-qualified redis key via a sync
+        // connection to the same server the async cache uses. Kept as a committed
+        // helper (not an inline probe) so the async self-heal/REDIS-10 tests below
+        // share one planting/inspection path.
+        fn plant_raw(key: &str, bytes: &[u8]) {
+            let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+                .unwrap()
+                .get_connection()
+                .unwrap();
+            let _: () = redis::cmd("SET")
+                .arg(key)
+                .arg(bytes)
+                .query(&mut conn)
+                .unwrap();
+        }
+
+        fn key_exists(key: &str) -> bool {
+            let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+                .unwrap()
+                .get_connection()
+                .unwrap();
+            redis::cmd("EXISTS").arg(key).query(&mut conn).unwrap()
+        }
+
+        fn delete_key(key: &str) {
+            let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+                .unwrap()
+                .get_connection()
+                .unwrap();
+            let _: () = redis::cmd("DEL").arg(key).query(&mut conn).unwrap();
+        }
+
+        /// D2 (async): a corrupt entry self-heals — `async_cache_get` deletes it and
+        /// returns `Ok(None)` — and a subsequent recompute produces a HIT. Async
+        /// parity for the sync self-heal + recompute test.
+        #[tokio::test]
+        async fn async_cache_get_self_heals_and_recomputes_to_hit() {
+            let prefix = format!("{}:async-selfheal", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            assert_eq!(
+                c.async_cache_get(&1).await.unwrap(),
+                None,
+                "async self-heal returns a miss"
+            );
+            assert!(
+                !key_exists(&key),
+                "async self-heal must delete the corrupt key"
+            );
+
+            assert_eq!(c.async_cache_set(1, 88).await.unwrap(), None);
+            assert_eq!(
+                c.async_cache_get(&1).await.unwrap(),
+                Some(88),
+                "the read after recompute is a HIT"
+            );
+
+            delete_key(&key);
+        }
+
+        /// D2 (async): strict mode returns `Err(CacheDeserialization)` on a corrupt
+        /// entry and leaves it in place (does not self-heal). Async parity for the
+        /// sync strict-mode test.
+        #[tokio::test]
+        async fn async_cache_get_strict_mode_errors_and_keeps_corrupt_entry() {
+            let prefix = format!("{}:async-strict", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .strict_deserialization(true)
+                .build()
+                .await
+                .unwrap();
+
+            let err = c
+                .async_cache_get(&1)
+                .await
+                .expect_err("strict async must error on a corrupt entry");
+            assert!(
+                err.is_deserialization(),
+                "expected CacheDeserialization, got: {err:?}"
+            );
+            assert!(
+                key_exists(&key),
+                "strict mode must NOT delete the corrupt key"
+            );
+
+            delete_key(&key);
+        }
+
+        /// REDIS-10 (async `async_cache_set`): a corrupt displaced previous value
+        /// returns `Ok(None)`, not an error; the new value is written.
+        #[tokio::test]
+        async fn async_cache_set_displaced_corrupt_previous_returns_ok_none() {
+            let prefix = format!("{}:async-redis10-set", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            let result = c.async_cache_set(1, 42).await;
+            assert!(
+                result.is_ok(),
+                "async_cache_set must not error on corrupt displaced value; got: {result:?}"
+            );
+            assert!(
+                result.unwrap().is_none(),
+                "displaced corrupt value must yield Ok(None)"
+            );
+            assert_eq!(c.async_cache_get(&1).await.unwrap(), Some(42));
+
+            delete_key(&key);
+        }
+
+        /// REDIS-10 (async `async_cache_set_ref`): a corrupt displaced previous
+        /// value returns `Ok(None)`; the new value is written from a borrow.
+        #[tokio::test]
+        async fn async_cache_set_ref_displaced_corrupt_previous_returns_ok_none() {
+            use crate::SerializeCachedAsync;
+            let prefix = format!("{}:async-redis10-setref", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            let val = 42u32;
+            let result = c.async_cache_set_ref(&1, &val).await;
+            assert!(
+                result.is_ok(),
+                "async_cache_set_ref must not error on corrupt displaced value; got: {result:?}"
+            );
+            assert!(
+                result.unwrap().is_none(),
+                "displaced corrupt value must yield Ok(None)"
+            );
+            assert_eq!(c.async_cache_get(&1).await.unwrap(), Some(42));
+
+            delete_key(&key);
+        }
+
+        /// Security (async build path): the boxed `source` inside the sanitized
+        /// `Connection { source }` must not expose the planted password through its
+        /// own Debug/Display OR its full `source()` cause chain. The existing async
+        /// leak test only checks the top-level enum Display/Debug; this walks the
+        /// boxed source's whole chain, matching the sync
+        /// `connection_boxed_source_debug_does_not_leak_password` coverage.
+        #[tokio::test]
+        async fn async_connection_boxed_source_chain_does_not_leak_password() {
+            let secret = "async_boxed_chain_secret_qzx999";
+            let bad_url = format!("not-redis://:{secret}@nonexistent-host:9999");
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(&bad_url)
+                .build()
+                .await;
+
+            let err = result.expect_err("build must fail with a bad async URL");
+            let RedisCacheBuildError::Connection { source } = &err else {
+                panic!("expected Connection error, got: {err:?}");
+            };
+            assert!(
+                !format!("{source:?}").contains(secret),
+                "boxed source Debug must not expose the password"
+            );
+            assert!(
+                !source.to_string().contains(secret),
+                "boxed source Display must not expose the password"
+            );
+            // Walk the full cause chain: neither the password nor the raw URL may
+            // appear at any depth.
+            let mut cause = source.source();
+            while let Some(c) = cause {
+                let rendered = format!("{c:?}{c}");
+                assert!(
+                    !rendered.contains(secret),
+                    "cause chain must not expose the password; got: {rendered}"
+                );
+                assert!(
+                    !rendered.contains(&bad_url),
+                    "cause chain must not echo the raw URL; got: {rendered}"
+                );
+                cause = c.source();
+            }
         }
     }
 
@@ -2499,10 +2908,7 @@ mod error_source_tests {
         let bad_bytes: Vec<u8> = vec![0xc1]; // 0xc1 is an unused msgpack byte
         let inner: rmp_serde::decode::Error = rmp_serde::from_slice::<u32>(&bad_bytes).unwrap_err();
         let inner_display = inner.to_string();
-        let err = RedisCacheError::CacheDeserialization {
-            source: inner,
-            cached_value: bad_bytes.clone(),
-        };
+        let err = RedisCacheError::deserialization(inner, bad_bytes.clone());
         let source = err
             .source()
             .expect("CacheDeserialization must expose its inner decode::Error as source()");
@@ -2543,7 +2949,7 @@ mod error_source_tests {
         }
         let inner: rmp_serde::encode::Error = rmp_serde::to_vec(&Unserializable).unwrap_err();
         let inner_display = inner.to_string();
-        let err = RedisCacheError::CacheSerialization { source: inner };
+        let err = RedisCacheError::serialization(inner);
         let source = err
             .source()
             .expect("CacheSerialization must expose its inner encode::Error as source()");
@@ -2666,6 +3072,75 @@ mod error_source_tests {
             }
             Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
         }
+    }
+
+    /// Non-contract but documented-to-function: the opaque boxed `source` of a
+    /// `RedisCacheError::Redis` still downcasts back to `redis::RedisError`. The
+    /// semver note says consumers should match on the variant rather than
+    /// downcast, but this must keep working for callers that do.
+    #[test]
+    fn redis_error_source_downcasts_to_redis_error() {
+        let re = redis::RedisError::from((redis::ErrorKind::InvalidClientConfig, "boom"));
+        let err = RedisCacheError::redis(re);
+        let source = err.source().expect("Redis variant must expose a source");
+        assert!(
+            source.downcast_ref::<redis::RedisError>().is_some(),
+            "source() must still downcast to redis::RedisError"
+        );
+    }
+
+    /// The sanitized boxed `source` of a `RedisCacheBuildError::Connection` also
+    /// downcasts to `redis::RedisError` (the build path wraps a synthetic redis
+    /// error). Downcasting is non-contract but functional.
+    #[test]
+    fn build_connection_source_downcasts_to_redis_error() {
+        let err = RedisCacheBuildError::connection(redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "sanitized synthetic error",
+        )));
+        let source = err
+            .source()
+            .expect("Connection variant must expose a source");
+        assert!(
+            source.downcast_ref::<redis::RedisError>().is_some(),
+            "Connection source() must downcast to redis::RedisError"
+        );
+    }
+
+    /// `RedisCacheError::is_deserialization` classifies only the decode variant,
+    /// not `Redis` / `CacheSerialization`. Stable classifier under the opaque
+    /// source reshape.
+    #[test]
+    fn is_deserialization_classifier_distinguishes_variants() {
+        let bad: Vec<u8> = vec![0xc1];
+        let deser =
+            RedisCacheError::deserialization(rmp_serde::from_slice::<u32>(&bad).unwrap_err(), bad);
+        assert!(
+            deser.is_deserialization(),
+            "decode error must classify true"
+        );
+
+        let redis_err = RedisCacheError::redis(redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "x",
+        )));
+        assert!(
+            !redis_err.is_deserialization(),
+            "redis error must classify false"
+        );
+
+        #[derive(Debug)]
+        struct Unserializable;
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+        let ser = RedisCacheError::serialization(rmp_serde::to_vec(&Unserializable).unwrap_err());
+        assert!(
+            !ser.is_deserialization(),
+            "serialization error must classify false"
+        );
     }
 
     /// `RedisCache` is `Clone` - compile-time bound check.
@@ -2809,5 +3284,199 @@ mod tests {
         assert!(c.cache_set(3, 300).unwrap().is_none());
 
         assert_eq!(100, c.cache_remove(&1).unwrap().unwrap());
+    }
+
+    /// D2: default mode -- a corrupt cache entry is deleted and `cache_get`
+    /// returns `Ok(None)` (self-heal) instead of propagating the decode error.
+    #[test]
+    fn cache_get_self_heals_corrupted_entry_by_default() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:selfheal-default", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        // Write garbage bytes so deserialization will fail.
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        // In default mode (strict_deserialization=false), corrupt entry returns Ok(None)
+        let result = c.cache_get(&1).unwrap();
+        assert!(
+            result.is_none(),
+            "expected Ok(None) after self-heal, got: {result:?}"
+        );
+
+        // The key must have been deleted (self-heal).
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(!exists, "corrupt key must be deleted after self-heal");
+    }
+
+    /// D2: strict mode -- a corrupt cache entry returns `Err(CacheDeserialization)`
+    /// and the key is NOT deleted.
+    #[test]
+    fn cache_get_strict_mode_returns_error_for_corrupted_entry() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:selfheal-strict", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .strict_deserialization(true)
+            .build()
+            .unwrap();
+
+        // In strict mode, corrupt entry must return a deserialization error.
+        let err = c
+            .cache_get(&1)
+            .expect_err("strict mode must return Err for corrupt entry");
+        assert!(
+            err.is_deserialization(),
+            "expected CacheDeserialization, got: {err:?}"
+        );
+
+        // The key must NOT have been deleted in strict mode.
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(exists, "corrupt key must NOT be deleted in strict mode");
+
+        // cleanup
+        let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
+    }
+
+    /// REDIS-10: on the SET path, a pre-existing corrupt value returns Ok(None)
+    /// not an error, in both default and strict modes.
+    #[test]
+    fn cache_set_displaced_corrupt_previous_returns_ok_none() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:redis10-test", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        // Plant a corrupt value so the GET in the SET pipeline will see garbage.
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        // cache_set must succeed and return Ok(None) even though the displaced value
+        // was corrupt.
+        let result = c.cache_set(1, 42);
+        assert!(
+            result.is_ok(),
+            "cache_set must not error on corrupt displaced value; got: {result:?}"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "displaced corrupt value must yield Ok(None)"
+        );
+    }
+
+    /// D2: after a self-healed miss the corrupt key is deleted; recomputing via
+    /// `cache_set` and reading again must produce a HIT. Covers the full
+    /// self-heal -> recompute -> hit cycle, not just the initial `Ok(None)`.
+    #[test]
+    fn cache_get_self_heal_then_recompute_produces_hit() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:selfheal-recompute", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        // Corrupt entry self-heals to a miss and is deleted.
+        assert_eq!(c.cache_get(&1).unwrap(), None, "self-heal returns a miss");
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(!exists, "self-heal must delete the corrupt key");
+
+        // Recompute over the healed miss (previous value is None), then a HIT.
+        assert_eq!(
+            c.cache_set(1, 77).unwrap(),
+            None,
+            "recompute writes over the healed miss"
+        );
+        assert_eq!(
+            c.cache_get(&1).unwrap(),
+            Some(77),
+            "the read after recompute is a HIT"
+        );
+
+        let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
+    }
+
+    /// REDIS-10 (sync `cache_set_ref`): a corrupt displaced previous value returns
+    /// `Ok(None)` — the write succeeds and the undecodable old value is discarded,
+    /// never surfaced as an error. The prior REDIS-10 test only covered `cache_set`.
+    #[test]
+    fn cache_set_ref_displaced_corrupt_previous_returns_ok_none() {
+        use crate::SerializeCached;
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:redis10-setref", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        let val = 42u32;
+        let result = SerializeCached::cache_set_ref(&c, &1, &val);
+        assert!(
+            result.is_ok(),
+            "cache_set_ref must not error on corrupt displaced value; got: {result:?}"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "displaced corrupt value must yield Ok(None)"
+        );
+        // The new value was written and is now readable.
+        assert_eq!(c.cache_get(&1).unwrap(), Some(42));
+
+        let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
     }
 }

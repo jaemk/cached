@@ -23,26 +23,13 @@ pub struct RedbCacheBuilder<K, V> {
     durable: bool,
     disk_dir: Option<PathBuf>,
     cache_name: Option<String>,
+    strict_deserialization: bool,
     // fn-pointer phantom — see the rationale on `RedbCache::_phantom`; keeps the
     // type unconditionally `Send + Sync` regardless of `K`/`V`.
     _phantom: PhantomData<fn() -> (K, V)>,
 }
 
 use thiserror::Error;
-
-/// Convert redb's per-operation error types into `$t` by routing through
-/// [`redb::Error`] (for which `$t` already has a `#[from]`).
-macro_rules! impl_from_redb {
-    ($t:ty; $($s:ty),+ $(,)?) => {
-        $(
-            impl From<$s> for $t {
-                fn from(e: $s) -> Self {
-                    <$t>::from(redb::Error::from(e))
-                }
-            }
-        )+
-    };
-}
 
 /// Error returned when building a [`RedbCache`].
 ///
@@ -56,18 +43,25 @@ macro_rules! impl_from_redb {
 ///     _ => {}
 /// }
 /// ```
+///
+/// **Semver note:** the concrete source types inside `Storage` and `Io` are
+/// NOT part of the public API and may change without a major version bump.
+/// Inspect them via [`std::error::Error::source`] and downcast if needed.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedbCacheBuildError {
     #[error("Storage error")]
     Storage {
-        #[from]
-        source: redb::Error,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     #[error(transparent)]
     Build(#[from] super::BuildError),
     #[error("I/O error preparing the disk cache directory")]
-    Io(#[from] std::io::Error),
+    Io {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     /// The `cache_name` passed to [`RedbCacheBuilder`] is invalid. It is used as a
     /// cross-platform filename component, so it must not be empty, must not be `.` or `..`,
     /// and must not contain any character that is invalid in a filename: a path separator
@@ -81,13 +75,18 @@ pub enum RedbCacheBuildError {
     InvalidCacheName,
 }
 
-impl_from_redb!(
-    RedbCacheBuildError;
-    redb::DatabaseError,
-    redb::TransactionError,
-    redb::TableError,
-    redb::CommitError,
-);
+impl RedbCacheBuildError {
+    pub(crate) fn storage(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Storage {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn io(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Io {
+            source: Box::new(e),
+        }
+    }
+}
 
 static DISK_FILE_PREFIX: &str = "cached_disk_cache";
 // Bumped whenever the on-disk format changes (the redb migration, then dropping the
@@ -121,6 +120,7 @@ where
             durable: true,
             disk_dir: None,
             cache_name: None,
+            strict_deserialization: false,
             _phantom: Default::default(),
         }
     }
@@ -198,6 +198,25 @@ where
     #[must_use]
     pub fn durable(mut self, durable: bool) -> Self {
         self.durable = durable;
+        self
+    }
+
+    /// Set whether deserialization failures are propagated as errors (`true`) or
+    /// silently self-healed (`false`, the default).
+    ///
+    /// **Default (`false`, self-heal mode):** when a stored entry cannot be decoded
+    /// (e.g. after a format migration or data corruption), `cache_get` deletes the
+    /// offending entry and returns `Ok(None)` — a transparent cache miss that lets
+    /// the caller repopulate the entry. `remove_expired_entries` treats undecodable
+    /// entries as eviction candidates and removes them (counting each one).
+    ///
+    /// **Strict mode (`true`):** deserialization failures are surfaced as
+    /// `Err(RedbCacheError::CacheDeserialization { .. })` and the entry is left in
+    /// place. Use this if you prefer to detect data corruption rather than silently
+    /// skip it.
+    #[must_use]
+    pub fn strict_deserialization(mut self, strict: bool) -> Self {
+        self.strict_deserialization = strict;
         self
     }
 
@@ -312,10 +331,10 @@ where
         // as the database file.
         let disk_dir = match self.disk_dir {
             Some(disk_dir) => {
-                create_cache_dir(&disk_dir)?;
+                create_cache_dir(&disk_dir).map_err(RedbCacheBuildError::io)?;
                 disk_dir
             }
-            None => Self::default_disk_path()?,
+            None => Self::default_disk_path().map_err(RedbCacheBuildError::io)?,
         };
         let disk_path = disk_dir.join(format!("{}.redb", cache_dir_name));
 
@@ -334,18 +353,22 @@ where
                 .create(true)
                 .truncate(false)
                 .mode(0o600)
-                .open(&disk_path)?;
+                .open(&disk_path)
+                .map_err(RedbCacheBuildError::io)?;
         }
 
-        let db = Builder::new().create(&disk_path)?;
+        let db = Builder::new()
+            .create(&disk_path)
+            .map_err(RedbCacheBuildError::storage)?;
 
         // Create the table once at build time so that read transactions always
         // find it (a read txn `open_table` on a never-created table errors with
         // `TableError::TableDoesNotExist`).
         {
-            let wtxn = db.begin_write()?;
-            wtxn.open_table(TABLE)?;
-            wtxn.commit()?;
+            let wtxn = db.begin_write().map_err(RedbCacheBuildError::storage)?;
+            wtxn.open_table(TABLE)
+                .map_err(RedbCacheBuildError::storage)?;
+            wtxn.commit().map_err(RedbCacheBuildError::storage)?;
         }
 
         Ok(RedbCache {
@@ -354,6 +377,7 @@ where
             durable: self.durable,
             disk_path,
             connection: Arc::new(db),
+            strict_deserialization: self.strict_deserialization,
             _phantom: self._phantom,
         })
     }
@@ -443,6 +467,7 @@ pub struct RedbCache<K, V> {
     durable: bool,
     disk_path: PathBuf,
     connection: Arc<Database>,
+    strict_deserialization: bool,
     // `RedbCache`/`RedbCacheBuilder` own no live `K`/`V` (values are serialized
     // to disk; `K`/`V` only appear in method signatures). Use a fn-pointer
     // phantom so the type is unconditionally `Send + Sync` and does not impose
@@ -490,6 +515,12 @@ where
     /// also return `usize`).
     pub fn remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
         let ttl = *self.ttl.lock();
+        let strict = self.strict_deserialization;
+
+        // DISK-5: if no TTL is configured, there are no TTL-based expirations.
+        let Some(ttl) = ttl else {
+            return Ok(0);
+        };
 
         // Collect candidate expired keys under a read transaction. We cannot
         // iterate and remove entries in the same transaction because the
@@ -497,25 +528,33 @@ where
         let mut expired_keys: Vec<String> = Vec::new();
         {
             let now = SystemTime::now();
-            let rtxn = self.connection.begin_read()?;
-            let table = rtxn.open_table(TABLE)?;
-            for item in table.iter()? {
-                let (key, value) = item?;
+            let rtxn = self
+                .connection
+                .begin_read()
+                .map_err(RedbCacheError::storage)?;
+            let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+            for item in table.iter().map_err(RedbCacheError::storage)? {
+                let (key, value) = item.map_err(RedbCacheError::storage)?;
                 let raw = value.value();
-                let cached =
-                    rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
-                        RedbCacheError::CacheDeserialization {
-                            source,
-                            cached_value: raw.to_vec(),
+                let raw_vec = raw.to_vec();
+                match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_vec) {
+                    Ok(cached) => {
+                        if now
+                            .duration_since(cached.created_at)
+                            .unwrap_or(Duration::from_secs(0))
+                            >= ttl
+                        {
+                            expired_keys.push(key.value().to_string());
                         }
-                    })?;
-                if let Some(ttl) = ttl
-                    && now
-                        .duration_since(cached.created_at)
-                        .unwrap_or(Duration::from_secs(0))
-                        >= ttl
-                {
-                    expired_keys.push(key.value().to_string());
+                    }
+                    Err(e) if !strict => {
+                        // D2: undecodable entry is treated as an eviction candidate.
+                        expired_keys.push(key.value().to_string());
+                        let _ = e;
+                    }
+                    Err(e) => {
+                        return Err(RedbCacheError::deserialization(e, raw_vec));
+                    }
                 }
             }
         }
@@ -533,46 +572,54 @@ where
         let now_write = SystemTime::now();
         let wtxn = begin_write(&self.connection, self.durable)?;
         {
-            let mut table = wtxn.open_table(TABLE)?;
+            let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
             for key in &expired_keys {
                 // Re-read the entry under the write txn to obtain the
                 // authoritative state. Drop the access guard before mutating
                 // the table.
-                let current: Option<CachedDiskValue<V>> = match table.get(key.as_str())? {
-                    None => None,
-                    Some(guard) => {
-                        let raw = guard.value();
-                        Some(rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(
-                            |source| RedbCacheError::CacheDeserialization {
-                                source,
-                                cached_value: raw.to_vec(),
-                            },
-                        )?)
-                        // guard is dropped here; table can be mutated below.
-                    }
-                };
+                // guard is dropped after .map(); table can be mutated below.
+                let raw_bytes: Option<Vec<u8>> = table
+                    .get(key.as_str())
+                    .map_err(RedbCacheError::storage)?
+                    .map(|guard| guard.value().to_vec());
 
-                match current {
+                match raw_bytes {
                     None => {
                         // Already removed by a concurrent operation; skip.
                     }
-                    Some(entry) => {
-                        if let Some(ttl) = ttl
-                            && now_write
-                                .duration_since(entry.created_at)
-                                .unwrap_or(Duration::from_secs(0))
-                                >= ttl
-                        {
-                            table.remove(key.as_str())?;
-                            removed += 1;
+                    Some(bytes) => {
+                        match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                            Ok(entry) => {
+                                if now_write
+                                    .duration_since(entry.created_at)
+                                    .unwrap_or(Duration::from_secs(0))
+                                    >= ttl
+                                {
+                                    table
+                                        .remove(key.as_str())
+                                        .map_err(RedbCacheError::storage)?;
+                                    removed += 1;
+                                }
+                                // else: entry was rewritten with a fresh timestamp by a
+                                // concurrent writer; leave it in place.
+                            }
+                            Err(e) if !strict => {
+                                // D2: corrupt under write txn too — evict it.
+                                table
+                                    .remove(key.as_str())
+                                    .map_err(RedbCacheError::storage)?;
+                                removed += 1;
+                                let _ = e;
+                            }
+                            Err(e) => {
+                                return Err(RedbCacheError::deserialization(e, bytes));
+                            }
                         }
-                        // else: entry was rewritten with a fresh timestamp by a
-                        // concurrent writer; leave it in place.
                     }
                 }
             }
         }
-        wtxn.commit()?;
+        wtxn.commit().map_err(RedbCacheError::storage)?;
         Ok(removed)
     }
 
@@ -608,10 +655,15 @@ impl<K, V> RedbCache<K, V> {
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedbCacheError {
+    /// A redb storage or transaction error.
+    ///
+    /// **Semver note:** the concrete source type is NOT part of the public API
+    /// and may change without a major version bump. Inspect via
+    /// [`std::error::Error::source`] and downcast if needed.
     #[error("Storage error")]
     Storage {
-        #[from]
-        source: redb::Error,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     /// A stored value failed to deserialize.
     ///
@@ -619,27 +671,49 @@ pub enum RedbCacheError {
     /// from disk and failed to decode. Those bytes may contain sensitive
     /// application data. Do not log or display this error variant without
     /// redacting or omitting the `cached_value` field.
+    ///
+    /// **Semver note:** the concrete source type is NOT part of the public API.
     #[error("Error deserializing cached value")]
     CacheDeserialization {
         #[source]
-        source: rmp_serde::decode::Error,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
         cached_value: Vec<u8>,
     },
+    /// A value failed to serialize before writing.
+    ///
+    /// **Semver note:** the concrete source type is NOT part of the public API.
     #[error("Error serializing cached value")]
     CacheSerialization {
-        #[from]
-        source: rmp_serde::encode::Error,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 }
 
-impl_from_redb!(
-    RedbCacheError;
-    redb::TransactionError,
-    redb::TableError,
-    redb::StorageError,
-    redb::CommitError,
-    redb::SetDurabilityError,
-);
+impl RedbCacheError {
+    pub(crate) fn storage(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Storage {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn serialization(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::CacheSerialization {
+            source: Box::new(e),
+        }
+    }
+    pub(crate) fn deserialization(
+        e: impl std::error::Error + Send + Sync + 'static,
+        cached_value: Vec<u8>,
+    ) -> Self {
+        Self::CacheDeserialization {
+            source: Box::new(e),
+            cached_value,
+        }
+    }
+    /// Returns `true` if this error is a deserialization failure.
+    pub fn is_deserialization(&self) -> bool {
+        matches!(self, Self::CacheDeserialization { .. })
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedDiskValue<V> {
@@ -700,9 +774,10 @@ fn begin_write(
     connection: &Database,
     durable: bool,
 ) -> Result<redb::WriteTransaction, RedbCacheError> {
-    let mut wtxn = connection.begin_write()?;
+    let mut wtxn = connection.begin_write().map_err(RedbCacheError::storage)?;
     if !durable {
-        wtxn.set_durability(Durability::None)?;
+        wtxn.set_durability(Durability::None)
+            .map_err(RedbCacheError::storage)?;
     }
     Ok(wtxn)
 }
@@ -713,6 +788,7 @@ fn disk_cache_get<V>(
     ttl: Option<Duration>,
     refresh: bool,
     durable: bool,
+    strict: bool,
 ) -> Result<Option<V>, RedbCacheError>
 where
     V: Serialize + DeserializeOwned,
@@ -720,20 +796,30 @@ where
     // Fast path: read the entry under a read transaction. For the common case
     // where no mutation is required (no TTL, or a fresh entry with refresh
     // disabled) we return immediately, keeping a single read txn with no write.
-    let cached = {
-        let rtxn = connection.begin_read()?;
-        let table = rtxn.open_table(TABLE)?;
-        let Some(guard) = table.get(key)? else {
+    let raw_bytes: Vec<u8> = {
+        let rtxn = connection.begin_read().map_err(RedbCacheError::storage)?;
+        let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        let Some(guard) = table.get(key).map_err(RedbCacheError::storage)? else {
             return Ok(None);
         };
-        // Deserialize before the guard/table/txn are dropped.
-        let raw = guard.value();
-        rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
-            RedbCacheError::CacheDeserialization {
-                source,
-                cached_value: raw.to_vec(),
+        // Clone bytes before the guard/table/txn are dropped.
+        guard.value().to_vec()
+    };
+
+    let cached: CachedDiskValue<V> = match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_bytes) {
+        Ok(v) => v,
+        Err(e) if !strict => {
+            // D2: self-heal — delete the corrupt entry and return a cache miss.
+            let wtxn = begin_write(connection, durable)?;
+            {
+                let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+                table.remove(key).map_err(RedbCacheError::storage)?;
             }
-        })?
+            wtxn.commit().map_err(RedbCacheError::storage)?;
+            let _ = e;
+            return Ok(None);
+        }
+        Err(e) => return Err(RedbCacheError::deserialization(e, raw_bytes)),
     };
 
     let Some(ttl) = ttl else {
@@ -766,36 +852,45 @@ where
     // redb serialises write transactions, so the re-read + conditional mutate
     // below is atomic against any concurrent writer.
     let wtxn = begin_write(connection, durable)?;
-    let result = {
-        let mut table = wtxn.open_table(TABLE)?;
+    // Use a Result<Option<V>> block so errors propagate and table is dropped
+    // before commit (redb requires WriteTransaction to outlive open Tables).
+    let result: Result<Option<V>, RedbCacheError> = {
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
 
         // Re-read the current entry under the write txn. Drop the access guard
-        // immediately after copying the bytes so the table can be mutated.
-        let current: Option<CachedDiskValue<V>> = match table.get(key)? {
-            None => None,
-            Some(guard) => {
-                let raw = guard.value();
-                Some(
-                    rmp_serde::from_slice::<CachedDiskValue<V>>(raw).map_err(|source| {
-                        RedbCacheError::CacheDeserialization {
-                            source,
-                            cached_value: raw.to_vec(),
-                        }
-                    })?,
-                )
-                // guard is dropped here; table can be mutated below.
-            }
-        };
+        // guard is dropped after .map(); table can be mutated below.
+        let current_bytes: Option<Vec<u8>> = table
+            .get(key)
+            .map_err(RedbCacheError::storage)?
+            .map(|guard| guard.value().to_vec());
 
-        match current {
+        match current_bytes {
             None => {
                 // Entry vanished between the read txn and this write txn (a
                 // concurrent remove or clear). Do not resurrect it.
-                None
+                Ok(None)
             }
-            Some(mut current_entry) => {
+            Some(bytes) => {
+                let current: CachedDiskValue<V> =
+                    match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                        Ok(v) => v,
+                        Err(e) if !strict => {
+                            // D2: corrupt under write txn — evict it. Table is
+                            // dropped at end of this block; commit follows.
+                            table.remove(key).map_err(RedbCacheError::storage)?;
+                            let _ = e;
+                            return {
+                                // table is dropped; safe to consume wtxn.
+                                drop(table);
+                                wtxn.commit().map_err(RedbCacheError::storage)?;
+                                Ok(None)
+                            };
+                        }
+                        Err(e) => return Err(RedbCacheError::deserialization(e, bytes)),
+                    };
+
                 let current_age = SystemTime::now()
-                    .duration_since(current_entry.created_at)
+                    .duration_since(current.created_at)
                     .unwrap_or(Duration::from_secs(0));
 
                 if current_age < ttl {
@@ -804,21 +899,28 @@ where
                     // txn saw if a concurrent `cache_set` replaced it. Refresh
                     // the current entry (not the stale read) if requested.
                     if refresh {
-                        current_entry.refresh_created_at();
-                        let serialized = rmp_serde::to_vec(&current_entry)?;
-                        table.insert(key, serialized.as_slice())?;
+                        let mut refreshed = current;
+                        refreshed.refresh_created_at();
+                        let serialized =
+                            rmp_serde::to_vec(&refreshed).map_err(RedbCacheError::serialization)?;
+                        table
+                            .insert(key, serialized.as_slice())
+                            .map_err(RedbCacheError::storage)?;
+                        Ok(Some(refreshed.value))
+                    } else {
+                        Ok(Some(current.value))
                     }
-                    Some(current_entry.value)
                 } else {
                     // Still expired under the write txn: remove it.
-                    table.remove(key)?;
-                    None
+                    table.remove(key).map_err(RedbCacheError::storage)?;
+                    Ok(None)
                 }
             }
         }
+        // table is dropped here
     };
-    wtxn.commit()?;
-    Ok(result)
+    wtxn.commit().map_err(RedbCacheError::storage)?;
+    result
 }
 
 fn disk_cache_set<V>(
@@ -837,12 +939,13 @@ where
     // itself succeeded, so an undecodable previous value is reported as `None`
     // (there is no recoverable previous value) rather than surfaced as an error.
     let previous_bytes: Option<Vec<u8>> = {
-        let mut table = wtxn.open_table(TABLE)?;
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
         table
-            .insert(key, serialized.as_slice())?
+            .insert(key, serialized.as_slice())
+            .map_err(RedbCacheError::storage)?
             .map(|guard| guard.value().to_vec())
     };
-    wtxn.commit()?;
+    wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(previous_bytes
         .and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok())
         .map(|cached| cached.value))
@@ -862,10 +965,13 @@ where
     // is removed regardless of whether its value can be decoded. The removal
     // succeeded, so an undecodable value is reported as `None` rather than an error.
     let removed_bytes: Option<Vec<u8>> = {
-        let mut table = wtxn.open_table(TABLE)?;
-        table.remove(key)?.map(|guard| guard.value().to_vec())
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        table
+            .remove(key)
+            .map_err(RedbCacheError::storage)?
+            .map(|guard| guard.value().to_vec())
     };
-    wtxn.commit()?;
+    wtxn.commit().map_err(RedbCacheError::storage)?;
 
     let removed =
         removed_bytes.and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok());
@@ -903,10 +1009,13 @@ where
     // is removed regardless of whether its value can be decoded. The removal
     // succeeded, so an undecodable value is reported as `None` rather than an error.
     let removed_bytes: Option<Vec<u8>> = {
-        let mut table = wtxn.open_table(TABLE)?;
-        table.remove(key)?.map(|guard| guard.value().to_vec())
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        table
+            .remove(key)
+            .map_err(RedbCacheError::storage)?
+            .map(|guard| guard.value().to_vec())
     };
-    wtxn.commit()?;
+    wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(removed_bytes
         .and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok())
         .map(|cached| cached.value))
@@ -919,10 +1028,13 @@ fn disk_cache_delete(
 ) -> Result<bool, RedbCacheError> {
     let wtxn = begin_write(connection, durable)?;
     let removed = {
-        let mut table = wtxn.open_table(TABLE)?;
-        table.remove(key)?.is_some()
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        table
+            .remove(key)
+            .map_err(RedbCacheError::storage)?
+            .is_some()
     };
-    wtxn.commit()?;
+    wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(removed)
 }
 
@@ -931,9 +1043,9 @@ fn disk_cache_delete(
 /// than erroring with `TableError::TableDoesNotExist`.
 fn disk_cache_clear(connection: &Database, durable: bool) -> Result<(), RedbCacheError> {
     let wtxn = begin_write(connection, durable)?;
-    wtxn.delete_table(TABLE)?;
-    wtxn.open_table(TABLE)?;
-    wtxn.commit()?;
+    wtxn.delete_table(TABLE).map_err(RedbCacheError::storage)?;
+    wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+    wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(())
 }
 
@@ -942,9 +1054,10 @@ fn disk_cache_clear(connection: &Database, durable: bool) -> Result<(), RedbCach
 /// `Durability::None` commits (the writes made while `durable`
 /// is `false`).
 fn redb_flush(connection: &Database) -> Result<(), RedbCacheError> {
-    let mut wtxn = connection.begin_write()?;
-    wtxn.set_durability(Durability::Immediate)?;
-    wtxn.commit()?;
+    let mut wtxn = connection.begin_write().map_err(RedbCacheError::storage)?;
+    wtxn.set_durability(Durability::Immediate)
+        .map_err(RedbCacheError::storage)?;
+    wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(())
 }
 
@@ -1019,11 +1132,13 @@ where
             ttl,
             refresh,
             self.durable,
+            self.strict_deserialization,
         )
     }
 
     fn cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
-        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
+        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))
+            .map_err(RedbCacheError::serialization)?;
         disk_cache_set(&self.connection, &key.to_string(), serialized, self.durable)
     }
 
@@ -1070,7 +1185,8 @@ where
     /// `key.to_string()`, returning the previous value if any. Equivalent to
     /// [`ConcurrentCached::cache_set`] but avoids taking ownership of `value`.
     fn cache_set_ref(&self, key: &K, value: &V) -> Result<Option<V>, RedbCacheError> {
-        let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))?;
+        let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
+            .map_err(RedbCacheError::serialization)?;
         disk_cache_set(&self.connection, &key.to_string(), serialized, self.durable)
     }
 }
@@ -1102,20 +1218,24 @@ where
     async fn async_cache_get(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
-        let (ttl, refresh, durable) = (
+        let (ttl, refresh, durable, strict) = (
             *self.ttl.lock(),
             self.refresh.load(Ordering::Relaxed),
             self.durable,
+            self.strict_deserialization,
         );
-        blocking::unblock(move || disk_cache_get::<V>(&connection, &key, ttl, refresh, durable))
-            .await
+        blocking::unblock(move || {
+            disk_cache_get::<V>(&connection, &key, ttl, refresh, durable, strict)
+        })
+        .await
     }
 
     async fn async_cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
         let durable = self.durable;
-        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))?;
+        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))
+            .map_err(RedbCacheError::serialization)?;
         blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable)).await
     }
 
@@ -1186,7 +1306,7 @@ where
         let durable = self.durable;
         // Serialize eagerly; defer any error into the future.
         let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
-            .map_err(|source| RedbCacheError::CacheSerialization { source });
+            .map_err(RedbCacheError::serialization);
         async move {
             let serialized = serialized?;
             blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable))
@@ -1472,12 +1592,15 @@ mod tests {
         ));
     }
 
+    /// D2: strict mode -- a corrupt entry returns `Err(CacheDeserialization)` and
+    /// leaves the entry in place.
     #[test]
-    fn cache_get_returns_decode_error_for_corrupted_value() {
+    fn cache_get_returns_decode_error_for_corrupted_value_in_strict_mode() {
         let tmp_dir = temp_dir!();
         let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-cache-get")
+            .name("corrupted-cache-get-strict")
             .disk_directory(tmp_dir.path())
+            .strict_deserialization(true)
             .build()
             .expect("error building disk cache");
         raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
@@ -1486,7 +1609,25 @@ mod tests {
             cache.cache_get(&TEST_KEY),
             Err(RedbCacheError::CacheDeserialization { .. })
         ));
+        // In strict mode, the corrupt entry must NOT be deleted.
         assert!(raw_get(&cache, &TEST_KEY.to_string()).is_some());
+    }
+
+    /// D2: default mode -- a corrupt entry is self-healed: deleted and Ok(None) returned.
+    #[test]
+    fn cache_get_self_heals_corrupted_entry_by_default() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-cache-get-default")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .expect("error building disk cache");
+        raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
+
+        // Default mode: self-heal returns Ok(None).
+        assert!(matches!(cache.cache_get(&TEST_KEY), Ok(None)));
+        // The corrupt entry must have been deleted.
+        assert!(raw_get(&cache, &TEST_KEY.to_string()).is_none());
     }
 
     #[test]
@@ -1680,13 +1821,15 @@ mod tests {
         );
     }
 
+    /// D2: strict mode -- `remove_expired_entries` aborts on the first corrupt entry.
     #[test]
-    fn remove_expired_entries_returns_decode_error_for_corrupted_value() {
+    fn remove_expired_entries_returns_decode_error_for_corrupted_value_in_strict_mode() {
         let tmp_dir = temp_dir!();
         let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-sweep")
+            .name("corrupted-sweep-strict")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
+            .strict_deserialization(true)
             .build()
             .expect("error building disk cache");
         raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
@@ -1695,6 +1838,28 @@ mod tests {
             cache.remove_expired_entries(),
             Err(RedbCacheError::CacheDeserialization { .. })
         ));
+    }
+
+    /// D2: default mode -- `remove_expired_entries` treats corrupt entries as
+    /// eviction candidates (removes them and counts them).
+    #[test]
+    fn remove_expired_entries_self_heals_corrupted_entries_by_default() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("corrupted-sweep-default")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(1))
+            .build()
+            .expect("error building disk cache");
+        raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
+
+        // Default mode: corrupt entry is treated as eviction candidate.
+        let count = cache
+            .remove_expired_entries()
+            .expect("remove_expired_entries must succeed");
+        assert_eq!(count, 1, "corrupt entry must be counted as removed");
+        // The corrupt entry must be gone.
+        assert!(raw_get(&cache, &TEST_KEY.to_string()).is_none());
     }
 
     #[test]
@@ -1721,6 +1886,170 @@ mod tests {
         assert!(raw_get(&cache, &3u32.to_string()).is_some());
         assert!(raw_get(&cache, &1u32.to_string()).is_none());
         assert!(raw_get(&cache, &2u32.to_string()).is_none());
+    }
+
+    /// DISK-5: `remove_expired_entries` returns `Ok(0)` immediately when no TTL
+    /// is configured, without scanning any entries.
+    #[test]
+    fn remove_expired_entries_returns_zero_when_no_ttl_configured() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("sweep-no-ttl")
+            .disk_directory(tmp_dir.path())
+            // No TTL set -- entries never expire.
+            .build()
+            .expect("error building disk cache");
+        cache.cache_set(1, 10).unwrap();
+        cache.cache_set(2, 20).unwrap();
+
+        let removed = cache.remove_expired_entries().expect("sweep must succeed");
+        assert_eq!(removed, 0, "no TTL means no entries expire");
+        // Entries are still present.
+        assert!(raw_get(&cache, &1u32.to_string()).is_some());
+        assert!(raw_get(&cache, &2u32.to_string()).is_some());
+    }
+
+    /// D2 + sweep: one `remove_expired_entries` call over a table holding a valid
+    /// *live* entry, a valid *expired* entry, and two *corrupt* entries must remove
+    /// exactly the expired and both corrupt ones (count == 3), retain the live
+    /// entry, and physically delete the rest. This is the interleaved-eviction
+    /// case the single-fixture tests above do not exercise.
+    #[test]
+    fn remove_expired_entries_sweeps_corrupt_and_expired_but_keeps_live() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("sweep-mixed-corrupt-live-expired")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("error building disk cache");
+
+        // Live entry: freshly written, age ~0 << 60s ttl -> must be retained.
+        cache.cache_set(1, 10).unwrap();
+
+        // Valid-but-expired entry: a well-formed CachedDiskValue whose created_at
+        // is an hour in the past (age >> ttl) -> must be removed. Constructed by
+        // hand so the age is deterministic rather than sleep-dependent.
+        let expired = CachedDiskValue {
+            value: 20u32,
+            created_at: SystemTime::now()
+                .checked_sub(Duration::from_secs(3600))
+                .expect("subtracting an hour must not underflow"),
+        };
+        raw_insert(
+            &cache,
+            &2u32.to_string(),
+            rmp_serde::to_vec(&expired).expect("serialize expired fixture"),
+        );
+
+        // Two corrupt entries (distinct undecodable byte patterns) -> both removed
+        // in default (self-heal) mode.
+        raw_insert(&cache, &3u32.to_string(), vec![0xc1, 0xc1, 0xc1]);
+        raw_insert(&cache, &4u32.to_string(), vec![0xc1, 0x00, 0xff]);
+
+        // Exactly three entries removed: the expired one and the two corrupt ones.
+        assert_eq!(
+            cache.remove_expired_entries().unwrap(),
+            3,
+            "sweep must remove the expired entry and both corrupt entries, and only those"
+        );
+
+        // The live entry survives and stays readable; every other key is gone.
+        assert!(
+            raw_get(&cache, &1u32.to_string()).is_some(),
+            "live entry must be retained"
+        );
+        assert_eq!(
+            cache.cache_get(&1).unwrap(),
+            Some(10),
+            "the retained live entry must still decode"
+        );
+        assert!(
+            raw_get(&cache, &2u32.to_string()).is_none(),
+            "expired entry must be physically removed"
+        );
+        assert!(
+            raw_get(&cache, &3u32.to_string()).is_none(),
+            "first corrupt entry must be physically removed"
+        );
+        assert!(
+            raw_get(&cache, &4u32.to_string()).is_none(),
+            "second corrupt entry must be physically removed"
+        );
+    }
+
+    /// D2: strict-mode `remove_expired_entries` aborts on the first corrupt entry
+    /// AND leaves it physically in place — it must not evict in strict mode.
+    /// The existing strict sweep test only asserts the error; this pins the
+    /// no-delete side of the contract.
+    #[test]
+    fn remove_expired_entries_strict_mode_aborts_and_leaves_corrupt_entry() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("sweep-strict-leaves-corrupt")
+            .disk_directory(tmp_dir.path())
+            .ttl(Duration::from_secs(1))
+            .strict_deserialization(true)
+            .build()
+            .expect("error building disk cache");
+        raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
+
+        assert!(matches!(
+            cache.remove_expired_entries(),
+            Err(RedbCacheError::CacheDeserialization { .. })
+        ));
+        assert!(
+            raw_get(&cache, &TEST_KEY.to_string()).is_some(),
+            "strict-mode sweep must leave the corrupt entry in place"
+        );
+    }
+
+    /// D2: after a self-healed miss the corrupt entry is gone; recomputing via
+    /// `cache_set` and reading again must produce a HIT. Guards that the self-heal
+    /// delete does not poison subsequent writes to the same key.
+    #[test]
+    fn cache_get_self_heal_then_recompute_produces_hit() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder()
+            .name("self-heal-then-recompute")
+            .disk_directory(tmp_dir.path())
+            .build()
+            .expect("error building disk cache");
+        raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
+
+        // Self-heal: corrupt entry -> Ok(None) and the entry is deleted.
+        assert_eq!(cache.cache_get(&TEST_KEY).unwrap(), None);
+        assert!(raw_get(&cache, &TEST_KEY.to_string()).is_none());
+
+        // Recompute over the healed miss: the previous value is None.
+        assert_eq!(cache.cache_set(TEST_KEY, TEST_VAL).unwrap(), None);
+        // Subsequent read is a HIT with the recomputed value.
+        assert_eq!(cache.cache_get(&TEST_KEY).unwrap(), Some(TEST_VAL));
+    }
+
+    /// `RedbCacheError::is_deserialization` classifies only the decode variant,
+    /// not storage or serialization errors. No disk needed.
+    #[test]
+    fn is_deserialization_classifier_distinguishes_variants() {
+        let bad: Vec<u8> = vec![0xc1];
+        let deser =
+            RedbCacheError::deserialization(rmp_serde::from_slice::<u32>(&bad).unwrap_err(), bad);
+        assert!(
+            deser.is_deserialization(),
+            "decode error must classify true"
+        );
+
+        let storage = RedbCacheError::storage(redb::Error::Io(std::io::Error::other("io")));
+        assert!(
+            !storage.is_deserialization(),
+            "storage error must classify false"
+        );
+
+        let ser = RedbCacheError::serialization(std::io::Error::other("ser"));
+        assert!(
+            !ser.is_deserialization(),
+            "serialization error must classify false"
+        );
     }
 
     const LIFE_SPAN_2_SECS: Duration = Duration::from_secs(2);
@@ -2628,10 +2957,10 @@ mod tests {
     /// by build-time redb failures. Its Display no longer says "connection".
     #[test]
     fn build_error_storage_variant_name_and_display() {
-        // Construct the variant directly to verify the field name compiles.
-        let err = RedbCacheBuildError::Storage {
-            source: redb::Error::Io(std::io::Error::other("synthetic redb io error")),
-        };
+        // Construct the variant via constructor to verify it compiles.
+        let err = RedbCacheBuildError::storage(redb::Error::Io(std::io::Error::other(
+            "synthetic redb io error",
+        )));
         let display = err.to_string();
         // Must say "storage" (case-insensitive).
         assert!(
@@ -2651,9 +2980,11 @@ mod tests {
     #[test]
     fn cache_get_decode_error_carries_raw_bytes() {
         let tmp_dir = temp_dir!();
+        // strict_deserialization=true so we get an error to inspect.
         let cache: RedbCache<u32, u32> = RedbCache::builder()
             .name("decode-error-carries-bytes")
             .disk_directory(tmp_dir.path())
+            .strict_deserialization(true)
             .build()
             .expect("error building disk cache");
         let corrupt: Vec<u8> = vec![0xc1, 0xc1, 0xc1];
@@ -2671,7 +3002,7 @@ mod tests {
             }
             other => panic!("expected CacheDeserialization, got {other:?}"),
         }
-        // Entry must still be present (cache_get does not remove on decode error).
+        // In strict mode, the entry must still be present.
         assert!(raw_get(&cache, &TEST_KEY.to_string()).is_some());
     }
 
@@ -2680,10 +3011,12 @@ mod tests {
     #[test]
     fn remove_expired_entries_decode_error_carries_raw_bytes() {
         let tmp_dir = temp_dir!();
+        // strict_deserialization=true so we get an error to inspect.
         let cache: RedbCache<u32, u32> = RedbCache::builder()
             .name("sweep-decode-error-bytes")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
+            .strict_deserialization(true)
             .build()
             .expect("error building disk cache");
         let corrupt: Vec<u8> = vec![0xc1, 0xc1, 0xc1];
@@ -2735,9 +3068,11 @@ mod tests {
     fn cache_deserialization_error_source_is_wired() {
         use std::error::Error;
         let tmp_dir = temp_dir!();
+        // Use strict mode so we get an error from cache_get.
         let cache: RedbCache<u32, u32> = RedbCache::builder()
             .name("deser-source-wired")
             .disk_directory(tmp_dir.path())
+            .strict_deserialization(true)
             .build()
             .expect("error building disk cache");
         raw_insert(&cache, &TEST_KEY.to_string(), vec![0xc1, 0xc1, 0xc1]);
@@ -2745,9 +3080,12 @@ mod tests {
         let err = cache
             .cache_get(&TEST_KEY)
             .expect_err("expected a decode error");
+        let source = err
+            .source()
+            .expect("CacheDeserialization must expose its inner error via source()");
         assert!(
-            err.source().is_some(),
-            "CacheDeserialization must expose its inner error via source()"
+            source.downcast_ref::<rmp_serde::decode::Error>().is_some(),
+            "boxed source must downcast to rmp_serde::decode::Error"
         );
     }
 
@@ -2757,10 +3095,18 @@ mod tests {
     fn build_error_storage_source_is_wired() {
         use std::error::Error;
         let inner = redb::Error::Io(std::io::Error::other("synthetic redb io error"));
-        let err = RedbCacheBuildError::Storage { source: inner };
+        let err = RedbCacheBuildError::storage(inner);
         assert!(
             err.source().is_some(),
             "RedbCacheBuildError::Storage must expose its inner error via source()"
+        );
+        // The inner error must be accessible via downcast.
+        assert!(
+            err.source()
+                .unwrap()
+                .downcast_ref::<redb::Error>()
+                .is_some(),
+            "boxed source must downcast to redb::Error"
         );
     }
 
