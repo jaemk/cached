@@ -923,7 +923,6 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         H: ShardHasher<K>,
     {
         let new_cache = self.build()?;
-        let _existing_ttl = existing.ttl_duration();
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, TimedEntry<V>)> = {
                 let guard = shard.lock.read();

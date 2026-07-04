@@ -609,7 +609,7 @@ where
     }
 }
 
-impl<K: Hash + Eq, V: Expires + Clone, S: BuildHasher + Clone> CloneCached<K, V>
+impl<K: Hash + Eq, V: Expires + Clone, S: BuildHasher> CloneCached<K, V>
     for ExpiringCache<K, V, S>
 {
     // Unlike `cache_get`, this intentionally leaves an expired entry in the map so the

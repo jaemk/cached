@@ -668,7 +668,7 @@ where
     }
 }
 
-impl<K: Hash + Eq + Clone, V: Expires + Clone, S: BuildHasher + Clone> CloneCached<K, V>
+impl<K: Hash + Eq + Clone, V: Expires + Clone, S: BuildHasher> CloneCached<K, V>
     for ExpiringLruCache<K, V, S>
 {
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
