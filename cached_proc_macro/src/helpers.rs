@@ -233,7 +233,7 @@ impl FromMeta for SyncWriteMode {
         match value {
             "default" | "true" => Ok(Self::Default),
             "by_key" => Ok(Self::ByKey),
-            "false" => Ok(Self::Disabled),
+            "false" | "disabled" => Ok(Self::Disabled),
             _ => Err(Error::unknown_value(value)),
         }
     }

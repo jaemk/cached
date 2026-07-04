@@ -186,6 +186,29 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let signature = input.sig;
     let body = input.block;
 
+    // Attributes written between the macro and the `fn` (e.g.
+    // `#[cached] #[cfg(feature = "x")] fn f`) land in `input.attrs`. They must
+    // reach every generated item, not just the wrapper, or cfg-gating desyncs
+    // (the static and `_no_cache` origin would compile with the feature off,
+    // referencing a body/wrapper that no longer exists) and `#[allow(...)]`
+    // fails to suppress lints on the generated body (MACRO-4).
+    //
+    // A `static` rejects fn-only attrs (`#[inline]`, `#[must_use]`, ...), so
+    // only forward existence-gating `cfg`/`cfg_attr` there. The `_no_cache`
+    // origin is a fn carrying the user body, so it takes every non-doc attr
+    // (docs excluded: static and origin carry their own). The wrapper and prime
+    // companion already receive the full attribute set below.
+    let static_cfg_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+        .cloned()
+        .collect();
+    let no_cache_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| !attr.path().is_ident("doc"))
+        .cloned()
+        .collect();
+
     // Resolve the path to the `cached` crate so generated code works when the
     // dependency is renamed by the downstream crate (#157).
     let krate = crate_path();
@@ -1178,11 +1201,17 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
+    // Run the function BEFORE taking the lock, mirroring the main `Disabled`
+    // path (compute, then lock, then set). Locking first deadlocks a recursive
+    // prime - parking_lot is non-reentrant, so the body's own cached call
+    // re-locks the held static on the same thread - and blocks every reader for
+    // the full recompute, defeating the timer-driven background-refresh pattern
+    // `src/macros.rs` documents (MACRO-1). For `by_key`, `#lock` still takes the
+    // per-key bucket lock, but only across the set, not the compute.
     let prime_do_set_return_block = quote! {
-        // try to get a lock first
-        #lock
-        // run the function and cache the result
+        // run the function first (no lock held), then cache the result
         #function_call
+        #lock
         #set_cache_and_return
     };
 
@@ -1200,6 +1229,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         (
             quote! {
+                #(#static_cfg_attrs)*
                 #[doc = #cache_ident_doc]
                 #module_ty
             },
@@ -1247,6 +1277,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         // Cached static (module scope unless `in_impl`)
         #module_static
         // No cache function (origin of the cached function)
+        #(#no_cache_attrs)*
         #no_cache_fn_doc
         #companions_visibility #function_no_cache
         // Cached function
