@@ -221,6 +221,9 @@ pub struct TtlSortedCache<K, V, S = DefaultHashBuilder> {
 
     pub(crate) ttl: Duration,
     pub(crate) size_limit: Option<usize>,
+    // Preallocation hint captured at build so `cache_reset` can shrink back to
+    // it instead of to zero, matching `TtlCache` (CORE-8).
+    pub(super) initial_capacity: Option<usize>,
     pub(super) hits: StripedCounter,
     pub(super) misses: StripedCounter,
     pub(super) evictions: AtomicU64,
@@ -253,6 +256,7 @@ where
             keys: self.keys.clone(),
             ttl: self.ttl,
             size_limit: self.size_limit,
+            initial_capacity: self.initial_capacity,
             hits: self.hits.snapshot(),
             misses: self.misses.snapshot(),
             evictions: AtomicU64::new(self.evictions.load(AtomicOrdering::Relaxed)),
@@ -415,6 +419,7 @@ impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
             keys: BTreeSet::new(),
             ttl,
             size_limit: self.size,
+            initial_capacity: None,
             hits: StripedCounter::new(),
             misses: StripedCounter::new(),
             evictions: AtomicU64::new(0),
@@ -427,11 +432,22 @@ impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
         // pre-reserved `size + 1` entries. We reserve only once: issuing the
         // `size + 1` reservation first would defeat a smaller explicit `capacity`,
         // since `HashMap::reserve` does not reduce an existing allocation.
-        let preallocate = self
-            .capacity
-            .or_else(|| self.size.map(|size| size.saturating_add(1)));
+        // A fallible `try_reserve` so an oversized `max_size`/`initial_capacity`
+        // returns `Err(BuildError)` instead of aborting on capacity overflow,
+        // matching `LruCache`/`LruTtlCache` (CORE-1).
+        let (preallocate, field) = match self.capacity {
+            Some(cap) => (Some(cap), "initial_capacity"),
+            None => (self.size.map(|size| size.saturating_add(1)), "max_size"),
+        };
         if let Some(amount) = preallocate {
-            cache.map.reserve(amount);
+            cache
+                .map
+                .try_reserve(amount)
+                .map_err(|_| super::BuildError::InvalidValue {
+                    field,
+                    reason: "allocation failed",
+                })?;
+            cache.initial_capacity = Some(amount);
         }
         Ok(cache)
     }
@@ -466,9 +482,9 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Set the maximum number of entries. When reached, the next entries to expire are evicted.
     /// Returns the previous value if one was set.
     ///
-    /// This grows the backing map to hold at least `max_size + 1` entries, so calling it on a
-    /// cache built with a deliberately small [`initial_capacity`](TtlSortedCacheBuilder::initial_capacity) will
-    /// override that smaller allocation.
+    /// The backing map grows on demand as entries are inserted (it is not pre-reserved here),
+    /// matching [`LruCache::set_max_size`](super::LruCache::set_max_size); so this cannot abort
+    /// on a capacity-overflowing `max_size`.
     ///
     /// # Panics
     ///
@@ -487,11 +503,6 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.size_limit;
         self.size_limit = Some(max_size);
-        self.map.reserve(
-            max_size
-                .saturating_add(1)
-                .saturating_sub(self.map.capacity()),
-        );
         prev
     }
 
@@ -978,8 +989,10 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
         // Use clear + shrink_to to avoid needing S: Clone to rebuild the HashMap.
+        // Shrink back to the build-time preallocation hint, not to zero, so the
+        // configured capacity survives a reset (CORE-8), matching `TtlCache`.
         self.map.clear();
-        self.map.shrink_to(0);
+        self.map.shrink_to(self.initial_capacity.unwrap_or(0));
         self.keys = BTreeSet::new();
         self.min_instant = Instant::now();
         self.cache_reset_metrics();
@@ -1708,6 +1721,46 @@ mod test {
         cache.set_max_size(0);
     }
 
+    // CORE-1: a capacity-overflowing `max_size` must return `Err(BuildError)`
+    // from the fallible `try_reserve`, not abort, matching the LRU-family stores.
+    #[test]
+    fn build_rejects_capacity_overflowing_max_size() {
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(usize::MAX)
+            .build();
+        match cache {
+            Ok(_) => panic!("usize::MAX max_size should fail to allocate"),
+            Err(error) => assert!(
+                matches!(error, crate::stores::BuildError::InvalidValue { .. }),
+                "expected InvalidValue, got {error:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn build_rejects_capacity_overflowing_initial_capacity() {
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .initial_capacity(usize::MAX)
+            .build();
+        assert!(
+            matches!(cache, Err(crate::stores::BuildError::InvalidValue { .. })),
+            "usize::MAX initial_capacity should return Err(InvalidValue)"
+        );
+    }
+
+    // CORE-1: `set_max_size` grows on demand (no pre-reserve), so even a huge
+    // bound cannot panic; the documented panic-free `try_set_max_size` holds.
+    #[test]
+    fn try_set_max_size_huge_does_not_panic() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(cache.try_set_max_size(usize::MAX).unwrap(), None);
+    }
+
     #[test]
     fn explicit_capacity_takes_precedence_over_max_size_preallocation() {
         // Regression for #266: an explicit, smaller `capacity` must not be defeated
@@ -1909,6 +1962,26 @@ mod test {
             1,
             evicted.load(Ordering::Relaxed),
             "on_evict should still fire after reset"
+        );
+    }
+
+    // CORE-8: `cache_reset` shrinks back to the build-time preallocation hint,
+    // not to zero, so the configured capacity survives a reset.
+    #[test]
+    fn cache_reset_preserves_initial_capacity() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .initial_capacity(128)
+            .build()
+            .unwrap();
+        for i in 0..64 {
+            cache.cache_set(i, i);
+        }
+        cache.cache_reset();
+        assert!(
+            cache.map.capacity() >= 128,
+            "reset should retain the initial_capacity hint, got {}",
+            cache.map.capacity()
         );
     }
 

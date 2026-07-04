@@ -653,12 +653,12 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         let key_for_evict = key.clone();
         let ttl = self.ttl;
         let setter = || {
+            // Anchor the expiry AFTER the factory runs so a slow factory does
+            // not eat into the fresh entry's TTL (CORE-3).
+            let value = f();
             let now = Instant::now();
             let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
-            TimedEntry {
-                expires_at,
-                value: f(),
-            }
+            TimedEntry { expires_at, value }
         };
         let (was_present, was_valid, old_entry, entry) =
             self.store
@@ -693,12 +693,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         let key_for_evict = key.clone();
         let ttl = self.ttl;
         let setter = || {
+            // Anchor the expiry after the factory succeeds (CORE-3).
+            let value = f()?;
             let now = Instant::now();
             let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
-            Ok(TimedEntry {
-                expires_at,
-                value: f()?,
-            })
+            Ok(TimedEntry { expires_at, value })
         };
         let (was_present, was_valid, old_entry, entry) =
             self.store
@@ -959,12 +958,11 @@ where
             let key_for_evict = key.clone();
             let ttl = self.ttl;
             let setter = || async move {
+                // Anchor the expiry after the factory resolves (CORE-3).
+                let value = f().await;
                 let now = Instant::now();
                 let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
-                TimedEntry {
-                    expires_at,
-                    value: f().await,
-                }
+                TimedEntry { expires_at, value }
             };
             let (was_present, was_valid, old_entry, entry) = self
                 .store
@@ -1674,5 +1672,48 @@ mod tests {
         assert_eq!(c2.cache_get(&1), Some(&10));
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(c2.cache_get(&1), None, "entry must expire after ttl");
+    }
+
+    // CORE-3: the sync get_or_set paths must anchor the expiry AFTER the factory
+    // runs, so a factory slower than the TTL still yields a live entry.
+    #[test]
+    fn sync_expiry_anchored_after_factory() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(40))
+            .build()
+            .unwrap();
+        let v = c.cache_get_or_set_with(1, || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            7
+        });
+        assert_eq!(*v, 7);
+        assert_eq!(
+            c.cache_get(&1),
+            Some(&7),
+            "entry must be live right after insert"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_expiry_anchored_after_factory() {
+        use crate::CachedGetOrSetAsync;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(40))
+            .build()
+            .unwrap();
+        let v = CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 1, || async {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            7
+        })
+        .await;
+        assert_eq!(*v, 7);
+        assert_eq!(
+            c.cache_get(&1),
+            Some(&7),
+            "entry must be live right after insert"
+        );
     }
 }
