@@ -17,6 +17,7 @@ pub struct RedisCacheBuilder<K, V> {
     pool_min_idle: Option<u32>,
     pool_max_lifetime: Option<Duration>,
     pool_idle_timeout: Option<Duration>,
+    pool_connection_timeout: Option<Duration>,
     strict_deserialization: bool,
     // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
     _phantom: PhantomData<fn() -> (K, V)>,
@@ -483,6 +484,52 @@ mod credential_leak_tests {
             panic!("expected Connection error, got: {err:?}");
         }
     }
+
+    /// A valid-scheme connection string with embedded credentials pointing at a
+    /// refused host fails during eager pool construction. The resulting `Pool`
+    /// error and its full cause chain must not leak the password (REDIS-8).
+    #[test]
+    fn pool_build_error_does_not_leak_password() {
+        let secret = "pool_build_secret_abc123";
+        // Valid redis scheme (so `Client::open` succeeds), credentials in the
+        // URL, pointing at a refused port so the eager pool connect fails fast.
+        let bad_url = format!("redis://:{secret}@127.0.0.1:1");
+
+        let result = RedisCacheBuilder::<String, String>::new()
+            .prefix("test")
+            .ttl(Duration::from_secs(1))
+            .connection_string(&bad_url)
+            .connection_pool_min_idle(1)
+            .connection_pool_connection_timeout(Duration::from_millis(50))
+            .build();
+
+        let err = result.expect_err("build must fail against a refused host");
+        assert!(
+            matches!(err, RedisCacheBuildError::Pool { .. }),
+            "expected Pool error, got: {err:?}"
+        );
+        let debug = format!("{err:?}");
+        assert!(
+            !debug.contains(secret),
+            "Pool Debug leaked the password: {debug}"
+        );
+        if let RedisCacheBuildError::Pool { ref source } = err {
+            let src = format!("{source:?}{source}");
+            assert!(
+                !src.contains(secret),
+                "boxed Pool source leaked the password: {src}"
+            );
+            let mut cause = source.source();
+            while let Some(c) = cause {
+                let c_str = format!("{c:?}{c}");
+                assert!(
+                    !c_str.contains(secret),
+                    "cause chain leaked the password: {c_str}"
+                );
+                cause = c.source();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -649,11 +696,6 @@ impl RedisCacheBuildError {
             source: Box::new(e),
         }
     }
-    pub(crate) fn pool_err(e: r2d2::Error) -> Self {
-        Self::Pool {
-            source: Box::new(e),
-        }
-    }
 }
 
 impl<K, V> Default for RedisCacheBuilder<K, V>
@@ -688,6 +730,7 @@ where
             pool_min_idle: None,
             pool_max_lifetime: None,
             pool_idle_timeout: None,
+            pool_connection_timeout: None,
             strict_deserialization: false,
             _phantom: PhantomData,
         }
@@ -795,6 +838,17 @@ where
         self
     }
 
+    /// Bound how long the pool waits to establish a connection before failing.
+    ///
+    /// Maps to `r2d2::Builder::connection_timeout` (default 30s). A shorter value
+    /// makes [`build`](Self::build) fail faster when the redis server is
+    /// unreachable, rather than blocking for the full default.
+    #[must_use]
+    pub fn connection_pool_connection_timeout(mut self, connection_timeout: Duration) -> Self {
+        self.pool_connection_timeout = Some(connection_timeout);
+        self
+    }
+
     /// Enable strict deserialization mode.
     ///
     /// When `false` (the default), a corrupt or otherwise undecodable cached
@@ -870,10 +924,22 @@ where
         } else {
             pool_builder
         };
+        let pool_builder = if let Some(connection_timeout) = self.pool_connection_timeout {
+            pool_builder.connection_timeout(connection_timeout)
+        } else {
+            pool_builder
+        };
 
-        let pool = pool_builder
-            .build(client)
-            .map_err(RedisCacheBuildError::pool_err)?;
+        // `Pool::build` eagerly opens the initial connections, so its `r2d2::Error`
+        // wraps the underlying redis connect error, which can carry the connection
+        // URL (and therefore credentials). Discard the raw error and substitute a
+        // redacted synthetic one, matching the `Connection` path above (REDIS-8).
+        let pool = pool_builder.build(client).map_err(|_| RedisCacheBuildError::Pool {
+            source: Box::new(redis::RedisError::from((
+                redis::ErrorKind::Io,
+                "failed to establish initial redis pool connection (connection string redacted)",
+            ))),
+        })?;
         Ok(pool)
     }
 
