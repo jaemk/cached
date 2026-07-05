@@ -396,17 +396,16 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     }
 
     fn check_capacity(&mut self) {
-        let len = self.store.len();
-        if len > self.capacity {
+        // `while` (not `if`) plus pop-before-notify: remove the victim from both
+        // the store and the LRU order BEFORE invoking `on_evict`, so a panicking
+        // callback can never leave an entry behind over capacity, and the loop
+        // self-heals `len <= capacity` after any earlier panic (SHARD-4).
+        while self.store.len() > self.capacity {
             let index = self.order.back();
-            let (key, value) = self.order.get(index);
+            let (key, _value) = self.order.get(index);
             let hasher = &mut self.hash_builder.build_hasher();
             key.hash(hasher);
             let hash = hasher.finish();
-
-            if let Some(on_evict) = &self.on_evict {
-                on_evict(key, value);
-            }
 
             let order = &self.order;
             match self.store.find_entry(hash, |&i| *key == order.get(i).0) {
@@ -417,8 +416,13 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
                     "LruCache internal invariant violated: LRU order and hash table out of sync"
                 ),
             }
-            self.order.remove(index);
+            // Take ownership of the evicted pair, then notify. If `on_evict`
+            // panics here the victim is already gone, so the invariant holds.
+            let (evicted_key, evicted_value) = self.order.remove(index);
             self.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&evicted_key, &evicted_value);
+            }
         }
     }
 
@@ -1226,6 +1230,20 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_existing_key_does_not_promote_recency() {
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
+        c.set(1, 10);
+        c.set(2, 20);
+        c.set(3, 30);
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        // Overwriting the least-recently-used key updates the value in-place and
+        // returns the old value, but must NOT move it to the front.
+        assert_eq!(Cached::cache_set(&mut c, 1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.value_order(), vec![30, 20, 11]);
+    }
+
+    #[test]
     fn sized_cache_clone_is_independent() {
         let mut c = LruCache::builder().max_size(3).build().unwrap();
         c.set(1, 100);
@@ -1646,5 +1664,37 @@ mod tests {
         assert_eq!(c.cache_get(&1), Some(&10));
         assert_eq!(c.cache_get(&2), None); // evicted
         assert_eq!(c.cache_get(&3), Some(&30));
+    }
+
+    // SHARD-4: a panicking `on_evict` during capacity eviction must not leave the
+    // cache permanently over capacity. The victim is removed before the callback
+    // runs, so `len <= capacity` holds across repeated panicking inserts.
+    #[test]
+    fn panicking_on_evict_keeps_cache_within_capacity() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c: LruCache<u32, u32> = LruCache::builder()
+            .max_size(2)
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        // The third insert overflows capacity and evicts, so `on_evict` panics.
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_set(3, 3)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert!(
+            c.cache_size() <= 2,
+            "cache left over capacity: len {}",
+            c.cache_size()
+        );
+        // Later inserts keep healing to <= capacity even as the callback panics.
+        for i in 4..8 {
+            let _ = catch_unwind(AssertUnwindSafe(|| c.cache_set(i, i)));
+            assert!(
+                c.cache_size() <= 2,
+                "cache exceeded capacity after insert {i}: len {}",
+                c.cache_size()
+            );
+        }
     }
 }

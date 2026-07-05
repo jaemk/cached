@@ -5,8 +5,7 @@ mod once;
 
 use proc_macro::TokenStream;
 
-/// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedGetOrSetAsync` for async functions)
+/// Define a memoized function using a cache store that implements `cached::Cached`
 ///
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
@@ -109,6 +108,9 @@ use proc_macro::TokenStream;
 ///   `.set_was_cached`). Use a different name for any non-`cached` `Return` type.
 /// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead refresh the recently expired `Ok` value.
 ///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
+///   **Note:** the stale value's TTL is refreshed on *every* `Err` call - if the underlying
+///   operation stays down indefinitely, the stale entry will never expire. `ttl` bounds staleness
+///   under normal (transient) failure; it does not bound it under permanent failure.
 ///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
 ///   *Note*, this option requires the cache type to implement `CloneCached`. The compatible built-in options are:
 ///   `ttl`, `ttl_secs`, or `ttl_millis` (uses `TtlCache`), `max_size` + `ttl`/`ttl_secs`/`ttl_millis` (uses `LruTtlCache`), and
@@ -130,9 +132,15 @@ use proc_macro::TokenStream;
 ///   Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `unsync_reads`, and `refresh`.
 ///
 /// ## Note
-/// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
+/// The `ty` and `key` attributes must be in a `String`
 /// This is because darling, which is used for parsing the attributes, does not support directly parsing
-/// attributes into `Type`s or `Block`s.
+/// attributes into `Type`s. (`create` and `convert` accept an unquoted `{ ... }` block; the legacy
+/// quoted-string form is also accepted.)
+///
+/// **Security:** the default store (`UnboundCache`) is unbounded and keyed by the function
+/// arguments, so an untrusted or otherwise unbounded key space can grow the cache without limit and
+/// exhaust memory. Set `max_size` (or supply a bounded `ty`/`create` store) when the key space is
+/// untrusted or unbounded.
 ///
 /// `Result`/`Option` detection is exact: the macro matches only the bare identifiers `Result`
 /// and `Option` (including qualified forms like `std::result::Result<T, E>`). Type aliases are
@@ -151,9 +159,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     cached::cached(args, input)
 }
 
-/// Define a memoized function using a cache store that implements `cached::Cached` (and
-/// `cached::CachedGetOrSetAsync` for async functions). Function arguments are not used to identify
-/// a cached value, only one value is cached unless a `ttl` expiry is specified.
+/// Define a memoized function using a cache store that implements `cached::Cached`. Function
+/// arguments are not used to identify a cached value, only one value is cached unless a `ttl`
+/// expiry is specified.
 ///
 /// # Attributes
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
@@ -248,7 +256,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// On the default in-memory path, do **not** specify `map_error` - the sharded stores are
 /// infallible (`Error = Infallible`) and supplying `map_error` is a compile error.
-/// Reserve `map_error` for `redis`/`disk`/custom `ty`/`create` stores where the error type is fallible.
+/// `map_error` is optional on `redis`/`disk`/custom `ty`/`create` stores (whose error type is
+/// fallible); when omitted, store errors are converted into your function's error type with `?`
+/// (which requires your error type to implement `From<StoreError>`).
 /// Functions may return a plain `T`, `Option<T>`, or `Result<T, E>`. Plain values are
 /// cached as-is. `Option<T>` skips caching `None` by default; use `cache_none = true`
 /// to also cache `None`. `Result<T, E>` caches only successful `Ok(T)` values and returns
@@ -277,17 +287,19 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// Use `key` + `convert` to map to an explicit key type and avoid the clone if needed.
 ///
 /// # Attributes
-/// - `map_error`: (required for `redis`/`disk` and custom `ty`/`create` stores; **not allowed**
-///   on the default in-memory sharded path - those stores are infallible and supplying `map_error`
-///   there is a compile error) a closure used to map store errors into the error type returned
-///   by your function.
+/// - `map_error`: (optional; usable only with `redis`/`disk` and custom `ty`/`create` stores;
+///   **not allowed** on the default in-memory sharded path - those stores are infallible and
+///   supplying `map_error` there is a compile error) a closure used to map store errors into the
+///   error type returned by your function. When omitted on a fallible store, store errors are
+///   converted with `?` (your error type must implement `From<StoreError>`).
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
-/// - `redis`: (optional, bool) default to a `RedisCache` or `AsyncRedisCache`
+/// - `redis`: (optional, bool) default to a `RedisCache` or `AsyncRedisCache`. If the store fails to
+///   build, the failure surfaces as a panic on the first call to the cached function.
 /// - `disk`: (optional, bool) selects `RedbCache` (the default disk engine), this must be set to true even if `type` and `create` are specified.
-///   On an `async fn`, `redb`'s blocking I/O is run on `tokio`'s blocking pool via
-///   `spawn_blocking` (so it does not stall the async runtime); this requires a Tokio
-///   runtime context and surfaces a `RedbCacheError::BackgroundTaskFailed` if that task is
-///   cancelled or panics.
+///   `redb` is used synchronously. On an `async fn`, `redb`'s blocking I/O is run off the async
+///   runtime via `blocking::unblock` (so it does not stall the runtime); no Tokio runtime is
+///   required. If the store fails to build, the failure surfaces as a panic on the first call to
+///   the cached function.
 /// - `max_size`: (optional, usize) total LRU capacity for the default in-memory store. Selects
 ///   `ShardedLruCache` (or `ShardedLruTtlCache` when combined with `ttl`). A compile error is
 ///   emitted when combined with `redis`, `disk`, or `create`.
@@ -305,11 +317,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `ttl_millis`: (optional, u64) the same TTL expressed in milliseconds; mutually exclusive with
 ///   `ttl`, `ttl_secs`, and `expires`. On the default in-memory path it selects the same sharded TTL stores as `ttl`
 ///   (so it likewise requires the `time_stores` feature). Honored on every backend (in-memory sharded,
-///   redis, and disk). The in-memory sharded and disk (redb) stores honor true sub-second expiry; only
-///   the redis backend applies TTL at
-///   whole-second granularity (any non-zero fractional second rounds up to the next whole second, so
-///   `ttl_millis = 500` becomes 1s and `ttl_millis = 1500` becomes 2s on redis), so a
-///   `ttl_millis` that is not a whole number of seconds gives finer expiry everywhere except redis.
+///   redis, and disk): the in-memory sharded, disk (redb), and redis stores all honor true sub-second
+///   expiry, with redis applying the TTL at millisecond granularity via `PSETEX`/`PEXPIRE`.
 /// - `force_refresh`: (optional, expression block) a boolean expression over the function arguments,
 ///   in curly braces like `convert` (it is evaluated, not a magic flag), e.g.
 ///   `force_refresh = "{ id == 0 }"`. When it evaluates to `true`, any cached value is bypassed and the
@@ -407,9 +416,15 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   throughput. Requires `disk = true`; using it on the in-memory or `redis` path is a compile error.
 ///
 /// ## Note
-/// The `ty`, `create`, `key`, and `convert` attributes must be in a `String`
+/// The `ty` and `key` attributes must be in a `String`
 /// This is because darling, which is used for parsing the attributes, does not support directly parsing
-/// attributes into `Type`s or `Block`s.
+/// attributes into `Type`s. (`create` and `convert` accept an unquoted `{ ... }` block; the legacy
+/// quoted-string form is also accepted.)
+///
+/// **Security:** the default store (`ShardedUnboundCache`) is unbounded and keyed by the function
+/// arguments, so an untrusted or otherwise unbounded key space can grow the cache without limit and
+/// exhaust memory. Set `max_size` (or supply a bounded `ty`/`create` store) when the key space is
+/// untrusted or unbounded.
 ///
 /// `sync_writes` is not supported by `#[concurrent_cached]`. Use `#[cached(sync_writes = ...)]` instead
 /// if you need to serialize concurrent first-call execution.

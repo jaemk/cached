@@ -248,6 +248,20 @@ where
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
 
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// Infallible ergonomic API for the concrete type. As an inherent method it takes
+    /// resolution priority over
+    /// [`ConcurrentCachedExt::get_or_set_with`](crate::ConcurrentCachedExt::get_or_set_with)
+    /// (which returns `Result<V, Infallible>`), so no `.unwrap()` is needed at the call site.
+    ///
+    /// Non-atomic get-then-set: on a miss another thread may store a value for the same key
+    /// between the get and the set. See
+    /// [`ConcurrentCached::cache_get_or_set_with`](crate::ConcurrentCached::cache_get_or_set_with).
+    pub fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> V {
+        ConcurrentCached::cache_get_or_set_with(self, k, f).unwrap()
+    }
+
     /// Remove a cached value and return it if the entry was live.
     ///
     /// This is the infallible ergonomic API for the concrete type.
@@ -343,12 +357,10 @@ where
     /// Remove all entries from every shard, firing `on_evict` for each removed entry when a
     /// callback is configured.
     ///
-    /// If no `on_evict` callback is configured, this is equivalent to [`clear`](Self::clear).
-    /// Increments the evictions counter for each removed entry only when `on_evict` is set.
+    /// Unlike [`clear`](Self::clear), every removed entry is counted as an eviction
+    /// (`metrics().evictions`) whether or not an `on_evict` callback is configured; the callback
+    /// fires only when one is set.
     pub fn cache_clear_with_on_evict(&self) {
-        if self.inner.on_evict.is_none() {
-            return self.clear();
-        }
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, TimedEntry<V>)> = shard.lock.write().drain().collect();
             if !removed.is_empty() {
@@ -415,7 +427,10 @@ where
         self.ttl_duration()
     }
 
-    /// Set the TTL used when checking existing and newly inserted entries, returning the previous value.
+    /// Set the TTL applied to entries inserted after this call, returning the previous value.
+    ///
+    /// The new TTL only affects entries inserted after the change; existing entries keep their
+    /// original expiry.
     ///
     /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
     /// nanoseconds (~584 years). In practice this limit is never reached.
@@ -619,8 +634,30 @@ where
             expires_at,
             value: v,
         };
-        let old = shard.lock.write().insert(k, new_entry);
-        Ok(old.map(|e| e.value))
+        // Capture the displaced entry. When an `on_evict` callback is configured, remove-then-
+        // insert so the owned old key is available to fire the callback after the lock is
+        // released (the sharded on_evict-after-unlock invariant); otherwise a plain insert.
+        let old: Option<(Option<K>, TimedEntry<V>)> = if self.inner.on_evict.is_some() {
+            let mut guard = shard.lock.write();
+            let removed = guard.remove_entry(&k);
+            guard.insert(k, new_entry);
+            removed.map(|(ok, e)| (Some(ok), e))
+        } else {
+            shard.lock.write().insert(k, new_entry).map(|e| (None, e))
+        };
+        match old {
+            // A displaced expired value is filtered from the return (matching cache_remove and
+            // the single-owner TTL stores); fire on_evict and count an eviction for it.
+            Some((key, entry)) if entry.expires_at.is_some_and(|t| Instant::now() >= t) => {
+                if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
+                    cb(key, &entry.value);
+                }
+                self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+            Some((_, entry)) => Ok(Some(entry.value)),
+            None => Ok(None),
+        }
     }
 
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
@@ -889,7 +926,6 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         H: ShardHasher<K>,
     {
         let new_cache = self.build()?;
-        let _existing_ttl = existing.ttl_duration();
         for shard in existing.inner.shards.iter() {
             let entries: Vec<(K, TimedEntry<V>)> = {
                 let guard = shard.lock.read();
@@ -1018,6 +1054,35 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+        let count = Arc::new(AtomicU64::new(0));
+        let count2 = count.clone();
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_, _| {
+                count2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).unwrap();
+        let before = c.metrics().evictions.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Overwriting the expired value: None returned, on_evict fires once, one eviction.
+        assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 200).unwrap(), None);
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(&c, 1, 300).unwrap(),
+            Some(200)
+        );
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
+    }
+
+    #[test]
     fn ttl_secs_and_ttl_millis_set_duration() {
         let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl_secs(7)
@@ -1138,6 +1203,24 @@ mod tests {
     }
 
     #[test]
+    fn try_set_ttl_rejects_zero_and_returns_previous() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // Nonzero: stored, previous ttl returned, and the new ttl takes effect.
+        let prev = c.try_set_ttl(Duration::from_secs(30)).unwrap();
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+        assert_eq!(c.ttl(), Some(Duration::from_secs(30)));
+        // Zero: rejected without touching the stored ttl.
+        assert_eq!(
+            c.try_set_ttl(Duration::ZERO),
+            Err(crate::SetTtlError::ZeroTtl)
+        );
+        assert_eq!(c.ttl(), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
     fn copy_from_skips_expired() {
         let old = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(50))
@@ -1233,6 +1316,36 @@ mod tests {
                 - before,
             20,
             "evictions counter must increment for each entry"
+        );
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_counts_evictions_without_callback() {
+        // metrics().evictions must not depend on an on_evict observer being attached.
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+        for i in 0..20u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before = c.metrics().evictions.expect("evictions tracked");
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.len(), 0);
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked") - before,
+            20,
+            "evictions must be counted even with no on_evict callback"
+        );
+        for i in 0..5u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before_plain = c.metrics().evictions.expect("evictions tracked");
+        c.clear();
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked"),
+            before_plain,
+            "plain clear() must not count evictions"
         );
     }
 

@@ -132,12 +132,19 @@ impl<K, V> Entry<K, V> {
         }
     }
 
-    /// Returns `true` if the entry's expiry instant has passed.
-    /// Expires strictly AFTER `expiry` (`now > expiry`, i.e. `expiry < now`),
-    /// in contrast to [`TtlCache`](super::TtlCache) / `LruTtlCache` which expire
-    /// at-or-after (`now >= expires_at`).
+    /// Returns `true` if the entry's expiry instant has passed as of `now`.
+    ///
+    /// Expiry is at-or-after the deadline (`now >= expiry`), matching
+    /// [`TtlCache`](super::TtlCache) / `LruTtlCache`. Split from [`is_expired`](Self::is_expired)
+    /// so the boundary can be unit-tested with a controlled `now` (the real monotonic clock
+    /// never yields an exact `now == expiry` tie deterministically).
+    fn is_expired_at(&self, now: Instant) -> bool {
+        self.expiry.is_some_and(|e| e <= now)
+    }
+
+    /// Returns `true` if the entry's expiry instant has passed as of the current time.
     fn is_expired(&self) -> bool {
-        self.expiry.is_some_and(|e| e < Instant::now())
+        self.is_expired_at(Instant::now())
     }
 }
 
@@ -214,6 +221,9 @@ pub struct TtlSortedCache<K, V, S = DefaultHashBuilder> {
 
     pub(crate) ttl: Duration,
     pub(crate) size_limit: Option<usize>,
+    // Preallocation hint captured at build so `cache_reset` can shrink back to
+    // it instead of to zero, matching `TtlCache` (CORE-8).
+    pub(super) initial_capacity: Option<usize>,
     pub(super) hits: StripedCounter,
     pub(super) misses: StripedCounter,
     pub(super) evictions: AtomicU64,
@@ -246,6 +256,7 @@ where
             keys: self.keys.clone(),
             ttl: self.ttl,
             size_limit: self.size_limit,
+            initial_capacity: self.initial_capacity,
             hits: self.hits.snapshot(),
             misses: self.misses.snapshot(),
             evictions: AtomicU64::new(self.evictions.load(AtomicOrdering::Relaxed)),
@@ -279,8 +290,8 @@ impl<K, V> Default for TtlSortedCacheBuilder<K, V, DefaultHashBuilder> {
 impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
     /// Set the maximum number of entries (eviction bound). When the cache exceeds this
     /// limit, the next-to-expire entries are evicted until it is within bounds. Unlike
-    /// [`capacity`](Self::capacity), this is a hard cap on entry count, not a preallocation
-    /// hint.
+    /// [`initial_capacity`](Self::initial_capacity), this is a hard cap on entry count, not a
+    /// preallocation hint.
     #[doc(alias = "size")]
     #[must_use]
     pub fn max_size(mut self, max_size: usize) -> Self {
@@ -408,6 +419,7 @@ impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
             keys: BTreeSet::new(),
             ttl,
             size_limit: self.size,
+            initial_capacity: None,
             hits: StripedCounter::new(),
             misses: StripedCounter::new(),
             evictions: AtomicU64::new(0),
@@ -420,11 +432,22 @@ impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
         // pre-reserved `size + 1` entries. We reserve only once: issuing the
         // `size + 1` reservation first would defeat a smaller explicit `capacity`,
         // since `HashMap::reserve` does not reduce an existing allocation.
-        let preallocate = self
-            .capacity
-            .or_else(|| self.size.map(|size| size.saturating_add(1)));
+        // A fallible `try_reserve` so an oversized `max_size`/`initial_capacity`
+        // returns `Err(BuildError)` instead of aborting on capacity overflow,
+        // matching `LruCache`/`LruTtlCache` (CORE-1).
+        let (preallocate, field) = match self.capacity {
+            Some(cap) => (Some(cap), "initial_capacity"),
+            None => (self.size.map(|size| size.saturating_add(1)), "max_size"),
+        };
         if let Some(amount) = preallocate {
-            cache.map.reserve(amount);
+            cache
+                .map
+                .try_reserve(amount)
+                .map_err(|_| super::BuildError::InvalidValue {
+                    field,
+                    reason: "allocation failed",
+                })?;
+            cache.initial_capacity = Some(amount);
         }
         Ok(cache)
     }
@@ -459,9 +482,9 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Set the maximum number of entries. When reached, the next entries to expire are evicted.
     /// Returns the previous value if one was set.
     ///
-    /// This grows the backing map to hold at least `max_size + 1` entries, so calling it on a
-    /// cache built with a deliberately small [`initial_capacity`](TtlSortedCacheBuilder::initial_capacity) will
-    /// override that smaller allocation.
+    /// The backing map grows on demand as entries are inserted (it is not pre-reserved here),
+    /// matching [`LruCache::set_max_size`](super::LruCache::set_max_size); so this cannot abort
+    /// on a capacity-overflowing `max_size`.
     ///
     /// # Panics
     ///
@@ -480,11 +503,6 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.size_limit;
         self.size_limit = Some(max_size);
-        self.map.reserve(
-            max_size
-                .saturating_add(1)
-                .saturating_sub(self.map.capacity()),
-        );
         prev
     }
 
@@ -529,6 +547,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         let min = Stamped::bound(self.min_instant);
         let max = Stamped::bound(cutoff);
         let min = Included(&min);
+        // `Stamped::bound(cutoff)` has `key: None`, which sorts below every real entry at the
+        // same expiry, so a real entry expiring exactly at `cutoff` is never in this range under
+        // either `Excluded` or `Included`. That matches `is_expired_at`'s at-or-after boundary in
+        // practice: `cutoff` is sampled here, so no stored expiry (computed at an earlier insert)
+        // ever equals it, and any entry that did tie is caught by the next `is_expired` get.
         let max = Excluded(&max);
         let remove = self.keys.range((min, max)).count();
 
@@ -703,13 +726,20 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
                 self.keys.remove(&old_stamped);
             }
         }
-        let old_value = old.and_then(|entry| {
-            if entry.is_expired() {
+        let old_value = match old {
+            // A displaced expired value is filtered from the return (matching the get paths), so
+            // it is dropped silently from the caller's view; fire `on_evict` and count an
+            // eviction so cleanup and metrics stay consistent with the other removal paths.
+            Some(entry) if entry.is_expired() => {
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(entry.key.0.as_ref(), &entry.value);
+                }
+                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 None
-            } else {
-                Some(entry.value)
             }
-        });
+            Some(entry) => Some(entry.value),
+            None => None,
+        };
 
         // Skip size-limit eviction in two cases:
         // 1. The TTL overflowed and was saturated to `now` — the new entry has the earliest
@@ -959,8 +989,10 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
         // Use clear + shrink_to to avoid needing S: Clone to rebuild the HashMap.
+        // Shrink back to the build-time preallocation hint, not to zero, so the
+        // configured capacity survives a reset (CORE-8), matching `TtlCache`.
         self.map.clear();
-        self.map.shrink_to(0);
+        self.map.shrink_to(self.initial_capacity.unwrap_or(0));
         self.keys = BTreeSet::new();
         self.min_instant = Instant::now();
         self.cache_reset_metrics();
@@ -1213,6 +1245,64 @@ mod test {
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // The previous value has expired: overwriting filters it (None), fires on_evict once,
+        // and counts one eviction.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn entry_is_expired_at_uses_at_or_after_boundary() {
+        // TtlSortedCache aligns with TtlCache / LruTtlCache: an entry is expired at-or-after its
+        // deadline (`now >= expiry`), not strictly-after. The real monotonic clock never yields a
+        // deterministic `now == expiry` tie, so exercise the boundary through `is_expired_at`.
+        use super::{CacheArc, Entry};
+        use crate::time::Instant;
+
+        let deadline = Instant::now();
+        let entry = Entry {
+            expiry: Some(deadline),
+            key: CacheArc::new(1u32),
+            value: 42u32,
+        };
+
+        // Exactly at the deadline: expired (at-or-after). Strictly-after would report `false`.
+        assert!(
+            entry.is_expired_at(deadline),
+            "entry must be expired at exactly its deadline (at-or-after)"
+        );
+        // One tick before: still live.
+        assert!(
+            !entry.is_expired_at(deadline - Duration::from_nanos(1)),
+            "entry must be live just before its deadline"
+        );
+        // A never-expiring entry (zero-TTL sentinel) is never expired.
+        let never = Entry {
+            expiry: None,
+            key: CacheArc::new(2u32),
+            value: 7u32,
+        };
+        assert!(!never.is_expired_at(deadline));
+    }
 
     #[test]
     fn ttl_sorted_cache_set_error_is_clone_eq() {
@@ -1631,6 +1721,46 @@ mod test {
         cache.set_max_size(0);
     }
 
+    // CORE-1: a capacity-overflowing `max_size` must return `Err(BuildError)`
+    // from the fallible `try_reserve`, not abort, matching the LRU-family stores.
+    #[test]
+    fn build_rejects_capacity_overflowing_max_size() {
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(usize::MAX)
+            .build();
+        match cache {
+            Ok(_) => panic!("usize::MAX max_size should fail to allocate"),
+            Err(error) => assert!(
+                matches!(error, crate::stores::BuildError::InvalidValue { .. }),
+                "expected InvalidValue, got {error:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn build_rejects_capacity_overflowing_initial_capacity() {
+        let cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .initial_capacity(usize::MAX)
+            .build();
+        assert!(
+            matches!(cache, Err(crate::stores::BuildError::InvalidValue { .. })),
+            "usize::MAX initial_capacity should return Err(InvalidValue)"
+        );
+    }
+
+    // CORE-1: `set_max_size` grows on demand (no pre-reserve), so even a huge
+    // bound cannot panic; the documented panic-free `try_set_max_size` holds.
+    #[test]
+    fn try_set_max_size_huge_does_not_panic() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(cache.try_set_max_size(usize::MAX).unwrap(), None);
+    }
+
     #[test]
     fn explicit_capacity_takes_precedence_over_max_size_preallocation() {
         // Regression for #266: an explicit, smaller `capacity` must not be defeated
@@ -1832,6 +1962,26 @@ mod test {
             1,
             evicted.load(Ordering::Relaxed),
             "on_evict should still fire after reset"
+        );
+    }
+
+    // CORE-8: `cache_reset` shrinks back to the build-time preallocation hint,
+    // not to zero, so the configured capacity survives a reset.
+    #[test]
+    fn cache_reset_preserves_initial_capacity() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .initial_capacity(128)
+            .build()
+            .unwrap();
+        for i in 0..64 {
+            cache.cache_set(i, i);
+        }
+        cache.cache_reset();
+        assert!(
+            cache.map.capacity() >= 128,
+            "reset should retain the initial_capacity hint, got {}",
+            cache.map.capacity()
         );
     }
 

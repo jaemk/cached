@@ -2,8 +2,168 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.3 / cached_proc_macro 3.0.0-rc.3 / cached_proc_macro_types 3.0.0-rc.3] - 2026-07-05
+
+> Changes since rc.2. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md); the rc.1 and rc.2 sections below record the earlier 3.0 candidates. Note the `sync_writes` default reverted since the release candidates: see "`sync_writes` default reverted to no synchronization" below.
+
+### Breaking Changes
+
+#### `sync_writes` default reverted to no synchronization
+- rc.1 and rc.2 defaulted a bare `#[cached]` to `sync_writes = "by_key"`. That default held a
+  per-key bucket lock across the function body, which deadlocks recursive memoized functions
+  whenever two keys in the active call chain share a bucket, and serialized hot readers of the
+  same key. The default is again no synchronization, matching 2.x and `functools.lru_cache`.
+- `sync_writes = "by_key"` remains available as an explicit opt-in, documented with the
+  recursion and hit-path caveats. `sync_writes = "disabled"` is accepted as a spelling of the
+  default.
+- **Migration:** no change from 2.x. Callers who relied on the rc-era `by_key` default must set
+  `sync_writes = "by_key"` explicitly.
+
+#### `CachedAsync` renamed to `CachedGetOrSetAsync`; sync passthroughs removed
+- The trait that memoizes an async closure over a synchronous in-memory `Cached` store is
+  renamed to name that job. Its four sync passthroughs (`async_cache_get` / `async_cache_set` /
+  `async_cache_remove` / `async_cache_clear`), which only forwarded to the sync `Cached`
+  methods, are removed along with the misleading `Self: Cached` bound. The get-or-set family is
+  unchanged.
+- **Migration:** import `cached::CachedGetOrSetAsync` instead of `cached::CachedAsync`; call the
+  sync `cache_*` methods on an in-memory store instead of the removed `async_cache_*`
+  passthroughs.
+
+#### `CacheMetrics` fields
+- `CacheMetrics::entry_count` is now `Option<usize>`; `metrics()` reports `None` for stores
+  whose size is unknown (redis/redb) instead of a false `0`. `CacheMetrics` is also
+  `#[non_exhaustive]` and derives `Default`, so future counters can be added without breaking
+  construction.
+- **Migration:** handle the `Option` on `entry_count`; construct `CacheMetrics` by mutating a
+  `CacheMetrics::default()` rather than with a struct literal.
+
+#### Fallible and total store APIs
+- Sharded `copy_from` returns `Result<_, BuildError>` instead of panicking on invalid
+  configuration.
+- `Expires::expires_at` returns `crate::time::Instant` (web-time backed, correct under wasm)
+  instead of `std::time::Instant`.
+- `CloneCached::cache_get_with_expiry_status` requires `V: Clone`, matching its
+  `cache_peek_with_expiry_status` sibling.
+- The `Eq` marker impls for `UnboundCache` and `LruCache` now require `V: Eq` (the `PartialEq`
+  impls keep `V: PartialEq`).
+- `ShardedLruTtlCacheBuilder`'s type parameters are reordered so the hash builder is last,
+  matching the other sharded builders.
+
+#### redis/redb error types decoupled from their backing crates
+- `RedisCacheError` / `RedisCacheBuildError` / `RedbCacheError` / `RedbCacheBuildError` no longer
+  expose `redis::`, `r2d2::`, or `redb::` types through public fields or blanket `From` impls.
+  Foreign error causes are boxed behind `Box<dyn std::error::Error + Send + Sync>`, so a redis or
+  redb version bump is no longer a breaking change to these enums.
+- **Migration:** match on the variant (e.g. `Connection { .. }`, `Pool { .. }`, `Storage { .. }`)
+  and read `source()` for the cause instead of pattern-matching the foreign error directly.
+
+#### Feature and dependency changes
+- Optional dependencies are gated with Cargo's `dep:` syntax, so an optional dependency's name is
+  no longer silently usable as a feature. Enable the named crate feature (`redis_store`,
+  `disk_store`, `proc_macro`, ...) rather than a bare dependency name.
+- `blocking` moved from the base `async` feature to `redb_store` (it only offloads synchronous
+  redb work). Redis-only and in-memory async builds no longer pull it.
+- `redis_connection_manager` and `redis_async_cache` are additive and runtime-agnostic: both
+  depend only on `redis/aio`, so the async runtime is a separate axis. Pair a capability with
+  `redis_tokio*` or `redis_smol*`. The connection manager is now a per-cache
+  `.connection_manager(true)` opt-in rather than a feature that cfg-swapped every cache's
+  connection type.
+- `RedbCacheBuilder` rejects a `cache_name` containing any character invalid in a cross-platform
+  filename (`:` `<` `>` `"` `|` `?` `*`, a path separator, or an ASCII control byte). `:`-bearing
+  module-path-style names no longer build.
+
+### Security
+
+#### Seeded per-key lock bucket hasher
+- `sync_writes = "by_key"` bucket selection seeds from a per-static `RandomState` instead of a
+  fixed-seed hasher, so an attacker who knows the key space can no longer collapse the lock
+  buckets to force whole-cache serialization.
+
+#### Self-healing deserialization is the default for redis/redb
+- A corrupt or undecodable cached value on the `cache_get` path is self-healed by default: the
+  offending entry is deleted and the call returns `Ok(None)` (a miss) so the cached function
+  recomputes. Opt into the previous fail-closed behavior with `.strict_deserialization(true)`,
+  which returns `Err(CacheDeserialization { .. })` instead.
+
+#### redis credential and error hardening
+- Connection-string redaction is structural: `resolve_connection_string()` returns a redacting
+  `ConnectionString`, and the build path constructs sanitized synthetic errors, so "no
+  credentials in the error `Display`/`Debug`" is a compile-time property rather than a
+  convention.
+- The `r2d2` pool-build failure is sanitized like the connection path, closing the last
+  build-path error that could surface the connection URL.
+- `RedisCacheBuilder::connection_pool_connection_timeout` bounds how long `build` waits to
+  establish a connection.
+
+#### redb disk hardening (Unix)
+- A symlink at the resolved db path or an explicitly configured cache directory is rejected
+  before opening, so writes cannot be redirected through a planted symlink. The
+  symlink-and-permissions validation now runs for the XDG default candidates, not only the temp
+  fallback.
+- The db file is forced to mode `0600` on every open, not only at creation, so a file created
+  `0644` by an earlier version is no longer readable by group or other.
+- A default candidate on a read-only filesystem falls back to the temp directory, not only on
+  `PermissionDenied`.
+
+### Fixed
+
+#### `#[cached]` / `#[once]` prime companion no longer deadlocks or blocks readers
+- The `{fn}_prime_cache` companion ran the function body while holding the cache write lock. A
+  recursive prime re-locked the same static on the same thread and deadlocked (parking_lot is
+  non-reentrant), and any prime blocked every reader for the full recompute. The body now runs
+  before the lock is taken, mirroring the main path.
+
+#### ttl expiry anchored after the factory
+- `TtlCache`, `LruTtlCache`, and `TtlSortedCache` compute an entry's expiry after the value
+  factory resolves on every get-or-set path (several async and `LruTtlCache` sync paths anchored
+  before the factory, so a factory slower than the ttl produced an already-stale entry).
+
+#### eviction accounting corrections
+- `TtlCache`'s try-path get-or-set no longer fires `on_evict` or counts an eviction until the
+  replacement factory succeeds; on `Err` the expired entry is left in place, so the next lookup
+  evicts it exactly once instead of double-firing.
+- Overwriting an expired entry via `cache_set` fires `on_evict` and counts the eviction
+  uniformly across the timed and sharded stores.
+- A panicking `on_evict` during `LruCache` capacity eviction can no longer leave the cache over
+  capacity: the victim is removed before the callback runs, and the check loops until the bound
+  holds.
+
+#### `TtlSortedCache` allocation is fallible
+- `build` reserves with `try_reserve`, returning `Err(BuildError)` on a capacity-overflowing
+  `max_size` or `initial_capacity` instead of aborting; `set_max_size` grows on demand, so
+  `try_set_max_size` is genuinely panic-free.
+
+#### redb read-then-write races
+- `disk_cache_get` refresh-on-hit and expiry eviction, and `remove_expired_entries`, re-read and
+  re-check the entry inside the write transaction before mutating, so a concurrent writer in the
+  read-to-write gap is no longer clobbered.
+
+#### macro correctness
+- The `#[once]` generic-value-type guard compares whole idents, so `fn f<S: Into<String>>(..) ->
+  String` is no longer falsely rejected because `"String"` contains `"S"`.
+- A raw-identifier cache `name` (e.g. `r#type`) builds a working `static` instead of panicking.
+- Attributes written between the macro and the `fn` (`#[cfg]`, lint attrs) forward to every
+  generated item, so cfg-gating stays in lockstep and `#[allow(..)]` reaches the generated body.
+- `#[concurrent_cached]` rejects a custom `ty` without a `create` block on the redis and disk
+  paths (previously it declared the cache as `ty` but built the default store).
+- `#[cached]` rejects `result_fallback` combined with `with_cached_flag` (their `Return`-vs-raw
+  value shapes are incompatible).
+
+### Changed
+
+- Sharded stores gain an inherent `get_or_set_with` returning `V` directly, so the common case
+  needs no trait import or `.unwrap()`.
+- `ConcurrentCachedExt` gains `clear` / `reset` aliases for parity with `CachedExt`.
+- The `CacheTtl` trait is no longer feature-gated (its built-in impls remain gated on
+  `time_stores`).
+- `Cached for HashMap` no longer requires `S: Default`, so `HashMap<K, V, DefaultHashBuilder>`
+  implements `Cached` on wasm; `cache_reset` clears and shrinks in place.
+- `ConcurrentCached::cache_get_or_set_with` is dyn-compatible.
+- `TtlSortedCache::ttl()` resolves a zero configured ttl to `None`, and `cache_set` on a ttl that
+  overflows `Instant` stores the value with no expiry instead of dropping it.
+
 ## [3.0.0-rc.2 / cached_proc_macro 3.0.0-rc.2 / cached_proc_macro_types 3.0.0-rc.2] - 2026-07-02
-> Second 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-unreleased.md).
+> Second 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-3.0.md). Note: this candidate defaulted `#[cached]` to `sync_writes = "by_key"`; that default was reverted before 3.0.0 (see the Unreleased "`sync_writes` default reverted" entry).
 
 ### Breaking Changes
 
@@ -102,7 +262,7 @@
 - Macro error messages aligned for consistency.
 
 ## [3.0.0-rc.1] - 2026-06-21
-> First 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-unreleased.md).
+> First 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-3.0.md).
 
 ### Breaking Changes
 
@@ -209,6 +369,7 @@
 - Using `refresh = true` on `#[cached]` without also specifying a TTL (`ttl_secs`, `ttl_millis`, or `ttl`) is now a compile error. Previously the attribute was silently ignored in this configuration. This matches the existing behavior of `#[concurrent_cached]`, which has always required a TTL alongside `refresh = true`.
 
 #### `sync_writes` default on `#[cached]` changed to `"by_key"`
+> Reverted before 3.0.0: the default is again no synchronization. See the Unreleased "`sync_writes` default reverted to no synchronization" entry.
 - A bare `#[cached]` now uses `sync_writes = "by_key"`: concurrent first calls for the same key are deduplicated through bucketed per-key locks. Previously the default was no synchronization, mirroring Python's `functools.lru_cache`. Opt out with `sync_writes = false`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled` (not `"by_key"`). `#[once]` and `#[concurrent_cached]` defaults are unchanged.
 
 #### `Cached` trait: `type Error` associated type; `cache_try_set` / `try_set` return `Result<Option<V>, Self::Error>`
@@ -259,7 +420,7 @@
 - `RedbCache::flush` and `RedbCache::async_flush` force a durable (fsync) commit, so you can run with `durable(false)` for cheap writes and flush at chosen points (periodically or before shutdown) to persist them.
 - `RedbCache::disk_path()` returns the path of the on-disk redb database file backing the cache.
 - New `SerializeCached` / `SerializeCachedAsync` traits with `cache_set_ref(&self, &K, &V)` / `async_cache_set_ref`, implemented by `RedisCache` / `AsyncRedisCache` / `RedbCache`, let serialize-backed stores set an entry without taking ownership of the key/value. The `#[concurrent_cached]` macro now calls the borrowed setter for any store implementing these traits (the built-in `redis`/`disk` stores and custom `ty`/`create` stores alike), avoiding an extra value clone on the set ([#196](https://github.com/jaemk/cached/issues/196), [#195](https://github.com/jaemk/cached/issues/195)).
-- `RedisCache` / `AsyncRedisCache` now implement `cache_clear` / `async_cache_clear` via a namespace-scoped `SCAN` + batched `DEL` (O(n), scoped to the cache's prefix, not a server flush), and `cache_reset` / `async_cache_reset` delegate to them (redis tracks no in-memory metrics, matching `RedbCache`). Glob metacharacters (`*`, `?`, `[`, `]`, `\`) in the namespace/prefix are escaped in the `SCAN` pattern so they match literally ([#200](https://github.com/jaemk/cached/issues/200)). `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `build()` now returns `RedisCacheBuildError::EmptyScope` when both the namespace (after trimming trailing `:`) and the prefix are empty, since that would make `cache_clear` run `SCAN MATCH *` and delete every key in the database. (This is technically a breaking behavior change for any caller that explicitly set the namespace to empty and left the prefix empty; the default namespace `"cached-redis-store:"` is non-empty so normal usage is unaffected. See the [migration guide](docs/migrations/2.0-to-unreleased.md#9-rediscachebuilderbuild--asyncrediscachebuilderbuild-return-emptyscope-when-namespace-and-prefix-are-both-empty) for details.)
+- `RedisCache` / `AsyncRedisCache` now implement `cache_clear` / `async_cache_clear` via a namespace-scoped `SCAN` + batched `DEL` (O(n), scoped to the cache's prefix, not a server flush), and `cache_reset` / `async_cache_reset` delegate to them (redis tracks no in-memory metrics, matching `RedbCache`). Glob metacharacters (`*`, `?`, `[`, `]`, `\`) in the namespace/prefix are escaped in the `SCAN` pattern so they match literally ([#200](https://github.com/jaemk/cached/issues/200)). `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `build()` now returns `RedisCacheBuildError::EmptyScope` when both the namespace (after trimming trailing `:`) and the prefix are empty, since that would make `cache_clear` run `SCAN MATCH *` and delete every key in the database. (This is technically a breaking behavior change for any caller that explicitly set the namespace to empty and left the prefix empty; the default namespace `"cached-redis-store:"` is non-empty so normal usage is unaffected. See the [migration guide](docs/migrations/2.0-to-3.0.md#9-rediscachebuilderbuild--asyncrediscachebuilderbuild-return-emptyscope-when-namespace-and-prefix-are-both-empty) for details.)
 - `LruCache::set_max_size` / `try_set_max_size` resize a live cache, eagerly evicting LRU entries when shrinking (paralleling `TtlSortedCache`'s existing `set_max_size` / `try_set_max_size`, which set the new bound but evict lazily on the next insert rather than eagerly); `LruTtlCache` and `ExpiringLruCache` gained the same two methods (delegating to their inner LRU) for parity ([#180](https://github.com/jaemk/cached/issues/180)). All four `try_set_max_size` methods now return a single dedicated `SetMaxSizeError` (variant `ZeroSize`) instead of the builder `BuildError` (LRU family) or a `std::io::Error` (`TtlSortedCache`), so the runtime-resize error is self-describing and consistent across stores.
 - `RedbCacheBuilder::build()` now validates `cache_name` (used as a filename component) and returns `RedbCacheBuildError::InvalidCacheName` if it is empty, contains a path separator (`/` or `\`), or is a path-traversal component (`.` or `..`), which would otherwise silently create subdirectories, escape the cache directory, or produce a meaningless filename.
 - `#[cached]` / `#[concurrent_cached]` / `#[once]` gained a `ttl_millis = N` attribute for sub-second TTLs (milliseconds); mutually exclusive with `ttl`, `ttl_secs`, and `expires`, with a compile error if any are combined ([#149](https://github.com/jaemk/cached/issues/149)).

@@ -192,6 +192,20 @@ where
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
 
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// Infallible ergonomic API for the concrete type. As an inherent method it takes
+    /// resolution priority over
+    /// [`ConcurrentCachedExt::get_or_set_with`](crate::ConcurrentCachedExt::get_or_set_with)
+    /// (which returns `Result<V, Infallible>`), so no `.unwrap()` is needed at the call site.
+    ///
+    /// Non-atomic get-then-set: on a miss another thread may store a value for the same key
+    /// between the get and the set. See
+    /// [`ConcurrentCached::cache_get_or_set_with`](crate::ConcurrentCached::cache_get_or_set_with).
+    pub fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> V {
+        ConcurrentCached::cache_get_or_set_with(self, k, f).unwrap()
+    }
+
     /// Remove a cached value and return it if the entry was live.
     ///
     /// This is the infallible ergonomic API for the concrete type.

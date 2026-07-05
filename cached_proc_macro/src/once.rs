@@ -112,6 +112,22 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let signature = input.sig;
     let body = input.block;
 
+    // Forward attributes written between the macro and the `fn` to every
+    // generated item so cfg-gating stays in lockstep and lint suppression
+    // reaches the generated body (MACRO-4). A `static` takes only gating
+    // `cfg`/`cfg_attr` (it rejects fn-only attrs); the `in_impl` origin sibling
+    // and the prime companion are fns. Docs excluded (each item has its own).
+    let static_cfg_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+        .cloned()
+        .collect();
+    let no_cache_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| !attr.path().is_ident("doc"))
+        .cloned()
+        .collect();
+
     // Resolve the path to the `cached` crate (renamed-dependency support, #157).
     let krate = crate_path();
 
@@ -533,11 +549,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    // `sync_writes_buckets` is unused on `#[once]` (no `by_key` path), but the
-    // static generator still references the binding for the (rejected) `is_by_key`
-    // branch below; provide the default so the branches compile.
-    let sync_writes_buckets = 64_usize;
-
     // `has_ttl` / `ttl_duration` were resolved above (from `ttl` expr, `ttl_secs`,
     // or `ttl_millis`); `has_ttl` gates the timestamped storage shape (#149).
 
@@ -693,7 +704,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let (inner_sibling_def, inner_nested_def) = if args.in_impl {
         (
-            quote! { #[doc(hidden)] #companions_visibility #inner_sig #body },
+            quote! { #(#no_cache_attrs)* #[doc(hidden)] #companions_visibility #inner_sig #body },
             quote! {},
         )
     } else {
@@ -728,16 +739,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         let cache_ty = cache_ty.clone();
         let cache_create = cache_create.clone();
         let krate = krate.clone();
-        let is_by_key = sync_writes == SyncWriteMode::ByKey;
+        // `#[once]` rejects `sync_writes = "by_key"` above, so there is no bucketed static here.
         make_static = Box::new(move |vis: &proc_macro2::TokenStream| {
-            if is_by_key {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<(#krate::async_sync::RwLock<#cache_ty>, Vec<std::sync::Arc<#krate::async_sync::RwLock<()>>>)> = ::std::sync::LazyLock::new(|| (#krate::async_sync::RwLock::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#krate::async_sync::RwLock::new(()))).collect()));
-                }
-            } else {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<#krate::async_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::async_sync::RwLock::new(#cache_create));
-                }
+            quote! {
+                #vis static #cache_ident: ::std::sync::LazyLock<#krate::async_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::async_sync::RwLock::new(#cache_create));
             }
         });
     } else {
@@ -760,16 +765,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         let cache_ty = cache_ty.clone();
         let cache_create = cache_create.clone();
         let krate = krate.clone();
-        let is_by_key = sync_writes == SyncWriteMode::ByKey;
+        // `#[once]` rejects `sync_writes = "by_key"` above, so there is no bucketed static here.
         make_static = Box::new(move |vis: &proc_macro2::TokenStream| {
-            if is_by_key {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<(#krate::sync_sync::RwLock<#cache_ty>, Vec<std::sync::Arc<#krate::sync_sync::RwLock<()>>>)> = ::std::sync::LazyLock::new(|| (#krate::sync_sync::RwLock::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#krate::sync_sync::RwLock::new(()))).collect()));
-                }
-            } else {
-                quote! {
-                    #vis static #cache_ident: ::std::sync::LazyLock<#krate::sync_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::sync_sync::RwLock::new(#cache_create));
-                }
+            quote! {
+                #vis static #cache_ident: ::std::sync::LazyLock<#krate::sync_sync::RwLock<#cache_ty>> = ::std::sync::LazyLock::new(|| #krate::sync_sync::RwLock::new(#cache_create));
             }
         });
     }
@@ -779,8 +778,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     let prime_do_set_return_block = match sync_writes {
         SyncWriteMode::ByKey => unreachable!("ByKey rejected above"),
         _ => quote! {
-            #w_lock
+            // Compute before locking (MACRO-1): a write-lock-first prime
+            // deadlocks a recursive `#[once]` fn (parking_lot is non-reentrant)
+            // and blocks readers for the whole recompute.
             #function_call
+            #w_lock
             #set_cache_and_return
         },
     };
@@ -891,6 +893,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         (
             quote! {
+                #(#static_cfg_attrs)*
                 #[doc = #cache_ident_doc]
                 #module_ty
             },
@@ -911,6 +914,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Prime cached function. Priming is optional, so suppress
             // `dead_code` for callers that generate but never call the companion.
+            #(#static_cfg_attrs)*
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
             #companions_visibility #prime_sig {

@@ -1,6 +1,6 @@
 [package]
 name = "cached_proc_macro_types"
-version = "3.0.0-rc.2"
+version = "3.0.0-rc.3"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Types used by the cached proc-macro crate"
 repository = "https://github.com/jaemk/cached"

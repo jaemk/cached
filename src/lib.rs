@@ -8,6 +8,8 @@
 `cached` provides implementations of several caching structures as well as macros
 for defining memoized functions.
 
+Requires Rust >= 1.89.
+
 Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe with the backing
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
 store's own internal synchronization: sharded stores use per-shard `parking_lot::RwLock`; Redis and
@@ -23,12 +25,14 @@ keys in the active call chain share a bucket). `#[once]` defaults to no synchron
 `sync_writes`. The number of per-key lock buckets for `"by_key"` is tunable with
 `sync_writes_buckets = N` (default 64).
 
-- See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
+- See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for the available cache stores.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
 
 > **Upgrading from 2.x?** See the
-> [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-unreleased.md)
-> for all breaking changes and a step-by-step walkthrough.
+> [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-3.0-human.md)
+> for a step-by-step walkthrough, or the
+> [agent-oriented guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-3.0.md)
+> for the complete breaking-change list.
 >
 > **Upgrading from 1.x?** 2.0 contains breaking changes (new `cache_remove_entry` required method,
 > `Result`/`Option` caching behavior flipped to smart-by-default, `result`/`option` attributes
@@ -66,7 +70,8 @@ For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCa
 
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` mirrors the sync
 `ConcurrentCached` surface (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) for
-IO-backed stores that manage their own synchronization. `CachedGetOrSetAsync` is narrower: it
+concurrent stores that manage their own synchronization (the in-memory sharded stores, plus the
+IO-backed redis and redb stores). `CachedGetOrSetAsync` is narrower: it
 only memoizes an async closure over a synchronous in-memory `Cached` store, via the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
 `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
@@ -102,8 +107,6 @@ the `async_` prefix already prevents collisions with the sync methods.
 The procedural macros (`#[cached]`, `#[once]`, `#[concurrent_cached]`) offer a number of features, including async support.
 See the [`macros`](https://docs.rs/cached/latest/cached/macros/index.html) module for more samples, and the
 [`examples`](https://github.com/jaemk/cached/tree/master/examples) directory for runnable snippets.
-Project automation targets are documented by `make help`, and `make check/help` verifies that the
-help output stays in sync with supported Makefile targets.
 
 Any custom cache that implements `cached::Cached` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins (`cached::CachedGetOrSetAsync` additionally memoizes an async closure over such a store).
 Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentCachedAsync` can be used with the `#[concurrent_cached]` macro.
@@ -258,8 +261,8 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
-  `cache_peek_with_expiry_status` as a side-effect-free counterpart (the built-in sharded stores
-  override the default, which delegates to the renewing read).
+  `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
+  counting, LRU promotion, or TTL renewal).
 
 **Per-Value Expiry via the `Expires` Trait**
 
@@ -355,7 +358,7 @@ use cached::macros::cached;
 
 /// Defines a function named `fib` that uses a cache implicitly named `FIB`.
 /// By default, the cache will be the function's name in all caps.
-/// The following line is equivalent to #[cached(name = "FIB", unbound)]
+/// The following line is equivalent to #[cached(name = "FIB")]
 #[cached]
 fn fib(n: u64) -> u64 {
     if n == 0 || n == 1 { return n }
@@ -556,7 +559,8 @@ Due to the requirements of storing arguments and return values in a global cache
     Use `cache_err = true` to also cache `Err` values.
   - For I/O-backed stores used by `#[concurrent_cached]` (Redis and disk), must be `Result<T, E>`
     where `T: Clone + serde::Serialize + serde::DeserializeOwned` (the store serializes it).
-    `map_error` must be supplied to convert the store's error into `E`.
+    `map_error` is optional: supply it to convert the store's error into `E`, or omit it when
+    `E: From<RedisCacheError>` (Redis) or `E: From<RedbCacheError>` (disk).
 - Function arguments:
   - For in-memory stores (`#[cached]` / `#[once]`), must either be owned and implement `Hash + Eq + Clone`,
     or a `convert` expression must be specified on the macro to produce a key of a `Hash + Eq + Clone` type.
@@ -612,6 +616,13 @@ pub use macros::{Return, cached, concurrent_cached, once};
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 use std::future::Future;
+// Canonical `AsyncRedisCache` availability gate: a redis async *runtime* must be enabled. The
+// six runtime features below each imply `redis_store` + `async` (see Cargo.toml), so the store
+// and its async plumbing are present. The capability-only features (`redis_async_cache`,
+// `redis_connection_manager`) are deliberately NOT in this list: they add a redis capability but
+// no runtime, so on their own they cannot compile `AsyncRedisCache` (redis-rs needs a `*-comp`).
+// This exact expression is repeated at the `async_redis` module gate (src/stores/redis.rs) and
+// the stores re-export (src/stores/mod.rs); keep the three in sync.
 #[cfg(any(
     feature = "redis_smol",
     feature = "redis_smol_native_tls",
@@ -619,8 +630,6 @@ use std::future::Future;
     feature = "redis_tokio",
     feature = "redis_tokio_native_tls",
     feature = "redis_tokio_rustls",
-    feature = "redis_async_cache",
-    feature = "redis_connection_manager"
 ))]
 #[cfg_attr(
     docsrs,
@@ -631,11 +640,16 @@ use std::future::Future;
         feature = "redis_tokio",
         feature = "redis_tokio_native_tls",
         feature = "redis_tokio_rustls",
-        feature = "redis_async_cache",
-        feature = "redis_connection_manager"
     )))
 )]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
+
+// A capability-only feature (`redis_async_cache` / `redis_connection_manager`) enabled without a
+// runtime feature pulls `redis/aio` with no `*-comp`, which makes the `redis` crate itself fail
+// to build ("tokio-comp or smol-comp features required for aio feature"). That error originates
+// in the dependency, which compiles before `cached`, so a `compile_error!` here could not
+// preempt it. The requirement is documented on each capability feature in Cargo.toml: pair it
+// with a `redis_tokio*` or `redis_smol*` runtime feature.
 pub use stores::{
     BuildError, CacheEvict, CacheSetError, ConcurrentCacheEvict, DefaultHashBuilder,
     DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
@@ -685,6 +699,50 @@ pub mod async_sync {
 pub mod sync_sync {
     pub use parking_lot::Mutex;
     pub use parking_lot::RwLock;
+}
+
+/// Support type backing `sync_writes = "by_key"` named statics generated by `#[cached]`.
+///
+/// Doc-hidden and generic over the cache lock `C` (e.g. `RwLock<Cache>`) and the per-key bucket
+/// lock `B` (e.g. `RwLock<()>`). It [`Deref`](std::ops::Deref)s to the inner cache lock, so a
+/// named `by_key` static is inspected with exactly the same `.read()`/`.write()` (or `.lock()`,
+/// sync or async) calls as any other generated static; the bucket vector and the per-static
+/// randomly-seeded hasher are private. The only stable surface is that `Deref` to `C`.
+#[doc(hidden)]
+pub struct KeyedCache<C, B> {
+    cache: C,
+    buckets: std::boxed::Box<[std::sync::Arc<B>]>,
+    hasher: std::collections::hash_map::RandomState,
+}
+
+impl<C, B> KeyedCache<C, B> {
+    /// Construct from the cache lock and the pre-built bucket locks. Called by generated code.
+    #[doc(hidden)]
+    pub fn new(cache: C, buckets: std::vec::Vec<std::sync::Arc<B>>) -> Self {
+        Self {
+            cache,
+            buckets: buckets.into_boxed_slice(),
+            hasher: std::collections::hash_map::RandomState::new(),
+        }
+    }
+
+    /// Select the per-key bucket lock for `key`. The hasher is seeded once per static from a
+    /// process-random source ([`RandomState::new`](std::collections::hash_map::RandomState::new)),
+    /// so an attacker who knows the key space cannot force every key into one bucket (a
+    /// fixed-seed hasher could be collapsed that way). Called by generated code.
+    #[doc(hidden)]
+    pub fn bucket_for<Q: std::hash::Hash + ?Sized>(&self, key: &Q) -> &std::sync::Arc<B> {
+        use std::hash::BuildHasher;
+        let idx = (self.hasher.hash_one(key) as usize) % self.buckets.len();
+        &self.buckets[idx]
+    }
+}
+
+impl<C, B> std::ops::Deref for KeyedCache<C, B> {
+    type Target = C;
+    fn deref(&self) -> &C {
+        &self.cache
+    }
 }
 
 /// Convenience re-exports of the commonly-needed cache traits.
@@ -752,7 +810,7 @@ pub trait Cached<K, V> {
     ///
     /// Use [`std::convert::Infallible`] for stores where insertion can never fail.
     /// TTL-capable stores that may overflow `Instant` bounds use
-    /// [`CacheSetError`](crate::stores::CacheSetError).
+    /// [`CacheSetError`].
     type Error;
 
     // ── Core required methods (stores implement these) ────────────────────
@@ -790,7 +848,7 @@ pub trait Cached<K, V> {
     ///
     /// The error type is the associated [`Self::Error`]. Infallible stores set
     /// `type Error = std::convert::Infallible`, while TTL-capable stores set it to
-    /// [`CacheSetError`](crate::stores::CacheSetError).
+    /// [`CacheSetError`].
     fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         Ok(self.cache_set(k, v))
     }
@@ -1081,7 +1139,7 @@ pub trait CachedExt<K, V>: Cached<K, V> {
     /// [`cache_size`](Cached::cache_size).
     ///
     /// On lazy-eviction stores this count may include expired-but-not-yet-swept entries.
-    /// Use `evict()` (via [`CacheEvict`](crate::CacheEvict)) before calling `len()` if
+    /// Use `evict()` (via [`CacheEvict`]) before calling `len()` if
     /// you need an accurate count of live entries.
     #[must_use]
     fn len(&self) -> usize;
@@ -1223,7 +1281,7 @@ impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
 /// expired entries from the yielded view but do **not** remove them from the store. The
 /// receiver is `&self`, so no mutation occurs during iteration. As a result,
 /// `iter().count()` may be less than `len()` when expired-but-not-yet-swept entries are
-/// present. Call `evict()` (via [`CacheEvict`](crate::CacheEvict)) to physically remove
+/// present. Call `evict()` (via [`CacheEvict`]) to physically remove
 /// expired entries and reclaim memory.
 ///
 /// Sharded stores (`Sharded*`) do not implement this trait; they are internally
@@ -1262,7 +1320,21 @@ pub trait CachedIter<K, V> {
 }
 
 /// A snapshot of cache hit/miss and size statistics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// This struct is `#[non_exhaustive]`: new metric fields may be added in future releases, so it
+/// cannot be constructed with struct-literal syntax (including `..Default::default()`) or
+/// destructured exhaustively from outside the crate. To build one (e.g. when overriding
+/// `metrics()` in an external store), start from [`Default`] and assign the fields you track:
+///
+/// ```
+/// use cached::CacheMetrics;
+/// let mut m = CacheMetrics::default();
+/// m.hits = Some(10);
+/// m.misses = Some(2);
+/// assert_eq!(m.hit_ratio(), Some(10.0 / 12.0));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct CacheMetrics {
     /// Number of successful cache lookups, if tracked.
     pub hits: Option<u64>,
@@ -1348,10 +1420,15 @@ pub trait CloneCached<K, V> {
     /// Look up a cached value and report whether the found entry is expired.
     ///
     /// Returns `(value, expired)` where:
-    /// - `(None, false)` — key not present
-    /// - `(Some(v), false)` — key present and live
-    /// - `(Some(v), true)` — key present but expired (the stale value is returned so callers
-    ///   can fall back to it if the refresh fails)
+    /// - `(None, false)` — key not present (misses counter incremented)
+    /// - `(Some(v), false)` — key present and live (hits counter incremented)
+    /// - `(Some(v), true)` — key present but expired; the stale value is returned so callers
+    ///   can fall back to it if a refresh fails. The entry is **not** removed from the cache
+    ///   and eviction counters are **not** incremented (misses counter incremented).
+    ///
+    /// Unlike [`Cached::cache_get`], this never removes an expired entry — it intentionally
+    /// leaves it in place so it can be returned as a stale fallback. Expired entries are swept
+    /// by a subsequent `cache_get`, an explicit `cache_remove`, or `evict()`.
     fn cache_get_with_expiry_status<Q>(&mut self, key: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
@@ -1469,9 +1546,9 @@ pub trait ConcurrentCloneCached<K, V> {
 /// `&self` methods on the [`ConcurrentCacheTtl`] trait
 /// (`ttl`/`set_ttl`/`unset_ttl`/`set_refresh_on_hit`) instead.
 ///
-/// This trait requires the `time_stores` feature.
-#[cfg(feature = "time_stores")]
-#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+/// The trait itself is always available (mirroring [`ConcurrentCacheTtl`]), so external stores
+/// can implement it without enabling `time_stores`; the built-in implementations on
+/// [`TtlCache`], [`LruTtlCache`], and [`TtlSortedCache`] require the `time_stores` feature.
 pub trait CacheTtl {
     /// Return the TTL applied to newly inserted entries.
     #[must_use]
@@ -1515,9 +1592,10 @@ pub trait CacheTtl {
 /// This is not a general async cache surface: in-memory [`Cached`] stores never touch IO, so
 /// they are fully synchronous. `CachedGetOrSetAsync` only adds the get-or-set pattern for an
 /// async closure - on a miss it awaits the caller's closure and inserts the result - and
-/// sidesteps the borrow-check friction a hand-rolled version hits. For an IO-backed store that
-/// is itself async (redis, redb, sharded), use [`ConcurrentCachedAsync`], which mirrors the full
-/// sync surface; do not reach for this trait there.
+/// sidesteps the borrow-check friction a hand-rolled version hits. For a concurrent store with
+/// its own synchronization (the in-memory sharded stores, or the IO-backed redis and redb
+/// stores), use [`ConcurrentCachedAsync`], which mirrors the full sync surface; do not reach for
+/// this trait there.
 ///
 /// The methods are `async_`-prefixed so importing this alongside [`CachedExt`] (common, since the
 /// in-memory stores implement both) does not make `get_or_set_with` ambiguous at the call site.
@@ -1536,10 +1614,9 @@ pub trait CachedGetOrSetAsync<K, V> {
     /// mutable reference.
     ///
     /// This default returns a `Send` future, so it carries `Self: Send, K: Send`
-    /// (the future captures `&mut self` and `k` across the await). A store that is
-    /// genuinely `!Send` cannot use this default and should implement
-    /// [`async_cache_get_or_set_with_mut`](CachedGetOrSetAsync::async_cache_get_or_set_with_mut)
-    /// directly; the `&V` wrapper is only a convenience over it.
+    /// (the future captures `&mut self` and `k` across the await). It is only a
+    /// convenience wrapper over
+    /// [`async_cache_get_or_set_with_mut`](CachedGetOrSetAsync::async_cache_get_or_set_with_mut).
     fn async_cache_get_or_set_with<'a, F, Fut>(
         &'a mut self,
         k: K,
@@ -1579,8 +1656,7 @@ pub trait CachedGetOrSetAsync<K, V> {
     /// for a mutable reference.
     ///
     /// Like [`async_cache_get_or_set_with`](CachedGetOrSetAsync::async_cache_get_or_set_with), this
-    /// default returns a `Send` future and so carries `Self: Send, K: Send`; a
-    /// `!Send` store should implement the `_mut` variant directly.
+    /// default returns a `Send` future and so carries `Self: Send, K: Send`.
     fn async_cache_try_get_or_set_with<'a, F, Fut, E>(
         &'a mut self,
         k: K,
@@ -2018,14 +2094,20 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     ///
     /// This is a non-atomic get-then-set: on a miss, another thread may store a value
     /// for the same key between the get and the set, in which case the computed value
-    /// overwrites the concurrent write. For workloads requiring atomicity, use a store
-    /// that provides internal locking (e.g. `sync_writes` on the proc macro).
+    /// overwrites the concurrent write. `#[concurrent_cached]` has no `sync_writes`
+    /// equivalent; if you need the body to run at most once per key, serialize the call
+    /// yourself (for example behind your own per-key lock).
     ///
     /// # Errors
     ///
     /// Returns `Self::Error` if `cache_get` or `cache_set` fails.
+    ///
+    /// The `where Self: Sized` bound keeps this generic method out of the vtable so
+    /// `ConcurrentCached` stays dyn-compatible (`dyn ConcurrentCached<K, V, Error = E>` is a
+    /// usable type). Call it through a concrete type or the [`ConcurrentCachedExt`] alias.
     fn cache_get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
     where
+        Self: Sized,
         V: Clone,
     {
         if let Some(v) = self.cache_get(&k)? {
@@ -2154,11 +2236,27 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
+    /// Attempt to retrieve a cached value, returning `None` on a miss.
+    ///
+    /// The async counterpart of [`ConcurrentCached::cache_get`].
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
     #[doc(alias = "async_get")]
     #[doc(alias = "cache_get")]
     fn async_cache_get(&self, k: &K)
     -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
+    /// Insert a key, value pair and return the previous value at the key, if any,
+    /// without checking expiry (see [`ConcurrentCached::cache_set`] for the expiry
+    /// caveat on the returned value).
+    ///
+    /// The async counterpart of [`ConcurrentCached::cache_set`].
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
     #[doc(alias = "async_set")]
     #[doc(alias = "cache_set")]
     fn async_cache_set(
@@ -2249,8 +2347,9 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
     ///
     /// This is a non-atomic get-then-set: on a miss, another thread may store a value
     /// for the same key between the get and the set, in which case the computed value
-    /// overwrites the concurrent write. For workloads requiring atomicity, use a store
-    /// that provides internal locking (e.g. `sync_writes` on the proc macro).
+    /// overwrites the concurrent write. `#[concurrent_cached]` has no `sync_writes`
+    /// equivalent; if you need the body to run at most once per key, serialize the call
+    /// yourself (for example behind your own per-key lock).
     ///
     /// # Errors
     ///

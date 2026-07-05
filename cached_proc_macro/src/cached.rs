@@ -186,6 +186,29 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let signature = input.sig;
     let body = input.block;
 
+    // Attributes written between the macro and the `fn` (e.g.
+    // `#[cached] #[cfg(feature = "x")] fn f`) land in `input.attrs`. They must
+    // reach every generated item, not just the wrapper, or cfg-gating desyncs
+    // (the static and `_no_cache` origin would compile with the feature off,
+    // referencing a body/wrapper that no longer exists) and `#[allow(...)]`
+    // fails to suppress lints on the generated body (MACRO-4).
+    //
+    // A `static` rejects fn-only attrs (`#[inline]`, `#[must_use]`, ...), so
+    // only forward existence-gating `cfg`/`cfg_attr` there. The `_no_cache`
+    // origin is a fn carrying the user body, so it takes every non-doc attr
+    // (docs excluded: static and origin carry their own). The wrapper and prime
+    // companion already receive the full attribute set below.
+    let static_cfg_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+        .cloned()
+        .collect();
+    let no_cache_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| !attr.path().is_ident("doc"))
+        .cloned()
+        .collect();
+
     // Resolve the path to the `cached` crate so generated code works when the
     // dependency is renamed by the downstream crate (#157).
     let krate = crate_path();
@@ -534,6 +557,19 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+    if args.result_fallback && args.with_cached_flag {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`result_fallback` and `with_cached_flag` are mutually exclusive: \
+             `result_fallback` stores the inner `Ok(T)` value directly, but \
+             `with_cached_flag` wraps the `Ok` value in `Return<T>` - the generated \
+             code cannot simultaneously store `T` and expose `Return<T>` through \
+             the cached function. Use `with_cached_flag = true` alone (without \
+             `result_fallback`) or `result_fallback = true` alone.",
+        )
+        .to_compile_error()
+        .into();
+    }
     if args.cache_none && args.with_cached_flag {
         return syn::Error::new(
             fn_ident.span(),
@@ -870,7 +906,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // function-local item is meaningless and trips `unreachable_pub` (#7).
     let make_static = |vis: &proc_macro2::TokenStream| match sync_writes {
         SyncWriteMode::ByKey => quote! {
-            #vis static #cache_ident: ::std::sync::LazyLock<(#lock_type<#cache_ty>, Vec<std::sync::Arc<#lock_type<()>>>)> = ::std::sync::LazyLock::new(|| (#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| std::sync::Arc::new(#lock_type::new(()))).collect()));
+            #vis static #cache_ident: ::std::sync::LazyLock<#krate::KeyedCache<#lock_type<#cache_ty>, #lock_type<()>>> = ::std::sync::LazyLock::new(|| #krate::KeyedCache::new(#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| ::std::sync::Arc::new(#lock_type::new(()))).collect()));
         },
         _ => quote! {
             #vis static #cache_ident: ::std::sync::LazyLock<#lock_type<#cache_ty>> = ::std::sync::LazyLock::new(|| #lock_type::new(#cache_create));
@@ -912,13 +948,15 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         let lock = match sync_writes {
             SyncWriteMode::ByKey => {
                 let key_lock_block = by_key_lock_block(
+                    quote! { #cache_ident },
                     quote! { __cached_key },
-                    quote! { __cached_locks },
                     lock_method.clone(),
                     await_if_async.clone(),
                 );
                 quote! {
-                    let (__cached_cache_mutex, __cached_locks) = &*#cache_ident;
+                    // `KeyedCache` derefs to the inner cache lock, so `&**` reaches the same
+                    // `RwLock`/`Mutex` a non-`by_key` static exposes directly.
+                    let __cached_cache_mutex = &**#cache_ident;
                     #key_lock_block
                     let mut __cached_cache = __cached_cache_mutex.#lock_method()#await_if_async;
                 }
@@ -976,13 +1014,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         let do_set_return_block = match sync_writes {
             SyncWriteMode::ByKey => {
                 let key_lock_block = by_key_lock_block(
+                    quote! { #cache_ident },
                     quote! { __cached_key },
-                    quote! { __cached_locks },
                     lock_method.clone(),
                     await_if_async.clone(),
                 );
                 quote! {
-                    let (__cached_cache_mutex, __cached_locks) = &*#cache_ident;
+                    let __cached_cache_mutex = &**#cache_ident;
                     #key_lock_block
                     {
                         #by_key_cache_get_return_block
@@ -1163,11 +1201,17 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
+    // Run the function BEFORE taking the lock, mirroring the main `Disabled`
+    // path (compute, then lock, then set). Locking first deadlocks a recursive
+    // prime - parking_lot is non-reentrant, so the body's own cached call
+    // re-locks the held static on the same thread - and blocks every reader for
+    // the full recompute, defeating the timer-driven background-refresh pattern
+    // `src/macros.rs` documents (MACRO-1). For `by_key`, `#lock` still takes the
+    // per-key bucket lock, but only across the set, not the compute.
     let prime_do_set_return_block = quote! {
-        // try to get a lock first
-        #lock
-        // run the function and cache the result
+        // run the function first (no lock held), then cache the result
         #function_call
+        #lock
         #set_cache_and_return
     };
 
@@ -1185,6 +1229,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         (
             quote! {
+                #(#static_cfg_attrs)*
                 #[doc = #cache_ident_doc]
                 #module_ty
             },
@@ -1232,6 +1277,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         // Cached static (module scope unless `in_impl`)
         #module_static
         // No cache function (origin of the cached function)
+        #(#no_cache_attrs)*
         #no_cache_fn_doc
         #companions_visibility #function_no_cache
         // Cached function

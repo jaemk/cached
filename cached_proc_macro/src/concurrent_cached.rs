@@ -212,6 +212,22 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let signature = input.sig;
     let body = input.block;
 
+    // Forward attributes written between the macro and the `fn` to every
+    // generated item so cfg-gating stays in lockstep and lint suppression
+    // reaches the generated body (MACRO-4). A `static` takes only gating
+    // `cfg`/`cfg_attr` (it rejects fn-only attrs); the `in_impl` origin sibling
+    // and the prime companion are fns. Docs excluded (each item has its own).
+    let static_cfg_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+        .cloned()
+        .collect();
+    let no_cache_attrs: Vec<syn::Attribute> = attributes
+        .iter()
+        .filter(|attr| !attr.path().is_ident("doc"))
+        .cloned()
+        .collect();
+
     // Resolve the path to the `cached` crate (renamed-dependency support, #157).
     let krate = crate_path();
 
@@ -1075,7 +1091,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // rustdoc with `#[doc(hidden)]` (it stays callable as an escape hatch).
     let (inner_sibling_def, inner_nested_def) = if args.in_impl {
         (
-            quote! { #[doc(hidden)] #companions_visibility #inner_sig #body },
+            quote! { #(#no_cache_attrs)* #[doc(hidden)] #companions_visibility #inner_sig #body },
             quote! {},
         )
     } else {
@@ -1306,7 +1322,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (quote! {}, make_static(&quote! {}))
     } else {
         let static_decl = make_static(&quote! { #visibility });
-        (quote! { #[doc = #cache_ident_doc] #static_decl }, quote! {})
+        (
+            quote! { #(#static_cfg_attrs)* #[doc = #cache_ident_doc] #static_decl },
+            quote! {},
+        )
     };
 
     // The cache static is function-local when `in_impl = true`, so the cached
@@ -1322,6 +1341,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Prime cached function. Priming is optional, so suppress
             // `dead_code` for callers that generate but never call the companion.
+            #(#static_cfg_attrs)*
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
             #companions_visibility #prime_sig {

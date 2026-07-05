@@ -1,7 +1,7 @@
 /*
 "Kitchen sink": the default `UnboundCache`, an explicit `ty` + `create` store,
-and `#[cached(max_size = N)]` (LRU), with direct `Cached`-trait access to the
-generated cache statics.
+and `#[cached(max_size = N)]` (LRU), with direct `Cached`/`CachedExt`-trait access
+to the generated cache statics (the `hits`/`misses` aliases live on `CachedExt`).
 
 Run:
     cargo run --example kitchen_sink --features "time_stores,proc_macro"
@@ -26,7 +26,7 @@ fn fib(n: u32) -> u32 {
 }
 
 // Same as above, but preallocates some space.
-// Note that the cache key type is a tuple of function argument types.
+// Note that with a single argument the cache key type is just that argument's type (`u32`), not a tuple.
 #[cached(
     ty = "UnboundCache<u32, u32>",
     create = UnboundCache::builder().initial_capacity(50).build().unwrap()

@@ -1228,6 +1228,19 @@ fn short_remove_aliases_callable_for_effect() {
 
 // ── Item 8: cache_get_or_set_with on ConcurrentCached ────────────────────────
 
+/// `ConcurrentCached` must stay dyn-compatible: the provided generic
+/// `cache_get_or_set_with<F>` carries `where Self: Sized`, so it is excluded from the vtable
+/// and `dyn ConcurrentCached<..>` remains a nameable type. This function only needs to compile
+/// (e.g. to swap a redis store for an in-memory one behind a trait object in tests); if the
+/// `Self: Sized` bound were dropped, the trait would stop being dyn-compatible and this would
+/// fail to build.
+#[allow(dead_code)]
+fn _assert_concurrent_cached_dyn_compatible(
+    store: &dyn cached::ConcurrentCached<String, u32, Error = std::convert::Infallible>,
+) {
+    let _ = store.cache_get(&"k".to_string());
+}
+
 /// On a miss, `cache_get_or_set_with` calls the factory, stores the result, and
 /// returns it. On a hit, the factory is not called.
 #[test]
@@ -2187,20 +2200,51 @@ mod extension_trait_blanket_impls {
         assert_eq!(removed, Some(99));
     }
 
-    // get_or_set_with is available via ConcurrentCachedExt.
+    // Inherent get_or_set_with on the sharded stores returns V directly (no .unwrap()); the
+    // ext-trait Result-returning version is still reachable via fully-qualified syntax (API-4).
     #[test]
     fn concurrent_cached_ext_get_or_set_with_works() {
         use cached::{ConcurrentCachedExt, ShardedUnboundCache};
 
         let cache: ShardedUnboundCache<u32, u32> =
             ShardedUnboundCache::builder().build().expect("build");
-        let v = cache.get_or_set_with(10, || 99).expect("infallible");
+        // Inherent method: resolves ahead of the ext trait, returns V directly.
+        let v: u32 = cache.get_or_set_with(10, || 99);
         assert_eq!(v, 99);
         // Second call must hit and not invoke the factory.
-        let v2 = cache
-            .get_or_set_with(10, || panic!("factory must not run on hit"))
-            .expect("infallible");
+        let v2: u32 = cache.get_or_set_with(10, || panic!("factory must not run on hit"));
         assert_eq!(v2, 99);
+        // The ext-trait Result-returning version is still available via fully-qualified syntax.
+        let v3 = ConcurrentCachedExt::get_or_set_with(&cache, 10, || 0).expect("infallible");
+        assert_eq!(v3, 99);
+    }
+
+    // The inherent get_or_set_with is present on every sharded store, including the
+    // capacity/TTL-bounded ones (API-4).
+    #[cfg(feature = "time_stores")]
+    #[test]
+    fn inherent_get_or_set_with_on_bounded_stores_returns_value() {
+        use cached::time::Duration;
+        use cached::{ShardedLruCache, ShardedLruTtlCache};
+
+        let lru: ShardedLruCache<u32, u32> = ShardedLruCache::builder()
+            .max_size(8)
+            .build()
+            .expect("build");
+        let v: u32 = lru.get_or_set_with(1, || 42);
+        assert_eq!(v, 42);
+        assert_eq!(
+            lru.get_or_set_with(1, || panic!("factory must not run on hit")),
+            42
+        );
+
+        let ttl: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCache::builder()
+            .max_size(8)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build");
+        let w: u32 = ttl.get_or_set_with(2, || 7);
+        assert_eq!(w, 7);
     }
 
     // Short aliases reachable via `use cached::prelude::*` without a separate `use cached::CachedExt`.
@@ -2229,5 +2273,105 @@ mod extension_trait_blanket_impls {
             ConcurrentCachedExt::get(&cc, &42u32).expect("infallible"),
             Some(99)
         );
+    }
+}
+
+// ── CacheTtl trait is available without the time_stores feature (API-9) ───────
+//
+// The `CacheTtl` trait itself is no longer gated behind `time_stores` (mirroring
+// `ConcurrentCacheTtl`, which was already ungated), so an external store can implement it
+// without enabling the feature; only the built-in impls stay gated. This module is NOT
+// feature-gated, so it compiles under `make tests/no-default`
+// (`cargo test --no-default-features`), which fails to build if the trait is gated again.
+mod cache_ttl_trait_available_ungated {
+    use cached::CacheTtl;
+    use cached::time::Duration;
+
+    #[derive(Default)]
+    struct ExternalTtlStore {
+        ttl: Option<Duration>,
+        refresh: bool,
+    }
+
+    impl CacheTtl for ExternalTtlStore {
+        fn ttl(&self) -> Option<Duration> {
+            self.ttl
+        }
+        fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
+            self.ttl.replace(ttl)
+        }
+        fn unset_ttl(&mut self) -> Option<Duration> {
+            self.ttl.take()
+        }
+        fn refresh_on_hit(&self) -> bool {
+            self.refresh
+        }
+        fn set_refresh_on_hit(&mut self, refresh: bool) -> bool {
+            std::mem::replace(&mut self.refresh, refresh)
+        }
+    }
+
+    #[test]
+    fn external_store_implements_cache_ttl_without_time_stores() {
+        let mut s = ExternalTtlStore::default();
+        assert_eq!(s.ttl(), None);
+        assert_eq!(s.set_ttl(Duration::from_secs(5)), None);
+        assert_eq!(s.ttl(), Some(Duration::from_secs(5)));
+        // The provided `try_set_ttl` rejects a zero TTL via the ungated `SetTtlError`.
+        assert_eq!(
+            s.try_set_ttl(Duration::ZERO),
+            Err(cached::SetTtlError::ZeroTtl)
+        );
+        assert_eq!(s.unset_ttl(), Some(Duration::from_secs(5)));
+        assert!(!s.set_refresh_on_hit(true));
+        assert!(s.refresh_on_hit());
+    }
+}
+
+// ── Cached for HashMap works with a non-Default BuildHasher (API-10) ──────────
+//
+// The `Cached` impl for `HashMap` previously required `S: BuildHasher + Default`
+// (only so `cache_reset` could do `*self = HashMap::default()`). That excluded
+// hashers without a `Default` impl, e.g. ahash's `RandomState` on wasm where the
+// RNG-seeded `Default` is feature-gated off. `cache_reset` is now `clear()` +
+// `shrink_to_fit()`, so the bound is just `BuildHasher` and the hasher instance is
+// preserved across reset.
+mod hashmap_non_default_hasher {
+    use cached::Cached;
+    use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::BuildHasher;
+
+    /// A `BuildHasher` with no `Default` impl; constructed only from an explicit seed.
+    struct SeededBuildHasher(u64);
+
+    impl BuildHasher for SeededBuildHasher {
+        type Hasher = DefaultHasher;
+        fn build_hasher(&self) -> Self::Hasher {
+            use std::hash::Hasher;
+            let mut h = DefaultHasher::new();
+            h.write_u64(self.0);
+            h
+        }
+    }
+
+    #[test]
+    fn cached_hashmap_with_non_default_hasher() {
+        // This whole test only compiles because `Cached for HashMap` no longer requires
+        // `S: Default` (`SeededBuildHasher` has none).
+        let mut map: HashMap<u32, u32, SeededBuildHasher> =
+            HashMap::with_hasher(SeededBuildHasher(0xABCD));
+
+        assert_eq!(Cached::cache_set(&mut map, 1, 10), None);
+        assert_eq!(Cached::cache_set(&mut map, 2, 20), None);
+        assert_eq!(Cached::cache_get(&mut map, &1), Some(&10));
+        assert_eq!(Cached::cache_size(&map), 2);
+
+        // cache_reset clears entries but preserves the (non-Default) hasher, so the map is
+        // still usable afterward.
+        Cached::cache_reset(&mut map);
+        assert_eq!(Cached::cache_size(&map), 0);
+        assert_eq!(Cached::cache_set(&mut map, 3, 30), None);
+        assert_eq!(Cached::cache_get(&mut map, &3), Some(&30));
     }
 }

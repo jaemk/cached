@@ -141,7 +141,14 @@ impl<K, V, S> TtlCacheBuilder<K, V, S> {
 
     /// Set a callback to be invoked when an entry is evicted. The callback fires for:
     /// - TTL-expiry sweeps via [`evict`](TtlCache::evict).
-    /// - Explicit [`cache_remove`](crate::Cached::cache_remove), even when the removed
+    /// - Lazy TTL-expiry sweeps on access: a [`cache_get`](crate::Cached::cache_get) /
+    ///   `cache_get_mut` (and the `cache_get_or_set*` factory paths) that finds an expired
+    ///   entry removes or replaces it and fires the callback.
+    /// - Overwriting an already-expired entry via [`cache_set`](crate::Cached::cache_set) /
+    ///   [`cache_try_set`](crate::Cached::cache_try_set): the displaced value is filtered from
+    ///   the return (`None`), so it fires the callback and counts an eviction.
+    /// - Explicit [`cache_remove`](crate::Cached::cache_remove) /
+    ///   [`cache_remove_entry`](crate::Cached::cache_remove_entry), even when the removed
     ///   entry was already expired (`cache_remove` returns `None` but still fires the
     ///   callback and increments the evictions counter).
     ///
@@ -249,6 +256,34 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
         expires_at.is_none_or(|t| Instant::now() < t)
     }
 
+    /// Insert `entry` for `key`, returning the previous value only if it was still live.
+    ///
+    /// When the displaced previous value had already expired it is filtered from the return
+    /// (matching the get paths), so it is dropped silently from the caller's view; in that case
+    /// fire `on_evict` and count an eviction so resource cleanup and metrics stay consistent
+    /// with the other removal paths.
+    fn set_entry(&mut self, key: K, entry: TimedEntry<V>) -> Option<V> {
+        use std::collections::hash_map::Entry;
+        match self.store.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let old = occupied.insert(entry);
+                if Self::entry_live(old.expires_at) {
+                    Some(old.value)
+                } else {
+                    if let Some(on_evict) = &self.on_evict {
+                        on_evict(occupied.key(), &old.value);
+                    }
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+                None
+            }
+        }
+    }
+
     /// Compute the expiry instant for a new or refreshed entry given the current TTL.
     /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
     /// Returns `Err(CacheSetError::TimeBounds)` on overflow.
@@ -321,26 +356,31 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(entry) = self.store.get_mut(key)
-            && Self::entry_live(entry.expires_at)
-        {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            if self.refresh {
-                entry.expires_at = Self::compute_expires_at(self.ttl, Instant::now())
-                    .ok()
-                    .flatten()
-                    .or(entry.expires_at);
+        // Resolve hit / expired / absent from a SINGLE lookup: an absent key
+        // (the common miss) must not pay a second `remove_entry` probe (CORE-7).
+        let expired_present = match self.store.get_mut(key) {
+            Some(entry) if Self::entry_live(entry.expires_at) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                if self.refresh {
+                    entry.expires_at = Self::compute_expires_at(self.ttl, Instant::now())
+                        .ok()
+                        .flatten()
+                        .or(entry.expires_at);
+                }
+                // SAFETY: `ptr` points into a HashMap entry obtained from
+                // `get_mut`. We return immediately without modifying the map, so
+                // the entry is not moved while the returned reference is live.
+                // The raw pointer is needed because the borrow checker cannot see
+                // that the `&mut entry` borrow ends here when `refresh` mutated
+                // `entry.expires_at` above.
+                let ptr = &entry.value as *const V;
+                return Some(unsafe { &*ptr });
             }
-            // SAFETY: `ptr` points into a HashMap entry obtained from `get_mut`.
-            // We return immediately without modifying the map, so the entry is
-            // not moved while the returned reference is live. The raw pointer is
-            // needed because the borrow checker cannot see that the `&mut entry`
-            // borrow ends here when `refresh` mutated `entry.expires_at` above.
-            let ptr = &entry.value as *const V;
-            return Some(unsafe { &*ptr });
-        }
+            Some(_) => true, // present but expired: sweep it below
+            None => false,   // absent: plain miss, no second lookup
+        };
         self.misses.fetch_add(1, Ordering::Relaxed);
-        if let Some((k, entry)) = self.store.remove_entry(key) {
+        if expired_present && let Some((k, entry)) = self.store.remove_entry(key) {
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&k, &entry.value);
             }
@@ -354,23 +394,27 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(entry) = self.store.get_mut(key)
-            && Self::entry_live(entry.expires_at)
-        {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            if self.refresh {
-                entry.expires_at = Self::compute_expires_at(self.ttl, Instant::now())
-                    .ok()
-                    .flatten()
-                    .or(entry.expires_at);
+        // Single lookup on the miss path, as in `cache_get` (CORE-7).
+        let expired_present = match self.store.get_mut(key) {
+            Some(entry) if Self::entry_live(entry.expires_at) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                if self.refresh {
+                    entry.expires_at = Self::compute_expires_at(self.ttl, Instant::now())
+                        .ok()
+                        .flatten()
+                        .or(entry.expires_at);
+                }
+                // SAFETY: same as `cache_get` -- entry is not moved between
+                // obtaining the pointer and returning, and `&mut self` prevents
+                // concurrent access.
+                let ptr = &mut entry.value as *mut V;
+                return Some(unsafe { &mut *ptr });
             }
-            // SAFETY: same as `cache_get` -- entry is not moved between obtaining
-            // the pointer and returning, and `&mut self` prevents concurrent access.
-            let ptr = &mut entry.value as *mut V;
-            return Some(unsafe { &mut *ptr });
-        }
+            Some(_) => true,
+            None => false,
+        };
         self.misses.fetch_add(1, Ordering::Relaxed);
-        if let Some((k, entry)) = self.store.remove_entry(key) {
+        if expired_present && let Some((k, entry)) = self.store.remove_entry(key) {
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&k, &entry.value);
             }
@@ -442,11 +486,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                     self.hits.fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    // Compute the replacement BEFORE firing the eviction side
+                    // effects. On `Err` the expired entry is left in place, so
+                    // firing on_evict / counting here would double-fire when the
+                    // next call finally evicts the same physical entry (EXP-3).
+                    let val = f()?;
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(occupied.key(), &occupied.get().value);
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
-                    let val = f()?;
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     occupied.insert(TimedEntry {
@@ -480,33 +528,25 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
-        let entry = TimedEntry {
-            expires_at,
-            value: val,
-        };
-        self.store.insert(key, entry).and_then(|entry| {
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
-        })
+        self.set_entry(
+            key,
+            TimedEntry {
+                expires_at,
+                value: val,
+            },
+        )
     }
 
     fn cache_try_set(&mut self, key: K, val: V) -> Result<Option<V>, super::CacheSetError> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now)?;
-        let entry = TimedEntry {
-            expires_at,
-            value: val,
-        };
-        Ok(self.store.insert(key, entry).and_then(|entry| {
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
-        }))
+        Ok(self.set_entry(
+            key,
+            TimedEntry {
+                expires_at,
+                value: val,
+            },
+        ))
     }
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
@@ -722,23 +762,28 @@ where
                             on_evict(occupied.key(), &occupied.get().value);
                         }
                         self.evictions.fetch_add(1, Ordering::Relaxed);
+                        // Anchor the expiry AFTER the factory resolves: a slow
+                        // factory must not eat into the fresh entry's TTL (the
+                        // sync path already anchors after `f()`) (CORE-3).
+                        let val = f().await;
                         let now = Instant::now();
                         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                         occupied.insert(TimedEntry {
                             expires_at,
-                            value: f().await,
+                            value: val,
                         });
                     }
                     &mut occupied.into_mut().value
                 }
                 Entry::Vacant(vacant) => {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    let val = f().await;
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     &mut vacant
                         .insert(TimedEntry {
                             expires_at,
-                            value: f().await,
+                            value: val,
                         })
                         .value
                 }
@@ -773,6 +818,11 @@ where
                         self.hits.fetch_add(1, Ordering::Relaxed);
                     } else {
                         self.misses.fetch_add(1, Ordering::Relaxed);
+                        // Resolve the factory BEFORE firing the eviction side
+                        // effects (EXP-3) and anchor the expiry after it
+                        // (CORE-3). On `Err` the expired entry is left in place
+                        // and nothing is fired, so the next call evicts it once.
+                        let val = f().await?;
                         if let Some(on_evict) = &self.on_evict {
                             on_evict(occupied.key(), &occupied.get().value);
                         }
@@ -781,19 +831,20 @@ where
                         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                         occupied.insert(TimedEntry {
                             expires_at,
-                            value: f().await?,
+                            value: val,
                         });
                     }
                     &mut occupied.into_mut().value
                 }
                 Entry::Vacant(vacant) => {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    let val = f().await?;
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     &mut vacant
                         .insert(TimedEntry {
                             expires_at,
-                            value: f().await?,
+                            value: val,
                         })
                         .value
                 }
@@ -803,7 +854,7 @@ where
     }
 }
 
-impl<K: std::hash::Hash + Eq + Clone, V, S: BuildHasher> CacheEvict for TtlCache<K, V, S> {
+impl<K: std::hash::Hash + Eq, V, S: BuildHasher> CacheEvict for TtlCache<K, V, S> {
     fn evict(&mut self) -> usize {
         TtlCache::evict(self)
     }
@@ -815,6 +866,30 @@ mod tests {
     use crate::stores::Cached;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // The previous value has expired: overwriting filters it from the return (None), fires
+        // on_evict once, and counts one eviction.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        // Overwriting the now-live value returns it, no on_evict and no new eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn new_returns_ready_cache_respecting_ttl() {
@@ -1139,5 +1214,94 @@ mod tests {
             .unwrap();
         // The backing store must have at least the requested capacity.
         assert!(c.store.capacity() >= 32);
+    }
+
+    // EXP-3: on the try-path, a failing factory over an expired entry must not
+    // fire `on_evict` / count an eviction until the replacement succeeds, or the
+    // next real eviction of the same physical entry double-fires.
+    #[test]
+    fn try_get_or_set_err_over_expired_does_not_double_fire_on_evict() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Factory fails over the expired entry: the entry is left in place and
+        // nothing fires yet.
+        let r: Result<&mut u32, ()> = c.cache_try_get_or_set_with_mut(1, || Err(()));
+        assert!(r.is_err());
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        // A subsequent plain get evicts the still-expired entry exactly once.
+        assert_eq!(c.cache_get(&1), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
+
+    // CORE-7: a plain miss (absent key) must not fire `on_evict`; only an
+    // expired-entry miss evicts. (Pins the single-lookup miss path's behavior.)
+    #[test]
+    fn plain_miss_does_not_evict_expired_miss_does() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        // Absent key: miss, no eviction, no callback.
+        assert_eq!(c.cache_get(&42), None);
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        // Expired key: miss that also evicts and fires once.
+        c.cache_set(7, 1);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(c.cache_get(&7), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
+
+    // CORE-6: `CacheEvict` no longer requires `K: Clone`. A non-`Clone` key type
+    // must still implement `CacheEvict` (this fails to compile if the bound
+    // regresses).
+    #[test]
+    fn cache_evict_does_not_require_key_clone() {
+        #[derive(Hash, PartialEq, Eq)]
+        struct NoClone(u32);
+        fn assert_impls<T: crate::CacheEvict>() {}
+        assert_impls::<TtlCache<NoClone, u32>>();
+    }
+
+    // CORE-3: the async paths must anchor the expiry AFTER the factory resolves,
+    // so a factory slower than the TTL still yields a live entry.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_expiry_anchored_after_factory() {
+        use crate::CachedGetOrSetAsync;
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(40))
+            .build()
+            .unwrap();
+        // Factory takes ~3x the TTL; anchoring after means the fresh entry is
+        // still live immediately after insertion.
+        let v = CachedGetOrSetAsync::async_cache_get_or_set_with(&mut c, 1, || async {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            7
+        })
+        .await;
+        assert_eq!(*v, 7);
+        assert_eq!(
+            c.cache_get(&1),
+            Some(&7),
+            "entry must be live right after insert"
+        );
     }
 }

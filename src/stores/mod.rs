@@ -227,9 +227,8 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
-/// Error returned by [`TtlCache`](crate::stores::TtlCache),
-/// [`LruTtlCache`](crate::stores::LruTtlCache), and
-/// [`TtlSortedCache`](crate::stores::TtlSortedCache) via [`Cached::cache_try_set`] when
+/// Error returned by [`TtlCache`], [`LruTtlCache`], and
+/// [`TtlSortedCache`] via [`Cached::cache_try_set`] when
 /// an entry cannot be stored - currently only when computing the entry's expiry
 /// `Instant` overflows.
 ///
@@ -338,35 +337,26 @@ pub use sharded::{
     ShardedTtlCacheBase, ShardedTtlCacheBuilder,
 };
 
-#[cfg(all(
-    feature = "async_core",
-    feature = "redis_store",
-    any(
+// Canonical `AsyncRedisCache` availability gate (kept in sync with src/lib.rs and
+// src/stores/redis.rs): a redis async runtime feature must be enabled. The six runtime features
+// each imply `redis_store` + `async`; the capability-only features are excluded (no runtime).
+#[cfg(any(
+    feature = "redis_smol",
+    feature = "redis_smol_native_tls",
+    feature = "redis_smol_rustls",
+    feature = "redis_tokio",
+    feature = "redis_tokio_native_tls",
+    feature = "redis_tokio_rustls",
+))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(
         feature = "redis_smol",
         feature = "redis_smol_native_tls",
         feature = "redis_smol_rustls",
         feature = "redis_tokio",
         feature = "redis_tokio_native_tls",
         feature = "redis_tokio_rustls",
-        feature = "redis_async_cache",
-        feature = "redis_connection_manager"
-    )
-))]
-#[cfg_attr(
-    docsrs,
-    doc(cfg(all(
-        feature = "async_core",
-        feature = "redis_store",
-        any(
-            feature = "redis_smol",
-            feature = "redis_smol_native_tls",
-            feature = "redis_smol_rustls",
-            feature = "redis_tokio",
-            feature = "redis_tokio_native_tls",
-            feature = "redis_tokio_rustls",
-            feature = "redis_async_cache",
-            feature = "redis_connection_manager"
-        )
     )))
 )]
 pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
@@ -374,7 +364,7 @@ pub use crate::stores::redis::{AsyncRedisCache, AsyncRedisCacheBuilder};
 impl<K, V, S> Cached<K, V> for HashMap<K, V, S>
 where
     K: Hash + Eq,
-    S: std::hash::BuildHasher + Default,
+    S: std::hash::BuildHasher,
 {
     type Error = std::convert::Infallible;
 
@@ -428,7 +418,12 @@ where
         HashMap::clear(self);
     }
     fn cache_reset(&mut self) {
-        *self = HashMap::default();
+        // Clear and release capacity without requiring `S: Default`, so stores built with a
+        // non-`Default` `BuildHasher` (e.g. a seeded hasher, or ahash on wasm where
+        // `RandomState: Default` is gated off) still implement `Cached`. The existing hasher
+        // instance is preserved, matching the "configuration preserved across reset" contract.
+        HashMap::clear(self);
+        self.shrink_to_fit();
         self.cache_reset_metrics();
     }
     fn cache_size(&self) -> usize {

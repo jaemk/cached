@@ -36,10 +36,10 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 ---
 
 ## Toolchain & Edition
-- **Rust edition: 2024.** MSRV is **1.85** (the edition-2024 floor), declared via `rust-version` in `Cargo.toml` and `cached_proc_macro/Cargo.toml`.
+- **Rust edition: 2024.** MSRV is **1.89** (raised from the edition-2024 floor of 1.85 by redb 4.x), declared via `rust-version` in `Cargo.toml`, `cached_proc_macro/Cargo.toml`, and `cached_proc_macro_types/Cargo.toml`.
 - **`rust-toolchain.toml` pins the toolchain to `1.96.0`** (latest stable) for local development and CI. Always build/format/test with this toolchain — it is what keeps `cargo fmt` deterministic.
 - **If `cargo fmt --check` or `make ci` reports formatting diffs in files you did not touch, you are on the wrong rustfmt** — confirm `cargo --version` shows `1.96.0` (run `rustup toolchain install 1.96.0` if missing) instead of reformatting the whole tree.
-- The pin is dev/CI-only: it is not published and does not affect downstream consumers, who only need Rust ≥ 1.85.
+- The pin is dev/CI-only: it is not published and does not affect downstream consumers, who only need Rust ≥ 1.89.
 
 ---
 
@@ -63,9 +63,9 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 
 **`ExpiringCache` / `ExpiringLruCache` notes:**
 - Neither store requires the `time_stores` feature — they are always available.
-- `ExpiringLruCache::store()` is `pub` (released in v1.0.0 — cannot be changed to `pub(crate)` without a breaking change). `ExpiringCache` has no public `store()` accessor.
+- Neither `ExpiringCache` nor `ExpiringLruCache` exposes a public `store()` accessor; use the `Cached` trait API for inspection.
 - `cache_get` and `cache_get_mut` on `ExpiringCache` use two hash lookups on the hit path due to stable Rust's NLL borrow-checker limitation: the first lookup checks expiry (dropping the reference via `.map`), the second returns the value reference or calls `remove_entry`. Polonius (nightly) would allow a single lookup. This is intentional and documented in the source with a comment.
-- `cache_get_with_expiry_status` (from `CloneCached`) intentionally **leaves an expired entry in the map** so `result_fallback` can clone and return it as a stale-but-present value on `Err`. The stale entry remains visible via `cache_size()` and `CachedIter` until the next `cache_get`, `evict()`, or explicit `cache_remove`. When `result_fallback = true` and `expires = true`, callers receive `Ok(stale_value)` where `stale_value.is_expired() == true` — callers must check the value's expiry themselves if they need to distinguish a fresh result from a stale fallback.
+- `cache_get_with_expiry_status` (from `CloneCached`) intentionally **leaves an expired entry in the map** so `result_fallback` can clone and return it as a stale-but-present value on `Err`. The stale entry remains counted by `cache_size()` (but is skipped by `CachedIter`, which filters expired entries) until the next `cache_get`, `evict()`, or explicit `cache_remove`. When `result_fallback = true` and `expires = true`, callers receive `Ok(stale_value)` where `stale_value.is_expired() == true` — callers must check the value's expiry themselves if they need to distinguish a fresh result from a stale fallback.
 - `CachedIter::iter()` filters expired entries from the iterator but does **not** remove them from the map. Call `evict()` periodically for high-cardinality workloads.
 
 **Renamed from pre-1.0** (do not use old names — they no longer exist):
@@ -75,7 +75,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 - `ExpiringSizedCache` → `TtlSortedCache`
 - `ExpiringValueCache` → `ExpiringLruCache`
 
-**Builder APIs**: All stores are constructed exclusively through a `::builder()` constructor (e.g., `LruCache::builder()`, `TtlCache::builder()`). `build()` returns `Result<Store, BuildError>` (fallible) — the direct constructors (`new`, `with_*`) and the `try_build()` alias were removed in 2.0. The size-bound setter is `.max_size(n)` (renamed from `.size(n)` in 2.0). Builders support an `on_evict(|k, v| { ... })` callback fired on every evicted entry.
+**Builder APIs**: Stores are constructed through a `::builder()` constructor (e.g., `LruCache::builder()`, `TtlCache::builder()`); `build()` returns `Result<Store, BuildError>` (fallible), and the fallible `with_*` constructors and the `try_build()` alias were removed in 2.0. The in-memory and sharded stores additionally provide infallible `::new(...)` conveniences for a default configuration (e.g. `LruCache::new(100)`, `TtlCache::new(ttl)`, `UnboundCache::new()`, `ShardedUnboundCache::new()`); the I/O stores (`RedbCache`, `RedisCache`, `AsyncRedisCache`) have required fields and are builder-only. The size-bound setter is `.max_size(n)` (renamed from `.size(n)` in 2.0). Builders support an `on_evict(|k, v| { ... })` callback fired on every evicted entry.
 
 **`TimedEntry<V>`**: Now `pub(crate)` -- no longer exposed in the public API. The `store()` accessors on `TtlCache` and `LruTtlCache` were removed in a prior batch; `TimedEntry` followed as `pub(crate)` once there was no public surface that returned it. Use the `Cached` trait API for inspection.
 
@@ -86,7 +86,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | Trait | Purpose |
 |---|---|
 | `Cached<K,V>` | Core cache operations: get, set, remove, clear, metrics |
-| `CachedAsync<K,V>` | Async `async_get_or_set_with` / `async_try_get_or_set_with` |
+| `CachedGetOrSetAsync<K,V>` | Async `async_cache_get_or_set_with` / `async_cache_try_get_or_set_with` over a sync in-memory store |
 | `CachedRead<K,V>` | Shared-ref reads (no mutation); enables `unsync_reads` |
 | `CachedPeek<K,V>` | Non-mutating peek; skips recency/TTL refresh and metrics |
 | `CachedIter<K,V>` | Iteration over cache entries |
@@ -99,7 +99,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ConcurrentCacheTtl` | `&self` `ttl()`/`set_ttl()`/`unset_ttl()`/`try_set_ttl()`/`refresh_on_hit()` on concurrent TTL stores |
 | `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on single-owner timed stores |
 
-**`CacheMetrics`**: Snapshot struct returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `entry_count: usize`, `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
+**`CacheMetrics`**: `#[non_exhaustive]` snapshot struct (derives `Default`) returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `entry_count: Option<usize>` (`None` when the store cannot report a count, e.g. redis/redb), `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
 
 ---
 
@@ -119,7 +119,7 @@ The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseco
 **2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **hard rename error** — the macro rejects it with "`size` was renamed to `max_size`; use `max_size = ...`" and does not compile. Use `max_size = N`.
 
 **Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `cache_err`, `cache_none`, `with_cached_flag`):
-- `sync_writes`: `"by_key"` (default for `#[cached]`; per-key bucketed locks), `false` (no synchronization; old default), `true` / `"default"` (whole-cache lock). `#[once]` defaults to `false`; `#[concurrent_cached]` does not support `sync_writes`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled`.
+- `sync_writes`: `false` (default; no synchronization, matching 2.x and `functools.lru_cache`), `"by_key"` (opt-in per-key bucketed locks), `true` / `"default"` (whole-cache lock). `#[once]` also defaults to `false`; `#[concurrent_cached]` does not support `sync_writes`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled`.
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
 - `unsync_reads`: `bool` — use a shared read lock for cache hits; only works for stores implementing `CachedRead` (e.g. `UnboundCache`, `TtlSortedCache`, `HashMap`)
@@ -129,7 +129,7 @@ The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseco
 - `companions_vis`: string — visibility of the generated `{fn}_no_cache` and `{fn}_prime_cache` companions (e.g. `"pub(crate)"`, `""` for private); defaults to the cached function's own visibility
 - `map_error` (disk/redis `#[concurrent_cached]` only): unquoted closure `|e| MyErr(e)` or quoted string `"|e| MyErr(e)"` — converts the store error into the function's error type. Optional: when omitted, `.map_err(Into::into)?` is generated, requiring `E: From<StoreError>`.
 
-**`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution), except `in_impl` methods, for which the `_prime_cache` companion is not generated (the cache static is function-local). `#[once]` functions emit `foo_prime_cache()` with no arguments.
+**`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution), except `in_impl` methods, for which the `_prime_cache` companion is not generated (the cache static is function-local). `#[once]` functions emit `foo_prime_cache(…)` keeping the cached function's own arguments (the body runs to prime the single stored value, though the arguments do not affect the cache key).
 
 **Generics**: generic functions with `where` clauses are supported. The macros clone the original `syn::Signature` (preserving the `where` clause, lifetimes, const generics) for the generated origin/`inner` helper — quoting `#generics` alone would drop the `where` clause. Because `#[cached]`/`#[concurrent_cached]` store the cache in a `static`, a generic parameter that would land in the derived key/value type must be pinned via `key` + `convert` (and `ty`); `#[once]`'s static only holds the concrete value type, so it is unconstrained.
 

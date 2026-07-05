@@ -192,6 +192,20 @@ where
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
 
+    /// Return the cached value for `k`, or compute `f()`, store it, and return it.
+    ///
+    /// Infallible ergonomic API for the concrete type. As an inherent method it takes
+    /// resolution priority over
+    /// [`ConcurrentCachedExt::get_or_set_with`](crate::ConcurrentCachedExt::get_or_set_with)
+    /// (which returns `Result<V, Infallible>`), so no `.unwrap()` is needed at the call site.
+    ///
+    /// Non-atomic get-then-set: on a miss another thread may store a value for the same key
+    /// between the get and the set. See
+    /// [`ConcurrentCached::cache_get_or_set_with`](crate::ConcurrentCached::cache_get_or_set_with).
+    pub fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> V {
+        ConcurrentCached::cache_get_or_set_with(self, k, f).unwrap()
+    }
+
     /// Remove a cached value and return it if the entry was live.
     ///
     /// This is the infallible ergonomic API for the concrete type.
@@ -311,12 +325,10 @@ where
     /// Remove all entries from every shard, firing `on_evict` for each removed entry when a
     /// callback is configured.
     ///
-    /// If no `on_evict` callback is configured, this is equivalent to [`clear`](Self::clear).
-    /// Increments the evictions counter for each removed entry only when `on_evict` is set.
+    /// Unlike [`clear`](Self::clear), every removed entry is counted as an eviction
+    /// (`metrics().evictions`) whether or not an `on_evict` callback is configured; the callback
+    /// fires only when one is set.
     pub fn cache_clear_with_on_evict(&self) {
-        if self.inner.on_evict.is_none() {
-            return self.clear();
-        }
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
@@ -443,7 +455,34 @@ where
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
-        Ok(shard.lock.write().cache_set(k, v))
+        // With a callback, pop-then-set (`pop_raw` is silent and yields the owned key) so
+        // on_evict can fire after the lock is released; otherwise a plain set. A displaced
+        // expired value is counted as an eviction under the lock (matching cache_remove) and
+        // filtered from the return; a live displaced value is returned to the caller unchanged.
+        let old: Option<(Option<K>, V)> = {
+            let mut guard = shard.lock.write();
+            let old = if self.inner.on_evict.is_some() {
+                let removed = guard.pop_raw(&k);
+                guard.cache_set(k, v);
+                removed.map(|(ok, ov)| (Some(ok), ov))
+            } else {
+                guard.cache_set(k, v).map(|ov| (None, ov))
+            };
+            if matches!(&old, Some((_, ov)) if ov.is_expired()) {
+                guard.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+            old
+        };
+        match old {
+            Some((key, ov)) if ov.is_expired() => {
+                if let (Some(on_evict), Some(key)) = (&self.inner.on_evict, &key) {
+                    on_evict(key, &ov);
+                }
+                Ok(None)
+            }
+            Some((_, ov)) => Ok(Some(ov)),
+            None => Ok(None),
+        }
     }
 
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
@@ -933,6 +972,64 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+        let count = Arc::new(AtomicU64::new(0));
+        let count2 = count.clone();
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(4)
+            .on_evict(move |_, _| {
+                count2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1,
+            Val {
+                v: 1,
+                expired: true,
+            },
+        )
+        .unwrap();
+        let before = c.metrics().evictions.unwrap();
+        // Overwriting an expired value: None returned, on_evict fires once, one eviction.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(
+                &c,
+                1,
+                Val {
+                    v: 2,
+                    expired: false
+                }
+            )
+            .unwrap()
+            .map(|v| v.v),
+            None
+        );
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
+        // Overwriting a live value returns it, no on_evict and no new eviction.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(
+                &c,
+                1,
+                Val {
+                    v: 3,
+                    expired: false
+                }
+            )
+            .unwrap()
+            .map(|v| v.v),
+            Some(2)
+        );
+        assert_eq!(c.metrics().evictions.unwrap(), before + 1);
+        assert_eq!(count.load(AOrd::Relaxed), 1);
+    }
+
+    #[test]
     fn new_returns_ready_cache_respecting_max_size() {
         // shards(1) gives an exact eviction bound.
         let c = ShardedExpiringLruCache::<u32, Val>::builder()
@@ -1228,6 +1325,35 @@ mod tests {
                 - before,
             20,
             "evictions counter must increment for each entry"
+        );
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_counts_evictions_without_callback() {
+        // metrics().evictions must not depend on an on_evict observer being attached.
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        for i in 0..20u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let before = c.metrics().evictions.expect("evictions tracked");
+        c.cache_clear_with_on_evict();
+        assert_eq!(c.len(), 0);
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked") - before,
+            20,
+            "evictions must be counted even with no on_evict callback"
         );
     }
 

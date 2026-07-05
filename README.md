@@ -9,6 +9,8 @@
 `cached` provides implementations of several caching structures as well as macros
 for defining memoized functions.
 
+Requires Rust >= 1.89.
+
 Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe with the backing
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
 store's own internal synchronization: sharded stores use per-shard `parking_lot::RwLock`; Redis and
@@ -24,12 +26,14 @@ keys in the active call chain share a bucket). `#[once]` defaults to no synchron
 `sync_writes`. The number of per-key lock buckets for `"by_key"` is tunable with
 `sync_writes_buckets = N` (default 64).
 
-- See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) cache stores available.
+- See [`cached::stores` docs](https://docs.rs/cached/latest/cached/stores/index.html) for the available cache stores.
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
 
 > **Upgrading from 2.x?** See the
-> [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-unreleased.md)
-> for all breaking changes and a step-by-step walkthrough.
+> [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-3.0-human.md)
+> for a step-by-step walkthrough, or the
+> [agent-oriented guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-3.0.md)
+> for the complete breaking-change list.
 >
 > **Upgrading from 1.x?** 2.0 contains breaking changes (new `cache_remove_entry` required method,
 > `Result`/`Option` caching behavior flipped to smart-by-default, `result`/`option` attributes
@@ -67,7 +71,8 @@ For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCa
 
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` mirrors the sync
 `ConcurrentCached` surface (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) for
-IO-backed stores that manage their own synchronization. `CachedGetOrSetAsync` is narrower: it
+concurrent stores that manage their own synchronization (the in-memory sharded stores, plus the
+IO-backed redis and redb stores). `CachedGetOrSetAsync` is narrower: it
 only memoizes an async closure over a synchronous in-memory `Cached` store, via the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
 `async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
@@ -103,8 +108,6 @@ the `async_` prefix already prevents collisions with the sync methods.
 The procedural macros (`#[cached]`, `#[once]`, `#[concurrent_cached]`) offer a number of features, including async support.
 See the [`macros`](https://docs.rs/cached/latest/cached/macros/index.html) module for more samples, and the
 [`examples`](https://github.com/jaemk/cached/tree/master/examples) directory for runnable snippets.
-Project automation targets are documented by `make help`, and `make check/help` verifies that the
-help output stays in sync with supported Makefile targets.
 
 Any custom cache that implements `cached::Cached` can be used with the `#[cached]`/`#[once]` macros in place of the built-ins (`cached::CachedGetOrSetAsync` additionally memoizes an async closure over such a store).
 Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentCachedAsync` can be used with the `#[concurrent_cached]` macro.
@@ -259,8 +262,8 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
-  `cache_peek_with_expiry_status` as a side-effect-free counterpart (the built-in sharded stores
-  override the default, which delegates to the renewing read).
+  `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
+  counting, LRU promotion, or TTL renewal).
 
 **Per-Value Expiry via the `Expires` Trait**
 
@@ -355,7 +358,7 @@ use cached::macros::cached;
 
 /// Defines a function named `fib` that uses a cache implicitly named `FIB`.
 /// By default, the cache will be the function's name in all caps.
-/// The following line is equivalent to #[cached(name = "FIB", unbound)]
+/// The following line is equivalent to #[cached(name = "FIB")]
 #[cached]
 fn fib(n: u64) -> u64 {
     if n == 0 || n == 1 { return n }
@@ -556,7 +559,8 @@ Due to the requirements of storing arguments and return values in a global cache
     Use `cache_err = true` to also cache `Err` values.
   - For I/O-backed stores used by `#[concurrent_cached]` (Redis and disk), must be `Result<T, E>`
     where `T: Clone + serde::Serialize + serde::DeserializeOwned` (the store serializes it).
-    `map_error` must be supplied to convert the store's error into `E`.
+    `map_error` is optional: supply it to convert the store's error into `E`, or omit it when
+    `E: From<RedisCacheError>` (Redis) or `E: From<RedbCacheError>` (disk).
 - Function arguments:
   - For in-memory stores (`#[cached]` / `#[once]`), must either be owned and implement `Hash + Eq + Clone`,
     or a `convert` expression must be specified on the macro to produce a key of a `Hash + Eq + Clone` type.

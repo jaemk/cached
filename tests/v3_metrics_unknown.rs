@@ -45,6 +45,26 @@ fn concurrent_base_metrics_reports_known_entry_count() {
     assert_eq!(m.entry_count, Some(7));
 }
 
+/// `CacheMetrics` is `#[non_exhaustive]` with a `Default` (all fields `None`). External trait
+/// implementors construct it from the default and assign fields; struct-literal syntax
+/// (including `..Default::default()`) is intentionally rejected off-crate (E0639). This test
+/// runs as a separate crate, so it pins the supported off-crate construction path.
+#[test]
+fn cache_metrics_default_is_all_none_and_supports_field_assignment() {
+    let d = CacheMetrics::default();
+    assert_eq!(d.hits, None);
+    assert_eq!(d.misses, None);
+    assert_eq!(d.evictions, None);
+    assert_eq!(d.entry_count, None);
+    assert_eq!(d.capacity, None);
+
+    let mut m = CacheMetrics::default();
+    m.hits = Some(3);
+    m.misses = Some(1);
+    assert_eq!(m.hit_ratio(), Some(0.75));
+    assert_eq!(m.evictions, None);
+}
+
 /// Sharded in-memory stores report an exact `Some(n)` count through their inherent
 /// `metrics()`.
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "3.0.0-rc.2"
+version = "3.0.0-rc.3"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -23,11 +23,11 @@ workspace = true
 
 [features]
 default = ["proc_macro", "ahash", "time_stores"]
-proc_macro = ["cached_proc_macro", "cached_proc_macro_types"]
+proc_macro = ["dep:cached_proc_macro", "dep:cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
 async = ["async_core", "dep:async-lock"]
-redis_store = ["redis", "r2d2", "serde", "rmp-serde", "serde_json"]
+redis_store = ["dep:redis", "dep:r2d2", "dep:serde", "dep:rmp-serde", "dep:serde_json"]
 # Runtime axis: the redis async capabilities below (`redis_connection_manager`,
 # `redis_async_cache`) express only the redis capability and are runtime-agnostic;
 # the async runtime is chosen separately via `redis_tokio` (or its TLS variants) or
@@ -39,8 +39,10 @@ redis_store = ["redis", "r2d2", "serde", "rmp-serde", "serde_json"]
 # auto-reconnecting connection manager composes with either runtime -- a `redis_smol`
 # user can enable it. Note it is now additive: it makes the manager *available* as a
 # per-cache builder opt-in (`.connection_manager(true)`) and no longer swaps every
-# `AsyncRedisCache` from multiplexed to manager.
-redis_connection_manager = ["redis/connection-manager"]
+# `AsyncRedisCache` from multiplexed to manager. It pulls in `redis_store` + `async`
+# (like `redis_async_cache`) so the async store compiles; a runtime feature
+# (`redis_tokio*` / `redis_smol*`) is still required to actually connect.
+redis_connection_manager = ["redis_store", "async", "redis/connection-manager"]
 redis_smol = [
   "redis_store",
   "async",
@@ -66,16 +68,16 @@ redis_async_cache = ["redis_store", "async", "redis/cache-aio"]
 # `redb_store` rather than `async`. Redis-only and in-memory async builds do not
 # pay for it. The `blocking::unblock` call sites are `#[cfg(feature = "async")]`,
 # so a sync-only `redb_store` build enables the dependency without invoking it.
-redb_store = ["redb", "serde", "rmp-serde", "directories", "dep:blocking"]
+redb_store = ["dep:redb", "dep:serde", "dep:rmp-serde", "dep:directories", "dep:blocking"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
-version = "3.0.0-rc.2"
+version = "3.0.0-rc.3"
 path = "cached_proc_macro"
 optional = true
 
 [dependencies.cached_proc_macro_types]
-version = "3.0.0-rc.2"
+version = "3.0.0-rc.3"
 path = "cached_proc_macro_types"
 optional = true
 
