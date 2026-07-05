@@ -152,9 +152,13 @@ fn slow_once_prime_does_not_block_readers() {
 }
 
 // ── MACRO-1 (async): a slow async `#[cached]` prime must not block readers ───
+// Gated on `async`: an async `#[cached]` fn expands to the `async`-only
+// `cached::async_sync` machinery, so this section only compiles with the feature.
 
+#[cfg(feature = "async")]
 static ASYNC_PRIME_IN_BODY: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "async")]
 #[cached]
 async fn slow_cached_async(n: u64) -> u64 {
     if n == SLOW_KEY {
@@ -164,6 +168,7 @@ async fn slow_cached_async(n: u64) -> u64 {
     n * 10
 }
 
+#[cfg(feature = "async")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_cached_async_prime_does_not_block_readers() {
     assert_eq!(slow_cached_async(READER_KEY).await, READER_KEY * 10);
