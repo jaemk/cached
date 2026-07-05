@@ -141,7 +141,14 @@ impl<K, V, S> TtlCacheBuilder<K, V, S> {
 
     /// Set a callback to be invoked when an entry is evicted. The callback fires for:
     /// - TTL-expiry sweeps via [`evict`](TtlCache::evict).
-    /// - Explicit [`cache_remove`](crate::Cached::cache_remove), even when the removed
+    /// - Lazy TTL-expiry sweeps on access: a [`cache_get`](crate::Cached::cache_get) /
+    ///   `cache_get_mut` (and the `cache_get_or_set*` factory paths) that finds an expired
+    ///   entry removes or replaces it and fires the callback.
+    /// - Overwriting an already-expired entry via [`cache_set`](crate::Cached::cache_set) /
+    ///   [`cache_try_set`](crate::Cached::cache_try_set): the displaced value is filtered from
+    ///   the return (`None`), so it fires the callback and counts an eviction.
+    /// - Explicit [`cache_remove`](crate::Cached::cache_remove) /
+    ///   [`cache_remove_entry`](crate::Cached::cache_remove_entry), even when the removed
     ///   entry was already expired (`cache_remove` returns `None` but still fires the
     ///   callback and increments the evictions counter).
     ///

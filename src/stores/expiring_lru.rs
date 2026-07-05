@@ -171,11 +171,26 @@ impl<K, V: Expires, S> ExpiringLruCacheBuilder<K, V, S> {
         self
     }
 
-    /// Set a callback to be invoked when an entry is evicted.
+    /// Set a callback to be invoked when an entry is evicted. The callback fires for:
+    /// - LRU capacity eviction: inserting past `max_size` evicts the least-recently-used entry.
+    /// - Capacity shrink via [`set_max_size`](ExpiringLruCache::set_max_size) /
+    ///   [`try_set_max_size`](ExpiringLruCache::try_set_max_size).
+    /// - An expired value encountered during `cache_get`, `cache_get_mut`,
+    ///   `cache_get_or_set_with_mut`, `cache_try_get_or_set_with_mut` (the primary
+    ///   implementations), `cache_get_or_set_with`, `cache_try_get_or_set_with` (default-impl
+    ///   wrappers that delegate to the `_mut` variants), and their async equivalents.
+    /// - Overwriting an already-expired entry via [`cache_set`](crate::Cached::cache_set):
+    ///   the displaced value is filtered from the return (`None`), so it fires the callback
+    ///   and counts an eviction.
+    /// - An explicit [`evict`](ExpiringLruCache::evict) sweep.
+    /// - Explicit [`cache_remove`](crate::Cached::cache_remove) /
+    ///   [`cache_remove_entry`](crate::Cached::cache_remove_entry), including when the removed
+    ///   entry was already expired.
     ///
+    /// It does **not** fire on [`cache_clear`](crate::Cached::cache_clear) or `cache_reset`.
     /// Use [`cache_clear_with_on_evict`](ExpiringLruCache::cache_clear_with_on_evict)
-    /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
-    /// firing and eviction counter increments when clearing all entries.
+    /// instead to opt into callback firing and eviction counter increments when clearing
+    /// all entries.
     #[must_use]
     pub fn on_evict(mut self, on_evict: impl Fn(&K, &V) + Send + Sync + 'static) -> Self {
         self.on_evict = Some(Arc::new(on_evict));

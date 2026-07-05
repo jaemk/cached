@@ -36,8 +36,11 @@ fn ttl_millis(ttl: Duration) -> Result<u64, RedisCacheError> {
     }
     // Convert to milliseconds with saturating arithmetic so pathologically large
     // durations do not overflow. Clamp to `i64::MAX` milliseconds so the same
-    // bounded value can be used for both `PSETEX` (u64) and `PEXPIRE` (i64)
-    // without a second clamp at the call site. Clamp the low end to 1ms: a
+    // bounded value fits both `PSETEX` (u64) and `PEXPIRE` (i64) without a second
+    // clamp at the call site. This only bounds the value to the command argument's
+    // integer type; it is not a guarantee the command is accepted. Redis validates
+    // the expiry itself (e.g. it rejects a `PEXPIRE` whose `mstime() + ms` overflows),
+    // so a TTL near this clamp can still be refused by the server. Clamp the low end to 1ms: a
     // non-zero sub-millisecond Duration truncates to 0ms, which `PSETEX`/`PEXPIRE`
     // reject (or treat as immediate-delete). The `is_zero` guard above already
     // rejects an actually-zero Duration, so the `.max(1)` only lifts a truncated
@@ -1239,8 +1242,12 @@ impl<K, V> ConcurrentCacheTtl for RedisCache<K, V> {
     }
 
     /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
-    /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
-    /// TTL was applied when they were originally inserted.
+    /// if expiry was disabled). This call does not rewrite existing Redis keys; they retain
+    /// whatever TTL was applied when they were originally inserted.
+    ///
+    /// With [`refresh_on_hit`](crate::ConcurrentCacheTtl::refresh_on_hit) enabled, however, a
+    /// `cache_get` hit re-applies the current TTL to the key it touched (via `PEXPIRE`), so a
+    /// changed TTL does reach an existing key on its next hit.
     ///
     /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
     /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
@@ -2122,8 +2129,12 @@ mod async_redis {
         }
 
         /// Set the TTL for newly inserted cache entries, returning the previous TTL (or `None`
-        /// if expiry was disabled). Existing Redis keys are not affected; they retain whatever
-        /// TTL was applied when they were originally inserted.
+        /// if expiry was disabled). This call does not rewrite existing Redis keys; they retain
+        /// whatever TTL was applied when they were originally inserted.
+        ///
+        /// With [`refresh_on_hit`](crate::ConcurrentCacheTtl::refresh_on_hit) enabled, however, a
+        /// `cache_get` hit re-applies the current TTL to the key it touched (via `PEXPIRE`), so a
+        /// changed TTL does reach an existing key on its next hit.
         ///
         /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
         /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys

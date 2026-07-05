@@ -168,7 +168,13 @@ where
         self.ttl(Duration::from_millis(millis))
     }
 
-    /// Specify whether cache hits refresh the TTL
+    /// Specify whether cache hits refresh the TTL.
+    ///
+    /// **Cost:** with `refresh_on_hit` enabled, every cache hit rewrites the entry's
+    /// `created_at` in its own write transaction, so a read that would otherwise be a
+    /// lock-free MVCC read becomes a serialized write (and, when `durable` is `true`, an
+    /// fsync). On a read-heavy cache this per-hit write can dominate cost; leave it disabled
+    /// unless you need sliding-expiry semantics.
     #[must_use]
     pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
         self.refresh = refresh;
@@ -479,6 +485,12 @@ fn reject_if_symlink(path: &Path, what: &str) -> Result<(), std::io::Error> {
 /// [`RedisCache`](crate::stores::RedisCache), where a TTL is required. Set a TTL via
 /// [`RedbCacheBuilder::ttl`] / [`RedbCacheBuilder::ttl_secs`] / [`RedbCacheBuilder::ttl_millis`]
 /// at build time, or update it at runtime with [`ConcurrentCacheTtl::set_ttl`].
+///
+/// TTL liveness is evaluated against **wall-clock time** (`SystemTime`): redb stores each
+/// entry's `created_at` and liveness is recomputed at read time as `now - created_at < ttl`.
+/// Unlike the in-memory stores, which use a monotonic clock, this is sensitive to system-clock
+/// adjustments. A backward wall-clock jump (an NTP step or a manual clock change) reduces an
+/// entry's apparent age and so can extend its effective lifetime past the nominal TTL.
 ///
 /// # Concurrency and performance
 ///
@@ -1198,6 +1210,10 @@ where
     /// backing redb table: clearing a local file is cheap and expected.
     /// Durability of the clear follows `durable` (same as
     /// every other write).
+    ///
+    /// Note: clearing empties the table but does not shrink the on-disk file. redb does not
+    /// return freed pages to the filesystem, and compaction is not currently exposed, so the
+    /// file keeps its high-water-mark size and reuses that space for later writes.
     fn cache_clear(&self) -> Result<(), RedbCacheError> {
         disk_cache_clear(&self.connection, self.durable)
     }

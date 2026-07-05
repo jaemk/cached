@@ -427,7 +427,10 @@ where
         self.ttl_duration()
     }
 
-    /// Set the TTL used when checking existing and newly inserted entries, returning the previous value.
+    /// Set the TTL applied to entries inserted after this call, returning the previous value.
+    ///
+    /// The new TTL only affects entries inserted after the change; existing entries keep their
+    /// original expiry.
     ///
     /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
     /// nanoseconds (~584 years). In practice this limit is never reached.

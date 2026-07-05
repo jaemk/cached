@@ -194,16 +194,30 @@ impl<K, V, E, S> LruTtlCacheBuilder<K, V, E, S> {
 
 // on_evict transitions the builder from NoEvict -> HasEvict
 impl<K, V, S> LruTtlCacheBuilder<K, V, NoEvict, S> {
-    /// Set a callback to be invoked when an entry is evicted.
+    /// Set a callback to be invoked when an entry is evicted. The callback fires for:
+    /// - LRU capacity eviction: inserting past `max_size` evicts the least-recently-used entry.
+    /// - Capacity shrink via [`set_max_size`](LruTtlCache::set_max_size) /
+    ///   [`try_set_max_size`](LruTtlCache::try_set_max_size).
+    /// - TTL-expiry sweeps via [`evict`](LruTtlCache::evict).
+    /// - Lazy TTL-expiry sweeps on access: a [`cache_get`](crate::Cached::cache_get) /
+    ///   `cache_get_mut` (and the `cache_get_or_set*` factory paths) that finds an expired
+    ///   entry removes or replaces it and fires the callback.
+    /// - Overwriting an already-expired entry via [`cache_set`](crate::Cached::cache_set) /
+    ///   [`cache_try_set`](crate::Cached::cache_try_set): the displaced value is filtered from
+    ///   the return (`None`), so it fires the callback and counts an eviction.
+    /// - Explicit [`cache_remove`](crate::Cached::cache_remove) /
+    ///   [`cache_remove_entry`](crate::Cached::cache_remove_entry), even when the removed
+    ///   entry was already expired.
     ///
     /// Calling this method changes the builder's type to
     /// `LruTtlCacheBuilder<K, V, `[`HasEvict`]`>`, which requires `K: 'static`
     /// and `V: 'static` at [`build`](LruTtlCacheBuilder::build) time so the
     /// callback can be wired into the inner LRU eviction path.
     ///
+    /// Does **not** fire on [`cache_clear`](crate::Cached::cache_clear).
     /// Use [`cache_clear_with_on_evict`](LruTtlCache::cache_clear_with_on_evict)
-    /// instead of [`cache_clear`](crate::Cached::cache_clear) to opt into callback
-    /// firing and eviction counter increments when clearing all entries.
+    /// instead to opt into callback firing and eviction counter increments when clearing
+    /// all entries.
     #[must_use]
     pub fn on_evict(
         self,

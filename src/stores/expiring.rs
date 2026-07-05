@@ -614,8 +614,8 @@ impl<K: Hash + Eq, V: Expires + Clone, S: BuildHasher> CloneCached<K, V>
 {
     // Unlike `cache_get`, this intentionally leaves an expired entry in the map so the
     // `result_fallback` path can clone and return it as a stale-but-present value on `Err`.
-    // The entry remains visible via `cache_size()` and `CachedIter` until the next
-    // `cache_get`, `evict()`, or an explicit `cache_remove`.
+    // The entry remains counted by `cache_size()` (but is skipped by `CachedIter`, which
+    // omits expired entries) until the next `cache_get`, `evict()`, or an explicit `cache_remove`.
     fn cache_get_with_expiry_status<Q>(&mut self, k: &Q) -> (Option<V>, bool)
     where
         K: std::borrow::Borrow<Q>,
