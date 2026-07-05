@@ -741,6 +741,10 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
     /// Insert a key-value pair. Returns the previous value only if it had not yet expired.
     /// An expired previous value is filtered from the return; it fires `on_evict` and counts as
     /// an eviction, matching the other removal paths.
+    ///
+    /// Overwriting an existing key replaces the value in-place **without** refreshing the key's
+    /// LRU recency; the entry keeps its position in the eviction order (its expiry is still reset
+    /// from the current TTL). Read with `cache_get` first if you need to promote it.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
@@ -1096,6 +1100,24 @@ mod tests {
         assert_eq!(c.cache_set(1, 300), Some(200));
         assert_eq!(c.cache_evictions(), Some(before + 1));
         assert_eq!(fired.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cache_set_over_existing_key_does_not_promote_recency() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        // Overwriting the least-recently-used key updates the value in-place and
+        // returns the old (still-live) value, but must NOT move it to the front.
+        assert_eq!(c.cache_set(1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.cache_get(&1), Some(&11));
     }
 
     #[test]

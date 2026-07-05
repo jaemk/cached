@@ -1629,6 +1629,25 @@ mod tests {
     }
 
     #[test]
+    fn try_set_ttl_rejects_zero_and_returns_previous() {
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // Nonzero: stored, previous ttl returned, and the new ttl takes effect.
+        let prev = c.try_set_ttl(Duration::from_secs(30)).unwrap();
+        assert_eq!(prev, Some(Duration::from_secs(60)));
+        assert_eq!(c.ttl(), Some(Duration::from_secs(30)));
+        // Zero: rejected without touching the stored ttl.
+        assert_eq!(
+            c.try_set_ttl(Duration::ZERO),
+            Err(crate::SetTtlError::ZeroTtl)
+        );
+        assert_eq!(c.ttl(), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
     fn copy_from_skips_expired() {
         let old = ShardedLruTtlCache::<u32, u32>::builder()
             .max_size(64)

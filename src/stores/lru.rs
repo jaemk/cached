@@ -1230,6 +1230,20 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_existing_key_does_not_promote_recency() {
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
+        c.set(1, 10);
+        c.set(2, 20);
+        c.set(3, 30);
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        // Overwriting the least-recently-used key updates the value in-place and
+        // returns the old value, but must NOT move it to the front.
+        assert_eq!(Cached::cache_set(&mut c, 1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.value_order(), vec![30, 20, 11]);
+    }
+
+    #[test]
     fn sized_cache_clone_is_independent() {
         let mut c = LruCache::builder().max_size(3).build().unwrap();
         c.set(1, 100);
