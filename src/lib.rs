@@ -27,7 +27,7 @@ keys in the active call chain share a bucket). `#[once]` defaults to no synchron
 - See [`macros` docs](https://docs.rs/cached/latest/cached/macros/index.html) for more macro examples.
 
 > **Upgrading from 2.x?** See the
-> [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-unreleased.md)
+> [migration guide](https://github.com/jaemk/cached/blob/master/docs/migrations/2.0-to-3.0.md)
 > for all breaking changes and a step-by-step walkthrough.
 >
 > **Upgrading from 1.x?** 2.0 contains breaking changes (new `cache_remove_entry` required method,
