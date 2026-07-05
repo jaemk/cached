@@ -242,28 +242,32 @@ where
     /// Find (and create) a writable default directory in which to place the
     /// redb database file, returning the directory path.
     fn default_disk_path() -> Result<PathBuf, std::io::Error> {
+        // Earlier candidates use the user's XDG cache dir and are preferred; the
+        // last is always the temp_dir fallback.
         let candidates = Self::default_disk_dir_candidates();
-        // The last candidate is always the temp_dir fallback. All earlier
-        // candidates use the user's XDG cache dir and are treated as preferred.
-        let last_idx = candidates.len().saturating_sub(1);
         let mut last_error = None;
 
-        for (idx, disk_dir) in candidates.into_iter().enumerate() {
-            let is_temp_fallback = idx == last_idx;
+        for disk_dir in candidates {
             match create_cache_dir(&disk_dir) {
                 Ok(()) => {
-                    // On unix, when using the temp_dir fallback, validate the
-                    // resolved path to guard against symlink-based TOCTOU
-                    // attacks: reject symlinks and world/group-writable dirs.
+                    // On unix, validate every directory we pick on the caller's
+                    // behalf (XDG candidates and the temp fallback), not just the
+                    // last one: reject symlinks and world/group-writable dirs to
+                    // guard against symlink-based TOCTOU attacks (SEC-4).
                     #[cfg(unix)]
-                    if is_temp_fallback {
-                        validate_temp_cache_dir(&disk_dir)?;
-                    }
-                    #[cfg(not(unix))]
-                    let _ = is_temp_fallback;
+                    validate_cache_dir(&disk_dir)?;
                     return Ok(disk_dir);
                 }
-                Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                // Fall through to the next candidate when this one is unusable
+                // because the filesystem denies writes: a read-only mount aborts
+                // with `ReadOnlyFilesystem` rather than `PermissionDenied`, so
+                // both must trigger the fallback to temp (DISK-9).
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+                    ) =>
+                {
                     last_error = Some(error);
                 }
                 Err(error) => return Err(error),
@@ -332,6 +336,11 @@ where
         let disk_dir = match self.disk_dir {
             Some(disk_dir) => {
                 create_cache_dir(&disk_dir).map_err(RedbCacheBuildError::io)?;
+                // An explicit directory's permissions are the caller's choice, but
+                // a symlinked directory is still rejected so writes cannot be
+                // silently redirected (SEC-4).
+                #[cfg(unix)]
+                reject_if_symlink(&disk_dir, "cache directory").map_err(RedbCacheBuildError::io)?;
                 disk_dir
             }
             None => Self::default_disk_path().map_err(RedbCacheBuildError::io)?,
@@ -346,14 +355,22 @@ where
         // with default OS permissions.
         #[cfg(unix)]
         {
-            use std::fs::OpenOptions;
-            use std::os::unix::fs::OpenOptionsExt;
-            OpenOptions::new()
+            use std::fs::{OpenOptions, Permissions};
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            // Refuse to follow a symlink planted at the db path (SEC-4).
+            reject_if_symlink(&disk_path, "cache db file").map_err(RedbCacheBuildError::io)?;
+            let file = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(false)
                 .mode(0o600)
                 .open(&disk_path)
+                .map_err(RedbCacheBuildError::io)?;
+            // `mode(0o600)` only applies when the file is created. A pre-existing
+            // file (e.g. an rc-era db created at 0644) keeps its old permissions,
+            // so force 0600 on every open to close the readable-by-group/other
+            // window (DISK-7).
+            file.set_permissions(Permissions::from_mode(0o600))
                 .map_err(RedbCacheBuildError::io)?;
         }
 
@@ -403,24 +420,24 @@ fn create_cache_dir(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-/// On unix, validate that the resolved cache directory path is not a symlink
-/// and is not group- or world-writable. This guards the `temp_dir` fallback
-/// path against symlink-based TOCTOU attacks where an adversary replaces the
-/// target directory with a symlink pointing elsewhere.
+/// On unix, validate that a cache directory we resolved on the caller's behalf
+/// (an XDG candidate or the temp fallback) is not a symlink and is not group- or
+/// world-writable. Guards against symlink-based TOCTOU attacks where an adversary
+/// replaces the target directory with a symlink pointing elsewhere.
 ///
 /// Uid ownership is not checked here because obtaining the process uid without
 /// a dependency (e.g. `libc` or `rustix`) would require unsafe platform calls.
 /// The symlink + permission-bits check is sufficient to reject the most
 /// common attack vectors (world-writable directory, symlink redirection).
 #[cfg(unix)]
-fn validate_temp_cache_dir(path: &Path) -> Result<(), std::io::Error> {
+fn validate_cache_dir(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::MetadataExt;
 
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
         return Err(std::io::Error::new(
             ErrorKind::PermissionDenied,
-            "temp cache directory is a symlink; refusing to use it",
+            "cache directory is a symlink; refusing to use it",
         ));
     }
     // Reject group-writable (0o020) or other-writable (0o002) directories.
@@ -428,10 +445,28 @@ fn validate_temp_cache_dir(path: &Path) -> Result<(), std::io::Error> {
     if mode & 0o022 != 0 {
         return Err(std::io::Error::new(
             ErrorKind::PermissionDenied,
-            "temp cache directory has insecure permissions (group- or world-writable)",
+            "cache directory has insecure permissions (group- or world-writable)",
         ));
     }
     Ok(())
+}
+
+/// On unix, reject a path whose final component is a symlink, so we never follow
+/// a planted symlink when creating or opening the db file (or an explicitly
+/// configured directory). A not-yet-existing path is allowed: it is about to be
+/// created. Unlike `O_NOFOLLOW` this is not atomic, but it needs no `libc`
+/// dependency and matches the check `validate_cache_dir` already uses (SEC-4).
+#[cfg(unix)]
+fn reject_if_symlink(path: &Path, what: &str) -> Result<(), std::io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!("{what} is a symlink; refusing to use it"),
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Cache store backed by disk, using an embedded [`redb`](https://crates.io/crates/redb)
@@ -1768,6 +1803,80 @@ mod tests {
         durable
             .flush()
             .expect("flush on a durable/empty cache should succeed");
+    }
+
+    // SEC-4: a symlink planted at the db path must not be followed. The symlink
+    // targets a VALID redb file so that, absent the check, `build` would happily
+    // open it through the link; only the symlink rejection makes this fail.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_db_file_is_rejected() {
+        const NAME: &str = "symlink-dbfile";
+        let file_name = format!("{NAME}_v{DISK_FILE_VERSION}.redb");
+
+        // Build a real, valid redb file in a separate directory, then drop it to
+        // release redb's exclusive lock.
+        let target = temp_dir!();
+        {
+            let _seed: RedbCache<u32, u32> = RedbCache::builder()
+                .name(NAME)
+                .disk_directory(target.path())
+                .build()
+                .unwrap();
+        }
+        let target_file = target.path().join(&file_name);
+
+        let dir = temp_dir!();
+        std::os::unix::fs::symlink(&target_file, dir.path().join(&file_name)).unwrap();
+
+        let result = RedbCache::<u32, u32>::builder()
+            .name(NAME)
+            .disk_directory(dir.path())
+            .build();
+        assert!(result.is_err(), "a symlinked db path must be rejected");
+    }
+
+    // SEC-4: an explicitly configured directory that is a symlink is rejected.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_disk_directory_is_rejected() {
+        let real = temp_dir!();
+        let link_parent = temp_dir!();
+        let link = link_parent.path().join("linkdir");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+        let result = RedbCache::<u32, u32>::builder()
+            .name("symlink-dir")
+            .disk_directory(&link)
+            .build();
+        assert!(
+            result.is_err(),
+            "a symlinked cache directory must be rejected"
+        );
+    }
+
+    // DISK-7: a pre-existing db file (e.g. an rc-era 0644 file) is chmodded to
+    // 0600 on open, not left readable by group/other.
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_db_file_is_chmodded_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str = "chmod-existing";
+        let file_name = format!("{NAME}_v{DISK_FILE_VERSION}.redb");
+        let dir = temp_dir!();
+        let path = dir.path().join(&file_name);
+        // Simulate an rc-era file created world/group-readable.
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _c: RedbCache<u32, u32> = RedbCache::builder()
+            .name(NAME)
+            .disk_directory(dir.path())
+            .build()
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "pre-existing db file must be chmodded to 0600");
     }
 
     #[test]
@@ -3165,7 +3274,7 @@ mod tests {
         }
 
         /// A symlinked temp fallback directory must be rejected by
-        /// `validate_temp_cache_dir` with a `PermissionDenied` error.
+        /// `validate_cache_dir` with a `PermissionDenied` error.
         #[test]
         fn symlinked_temp_fallback_dir_is_rejected() {
             let real_dir = temp_dir!();
@@ -3173,12 +3282,9 @@ mod tests {
             let link_path = link_dir.path().join("symlink_cache");
             std::os::unix::fs::symlink(real_dir.path(), &link_path)
                 .expect("failed to create symlink");
-            // validate_temp_cache_dir must reject a symlink.
-            let result = super::super::validate_temp_cache_dir(&link_path);
-            assert!(
-                result.is_err(),
-                "validate_temp_cache_dir must reject a symlink"
-            );
+            // validate_cache_dir must reject a symlink.
+            let result = super::super::validate_cache_dir(&link_path);
+            assert!(result.is_err(), "validate_cache_dir must reject a symlink");
             let err = result.unwrap_err();
             assert_eq!(
                 err.kind(),
@@ -3188,7 +3294,7 @@ mod tests {
         }
 
         /// A real (non-symlink) temp fallback directory must be accepted by
-        /// `validate_temp_cache_dir`.
+        /// `validate_cache_dir`.
         #[test]
         fn real_temp_fallback_dir_is_accepted() {
             let dir = temp_dir!();
@@ -3196,10 +3302,10 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("set_permissions");
-            let result = super::super::validate_temp_cache_dir(dir.path());
+            let result = super::super::validate_cache_dir(dir.path());
             assert!(
                 result.is_ok(),
-                "validate_temp_cache_dir must accept a real 0700 dir: {result:?}"
+                "validate_cache_dir must accept a real 0700 dir: {result:?}"
             );
         }
 
@@ -3210,10 +3316,10 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
                 .expect("set_permissions");
-            let result = super::super::validate_temp_cache_dir(dir.path());
+            let result = super::super::validate_cache_dir(dir.path());
             assert!(
                 result.is_err(),
-                "validate_temp_cache_dir must reject a world-writable dir"
+                "validate_cache_dir must reject a world-writable dir"
             );
             assert_eq!(
                 result.unwrap_err().kind(),

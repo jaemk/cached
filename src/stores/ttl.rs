@@ -1291,6 +1291,10 @@ mod tests {
         })
         .await;
         assert_eq!(*v, 7);
-        assert_eq!(c.cache_get(&1), Some(&7), "entry must be live right after insert");
+        assert_eq!(
+            c.cache_get(&1),
+            Some(&7),
+            "entry must be live right after insert"
+        );
     }
 }
