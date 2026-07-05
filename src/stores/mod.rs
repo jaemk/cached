@@ -227,9 +227,8 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
-/// Error returned by [`TtlCache`](crate::stores::TtlCache),
-/// [`LruTtlCache`](crate::stores::LruTtlCache), and
-/// [`TtlSortedCache`](crate::stores::TtlSortedCache) via [`Cached::cache_try_set`] when
+/// Error returned by [`TtlCache`], [`LruTtlCache`], and
+/// [`TtlSortedCache`] via [`Cached::cache_try_set`] when
 /// an entry cannot be stored - currently only when computing the entry's expiry
 /// `Instant` overflows.
 ///

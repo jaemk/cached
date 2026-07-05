@@ -290,8 +290,8 @@ impl<K, V> Default for TtlSortedCacheBuilder<K, V, DefaultHashBuilder> {
 impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
     /// Set the maximum number of entries (eviction bound). When the cache exceeds this
     /// limit, the next-to-expire entries are evicted until it is within bounds. Unlike
-    /// [`capacity`](Self::capacity), this is a hard cap on entry count, not a preallocation
-    /// hint.
+    /// [`initial_capacity`](Self::initial_capacity), this is a hard cap on entry count, not a
+    /// preallocation hint.
     #[doc(alias = "size")]
     #[must_use]
     pub fn max_size(mut self, max_size: usize) -> Self {

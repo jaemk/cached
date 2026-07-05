@@ -810,7 +810,7 @@ pub trait Cached<K, V> {
     ///
     /// Use [`std::convert::Infallible`] for stores where insertion can never fail.
     /// TTL-capable stores that may overflow `Instant` bounds use
-    /// [`CacheSetError`](crate::stores::CacheSetError).
+    /// [`CacheSetError`].
     type Error;
 
     // ── Core required methods (stores implement these) ────────────────────
@@ -848,7 +848,7 @@ pub trait Cached<K, V> {
     ///
     /// The error type is the associated [`Self::Error`]. Infallible stores set
     /// `type Error = std::convert::Infallible`, while TTL-capable stores set it to
-    /// [`CacheSetError`](crate::stores::CacheSetError).
+    /// [`CacheSetError`].
     fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         Ok(self.cache_set(k, v))
     }
@@ -1139,7 +1139,7 @@ pub trait CachedExt<K, V>: Cached<K, V> {
     /// [`cache_size`](Cached::cache_size).
     ///
     /// On lazy-eviction stores this count may include expired-but-not-yet-swept entries.
-    /// Use `evict()` (via [`CacheEvict`](crate::CacheEvict)) before calling `len()` if
+    /// Use `evict()` (via [`CacheEvict`]) before calling `len()` if
     /// you need an accurate count of live entries.
     #[must_use]
     fn len(&self) -> usize;
@@ -1281,7 +1281,7 @@ impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
 /// expired entries from the yielded view but do **not** remove them from the store. The
 /// receiver is `&self`, so no mutation occurs during iteration. As a result,
 /// `iter().count()` may be less than `len()` when expired-but-not-yet-swept entries are
-/// present. Call `evict()` (via [`CacheEvict`](crate::CacheEvict)) to physically remove
+/// present. Call `evict()` (via [`CacheEvict`]) to physically remove
 /// expired entries and reclaim memory.
 ///
 /// Sharded stores (`Sharded*`) do not implement this trait; they are internally
