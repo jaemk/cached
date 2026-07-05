@@ -57,6 +57,8 @@ TEST_TARGETS = tests \
                tests/redis-async-cache-rustls \
                tests/redis-store \
                tests/redis-store-standalone \
+               tests/redis-runtime-axes \
+               tests/redis-capability-requires-runtime \
                tests/redis-tokio \
                tests/all-features
 
