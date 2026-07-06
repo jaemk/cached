@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// [`DefaultHashBuilder`] (ahash when the `ahash` feature is enabled, otherwise
 /// `std::collections::hash_map::RandomState`). Supply a custom `S` via
 /// [`LruCacheBuilder::hasher`] to use a different hasher.
+#[doc(alias = "SizedCache")]
 pub struct LruCache<K, V, S = DefaultHashBuilder> {
     // `store` contains a hash of K -> index of (K, V) tuple in `order`
     pub(super) store: HashTable<usize>,

@@ -43,7 +43,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 
 ---
 
-## Store Types (current names as of v2.0)
+## Store Types (current names as of v3.0)
 
 | Type | Module | Description |
 |---|---|---|
@@ -244,7 +244,7 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `ahash` (default) | ahash hasher for internal hash maps |
 | `time_stores` (default) | `TtlCache`, `LruTtlCache`, `TtlSortedCache` |
 | `async_core` | Async support marker (no runtime); use with custom async runtimes |
-| `async` | Async support (runtime-agnostic; pulls `async-lock` and `blocking`, no tokio) |
+| `async` | Async support (runtime-agnostic; pulls `async-lock`, no tokio) |
 | `redis_store` | Synchronous Redis backend |
 | `redis_tokio` | Async Redis backend (Tokio, no TLS); implies `redis_store` + `async` |
 | `redis_tokio_native_tls` | `redis_tokio` + TLS via `native-tls` |

@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// [`DefaultHashBuilder`] (ahash when the `ahash` feature is enabled, otherwise
 /// `std::collections::hash_map::RandomState`). Supply a custom `S` via
 /// [`TtlCacheBuilder::hasher`] to use a different hasher.
+#[doc(alias = "TimedCache")]
 pub struct TtlCache<K, V, S = DefaultHashBuilder> {
     pub(super) store: HashMap<K, TimedEntry<V>, S>,
     pub(super) ttl: Duration,
@@ -438,11 +439,15 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                     self.hits.fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    // Compute the replacement BEFORE firing the eviction side
+                    // effects. If `f()` panics the expired entry is left in place,
+                    // so firing on_evict / counting here would double-fire when the
+                    // next call finally evicts the same physical entry (EXP-3).
+                    let val = f();
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(occupied.key(), &occupied.get().value);
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
-                    let val = f();
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                     occupied.insert(TimedEntry {
@@ -758,14 +763,18 @@ where
                         self.hits.fetch_add(1, Ordering::Relaxed);
                     } else {
                         self.misses.fetch_add(1, Ordering::Relaxed);
+                        // Compute the replacement BEFORE firing the eviction side
+                        // effects. If the future is dropped before completion the
+                        // expired entry is left in place, so firing on_evict /
+                        // counting here would double-fire when the next call finally
+                        // evicts the same physical entry (EXP-3). Also anchor the
+                        // expiry after the factory resolves so a slow factory does
+                        // not eat into the fresh entry's TTL (CORE-3).
+                        let val = f().await;
                         if let Some(on_evict) = &self.on_evict {
                             on_evict(occupied.key(), &occupied.get().value);
                         }
                         self.evictions.fetch_add(1, Ordering::Relaxed);
-                        // Anchor the expiry AFTER the factory resolves: a slow
-                        // factory must not eat into the fresh entry's TTL (the
-                        // sync path already anchors after `f()`) (CORE-3).
-                        let val = f().await;
                         let now = Instant::now();
                         let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
                         occupied.insert(TimedEntry {
@@ -889,6 +898,142 @@ mod tests {
         assert_eq!(c.cache_set(1, 300), Some(200));
         assert_eq!(c.cache_evictions(), Some(1));
         assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
+
+    // TEST-1: eviction counter increments when overwriting an expired entry even
+    // without an on_evict callback configured.
+    #[test]
+    fn cache_set_over_expired_increments_eviction_counter_without_callback() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Overwriting an expired entry: returns None and increments evictions.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(c.cache_evictions(), Some(1));
+        // Overwriting the now-live value: returns it and no new eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(c.cache_evictions(), Some(1));
+    }
+
+    // BUG-1 regression (sync): a panicking factory on the infallible get-or-set
+    // path must not fire on_evict or increment evictions; the expired entry must
+    // remain in place for the next access to evict it exactly once.
+    #[test]
+    fn cache_get_or_set_with_mut_panic_does_not_fire_on_evict() {
+        use std::panic;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Factory panics: side effects must NOT fire before the factory resolves.
+        // Note: a caught panic prints to stderr; that is expected.
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _ = c.cache_get_or_set_with_mut(1u32, || -> u32 { panic!("factory panic") });
+        }));
+        assert!(result.is_err(), "expected panic to be caught");
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            0,
+            "on_evict must not fire when factory panics"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "evictions must remain 0 when factory panics"
+        );
+        assert_eq!(c.cache_size(), 1, "expired entry must still be present");
+
+        // A subsequent successful factory evicts the entry exactly once.
+        let _ = c.cache_get_or_set_with_mut(1u32, || 200u32);
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            1,
+            "on_evict must fire exactly once after successful replacement"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "evictions must be 1 after success"
+        );
+    }
+
+    // BUG-1 regression (async): a factory future dropped before completion on the
+    // infallible async get-or-set path must not fire on_evict or increment evictions;
+    // the expired entry must remain in place for the next call to evict exactly once.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_cancel_does_not_fire_on_evict() {
+        use crate::CachedGetOrSetAsync;
+        use std::task::Poll;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // Create a future whose factory never resolves, poll it once (so it enters
+        // the expired-entry branch and reaches `f().await`), then drop it.
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut c,
+                1u32,
+                std::future::pending::<u32>,
+            ));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            // Must be Pending: the factory future never resolves.
+            assert!(
+                matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+                "future must be pending while factory is unresolved"
+            );
+            // Drop `fut` here -- simulates cancellation mid-factory.
+        }
+
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            0,
+            "on_evict must not fire when factory future is dropped"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "evictions must be 0 after factory cancellation"
+        );
+        assert_eq!(c.cache_size(), 1, "expired entry must still be present");
+
+        // A subsequent successful factory evicts the entry exactly once.
+        let _ =
+            CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 1u32, || async { 200u32 })
+                .await;
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            1,
+            "on_evict must fire exactly once after successful replacement"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "evictions must be 1 after success"
+        );
     }
 
     #[test]
@@ -1302,6 +1447,236 @@ mod tests {
             c.cache_get(&1),
             Some(&7),
             "entry must be live right after insert"
+        );
+    }
+
+    // BUG-1 (miss-counter invariant, sync): the expired-occupant branch increments
+    // `misses` BEFORE running the factory. A panicking factory must therefore leave
+    // the miss counted exactly once (and never double-counted). Pins the counter so a
+    // future reorder of the miss increment past the factory can't silently change it.
+    #[test]
+    fn cache_get_or_set_with_mut_panic_counts_miss_once() {
+        use std::panic;
+
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _ = c.cache_get_or_set_with_mut(1u32, || -> u32 { panic!("factory panic") });
+        }));
+        assert!(result.is_err(), "expected panic to be caught");
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "the expired access is a single miss even when the factory panics"
+        );
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(c.cache_size(), 1, "expired entry must still be present");
+    }
+
+    // BUG-1 (successful expired replacement, sync): on the expired-occupant path a
+    // successful factory must fire `on_evict` exactly once WITH THE OLD (evicted)
+    // value, increment `evictions` by exactly one, and leave the factory's NEW value
+    // cached. Guards against an off-by-one on the counter and against a reorder that
+    // would fire the callback with the new value (insert-before-callback regression).
+    #[test]
+    fn cache_get_or_set_with_mut_expired_replacement_fires_with_old_value() {
+        let seen = Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+        let seen2 = seen.clone();
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, v: &u32| {
+                seen2.store(*v, Ordering::Relaxed);
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let val = c.cache_get_or_set_with_mut(1u32, || 200u32);
+        assert_eq!(*val, 200, "factory's new value must be returned");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "on_evict must fire exactly once"
+        );
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            100,
+            "on_evict must receive the OLD (evicted) value, not the replacement"
+        );
+        assert_eq!(c.cache_evictions(), Some(1), "exactly one eviction");
+        assert_eq!(
+            c.cache_peek(&1),
+            Some(&200),
+            "the new value must be cached and live"
+        );
+    }
+
+    // BUG-1 (hit path, sync): on a live occupant `cache_get_or_set_with_mut` must NOT
+    // run the factory, must count a hit (not a miss/eviction), and must return the
+    // existing value unchanged. Covers the previously untested Occupied-live branch.
+    #[test]
+    fn cache_get_or_set_with_mut_hit_does_not_call_factory() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let val = c.cache_get_or_set_with_mut(1u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            999u32
+        });
+        assert_eq!(*val, 100, "live entry must be returned, factory ignored");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "factory must not run on a hit"
+        );
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(0));
+        assert_eq!(c.cache_evictions(), Some(0));
+    }
+
+    // BUG-1 (refresh-on-hit, sync): with `refresh_on_hit(true)`, a hit on
+    // `cache_get_or_set_with_mut` must renew the entry's TTL so it survives past its
+    // original expiry. Covers the refresh branch of the Occupied-live path.
+    #[test]
+    fn cache_get_or_set_with_mut_refresh_extends_ttl_on_hit() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(120))
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(70));
+        // Hit refreshes the TTL to now + 120ms.
+        let val = c.cache_get_or_set_with_mut(1u32, || 999u32);
+        assert_eq!(*val, 100, "still a hit, factory ignored");
+        std::thread::sleep(std::time::Duration::from_millis(70));
+        // 140ms since original set (would be expired without refresh) but only 70ms
+        // since the refresh, so the entry must still be live.
+        assert_eq!(
+            c.cache_peek(&1),
+            Some(&100),
+            "refresh-on-hit must have extended the TTL past the original expiry"
+        );
+    }
+
+    // BUG-1 (vacant-path cancellation, async): a factory future dropped before
+    // completion on the VACANT path must insert NO entry and must not touch the
+    // eviction counter/callback. The miss is counted once (incremented before the
+    // factory). No async vacant-path cancellation test existed previously.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_cancel_on_vacant_inserts_nothing() {
+        use crate::CachedGetOrSetAsync;
+        use std::task::Poll;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        // Vacant key: poll a never-resolving factory once, then drop mid-factory.
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut c,
+                42u32,
+                std::future::pending::<u32>,
+            ));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(
+                matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+                "future must be pending while factory is unresolved"
+            );
+        }
+
+        assert_eq!(
+            c.cache_size(),
+            0,
+            "no entry may be inserted when the vacant-path factory is cancelled"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "vacant-path cancellation must not touch evictions"
+        );
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            0,
+            "vacant-path cancellation must not fire on_evict"
+        );
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "the vacant access is counted as a single miss"
+        );
+
+        // A subsequent successful factory inserts normally.
+        let _ =
+            CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 42u32, || async { 7u32 })
+                .await;
+        assert_eq!(c.cache_get(&42), Some(&7));
+    }
+
+    // BUG-1 (successful expired replacement, async): mirror of the sync old-value
+    // test on the async path -- on_evict fires once with the OLD value, evictions
+    // increments by one, and the factory's NEW value is cached.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_expired_replacement_fires_with_old_value() {
+        use crate::CachedGetOrSetAsync;
+
+        let seen = Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+        let seen2 = seen.clone();
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |_k: &u32, v: &u32| {
+                seen2.store(*v, Ordering::Relaxed);
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let val =
+            CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 1u32, || async { 200u32 })
+                .await;
+        assert_eq!(*val, 200, "factory's new value must be returned");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "on_evict must fire exactly once"
+        );
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            100,
+            "on_evict must receive the OLD (evicted) value, not the replacement"
+        );
+        assert_eq!(c.cache_evictions(), Some(1), "exactly one eviction");
+        assert_eq!(
+            c.cache_peek(&1),
+            Some(&200),
+            "the new value must be cached and live"
         );
     }
 }

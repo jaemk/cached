@@ -852,6 +852,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
+        // Two lookups on the hit path: the first checks expiry (releasing the borrow via
+        // `.map`), the second returns the reference. A single-lookup approach is not possible
+        // in stable Rust because returning `&'1 V` from inside an `if let` block ties the
+        // borrow to lifetime `'1`, which prevents `remove_entry` (a mutable borrow) even on
+        // the non-returning path. Polonius (nightly) would fix this.
         let is_expired = match self.map.get(key) {
             None => {
                 self.misses.increment();

@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.4 / cached_proc_macro 3.0.0-rc.4 / cached_proc_macro_types 3.0.0-rc.4] - 2026-07-05
+
+> Changes since rc.3, all non-breaking. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md).
+
+### Fixed
+- `TtlCache::cache_get_or_set_with_mut` and its async twin now run the value factory before firing the `on_evict` callback and counting the eviction on the expired-entry path. A panicking factory (sync) or a dropped/cancelled future (async) no longer leaves the expired entry in place with the callback already fired, which previously double-fired on the next access.
+- `RedisCache::cache_remove` / `AsyncRedisCache::async_cache_remove` honor `strict_deserialization`. An undecodable displaced value is discarded and the call returns `Ok(None)` in the default mode (the entry is still removed); it returns `Err(CacheDeserialization)` only under `strict_deserialization(true)`, matching `cache_get` and `RedbCache::cache_remove`.
+- `#[once]` and `#[concurrent_cached]` forward user lint attributes (for example `#[allow(...)]`) to the generated `*_prime_cache` companion, matching `#[cached]`.
+
+### Added
+- `#[cached]` / `#[once]` / `#[concurrent_cached]` on an `async fn` built without the `async` feature now fail with an error naming the missing feature instead of an error pointing at an internal module.
+- `#[doc(alias)]` entries mapping the 2.x store names to their 3.0 types (`SizedCache` -> `LruCache`, `TimedCache` -> `TtlCache`, `TimedSizedCache` -> `LruTtlCache`) for docs.rs search.
+
+### Packaging
+- The published crate manifests no longer carry a `[lints]` table. A future-toolchain warning firing in `cached` can no longer break downstream builds; warning enforcement moved to the workspace dev tooling.
+- `specs/`, `local/`, `.cursorrules`, and `Makefile` are excluded from the published package.
+
+### Documentation
+- Migration guide: describe the boxed `Box<dyn std::error::Error + Send + Sync>` error sources and how to inspect them, rewrite the redis capability/runtime feature notes, add the `ShardedLruTtlCacheBuilder` type-parameter reorder, and correct the no-arg builder examples and stale `DiskCache` references.
+- Correct the `async` feature docs (`blocking` moved to `redb_store`), the `ConcurrentCachedAsync` provided-method list, the sharded `set_ttl` `refresh_on_hit` caveat, and several changelog and AGENTS.md notes.
+
 ## [3.0.0-rc.3 / cached_proc_macro 3.0.0-rc.3 / cached_proc_macro_types 3.0.0-rc.3] - 2026-07-05
 
 > Changes since rc.2. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md); the rc.1 and rc.2 sections below record the earlier 3.0 candidates. Note the `sync_writes` default reverted since the release candidates: see "`sync_writes` default reverted to no synchronization" below.
@@ -60,7 +81,7 @@
 #### Feature and dependency changes
 - Optional dependencies are gated with Cargo's `dep:` syntax, so an optional dependency's name is
   no longer silently usable as a feature. Enable the named crate feature (`redis_store`,
-  `disk_store`, `proc_macro`, ...) rather than a bare dependency name.
+  `redb_store`, `proc_macro`, ...) rather than a bare dependency name.
 - `blocking` moved from the base `async` feature to `redb_store` (it only offloads synchronous
   redb work). Redis-only and in-memory async builds no longer pull it.
 - `redis_connection_manager` and `redis_async_cache` are additive and runtime-agnostic: both
@@ -163,7 +184,7 @@
   overflows `Instant` stores the value with no expiry instead of dropping it.
 
 ## [3.0.0-rc.2 / cached_proc_macro 3.0.0-rc.2 / cached_proc_macro_types 3.0.0-rc.2] - 2026-07-02
-> Second 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-3.0.md). Note: this candidate defaulted `#[cached]` to `sync_writes = "by_key"`; that default was reverted before 3.0.0 (see the Unreleased "`sync_writes` default reverted" entry).
+> Second 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-3.0.md). Note: this candidate defaulted `#[cached]` to `sync_writes = "by_key"`; that default was reverted before 3.0.0 (see the "`sync_writes` default reverted to no synchronization" entry in the 3.0.0-rc.3 notes).
 
 ### Breaking Changes
 
@@ -261,7 +282,7 @@
 - `#[must_use]` added to `CacheEvict::evict`.
 - Macro error messages aligned for consistency.
 
-## [3.0.0-rc.1] - 2026-06-21
+## [3.0.0-rc.1 / cached_proc_macro 3.0.0-rc.1 / cached_proc_macro_types 3.0.0-rc.1] - 2026-06-21
 > First 3.0 release candidate. The 3.0 API is not final and may change before the 3.0.0 release. See the [migration guide](docs/migrations/2.0-to-3.0.md).
 
 ### Breaking Changes
@@ -342,7 +363,7 @@
 - The `wasm` cargo feature is removed. It gated nothing - `web-time` provides wasm-compatible time types transparently with no opt-in feature. Drop it from your feature list; wasm targets need nothing extra.
 - The `disk_store` cargo feature is renamed to `redb_store`, naming the backend (`redb`) explicitly, parallel to the `redis_*` features. No backwards-compatible alias; rename it in your `Cargo.toml`.
 - The `redis_ahash` cargo feature is removed. It enabled the `redis` crate's optional `ahash` feature and gated no `cached` code; enable `ahash` on your own `redis` dependency if needed.
-- `cached_proc_macro_types` moved to edition 2024 and raised its `rust-version` to 1.89, matching the workspace (its semver version is unchanged at `1.0`). `cached_proc_macro`'s `rust-version` is likewise raised to 1.89.
+- `cached_proc_macro_types` moved to edition 2024 and raised its `rust-version` to 1.89, matching the workspace; its version tracks `cached` in lockstep (3.0.0-rc.x), not a standalone `1.0`. `cached_proc_macro`'s `rust-version` is likewise raised to 1.89.
 
 #### API audit follow-ups
 - `Cached::cache_try_set` (and its `try_set` alias) now return `Result<Option<V>, CacheSetError>` instead of `Result<Option<V>, Box<dyn std::error::Error>>`. `CacheSetError` is a new `#[non_exhaustive]` enum (variant `TimeBounds`) re-exported from the crate root, so callers can match on the failure instead of handling an opaque boxed error. Custom `Cached` impls that override `cache_try_set` must update the return type.
@@ -369,7 +390,7 @@
 - Using `refresh = true` on `#[cached]` without also specifying a TTL (`ttl_secs`, `ttl_millis`, or `ttl`) is now a compile error. Previously the attribute was silently ignored in this configuration. This matches the existing behavior of `#[concurrent_cached]`, which has always required a TTL alongside `refresh = true`.
 
 #### `sync_writes` default on `#[cached]` changed to `"by_key"`
-> Reverted before 3.0.0: the default is again no synchronization. See the Unreleased "`sync_writes` default reverted to no synchronization" entry.
+> Reverted before 3.0.0: the default is again no synchronization. See the "`sync_writes` default reverted to no synchronization" entry in the 3.0.0-rc.3 notes.
 - A bare `#[cached]` now uses `sync_writes = "by_key"`: concurrent first calls for the same key are deduplicated through bucketed per-key locks. Previously the default was no synchronization, mirroring Python's `functools.lru_cache`. Opt out with `sync_writes = false`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled` (not `"by_key"`). `#[once]` and `#[concurrent_cached]` defaults are unchanged.
 
 #### `Cached` trait: `type Error` associated type; `cache_try_set` / `try_set` return `Result<Option<V>, Self::Error>`

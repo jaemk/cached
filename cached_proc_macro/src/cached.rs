@@ -1272,8 +1272,19 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! { #[doc = #no_cache_fn_indent_doc] }
     };
 
+    // UX-1: emit a guard macro invocation for async fns so that a missing
+    // `async` feature produces a clear `compile_error!` rather than an obscure
+    // "cannot find `async_sync`" error. The proc-macro cannot inspect downstream
+    // feature flags, so we always emit the invocation and let the macro decide.
+    let async_feature_guard = if asyncness.is_some() {
+        quote! { #krate::__require_async_feature!{} }
+    } else {
+        quote! {}
+    };
+
     // put it all together
     let expanded = quote! {
+        #async_feature_guard
         // Cached static (module scope unless `in_impl`)
         #module_static
         // No cache function (origin of the cached function)

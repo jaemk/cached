@@ -1,0 +1,23 @@
+error: #[cached]/#[once]/#[concurrent_cached] on an async function requires the `async` feature of the `cached` crate
+ --> tests/ui/concurrent_cached_async_requires_async_feature.rs:3:1
+  |
+3 | #[concurrent_cached]
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `::cached::__require_async_feature` which comes from the expansion of the attribute macro `concurrent_cached` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0432]: unresolved import `cached`
+ --> tests/ui/concurrent_cached_async_requires_async_feature.rs:3:1
+  |
+3 | #[concurrent_cached]
+  | ^^^^^^^^^^^^^^^^^^^^ could not find `__set_dispatch_async` in `cached`
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(feature = "async_core")]
+  |       ---------------------- the item is gated behind the `async_core` feature
+...
+  | pub mod __set_dispatch_async {
+  |         ^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the attribute macro `concurrent_cached` (in Nightly builds, run with -Z macro-backtrace for more info)

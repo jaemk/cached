@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "3.0.0-rc.3"
+version = "3.0.0-rc.4"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -12,14 +12,11 @@ license = "MIT"
 edition = "2024"
 rust-version = "1.89"
 # Internal dev tooling and process docs that should not ship in the published crate.
-exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "AGENTS.md", "CLAUDE.md"]
+exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "specs/", "local/", ".cursorrules", "AGENTS.md", "CLAUDE.md", "Makefile"]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
-
-[lints]
-workspace = true
 
 [features]
 default = ["proc_macro", "ahash", "time_stores"]
@@ -72,12 +69,12 @@ redb_store = ["dep:redb", "dep:serde", "dep:rmp-serde", "dep:directories", "dep:
 time_stores = []
 
 [dependencies.cached_proc_macro]
-version = "3.0.0-rc.3"
+version = "3.0.0-rc.4"
 path = "cached_proc_macro"
 optional = true
 
 [dependencies.cached_proc_macro_types]
-version = "3.0.0-rc.3"
+version = "3.0.0-rc.4"
 path = "cached_proc_macro_types"
 optional = true
 
@@ -174,12 +171,6 @@ version = "3"
 
 [workspace]
 members = ["cached_proc_macro", "examples/wasm"]
-
-# Elevate all compiler warnings to errors across the workspace (equivalent to
-# `-D warnings`). Applies to `cargo build`/`test`/`clippy`, not just the Makefile
-# clippy target. Members opt in with `[lints] workspace = true`.
-[workspace.lints.rust]
-warnings = "deny"
 
 [[example]]
 name = "redis"

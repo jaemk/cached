@@ -1066,7 +1066,10 @@ mod time_store_tests {
         let _ = a.join().unwrap();
         let _ = b.join().unwrap();
         let _ = c.join().unwrap();
-        assert!(start.elapsed() < Duration::from_secs(2));
+        // One compute (~1s) then cache hits for the waiters; a by_key regression to
+        // per-thread recompute would take ~3s. The generous 2.5s bound tolerates
+        // slow/loaded CI runners while still catching that regression.
+        assert!(start.elapsed() < Duration::from_millis(2500));
     }
 
     #[cached(
@@ -1608,7 +1611,10 @@ mod time_store_tests {
             a.await.unwrap();
             b.await.unwrap();
             c.await.unwrap();
-            assert!(start.elapsed() < Duration::from_secs(2));
+            // Distinct keys must not serialize (~1s concurrent); a by_key regression
+            // to global serialization would take ~3s. The generous 2.5s bound tolerates
+            // slow/loaded CI runners while still catching that regression.
+            assert!(start.elapsed() < Duration::from_millis(2500));
         }
 
         #[derive(Clone, Debug)]

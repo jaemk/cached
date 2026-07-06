@@ -476,7 +476,8 @@ where
     /// Set the TTL applied to entries inserted after this call, returning the previous value.
     ///
     /// The new TTL only affects entries inserted after the change; existing entries keep their
-    /// original expiry.
+    /// original expiry. Note that entries read while `refresh_on_hit` is enabled re-anchor to
+    /// the TTL current at access time.
     ///
     /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
     /// nanoseconds (~584 years). In practice this limit is never reached.

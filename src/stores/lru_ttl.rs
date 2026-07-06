@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// [`DefaultHashBuilder`] (ahash when the `ahash` feature is enabled, otherwise
 /// `std::collections::hash_map::RandomState`). Supply a custom `S` via
 /// [`LruTtlCacheBuilder::hasher`] to use a different hasher.
+#[doc(alias = "TimedSizedCache")]
 pub struct LruTtlCache<K, V, S = DefaultHashBuilder> {
     pub(super) store: LruCache<K, TimedEntry<V>, S>,
     pub(super) size: usize,
@@ -810,9 +811,13 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
     }
     fn cache_reset(&mut self) {
         // Entries are dropped in-place; `on_evict` is NOT called for cleared entries.
-        // Delegate to the inner LruCache's reset which preserves the hash builder.
+        // Delegate to the inner LruCache's reset which preserves the hash builder and
+        // already resets the inner metrics. Reset outer-level metrics here directly to
+        // avoid a redundant second call to the inner store's cache_reset_metrics.
         self.store.cache_reset();
-        self.cache_reset_metrics();
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
     }
     fn cache_reset_metrics(&mut self) {
         self.misses.store(0, Ordering::Relaxed);
@@ -1103,6 +1108,34 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_expired_counts_eviction_without_callback() {
+        // Pins that the evictions counter increments when overwriting an expired entry
+        // even when no on_evict callback is configured.
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let before = c.cache_evictions().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Expired entry: overwrite filters it from the return and counts one eviction.
+        assert_eq!(c.cache_set(1, 200), None);
+        assert_eq!(
+            c.cache_evictions(),
+            Some(before + 1),
+            "evictions must increment by 1 on expired-entry overwrite even without on_evict"
+        );
+        // Overwriting the now-live value must not count as an eviction.
+        assert_eq!(c.cache_set(1, 300), Some(200));
+        assert_eq!(
+            c.cache_evictions(),
+            Some(before + 1),
+            "overwriting a live entry must not increment evictions"
+        );
+    }
+
+    #[test]
     fn cache_set_over_existing_key_does_not_promote_recency() {
         let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
             .max_size(3)
@@ -1352,6 +1385,121 @@ mod tests {
             "cache_reset must not fire on_evict"
         );
         assert_eq!(c.cache_size(), 0);
+    }
+
+    #[test]
+    fn cache_reset_zeroes_all_metrics() {
+        // CLN-2: cache_reset must reset metrics exactly once; verify the result is zero,
+        // including the inner LruCache's own capacity-eviction counter.
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(2)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        // Drive an inner-store capacity eviction so the inner evictions counter is non-zero
+        // before the reset. A half-reset that only touched the outer counter would leave this.
+        c.cache_set(3, 30); // evicts LRU (1) in the inner LruCache
+        assert!(
+            c.store.cache_evictions().unwrap() >= 1,
+            "precondition: inner store must record a capacity eviction before reset"
+        );
+        // Drive hits and misses too.
+        let _ = c.cache_get(&2);
+        let _ = c.cache_get(&99);
+        c.cache_reset();
+        assert_eq!(
+            c.cache_hits(),
+            Some(0),
+            "hits must be zero after cache_reset"
+        );
+        assert_eq!(
+            c.cache_misses(),
+            Some(0),
+            "misses must be zero after cache_reset"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "evictions must be zero after cache_reset"
+        );
+        assert_eq!(
+            c.store.cache_evictions(),
+            Some(0),
+            "inner store evictions must be zero after cache_reset"
+        );
+        assert_eq!(c.cache_size(), 0, "size must be zero after cache_reset");
+    }
+
+    #[test]
+    fn cache_reset_metrics_standalone_zeroes_outer_and_inner() {
+        // CLN-2 (regression guard): cache_reset_metrics() called on its own — NOT via
+        // cache_reset — must zero BOTH the outer counters (hits/misses/evictions) AND the
+        // inner LruCache's counters, while leaving stored entries untouched. Unlike
+        // cache_reset (which rebuilds the inner store and thus trivially clears its metrics),
+        // cache_reset_metrics must explicitly delegate to store.cache_reset_metrics(). If the
+        // CLN-2 restructure had left this method only touching the outer counter, the inner
+        // capacity-eviction count would survive and this test fails.
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(2)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        // Inner capacity eviction: 3 inserts into a size-2 cache evicts the LRU key.
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30); // inner evictions -> 1
+        assert!(
+            c.store.cache_evictions().unwrap() >= 1,
+            "precondition: inner store must record a capacity eviction"
+        );
+        // Outer metrics: a hit, a miss, and an expiry eviction.
+        let _ = c.cache_get(&3); // live -> hit
+        let _ = c.cache_get(&99); // miss
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        c.cache_set(3, 40); // overwrite now-expired key 3 -> outer eviction, returns None
+        assert!(
+            c.hits.load(Ordering::Relaxed) >= 1,
+            "precondition: outer hits must be non-zero"
+        );
+        assert!(
+            c.evictions.load(Ordering::Relaxed) >= 1,
+            "precondition: outer evictions must be non-zero"
+        );
+
+        c.cache_reset_metrics();
+
+        assert_eq!(
+            c.hits.load(Ordering::Relaxed),
+            0,
+            "outer hits must be zero after standalone cache_reset_metrics"
+        );
+        assert_eq!(
+            c.misses.load(Ordering::Relaxed),
+            0,
+            "outer misses must be zero after standalone cache_reset_metrics"
+        );
+        assert_eq!(
+            c.evictions.load(Ordering::Relaxed),
+            0,
+            "outer evictions must be zero after standalone cache_reset_metrics"
+        );
+        assert_eq!(
+            c.store.cache_evictions(),
+            Some(0),
+            "inner store evictions must be zero after standalone cache_reset_metrics"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "combined (outer + inner) evictions must be zero after cache_reset_metrics"
+        );
+        // cache_reset_metrics must NOT drop stored entries.
+        assert!(
+            c.cache_size() >= 1,
+            "cache_reset_metrics must not clear stored entries"
+        );
     }
 
     #[test]

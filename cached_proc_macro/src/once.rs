@@ -914,7 +914,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             // Prime cached function. Priming is optional, so suppress
             // `dead_code` for callers that generate but never call the companion.
-            #(#static_cfg_attrs)*
+            #(#no_cache_attrs)*
             #[doc = #prime_fn_indent_doc]
             #[allow(dead_code)]
             #companions_visibility #prime_sig {
@@ -925,7 +925,18 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    // UX-1: emit a guard macro invocation for async fns so that a missing
+    // `async` feature produces a clear `compile_error!` rather than an obscure
+    // "cannot find `async_sync`" error. The proc-macro cannot inspect downstream
+    // feature flags, so we always emit the invocation and let the macro decide.
+    let async_feature_guard = if asyncness.is_some() {
+        quote! { #krate::__require_async_feature!{} }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
+        #async_feature_guard
         // Cached static (module scope unless `in_impl`)
         #module_static
         // Inner origin fn as a sibling impl method (only when `in_impl`)

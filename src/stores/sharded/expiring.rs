@@ -856,6 +856,43 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_expired_counts_eviction_without_callback() {
+        // Pins that the evictions counter increments when overwriting an expired entry
+        // even when no on_evict callback is configured.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1,
+            Val {
+                v: 1,
+                expired: true,
+            },
+        )
+        .unwrap();
+        let before = c.metrics().evictions.unwrap();
+        assert_eq!(
+            SyncConcurrentCached::cache_set(
+                &c,
+                1,
+                Val {
+                    v: 2,
+                    expired: false
+                }
+            )
+            .unwrap()
+            .map(|v| v.v),
+            None
+        );
+        assert_eq!(
+            c.metrics().evictions.unwrap(),
+            before + 1,
+            "evictions must increment by 1 on expired-entry overwrite even without on_evict"
+        );
+    }
+
+    #[test]
     fn new_returns_ready_cache() {
         let c = ShardedExpiringCache::<u32, Val>::new();
         assert_eq!(
