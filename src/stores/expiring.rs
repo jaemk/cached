@@ -369,11 +369,20 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
                     occupied.into_mut()
                 } else {
                     self.misses.fetch_add(1, Ordering::Relaxed);
-                    let old = occupied.insert(f());
+                    // Compute the replacement BEFORE firing the eviction side effects.
+                    // If `f()` panics the expired entry is left in place, so firing
+                    // on_evict / counting here would double-fire when the next call
+                    // finally evicts the same physical entry.
+                    //
+                    // Fire on_evict while the old entry is still present in the map
+                    // slot, matching TtlCache ordering (compute value, fire callback,
+                    // then insert). A callback that peeks the cache sees the old value.
+                    let new_val = f();
                     if let Some(on_evict) = &self.on_evict {
-                        on_evict(occupied.key(), &old);
+                        on_evict(occupied.key(), occupied.get());
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
+                    occupied.insert(new_val);
                     occupied.into_mut()
                 }
             }
@@ -396,12 +405,14 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
                     Ok(occupied.into_mut())
                 } else {
                     self.misses.fetch_add(1, Ordering::Relaxed);
+                    // Same ordering fix as cache_get_or_set_with_mut: compute,
+                    // fire on_evict while old entry is still in the map, then insert.
                     let new_val = f()?;
-                    let old = occupied.insert(new_val);
                     if let Some(on_evict) = &self.on_evict {
-                        on_evict(occupied.key(), &old);
+                        on_evict(occupied.key(), occupied.get());
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
+                    occupied.insert(new_val);
                     Ok(occupied.into_mut())
                 }
             }
@@ -554,11 +565,14 @@ where
                         occupied.into_mut()
                     } else {
                         self.misses.fetch_add(1, Ordering::Relaxed);
-                        let old = occupied.insert(f().await);
+                        // Same ordering fix: compute, fire on_evict while old entry
+                        // is still in the map slot, then insert.
+                        let new_val = f().await;
                         if let Some(on_evict) = &self.on_evict {
-                            on_evict(occupied.key(), &old);
+                            on_evict(occupied.key(), occupied.get());
                         }
                         self.evictions.fetch_add(1, Ordering::Relaxed);
+                        occupied.insert(new_val);
                         occupied.into_mut()
                     }
                 }
@@ -590,12 +604,14 @@ where
                         occupied.into_mut()
                     } else {
                         self.misses.fetch_add(1, Ordering::Relaxed);
+                        // Same ordering fix: compute, fire on_evict while old entry
+                        // is still in the map slot, then insert.
                         let new_val = f().await?;
-                        let old = occupied.insert(new_val);
                         if let Some(on_evict) = &self.on_evict {
-                            on_evict(occupied.key(), &old);
+                            on_evict(occupied.key(), occupied.get());
                         }
                         self.evictions.fetch_add(1, Ordering::Relaxed);
+                        occupied.insert(new_val);
                         occupied.into_mut()
                     }
                 }
