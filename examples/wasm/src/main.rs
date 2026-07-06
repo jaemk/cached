@@ -1,8 +1,8 @@
 /*
-`cached` on `wasm32-unknown-unknown`: with the `wasm` feature, `cached::time`
-is backed by `web_time`, so `#[cached]` / `TtlCache` work in the browser. This
-is a standalone workspace crate (its Cargo.toml enables `cached` with
-`wasm,time_stores,proc_macro`), not a `cargo run --example` target.
+`cached` on `wasm32-unknown-unknown`: `cached::time` is backed by `web_time`,
+so `#[cached]` / `TtlCache` work in the browser. This is a standalone workspace
+crate (its Cargo.toml enables `cached` with `proc_macro,async,time_stores`),
+not a `cargo run --example` target.
 
 Build:
     cd examples/wasm && cargo build --target=wasm32-unknown-unknown
@@ -43,7 +43,7 @@ fn app() -> Html {
     html! {
         <>
             <button onclick = {onclick}>{"Fetch Content"}</button><br/>
-            <spam>{"Last clicked: "}{state.date}</spam><br/>
+            <span>{"Last clicked: "}{state.date}</span><br/>
             <div>
                 {if let Some(response) = (*state).content.clone() {
                     response

@@ -1,6 +1,6 @@
 /*
 Async memoization on the async-std runtime: `#[cached]` / `#[once]` on
-`async fn`s (including `ttl_secs` + `result`). Demonstrates the proc macros are
+`async fn`s (including `ttl_secs`). Demonstrates the proc macros are
 runtime-agnostic (the `async` feature; async-std runs `main`).
 
 Run:
@@ -74,7 +74,7 @@ async fn only_cached_once_per_second(s: String) -> Vec<String> {
 
 /// should only cache the _first_ value returned for 2 seconds.
 /// all arguments are ignored for subsequent calls until the
-/// cache expires after a second.
+/// cache expires after 2 seconds.
 /// when multiple un-cached tasks are running concurrently, only
 /// _one_ call will be "executed" and all others will be synchronized
 /// to return the cached result of the one call instead of all
