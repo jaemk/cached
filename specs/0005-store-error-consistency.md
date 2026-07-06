@@ -30,3 +30,7 @@ Status: Implemented
   changes the concrete error types those variants carry. Land them together so redis.rs error
   edits happen once.
 - Migration: mechanical match-arm updates; enums are already `#[non_exhaustive]`.
+- 5.4 refresh: `RedbCacheError::CacheDeserialization` carries a `cached_value: Vec<u8>` field
+  holding the raw bytes that failed to deserialize (`src/stores/redb.rs:724,727`). Any work
+  that adds a custom `Debug` impl (A13) or exposes the field publicly must account for this
+  type.

@@ -22,3 +22,7 @@ Status: Needs research
 - A durable store silently relocating to /tmp is a correctness surprise. Middle ground: an
   explicit `allow_temp_fallback(bool)`.
 - Migration: low; most users pass disk_directory explicitly.
+- 5.4 refresh: the fallback logic already matches on both `PermissionDenied` and
+  `ReadOnlyFilesystem` (`src/stores/redb.rs:272-275`), so a read-only mount also triggers
+  the fallback rather than returning a hard error. The explicitness concern applies equally
+  to both error kinds.
