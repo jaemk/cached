@@ -5,7 +5,22 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Conditional self-heal delete (C6). Redis has no native compare-and-delete, so
+/// the GET-then-DEL self-heal is closed with a Lua script that deletes the key
+/// only if its current value still equals the corrupt bytes we read. This makes
+/// the delete a no-op when a concurrent `SET`/`PSETEX` replaced the entry with a
+/// valid value between our read and the self-heal, so that fresh write is never
+/// lost. `redis::Script` caches the SHA and uses `EVALSHA` with an automatic
+/// `EVAL` fallback on `NOSCRIPT`.
+static SELF_HEAL_CONDITIONAL_DEL: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+         return redis.call('DEL', KEYS[1]) else return 0 end",
+    )
+});
 
 pub struct RedisCacheBuilder<K, V> {
     ttl: Option<Duration>,
@@ -1306,9 +1321,14 @@ where
                 Err(e) if !self.strict_deserialization => {
                     // Self-heal: the stored bytes are corrupt or incompatible with V.
                     // Delete the entry so the caller can recompute on the next call.
-                    let _: () = redis::cmd("DEL")
-                        .arg(&key_str)
-                        .query(&mut *conn)
+                    // Use a conditional Lua delete (C6) that only removes the key
+                    // if its current value still equals the corrupt `bytes` we
+                    // read; a concurrent valid `SET`/`PSETEX` in between is left
+                    // untouched instead of being clobbered by an unconditional DEL.
+                    let _: i64 = SELF_HEAL_CONDITIONAL_DEL
+                        .key(&key_str)
+                        .arg(&bytes)
+                        .invoke(&mut *conn)
                         .map_err(RedisCacheError::redis)?;
                     let _ = e;
                     Ok(None)
@@ -2210,9 +2230,13 @@ mod async_redis {
                 Some(bytes) => match super::deserialize_cached_redis_value(&bytes) {
                     Ok(v) => Ok(Some(v.value)),
                     Err(e) if !self.strict_deserialization => {
-                        let _: () = redis::cmd("DEL")
-                            .arg(&key_str)
-                            .query_async(&mut conn)
+                        // Conditional self-heal delete (C6): only remove the key
+                        // if its current value still equals the corrupt `bytes`
+                        // we read, so a concurrent valid write is never clobbered.
+                        let _: i64 = super::SELF_HEAL_CONDITIONAL_DEL
+                            .key(&key_str)
+                            .arg(&bytes)
+                            .invoke_async(&mut conn)
                             .await
                             .map_err(RedisCacheError::redis)?;
                         let _ = e;

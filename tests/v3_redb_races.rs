@@ -270,6 +270,94 @@ fn remove_expired_entries_does_not_delete_fresh_rewrite() {
     }
 }
 
+// ── Test 6: self-heal does not delete a concurrent valid write ───────────────
+//
+// Bug (C5): on a deserialization failure in non-strict mode, disk_cache_get read
+// the corrupt entry under a read txn, dropped it, then opened a fresh write txn
+// and blindly `table.remove(key)`d it. A concurrent `cache_set` that committed a
+// valid value between the read txn and the self-heal write txn was silently
+// deleted.
+//
+// Fix: the self-heal write txn re-reads the entry and re-validates it; it only
+// removes the key when it is STILL corrupt. A freshly-written valid value is
+// kept and returned.
+//
+// Corrupt fixture: an entry written by a `RedbCache<u32, String>` handle stores a
+// MessagePack string in the value position. Reopening the same on-disk table as a
+// `RedbCache<u32, u32>` cannot decode that string as a `u32`, so `cache_get`
+// takes the non-strict self-heal path. redb takes an exclusive file lock, so the
+// injector handle is dropped before the reader/writer handle opens.
+//
+// Reliability: a `Barrier` releases the self-healing reader and the fresh writer
+// simultaneously. Roughly half the time the reader's MVCC read txn opens before
+// the writer commits (seeing the corrupt snapshot) while the writer commits
+// before the reader's write txn (write txns serialise). That ordering is the
+// race; over ROUNDS rounds it manifests with probability ~ 1 - 0.5^ROUNDS.
+#[test]
+fn self_heal_does_not_delete_concurrent_write() {
+    const ROUNDS: usize = 120;
+    let dir = TempDir::new().unwrap();
+
+    for round in 0..ROUNDS {
+        // Inject a corrupt entry for key=1 by writing an incompatible value type
+        // to the same table, then dropping that handle to release the file lock.
+        {
+            let corrupt = RedbCache::<u32, String>::builder()
+                .name("self-heal-race")
+                .disk_directory(dir.path())
+                .durable(true)
+                .build()
+                .expect("corrupt-injector build");
+            corrupt.cache_set(1, "not-a-u32".to_string()).unwrap();
+        }
+
+        // Reopen as <u32, u32>; the stored String bytes fail to decode as u32,
+        // driving cache_get down the non-strict self-heal path.
+        let cache: Arc<RedbCache<u32, u32>> = Arc::new(
+            RedbCache::<u32, u32>::builder()
+                .name("self-heal-race")
+                .disk_directory(dir.path())
+                .durable(false)
+                .build()
+                .expect("reader build"),
+        );
+
+        let gate = Arc::new(Barrier::new(2));
+
+        let cr = cache.clone();
+        let gr = gate.clone();
+        let reader = std::thread::spawn(move || {
+            gr.wait();
+            let _ = cr.cache_get(&1); // self-heal path
+        });
+
+        let cw = cache.clone();
+        let gw = gate.clone();
+        let writer = std::thread::spawn(move || {
+            gw.wait();
+            cw.cache_set(1, 42)
+        });
+
+        reader.join().unwrap();
+        writer.join().unwrap().unwrap();
+
+        // The writer committed a valid value. Pre-fix, the reader's self-heal
+        // write txn blindly removed key=1, deleting that fresh write (None).
+        // Post-fix, the self-heal re-reads under the write txn, sees the valid
+        // value, and keeps it.
+        let got = cache.cache_get(&1).unwrap();
+        assert_eq!(
+            got,
+            Some(42),
+            "round {round}: self-heal deleted the concurrent valid write; \
+             expected Some(42), got {got:?}"
+        );
+
+        // Drop the cache handle so the next round's injector can take the lock.
+        drop(Arc::try_unwrap(cache).ok());
+    }
+}
+
 // ── Test 4: remove_expired_entries returns an accurate count ─────────────────
 //
 // The pre-fix code returns expired_keys.len() — the scan count — regardless of

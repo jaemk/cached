@@ -146,9 +146,14 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedUnboundCacheBase<
             .map(|i| {
                 let guard = self.inner.shards[i].lock.read();
                 let store_copy = guard.clone();
-                drop(guard);
+                // Load the hit/miss atomics while still holding the shard read
+                // lock, matching ShardedLruCache::deep_clone (src/stores/sharded/
+                // lru.rs): dropping the guard first would let a concurrent writer
+                // mutate the entries and bump the counters in between, pairing a
+                // stale entry snapshot with newer metrics (C7).
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);
                 let misses = self.inner.shards[i].misses.load(Ordering::Relaxed);
+                drop(guard);
                 let shard = Shard {
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),

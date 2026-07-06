@@ -856,15 +856,46 @@ where
     let cached: CachedDiskValue<V> = match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_bytes) {
         Ok(v) => v,
         Err(e) if !strict => {
-            // D2: self-heal — delete the corrupt entry and return a cache miss.
+            // D2/C5: self-heal. The entry read under the (now-dropped) read txn
+            // failed to decode. Do NOT blindly delete it: a concurrent
+            // `cache_set` may have committed a valid value between our read txn
+            // and now, and a blind remove would silently drop that fresh write.
+            //
+            // Instead re-read the entry under the write txn and re-validate.
+            // redb serialises write transactions, so this check-and-mutate is
+            // atomic against any concurrent writer (mirrors the refresh/expiry
+            // re-read at the mutation path below). Only delete if the entry is
+            // *still* corrupt; if it now decodes, adopt the fresh value and fall
+            // through to the normal TTL handling.
             let wtxn = begin_write(connection, durable)?;
-            {
+            let healed: Result<Option<CachedDiskValue<V>>, RedbCacheError> = {
                 let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
-                table.remove(key).map_err(RedbCacheError::storage)?;
-            }
+                // guard is dropped after .map(); table can be mutated below.
+                let current_bytes: Option<Vec<u8>> = table
+                    .get(key)
+                    .map_err(RedbCacheError::storage)?
+                    .map(|guard| guard.value().to_vec());
+                match current_bytes {
+                    // Entry vanished (concurrent remove/clear): nothing to heal.
+                    None => Ok(None),
+                    Some(bytes) => match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                        // A concurrent writer stored a valid value; keep it.
+                        Ok(v) => Ok(Some(v)),
+                        // Still corrupt under the write txn: evict it.
+                        Err(_) => {
+                            table.remove(key).map_err(RedbCacheError::storage)?;
+                            Ok(None)
+                        }
+                    },
+                }
+            };
+            let healed = healed?;
             wtxn.commit().map_err(RedbCacheError::storage)?;
             let _ = e;
-            return Ok(None);
+            match healed {
+                None => return Ok(None),
+                Some(v) => v,
+            }
         }
         Err(e) => return Err(RedbCacheError::deserialization(e, raw_bytes)),
     };
