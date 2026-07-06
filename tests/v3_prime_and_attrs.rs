@@ -11,7 +11,7 @@ Regression tests for the phase-2 macro fixes:
 
 #![cfg(feature = "proc_macro")]
 
-use cached::macros::{cached, once};
+use cached::macros::{cached, concurrent_cached, once};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -267,4 +267,86 @@ fn allow_reaches_no_cache(n: u32) -> u32 {
 #[test]
 fn allow_reaches_no_cache_runs() {
     assert_eq!(allow_reaches_no_cache(3), 3);
+}
+
+// ── BUG-3: lint attrs must reach the `#[once]` prime companion ───────────────
+// Before the fix, `{fn}_prime_cache` was emitted with only `#(#static_cfg_attrs)*`
+// (cfg/cfg_attr only), so `#[allow(clippy::needless_return)]` was NOT forwarded to
+// the prime companion. The nested `_no_cache` inner fn inside the prime companion
+// has `return n;` in its body. Under `cargo clippy -- -D warnings` (CI's
+// `check/clippy`) the lint fires on the inner fn, which the outer prime companion's
+// `#[allow]` cannot suppress if the allow is absent. After the fix the companion
+// uses `#(#no_cache_attrs)*` and forwards the allow, suppressing the lint.
+
+#[once]
+#[allow(clippy::needless_return)]
+fn once_allow_reaches_prime_companion(n: u32) -> u32 {
+    return n;
+}
+
+#[test]
+fn once_allow_reaches_prime_companion_compiles_and_runs() {
+    assert_eq!(once_allow_reaches_prime_companion(7), 7);
+    // Calling the prime companion verifies it was generated with the correct attrs.
+    assert_eq!(once_allow_reaches_prime_companion_prime_cache(7), 7);
+}
+
+// ── BUG-3: lint attrs must reach the `#[concurrent_cached]` prime companion ──
+// Same root cause: before the fix the prime companion used `#(#static_cfg_attrs)*`.
+
+#[concurrent_cached]
+#[allow(clippy::needless_return)]
+fn concurrent_allow_reaches_prime_companion(n: u32) -> u32 {
+    return n;
+}
+
+#[test]
+fn concurrent_allow_reaches_prime_companion_compiles_and_runs() {
+    assert_eq!(concurrent_allow_reaches_prime_companion(7), 7);
+    // Calling the prime companion verifies it was generated with the correct attrs.
+    assert_eq!(concurrent_allow_reaches_prime_companion_prime_cache(7), 7);
+}
+
+// ── UX-1 (async no-op): the guard expands to nothing under the `async` feature ──
+// All three proc macros emit `cached::__require_async_feature!{}` for an async fn.
+// With `async` enabled that macro is a no-op, so an async cached fn must compile and
+// behave normally. The existing async positives in `v3_macros.rs` cover the `in_impl`
+// path for all three; these cover the free-function path for `#[once]` and
+// `#[concurrent_cached]` (the free-fn async path emits the module-scope static and the
+// prime companion, which the `in_impl` tests do not exercise) and confirm the prime
+// companion also works under `async`. The `#[cached]` free-fn async no-op is already
+// covered by `slow_cached_async` above.
+
+#[cfg(feature = "async")]
+#[once]
+async fn async_once_guard_noop(x: u64) -> u64 {
+    x
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_once_free_fn_compiles_and_caches_under_async_feature() {
+    // First produced value is cached and shared across all later callers.
+    assert_eq!(async_once_guard_noop(1).await, 1);
+    assert_eq!(async_once_guard_noop(2).await, 1);
+    // The prime companion is generated on the async free-fn path and overwrites the
+    // single shared value; a later read serves it.
+    assert_eq!(async_once_guard_noop_prime_cache(9).await, 9);
+    assert_eq!(async_once_guard_noop(3).await, 9);
+}
+
+#[cfg(feature = "async")]
+#[concurrent_cached]
+async fn async_concurrent_guard_noop(x: u64) -> u64 {
+    x * 10
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_concurrent_free_fn_compiles_and_caches_under_async_feature() {
+    assert_eq!(async_concurrent_guard_noop(3).await, 30);
+    assert_eq!(async_concurrent_guard_noop(3).await, 30);
+    // Prime a distinct key, then read it back from the cache.
+    assert_eq!(async_concurrent_guard_noop_prime_cache(4).await, 40);
+    assert_eq!(async_concurrent_guard_noop(4).await, 40);
 }

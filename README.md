@@ -84,7 +84,7 @@ the `async_` prefix already prevents collisions with the sync methods.
 - `proc_macro`: Include proc macros
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async_core`: Include runtime-agnostic async traits used by async cache stores
-- `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency; uses `async-lock` and `blocking`)
+- `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency; uses `async-lock`)
 - `redis_store`: Include Redis cache store
 - `redis_smol`: Include async Redis support using `smol` (no TLS); implies `redis_store` and `async`
 - `redis_smol_native_tls`: `redis_smol` + TLS via `native-tls` (system TLS library)
