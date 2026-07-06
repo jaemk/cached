@@ -643,6 +643,39 @@ mod concurrent_clone_cached_peek {
         assert_eq!(val2, Some(77), "entry must survive the peek");
         assert!(expired2, "entry must still be expired after peek");
     }
+
+    /// `get_with_expiry_status` is the provided ergonomic alias for
+    /// `cache_get_with_expiry_status` (mirroring the single-owner `CloneCached`
+    /// alias): it returns the same `(value, expired)` shape and, unlike the peek
+    /// variant, counts the read (a live entry increments hits).
+    #[test]
+    fn get_with_expiry_status_alias_matches_and_counts() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        ConcurrentCached::cache_set(&cache, 1, 42).expect("infallible");
+
+        let before = cache.metrics();
+
+        // Alias returns the same shape as the underlying method.
+        let via_alias = ConcurrentCloneCached::get_with_expiry_status(&cache, &1);
+        assert_eq!(via_alias, (Some(42), false), "alias returns (value, expired)");
+
+        let (absent, absent_expired) =
+            ConcurrentCloneCached::get_with_expiry_status(&cache, &999);
+        assert_eq!(absent, None);
+        assert!(!absent_expired);
+
+        // Unlike the side-effect-free peek, get_* counts the read: the live hit bumps hits.
+        let after = cache.metrics();
+        assert_eq!(
+            after.hits,
+            before.hits.map(|h| h + 1),
+            "live get must count a hit"
+        );
+    }
 }
 
 #[cfg(feature = "redb_store")]

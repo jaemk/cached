@@ -566,113 +566,12 @@ where
     /// [`ConcurrentCacheEvict::evict`](crate::ConcurrentCacheEvict::evict), which
     /// also return `usize`).
     pub fn remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
-        let ttl = *self.ttl.lock();
-        let strict = self.strict_deserialization;
-
-        // DISK-5: if no TTL is configured, there are no TTL-based expirations.
-        let Some(ttl) = ttl else {
-            return Ok(0);
-        };
-
-        // Collect candidate expired keys under a read transaction. We cannot
-        // iterate and remove entries in the same transaction because the
-        // iterator borrows the read txn for its entire lifetime.
-        let mut expired_keys: Vec<String> = Vec::new();
-        {
-            let now = SystemTime::now();
-            let rtxn = self
-                .connection
-                .begin_read()
-                .map_err(RedbCacheError::storage)?;
-            let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
-            for item in table.iter().map_err(RedbCacheError::storage)? {
-                let (key, value) = item.map_err(RedbCacheError::storage)?;
-                let raw = value.value();
-                let raw_vec = raw.to_vec();
-                match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_vec) {
-                    Ok(cached) => {
-                        if now
-                            .duration_since(cached.created_at)
-                            .unwrap_or(Duration::from_secs(0))
-                            >= ttl
-                        {
-                            expired_keys.push(key.value().to_string());
-                        }
-                    }
-                    Err(e) if !strict => {
-                        // D2: undecodable entry is treated as an eviction candidate.
-                        expired_keys.push(key.value().to_string());
-                        let _ = e;
-                    }
-                    Err(e) => {
-                        return Err(RedbCacheError::deserialization(e, raw_vec));
-                    }
-                }
-            }
-        }
-
-        if expired_keys.is_empty() {
-            return Ok(0);
-        }
-
-        // Re-check each candidate key inside the write txn before removing it.
-        // A concurrent `cache_set` may have replaced one of these entries with a
-        // fresh value between the read scan above and now; skipping such entries
-        // ensures we never delete a live entry. The returned count reflects the
-        // number of entries *actually* removed, not the number found in the scan.
-        let mut removed = 0usize;
-        let now_write = SystemTime::now();
-        let wtxn = begin_write(&self.connection, self.durable)?;
-        {
-            let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
-            for key in &expired_keys {
-                // Re-read the entry under the write txn to obtain the
-                // authoritative state. Drop the access guard before mutating
-                // the table.
-                // guard is dropped after .map(); table can be mutated below.
-                let raw_bytes: Option<Vec<u8>> = table
-                    .get(key.as_str())
-                    .map_err(RedbCacheError::storage)?
-                    .map(|guard| guard.value().to_vec());
-
-                match raw_bytes {
-                    None => {
-                        // Already removed by a concurrent operation; skip.
-                    }
-                    Some(bytes) => {
-                        match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
-                            Ok(entry) => {
-                                if now_write
-                                    .duration_since(entry.created_at)
-                                    .unwrap_or(Duration::from_secs(0))
-                                    >= ttl
-                                {
-                                    table
-                                        .remove(key.as_str())
-                                        .map_err(RedbCacheError::storage)?;
-                                    removed += 1;
-                                }
-                                // else: entry was rewritten with a fresh timestamp by a
-                                // concurrent writer; leave it in place.
-                            }
-                            Err(e) if !strict => {
-                                // D2: corrupt under write txn too — evict it.
-                                table
-                                    .remove(key.as_str())
-                                    .map_err(RedbCacheError::storage)?;
-                                removed += 1;
-                                let _ = e;
-                            }
-                            Err(e) => {
-                                return Err(RedbCacheError::deserialization(e, bytes));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        wtxn.commit().map_err(RedbCacheError::storage)?;
-        Ok(removed)
+        remove_expired_entries_impl::<V>(
+            &self.connection,
+            *self.ttl.lock(),
+            self.strict_deserialization,
+            self.durable,
+        )
     }
 
     /// Force a durable (fsync) commit, persisting any writes made while
@@ -691,10 +590,13 @@ where
     }
 }
 
-/// Async counterpart of [`RedbCache::flush`].
+/// Async counterparts of the blocking `RedbCache` maintenance methods.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-impl<K, V> RedbCache<K, V> {
+impl<K, V> RedbCache<K, V>
+where
+    V: Serialize + DeserializeOwned + Send + 'static,
+{
     /// Async counterpart of [`flush`](RedbCache::flush): runs the durable (fsync)
     /// commit on a background thread (via the [`blocking`] crate) so it does not
     /// stall the async runtime.
@@ -702,10 +604,24 @@ impl<K, V> RedbCache<K, V> {
         let connection = self.connection.clone();
         blocking::unblock(move || redb_flush(&connection)).await
     }
+
+    /// Async counterpart of [`remove_expired_entries`](RedbCache::remove_expired_entries):
+    /// runs the O(n) TTL sweep on a background thread (via the [`blocking`] crate)
+    /// so it does not stall the async runtime. Returns the number of entries removed.
+    pub async fn async_remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
+        let connection = self.connection.clone();
+        let ttl = *self.ttl.lock();
+        let strict = self.strict_deserialization;
+        let durable = self.durable;
+        blocking::unblock(move || {
+            remove_expired_entries_impl::<V>(&connection, ttl, strict, durable)
+        })
+        .await
+    }
 }
 
 #[non_exhaustive]
-#[derive(Error, Debug)]
+#[derive(Error)]
 pub enum RedbCacheError {
     /// A redb storage or transaction error.
     ///
@@ -739,6 +655,34 @@ pub enum RedbCacheError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+}
+
+// Manual `Debug` that redacts the raw `cached_value` bytes (they may carry
+// sensitive application data read from disk) as `<N bytes redacted>`, so a `{:?}`
+// of the error never leaks the payload.
+impl std::fmt::Debug for RedbCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage { source } => {
+                f.debug_struct("Storage").field("source", source).finish()
+            }
+            Self::CacheDeserialization {
+                source,
+                cached_value,
+            } => f
+                .debug_struct("CacheDeserialization")
+                .field("source", source)
+                .field(
+                    "cached_value",
+                    &format_args!("<{} bytes redacted>", cached_value.len()),
+                )
+                .finish(),
+            Self::CacheSerialization { source } => f
+                .debug_struct("CacheSerialization")
+                .field("source", source)
+                .finish(),
+        }
+    }
 }
 
 impl RedbCacheError {
@@ -1163,6 +1107,122 @@ fn redb_flush(connection: &Database) -> Result<(), RedbCacheError> {
         .map_err(RedbCacheError::storage)?;
     wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(())
+}
+
+/// Shared implementation of [`RedbCache::remove_expired_entries`]. Kept as a free
+/// function so both the synchronous method and the async
+/// [`RedbCache::async_remove_expired_entries`] (which runs it via
+/// [`blocking::unblock`]) share one source of truth for the sweep behavior.
+fn remove_expired_entries_impl<V>(
+    connection: &Database,
+    ttl: Option<Duration>,
+    strict: bool,
+    durable: bool,
+) -> Result<usize, RedbCacheError>
+where
+    V: Serialize + DeserializeOwned,
+{
+    // DISK-5: if no TTL is configured, there are no TTL-based expirations.
+    let Some(ttl) = ttl else {
+        return Ok(0);
+    };
+
+    // Collect candidate expired keys under a read transaction. We cannot
+    // iterate and remove entries in the same transaction because the
+    // iterator borrows the read txn for its entire lifetime.
+    let mut expired_keys: Vec<String> = Vec::new();
+    {
+        let now = SystemTime::now();
+        let rtxn = connection.begin_read().map_err(RedbCacheError::storage)?;
+        let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        for item in table.iter().map_err(RedbCacheError::storage)? {
+            let (key, value) = item.map_err(RedbCacheError::storage)?;
+            let raw = value.value();
+            let raw_vec = raw.to_vec();
+            match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_vec) {
+                Ok(cached) => {
+                    if now
+                        .duration_since(cached.created_at)
+                        .unwrap_or(Duration::from_secs(0))
+                        >= ttl
+                    {
+                        expired_keys.push(key.value().to_string());
+                    }
+                }
+                Err(e) if !strict => {
+                    // D2: undecodable entry is treated as an eviction candidate.
+                    expired_keys.push(key.value().to_string());
+                    let _ = e;
+                }
+                Err(e) => {
+                    return Err(RedbCacheError::deserialization(e, raw_vec));
+                }
+            }
+        }
+    }
+
+    if expired_keys.is_empty() {
+        return Ok(0);
+    }
+
+    // Re-check each candidate key inside the write txn before removing it.
+    // A concurrent `cache_set` may have replaced one of these entries with a
+    // fresh value between the read scan above and now; skipping such entries
+    // ensures we never delete a live entry. The returned count reflects the
+    // number of entries *actually* removed, not the number found in the scan.
+    let mut removed = 0usize;
+    let now_write = SystemTime::now();
+    let wtxn = begin_write(connection, durable)?;
+    {
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        for key in &expired_keys {
+            // Re-read the entry under the write txn to obtain the
+            // authoritative state. Drop the access guard before mutating
+            // the table.
+            // guard is dropped after .map(); table can be mutated below.
+            let raw_bytes: Option<Vec<u8>> = table
+                .get(key.as_str())
+                .map_err(RedbCacheError::storage)?
+                .map(|guard| guard.value().to_vec());
+
+            match raw_bytes {
+                None => {
+                    // Already removed by a concurrent operation; skip.
+                }
+                Some(bytes) => {
+                    match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                        Ok(entry) => {
+                            if now_write
+                                .duration_since(entry.created_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                >= ttl
+                            {
+                                table
+                                    .remove(key.as_str())
+                                    .map_err(RedbCacheError::storage)?;
+                                removed += 1;
+                            }
+                            // else: entry was rewritten with a fresh timestamp by a
+                            // concurrent writer; leave it in place.
+                        }
+                        Err(e) if !strict => {
+                            // D2: corrupt under write txn too — evict it.
+                            table
+                                .remove(key.as_str())
+                                .map_err(RedbCacheError::storage)?;
+                            removed += 1;
+                            let _ = e;
+                        }
+                        Err(e) => {
+                            return Err(RedbCacheError::deserialization(e, bytes));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    wtxn.commit().map_err(RedbCacheError::storage)?;
+    Ok(removed)
 }
 
 /// Behavior on a corrupt stored value (one whose bytes fail to deserialize):

@@ -675,10 +675,12 @@ pub enum RedisCacheBuildError {
     /// `create_pool` / `create_multiplexed_connection` for details.
     #[error("redis connection error")]
     Connection {
+        #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     #[error("redis pool error")]
     Pool {
+        #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     #[error(transparent)]
@@ -1134,7 +1136,7 @@ where
 /// rather than downcast-inspecting the source. Use [`is_deserialization`](Self::is_deserialization)
 /// as a stable classifier when you only need to distinguish decode failures.
 #[non_exhaustive]
-#[derive(Error, Debug)]
+#[derive(Error)]
 pub enum RedisCacheError {
     #[error("redis error")]
     Redis {
@@ -1158,6 +1160,33 @@ pub enum RedisCacheError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+}
+
+// Manual `Debug` that redacts the raw `cached_value` bytes (they may carry
+// sensitive application data) as `<N bytes redacted>` instead of printing them,
+// so a `{:?}` of the error never leaks the payload.
+impl std::fmt::Debug for RedisCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Redis { source } => f.debug_struct("Redis").field("source", source).finish(),
+            Self::Pool { source } => f.debug_struct("Pool").field("source", source).finish(),
+            Self::CacheDeserialization {
+                source,
+                cached_value,
+            } => f
+                .debug_struct("CacheDeserialization")
+                .field("source", source)
+                .field(
+                    "cached_value",
+                    &format_args!("<{} bytes redacted>", cached_value.len()),
+                )
+                .finish(),
+            Self::CacheSerialization { source } => f
+                .debug_struct("CacheSerialization")
+                .field("source", source)
+                .finish(),
+        }
+    }
 }
 
 impl RedisCacheError {

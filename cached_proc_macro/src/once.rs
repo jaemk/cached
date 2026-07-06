@@ -869,10 +869,17 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     // make cached static, cached function and prime cached function doc comments
     let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
     let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
-    let cache_fn_doc_extra = format!(
-        "This is a cached function that uses the [`{}`] cached static.",
-        cache_ident
-    );
+    // When `in_impl`, the cache static is function-local (not a module-scope item),
+    // so an intra-doc link to it would be dead; describe it plainly instead.
+    let cache_fn_doc_extra = if args.in_impl {
+        "This is a cached method; its cache static is function-local to the method body."
+            .to_string()
+    } else {
+        format!(
+            "This is a cached function that uses the [`{}`] cached static.",
+            cache_ident
+        )
+    };
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
     // put it all together

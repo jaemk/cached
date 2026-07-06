@@ -6,9 +6,12 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{Ident, ItemFn, ReturnType, Type, parse_macro_input, parse_str};
 
-#[derive(Debug, Default, Eq, PartialEq)]
+// No `Default` derive: `sync_lock` is an `Option<SyncLock>` and an unspecified
+// lock resolves to `RwLock` in the store cascade (see `use_rwlock` below), not to
+// any `SyncLock::default()`. A derived default here would be dead and, worse,
+// contradict that resolution (it would name `Mutex`).
+#[derive(Debug, Eq, PartialEq)]
 enum SyncLock {
-    #[default]
     Mutex,
     RwLock,
 }
@@ -827,9 +830,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     if args.unsync_reads && args.ty.is_none() && (args.max_size.is_some() || has_ttl) {
         return syn::Error::new(
             fn_ident.span(),
-            "`unsync_reads` requires a store that implements `CachedRead` (no mutation on reads). \
-             `LruCache` and `LruTtlCache` update LRU recency on reads; `TtlCache` may refresh TTL. \
-             Use the default store (UnboundCache), `TtlSortedCache`, or a custom `ty` that implements `CachedRead`.",
+            "`unsync_reads` requires a store that implements `CachedRead` (reads take a shared \
+             lock, so they must not mutate the store). `LruCache`, `LruTtlCache`, and `TtlCache` \
+             do not implement `CachedRead` (their reads update LRU recency or TTL bookkeeping). \
+             Use the default store (`UnboundCache`), `TtlSortedCache`, or a custom `ty` that \
+             implements `CachedRead`.",
         )
         .to_compile_error()
         .into();
@@ -1282,9 +1287,30 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // Emit a guard for the time-based stores (`expires` -> ExpiringCache/
+    // ExpiringLruCache, a `ttl` -> TtlCache/LruTtlCache) so a missing
+    // `time_stores` feature produces a clear `compile_error!` rather than an
+    // obscure "cannot find `TtlCache` in `cached`". Custom `ty`/`create` stores
+    // opt out (the user supplies the type).
+    let time_stores_guard = if (args.expires || has_ttl) && args.ty.is_none() {
+        quote! { #krate::__require_time_stores_feature!{} }
+    } else {
+        quote! {}
+    };
+
+    // `CloneCached` is only needed by the `result_fallback` codegen (it calls
+    // `cache_get_with_expiry_status`); import it conditionally so it is not a dead
+    // `use` in every other expansion.
+    let clone_cached_import = if args.result_fallback {
+        quote! { use #krate::CloneCached; }
+    } else {
+        quote! {}
+    };
+
     // put it all together
     let expanded = quote! {
         #async_feature_guard
+        #time_stores_guard
         // Cached static (module scope unless `in_impl`)
         #module_static
         // No cache function (origin of the cached function)
@@ -1296,7 +1322,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         #visibility #signature_no_muts {
             #body_static
             use #krate::Cached;
-            use #krate::CloneCached;
+            #clone_cached_import
             let __cached_key = #key_convert_block;
             #do_set_return_block
         }
