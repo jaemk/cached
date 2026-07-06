@@ -14,9 +14,6 @@ rust-version = "1.89"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[lints]
-workspace = true
-
 [lib]
 proc-macro = true
 

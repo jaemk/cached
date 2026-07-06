@@ -95,6 +95,11 @@ DOCKER_REDIS_CONTAINER_LOCAL_PORT     = 6399
 # Exported variables
 export CACHED_REDIS_CONNECTION_STRING = redis://127.0.0.1:$(DOCKER_REDIS_CONTAINER_LOCAL_PORT)
 export RUST_BACKTRACE                 = 1
+# Elevate compiler warnings to errors for local builds/tests/CI. The published
+# crate no longer ships a `[lints]` table (it would break downstream builds on a
+# future toolchain warning); enforcement lives here instead. cargo caps lints on
+# registry dependencies, so this only denies warnings in this workspace's crates.
+export RUSTFLAGS                      = -D warnings
 
 ################################################################################
 # GitHub Actions goal. Run this to test your changes before submitting your final
