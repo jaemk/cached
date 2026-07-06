@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.4 / cached_proc_macro 3.0.0-rc.4 / cached_proc_macro_types 3.0.0-rc.4] - 2026-07-05
+
+> Changes since rc.3, all non-breaking. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md).
+
+### Fixed
+- `TtlCache::cache_get_or_set_with_mut` and its async twin now run the value factory before firing the `on_evict` callback and counting the eviction on the expired-entry path. A panicking factory (sync) or a dropped/cancelled future (async) no longer leaves the expired entry in place with the callback already fired, which previously double-fired on the next access.
+- `RedisCache::cache_remove` / `AsyncRedisCache::async_cache_remove` honor `strict_deserialization`. An undecodable displaced value is discarded and the call returns `Ok(None)` in the default mode (the entry is still removed); it returns `Err(CacheDeserialization)` only under `strict_deserialization(true)`, matching `cache_get` and `RedbCache::cache_remove`.
+- `#[once]` and `#[concurrent_cached]` forward user lint attributes (for example `#[allow(...)]`) to the generated `*_prime_cache` companion, matching `#[cached]`.
+
+### Added
+- `#[cached]` / `#[once]` / `#[concurrent_cached]` on an `async fn` built without the `async` feature now fail with an error naming the missing feature instead of an error pointing at an internal module.
+- `#[doc(alias)]` entries mapping the 2.x store names to their 3.0 types (`SizedCache` -> `LruCache`, `TimedCache` -> `TtlCache`, `TimedSizedCache` -> `LruTtlCache`) for docs.rs search.
+
+### Packaging
+- The published crate manifests no longer carry a `[lints]` table. A future-toolchain warning firing in `cached` can no longer break downstream builds; warning enforcement moved to the workspace dev tooling.
+- `specs/`, `local/`, `.cursorrules`, and `Makefile` are excluded from the published package.
+
+### Documentation
+- Migration guide: describe the boxed `Box<dyn std::error::Error + Send + Sync>` error sources and how to inspect them, rewrite the redis capability/runtime feature notes, add the `ShardedLruTtlCacheBuilder` type-parameter reorder, and correct the no-arg builder examples and stale `DiskCache` references.
+- Correct the `async` feature docs (`blocking` moved to `redb_store`), the `ConcurrentCachedAsync` provided-method list, the sharded `set_ttl` `refresh_on_hit` caveat, and several changelog and AGENTS.md notes.
+
 ## [3.0.0-rc.3 / cached_proc_macro 3.0.0-rc.3 / cached_proc_macro_types 3.0.0-rc.3] - 2026-07-05
 
 > Changes since rc.2. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md); the rc.1 and rc.2 sections below record the earlier 3.0 candidates. Note the `sync_writes` default reverted since the release candidates: see "`sync_writes` default reverted to no synchronization" below.
