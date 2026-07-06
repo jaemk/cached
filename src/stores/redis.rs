@@ -1497,34 +1497,35 @@ where
     K: Display + Clone,
     V: Serialize + DeserializeOwned,
 {
-    /// Serializes from the borrowed `val` (no clone) and `SET`s it, returning the
-    /// previous value if any. Equivalent to [`ConcurrentCached::cache_set`] but
-    /// avoids taking ownership of `val`.
-    fn cache_set_ref(&self, key: &K, val: &V) -> Result<Option<V>, RedisCacheError> {
+    /// Serializes from the borrowed `val` (no clone) and `SET`s it. Equivalent to
+    /// [`ConcurrentCached::cache_set`] but avoids taking ownership of `val` and does
+    /// not read back the previous value, so the write is a single round-trip
+    /// (no GET). Call [`ConcurrentCached::cache_get`] first if you need the prior value.
+    fn cache_set_ref(&self, key: &K, val: &V) -> Result<(), RedisCacheError> {
         let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
-        let mut pipe = redis::pipe();
         let key_str = self.generate_key(key);
 
         let ttl = *self.ttl.lock();
 
         let val = CachedRedisValueRef::new(val);
         let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
-        pipe.get(&key_str);
+
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
-            pipe.set::<String, Vec<u8>>(key_str, serialized).ignore();
+            let _: () = redis::cmd("SET")
+                .arg(&key_str)
+                .arg(serialized)
+                .query(&mut *conn)
+                .map_err(RedisCacheError::redis)?;
         } else {
-            pipe.pset_ex::<String, Vec<u8>>(key_str, serialized, ttl_millis(ttl)?)
-                .ignore();
+            let _: () = redis::cmd("PSETEX")
+                .arg(&key_str)
+                .arg(ttl_millis(ttl)?)
+                .arg(serialized)
+                .query(&mut *conn)
+                .map_err(RedisCacheError::redis)?;
         }
-
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
-        // REDIS-10: if the displaced previous value fails to decode, return Ok(None).
-        Ok(res.0.and_then(|bytes| {
-            deserialize_cached_redis_value::<V>(&bytes)
-                .ok()
-                .map(|v| v.value)
-        }))
+        Ok(())
     }
 }
 
@@ -2433,9 +2434,11 @@ mod async_redis {
         K: Display + Clone + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
-        /// Serializes from the borrowed `val` (no clone) and `SET`s it, returning
-        /// the previous value if any. Async counterpart of
+        /// Serializes from the borrowed `val` (no clone) and `SET`s it. Async
+        /// counterpart of
         /// [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref).
+        /// Does not read back the previous value, so the write is a single
+        /// round-trip (no GET).
         ///
         /// Serialization happens eagerly (before the returned future is awaited) so
         /// the borrowed `&V` is never held across the `.await`, keeping the `V: Send`
@@ -2444,7 +2447,7 @@ mod async_redis {
             &self,
             key: &K,
             val: &V,
-        ) -> impl std::future::Future<Output = Result<Option<V>, Self::Error>> + Send {
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
             let mut conn = self.connection.clone();
             let key = self.generate_key(key);
             let ttl = *self.ttl.lock();
@@ -2459,28 +2462,29 @@ mod async_redis {
             let serialized = rmp_serde::to_vec(&CachedRedisValueRef::new(val))
                 .map_err(RedisCacheError::serialization);
             async move {
-                let mut pipe = redis::pipe();
                 let serialized: Vec<u8> = serialized?;
                 let ttl_ms = ttl_ms?;
-                pipe.get(&key);
                 match ttl_ms {
                     // Disabled TTL: write the key without expiry (plain `SET`).
-                    None => pipe.set::<String, Vec<u8>>(key, serialized).ignore(),
-                    Some(ttl_ms) => pipe
-                        .pset_ex::<String, Vec<u8>>(key, serialized, ttl_ms)
-                        .ignore(),
-                };
-
-                let res: (Option<Vec<u8>>,) = pipe
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(RedisCacheError::redis)?;
-                // REDIS-10: if the displaced previous value fails to decode, return Ok(None).
-                Ok(res.0.and_then(|bytes| {
-                    super::deserialize_cached_redis_value::<V>(&bytes)
-                        .ok()
-                        .map(|v| v.value)
-                }))
+                    None => {
+                        let _: () = redis::cmd("SET")
+                            .arg(&key)
+                            .arg(serialized)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(RedisCacheError::redis)?;
+                    }
+                    Some(ttl_ms) => {
+                        let _: () = redis::cmd("PSETEX")
+                            .arg(&key)
+                            .arg(ttl_ms)
+                            .arg(serialized)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(RedisCacheError::redis)?;
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -2792,10 +2796,12 @@ mod async_redis {
             delete_key(&key);
         }
 
-        /// REDIS-10 (async `async_cache_set_ref`): a corrupt displaced previous
-        /// value returns `Ok(None)`; the new value is written from a borrow.
+        /// `async_cache_set_ref` returns `Ok(())` over any pre-existing (even
+        /// corrupt) value: it does not read the previous value back, so an
+        /// undecodable displaced value can never surface as an error. The new value
+        /// is written from a borrow and readable.
         #[tokio::test]
-        async fn async_cache_set_ref_displaced_corrupt_previous_returns_ok_none() {
+        async fn async_cache_set_ref_over_corrupt_previous_returns_ok_unit() {
             use crate::SerializeCachedAsync;
             let prefix = format!("{}:async-redis10-setref", now_millis());
             let key = format!("cached-redis-store:{}:1", prefix);
@@ -2812,11 +2818,7 @@ mod async_redis {
             let result = c.async_cache_set_ref(&1, &val).await;
             assert!(
                 result.is_ok(),
-                "async_cache_set_ref must not error on corrupt displaced value; got: {result:?}"
-            );
-            assert!(
-                result.unwrap().is_none(),
-                "displaced corrupt value must yield Ok(None)"
+                "async_cache_set_ref must not error over a corrupt previous value; got: {result:?}"
             );
             assert_eq!(c.async_cache_get(&1).await.unwrap(), Some(42));
 
@@ -3869,11 +3871,12 @@ mod tests {
         let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
     }
 
-    /// REDIS-10 (sync `cache_set_ref`): a corrupt displaced previous value returns
-    /// `Ok(None)` — the write succeeds and the undecodable old value is discarded,
-    /// never surfaced as an error. The prior REDIS-10 test only covered `cache_set`.
+    /// `cache_set_ref` returns `Ok(())` regardless of any pre-existing (even
+    /// corrupt) value under the key: it does not read the previous value back, so
+    /// an undecodable displaced value can never surface as an error. The new value
+    /// is written and readable.
     #[test]
-    fn cache_set_ref_displaced_corrupt_previous_returns_ok_none() {
+    fn cache_set_ref_over_corrupt_previous_returns_ok_unit() {
         use crate::SerializeCached;
         let mut conn = redis::Client::open("redis://127.0.0.1:6399")
             .unwrap()
@@ -3896,11 +3899,7 @@ mod tests {
         let result = SerializeCached::cache_set_ref(&c, &1, &val);
         assert!(
             result.is_ok(),
-            "cache_set_ref must not error on corrupt displaced value; got: {result:?}"
-        );
-        assert!(
-            result.unwrap().is_none(),
-            "displaced corrupt value must yield Ok(None)"
+            "cache_set_ref must not error over a corrupt previous value; got: {result:?}"
         );
         // The new value was written and is now readable.
         assert_eq!(c.cache_get(&1).unwrap(), Some(42));

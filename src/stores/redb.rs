@@ -1034,6 +1034,27 @@ where
         .map(|cached| cached.value))
 }
 
+/// Insert `serialized` under `key` without reading back the displaced value.
+/// Backs [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref):
+/// the previous `AccessGuard` returned by `insert` is dropped without being
+/// materialized or decoded, saving a byte copy and a deserialize on every write.
+fn disk_cache_set_no_return(
+    connection: &Database,
+    key: &str,
+    serialized: Vec<u8>,
+    durable: bool,
+) -> Result<(), RedbCacheError> {
+    let wtxn = begin_write(connection, durable)?;
+    {
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        table
+            .insert(key, serialized.as_slice())
+            .map_err(RedbCacheError::storage)?;
+    }
+    wtxn.commit().map_err(RedbCacheError::storage)?;
+    Ok(())
+}
+
 fn disk_cache_remove<V>(
     connection: &Database,
     key: &str,
@@ -1269,12 +1290,13 @@ where
     V: Serialize + DeserializeOwned,
 {
     /// Serializes from the borrowed `value` (no clone) and writes it under
-    /// `key.to_string()`, returning the previous value if any. Equivalent to
-    /// [`ConcurrentCached::cache_set`] but avoids taking ownership of `value`.
-    fn cache_set_ref(&self, key: &K, value: &V) -> Result<Option<V>, RedbCacheError> {
+    /// `key.to_string()`. Equivalent to [`ConcurrentCached::cache_set`] but avoids
+    /// taking ownership of `value` and does not read back the previous value.
+    /// Call [`ConcurrentCached::cache_get`] first if you need the prior value.
+    fn cache_set_ref(&self, key: &K, value: &V) -> Result<(), RedbCacheError> {
         let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
             .map_err(RedbCacheError::serialization)?;
-        disk_cache_set(&self.connection, &key.to_string(), serialized, self.durable)
+        disk_cache_set_no_return(&self.connection, &key.to_string(), serialized, self.durable)
     }
 }
 
@@ -1379,6 +1401,7 @@ where
     /// Serializes from the borrowed `value` (no clone) before moving the bytes
     /// onto the background thread. Async counterpart of
     /// [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref).
+    /// Does not read back the previous value.
     ///
     /// Serialization happens eagerly (before the returned future is awaited) so the
     /// borrowed `&V` is never held across the `.await`. This keeps the `V: Send`
@@ -1387,7 +1410,7 @@ where
         &self,
         key: &K,
         value: &V,
-    ) -> impl std::future::Future<Output = Result<Option<V>, RedbCacheError>> + Send {
+    ) -> impl std::future::Future<Output = Result<(), RedbCacheError>> + Send {
         let connection = self.connection.clone();
         let key = key.to_string();
         let durable = self.durable;
@@ -1396,8 +1419,10 @@ where
             .map_err(RedbCacheError::serialization);
         async move {
             let serialized = serialized?;
-            blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable))
-                .await
+            blocking::unblock(move || {
+                disk_cache_set_no_return(&connection, &key, serialized, durable)
+            })
+            .await
         }
     }
 }
@@ -2672,11 +2697,11 @@ mod tests {
 
         let key = TEST_KEY;
         let value = TEST_VAL;
-        // cache_set_ref writes from a borrow; the previous value is None.
+        // cache_set_ref writes from a borrow and returns `()` (no previous value).
         assert_that!(
             crate::SerializeCached::cache_set_ref(&cache, &key, &value),
-            ok(none()),
-            "cache_set_ref on a new key should return None"
+            ok(eq(&())),
+            "cache_set_ref on a new key should return Ok(())"
         );
         // cache_get must return the value that was written via cache_set_ref.
         assert_that!(
@@ -2684,12 +2709,12 @@ mod tests {
             ok(some(eq(&value))),
             "cache_get after cache_set_ref should return the written value"
         );
-        // A second cache_set_ref displaces the first and returns it.
+        // A second cache_set_ref displaces the first; it still returns `()`.
         let value2 = TEST_VAL_1;
         assert_that!(
             crate::SerializeCached::cache_set_ref(&cache, &key, &value2),
-            ok(some(eq(&value))),
-            "cache_set_ref over an existing entry should return the old value"
+            ok(eq(&())),
+            "cache_set_ref over an existing entry should return Ok(())"
         );
         assert_that!(
             cache.cache_get(&key),
@@ -2957,11 +2982,11 @@ mod tests {
 
         let key = TEST_KEY;
         let value = TEST_VAL;
-        // async_cache_set_ref writes from a borrow; the previous value is None.
+        // async_cache_set_ref writes from a borrow and returns `()` (no previous value).
         assert_eq!(
             cache.async_cache_set_ref(&key, &value).await.unwrap(),
-            None,
-            "async_cache_set_ref on a new key should return None"
+            (),
+            "async_cache_set_ref on a new key should return Ok(())"
         );
         // async_cache_get must return the value that was written via async_cache_set_ref.
         use crate::ConcurrentCachedAsync;
@@ -2970,12 +2995,12 @@ mod tests {
             Some(value),
             "async_cache_get after async_cache_set_ref should return the written value"
         );
-        // A second async_cache_set_ref displaces the first.
+        // A second async_cache_set_ref displaces the first; it still returns `()`.
         let value2 = TEST_VAL_1;
         assert_eq!(
             cache.async_cache_set_ref(&key, &value2).await.unwrap(),
-            Some(value),
-            "async_cache_set_ref over an existing entry should return the old value"
+            (),
+            "async_cache_set_ref over an existing entry should return Ok(())"
         );
         assert_eq!(
             cache.async_cache_get(&key).await.unwrap(),

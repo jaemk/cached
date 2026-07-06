@@ -4766,11 +4766,10 @@ mod redis_tests {
             };
 
             // Baseline: a real ttl via set_ref writes with a positive TTL.
-            let prev = cache
+            cache
                 .async_cache_set_ref(&"k_live".to_string(), &"v".to_string())
                 .await
                 .expect("set_ref k_live");
-            assert_eq!(prev, None, "first set_ref must return None");
             assert!(
                 raw_ttl("k_live") > 0,
                 "set_ref under a real ttl must write a positive TTL"
@@ -4778,11 +4777,10 @@ mod redis_tests {
 
             // Disable expiry: set_ref must write the key WITHOUT any expiry.
             ConcurrentCacheTtl::set_ttl(&cache, Duration::ZERO);
-            let prev2 = cache
+            cache
                 .async_cache_set_ref(&"k_persist".to_string(), &"v".to_string())
                 .await
                 .expect("set_ref k_persist");
-            assert_eq!(prev2, None);
             assert_eq!(
                 raw_ttl("k_persist"),
                 -1,
@@ -4796,17 +4794,12 @@ mod redis_tests {
                 Some("v".to_string())
             );
 
-            // Re-arm a real ttl: set_ref resumes writing a TTL, and returns the prior value.
+            // Re-arm a real ttl: set_ref resumes writing a TTL.
             ConcurrentCacheTtl::set_ttl(&cache, Duration::from_secs(30));
-            let prev3 = cache
+            cache
                 .async_cache_set_ref(&"k_persist".to_string(), &"v2".to_string())
                 .await
                 .expect("set_ref k_persist overwrite");
-            assert_eq!(
-                prev3,
-                Some("v".to_string()),
-                "set_ref overwrite must return the previous value"
-            );
             assert!(
                 raw_ttl("k_persist") > 0,
                 "set_ref under a re-enabled ttl must write a positive TTL"
@@ -4993,9 +4986,9 @@ mod redis_tests {
                 ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
                 None
             );
-            assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+            assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
             assert_eq!(
-                ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+                ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
                 None
             );
 
@@ -5007,9 +5000,9 @@ mod redis_tests {
                 ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
                 None
             );
-            assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+            assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
             assert_eq!(
-                ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+                ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
                 None
             );
 
@@ -5091,11 +5084,11 @@ mod redis_tests {
         let val = "ref_val".to_string();
         let val2 = "ref_val_overwrite".to_string();
 
-        // First insert must return None (no previous entry).
-        let prev = cache
+        // cache_set_ref returns `()` (no previous value; dropping it avoids a
+        // read+decode per write on redis).
+        cache
             .cache_set_ref(&key, &val)
             .expect("first cache_set_ref");
-        assert_eq!(prev, None, "first cache_set_ref must return None");
 
         let got = cache.cache_get(&key).expect("cache_get after set_ref");
         assert_eq!(
@@ -5104,15 +5097,10 @@ mod redis_tests {
             "cache_get must return the value written by cache_set_ref"
         );
 
-        // Overwrite with a different value; must return the previous value.
-        let prev2 = cache
+        // Overwrite with a different value; the write still returns `()`.
+        cache
             .cache_set_ref(&key, &val2)
             .expect("second cache_set_ref");
-        assert_eq!(
-            prev2,
-            Some(val),
-            "second cache_set_ref must return the previous value"
-        );
 
         // Overwrite must be visible via cache_get.
         let got2 = cache.cache_get(&key).expect("cache_get after overwrite");
@@ -5387,9 +5375,9 @@ mod redis_tests {
             ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
             None
         );
-        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
         assert_eq!(
-            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
             None,
             "unknown size must map to is_empty == None, not Some(true)"
         );
@@ -5402,9 +5390,9 @@ mod redis_tests {
             ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
             None
         );
-        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
         assert_eq!(
-            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
             None
         );
 

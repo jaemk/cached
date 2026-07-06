@@ -456,23 +456,23 @@ mod concurrent_len_is_empty {
             .expect("build ShardedUnboundCache");
 
         // Empty initially.
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         cache.cache_set(1, 10).unwrap();
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
 
         cache.cache_set(2, 20).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
 
         cache.cache_remove(&1).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
 
         cache.cache_clear().unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 
     /// `len` and `is_empty` on ShardedLruCache.
@@ -483,19 +483,19 @@ mod concurrent_len_is_empty {
             .build()
             .expect("build ShardedLruCache");
 
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         cache.cache_set(42, 99).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
 
         cache.cache_set(43, 100).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
 
         cache.cache_reset().unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -517,25 +517,25 @@ mod concurrent_len_is_empty_async {
             .build()
             .expect("build ShardedUnboundCache");
 
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
 
         ConcurrentCachedAsync::async_cache_clear(&cache)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 
     /// Async `len`/`is_empty` on ShardedTtlCache, exercising the time-bounded store.
@@ -549,8 +549,8 @@ mod concurrent_len_is_empty_async {
             .build()
             .expect("build ShardedTtlCache");
 
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
             .await
@@ -558,14 +558,14 @@ mod concurrent_len_is_empty_async {
         ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
 
         ConcurrentCachedAsync::async_cache_reset(&cache)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -670,21 +670,20 @@ mod redb_serialize_cached {
         let value: String = "hello".to_string();
 
         // Borrowed set: `key` and `value` are still owned by the caller afterward.
-        let prev = cache
+        // cache_set_ref returns `()` (no previous value read back).
+        cache
             .cache_set_ref(&key, &value)
             .expect("cache_set_ref failed");
-        assert_eq!(prev, None);
         assert_eq!(key, 42);
         assert_eq!(value, "hello");
 
         // Read back the value written via the borrowed setter.
         assert_eq!(cache.cache_get(&key).unwrap(), Some("hello".to_string()));
 
-        // Overwriting returns the previous value (proving same storage as cache_set).
-        let prev = cache
+        // Overwriting stores the new value (proving same storage as cache_set).
+        cache
             .cache_set_ref(&key, &"world".to_string())
             .expect("cache_set_ref overwrite failed");
-        assert_eq!(prev, Some("hello".to_string()));
         assert_eq!(cache.cache_get(&key).unwrap(), Some("world".to_string()));
     }
 
@@ -715,10 +714,9 @@ mod redb_serialize_cached {
         let key: u32 = 1;
         let value: String = "expires".to_string();
 
-        let prev = cache
+        cache
             .cache_set_ref(&key, &value)
             .expect("cache_set_ref failed");
-        assert_eq!(prev, None);
 
         // Entry is present immediately after insertion.
         assert_eq!(cache.cache_get(&key).unwrap(), Some("expires".to_string()));
@@ -746,11 +744,10 @@ mod redb_serialize_cached_async {
         let key: u32 = 7;
         let value: String = "async".to_string();
 
-        let prev = cache
+        cache
             .async_cache_set_ref(&key, &value)
             .await
             .expect("async_cache_set_ref failed");
-        assert_eq!(prev, None);
         // Caller still owns the borrowed inputs.
         assert_eq!(key, 7);
         assert_eq!(value, "async");
@@ -761,8 +758,8 @@ mod redb_serialize_cached_async {
         );
     }
 
-    /// Overwriting an existing entry via `async_cache_set_ref` returns the previous value
-    /// and the store reflects the new value on the next read.
+    /// Overwriting an existing entry via `async_cache_set_ref` returns `()` and the
+    /// store reflects the new value on the next read.
     #[tokio::test]
     async fn async_cache_set_ref_overwrite() {
         let dir = TempDir::new().unwrap();
@@ -773,19 +770,17 @@ mod redb_serialize_cached_async {
 
         let key: u32 = 99;
 
-        // First insert: no previous value.
-        let prev = cache
+        // First insert.
+        cache
             .async_cache_set_ref(&key, &"first".to_string())
             .await
             .expect("async_cache_set_ref first failed");
-        assert_eq!(prev, None);
 
-        // Overwrite: previous value is returned.
-        let prev = cache
+        // Overwrite.
+        cache
             .async_cache_set_ref(&key, &"second".to_string())
             .await
             .expect("async_cache_set_ref overwrite failed");
-        assert_eq!(prev, Some("first".to_string()));
 
         // Store reflects the new value.
         assert_eq!(
@@ -1693,10 +1688,9 @@ mod concurrent_trait_split_no_collision {
             .build()
             .expect("build RedbCache");
 
-        // cache_size lives on ConcurrentCacheBase (single impl) -- no E0034.
+        // cache_size / cache_is_empty live on ConcurrentCacheBase (single impl) -- no E0034.
         assert_eq!(cache.cache_size().expect("cache_size"), None);
-        assert_eq!(cache.len().expect("len"), None);
-        assert_eq!(cache.is_empty().expect("is_empty"), None);
+        assert_eq!(cache.cache_is_empty().expect("cache_is_empty"), None);
 
         // set_ttl / ttl / unset_ttl live on ConcurrentCacheTtl -- no E0034 even with
         // both ConcurrentCached and ConcurrentCachedAsync in scope.
@@ -1783,7 +1777,7 @@ mod concurrent_trait_split_no_collision {
     fn non_ttl_sharded_store_base_helpers_resolve() {
         let cache: ShardedUnboundCache<u32, u32> =
             ShardedUnboundCache::builder().build().expect("build");
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
         cache.cache_set(1, 10).expect("infallible");
         assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
     }
@@ -1869,11 +1863,11 @@ mod concurrent_base_unknown_size_defaults {
         );
 
         // len delegates to cache_size -> also None.
-        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
 
         // is_empty maps an unknown size through to None (NOT Some(true)).
         assert_eq!(
-            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
             None
         );
 
@@ -1883,9 +1877,9 @@ mod concurrent_base_unknown_size_defaults {
             ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
             None
         );
-        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
         assert_eq!(
-            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
             None
         );
     }

@@ -65,8 +65,9 @@ implementations only need to implement the `cache_`-prefixed required methods on
 the short aliases come for free via the blanket extension trait impl.
 
 For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCached` stores,
-`len`/`is_empty` are defined on `ConcurrentCacheBase` (the shared base trait), not on
-`ConcurrentCachedExt` — bring `ConcurrentCacheBase` into scope to call them on a generic bound.
+size introspection is `cache_size` and `cache_is_empty` on `ConcurrentCacheBase` (the shared base
+trait), not on `ConcurrentCachedExt`: bring `ConcurrentCacheBase` into scope to call them on a
+generic bound. (The sharded stores keep their inherent infallible `len`/`is_empty` too.)
 
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` mirrors the sync
 `ConcurrentCached` surface (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) for
@@ -1722,7 +1723,7 @@ pub trait CachedGetOrSetAsync<K, V> {
 ///
 /// [`ConcurrentCached`] and [`ConcurrentCachedAsync`] both extend this trait, which owns the
 /// associated [`Error`](Self::Error) type and the cheap introspection methods
-/// ([`cache_size`](Self::cache_size), [`len`](Self::len), [`is_empty`](Self::is_empty),
+/// ([`cache_size`](Self::cache_size), [`cache_is_empty`](Self::cache_is_empty),
 /// [`cache_hits`](Self::cache_hits), [`cache_misses`](Self::cache_misses),
 /// [`cache_capacity`](Self::cache_capacity), [`cache_evictions`](Self::cache_evictions),
 /// and [`metrics`](Self::metrics)). Hoisting these into a single base means a store that
@@ -1764,21 +1765,14 @@ pub trait ConcurrentCacheBase {
         Ok(None)
     }
 
-    /// Ergonomic alias for [`cache_size`](Self::cache_size).
-    ///
-    /// Note: the sharded stores also expose an inherent `len(&self) -> usize`, which
-    /// takes priority at the call site (`store.len()` returns a bare `usize`). To call
-    /// this trait method, use fully-qualified syntax: `ConcurrentCacheBase::len(&store)`.
-    fn len(&self) -> Result<Option<usize>, Self::Error> {
-        self.cache_size()
-    }
-
     /// Return `Ok(Some(true))` if the cache is known to be empty, `Ok(Some(false))` if
     /// known non-empty, or `Ok(None)` if the size is unknown.
     ///
-    /// Note: like [`len`](Self::len), the sharded stores' inherent `is_empty(&self) -> bool`
-    /// takes priority; use `ConcurrentCacheBase::is_empty(&store)` to call this trait method.
-    fn is_empty(&self) -> Result<Option<bool>, Self::Error> {
+    /// This is derived from [`cache_size`](Self::cache_size). Note the sharded stores also
+    /// expose an inherent `is_empty(&self) -> bool`, which takes priority at the call site
+    /// (`store.is_empty()` returns a bare `bool`); use fully-qualified syntax
+    /// `ConcurrentCacheBase::cache_is_empty(&store)` to call this trait method.
+    fn cache_is_empty(&self) -> Result<Option<bool>, Self::Error> {
         Ok(self.cache_size()?.map(|n| n == 0))
     }
 
@@ -2419,15 +2413,20 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
 /// borrowed `&V` with no clone. Without it, the macro takes the owned fallback, which requires
 /// `V: Clone` and clones the value on every set.
 pub trait SerializeCached<K, V>: ConcurrentCached<K, V> {
-    /// Insert a key/value pair, taking both by reference, and return the previous value if any.
+    /// Insert a key/value pair, taking both by reference.
     ///
     /// Semantically equivalent to [`ConcurrentCached::cache_set`] but serializes from the
     /// borrowed `k`/`v` without cloning.
     ///
+    /// Unlike [`ConcurrentCached::cache_set`], this does not return the previous value.
+    /// On IO stores (redis) that would cost an extra read+decode per write; dropping it
+    /// keeps the write path to a single round-trip. If you need the prior value, call
+    /// [`ConcurrentCached::cache_get`] yourself before setting.
+    ///
     /// # Errors
     ///
     /// Returns `Self::Error` if the operation fails.
-    fn cache_set_ref(&self, k: &K, v: &V) -> Result<Option<V>, Self::Error>;
+    fn cache_set_ref(&self, k: &K, v: &V) -> Result<(), Self::Error>;
 }
 
 /// Async borrowed-set extension for serialize-based concurrent stores.
@@ -2444,9 +2443,13 @@ pub trait SerializeCached<K, V>: ConcurrentCached<K, V> {
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 pub trait SerializeCachedAsync<K, V>: ConcurrentCachedAsync<K, V> {
-    /// Insert a key/value pair, taking both by reference, and return the previous value if any.
+    /// Insert a key/value pair, taking both by reference.
     ///
     /// The async counterpart of [`SerializeCached::cache_set_ref`].
+    ///
+    /// Like the sync method, this does not return the previous value (dropping it avoids an
+    /// extra read+decode per write on IO stores); call
+    /// [`ConcurrentCachedAsync::async_cache_get`] yourself if you need the prior value.
     ///
     /// # Errors
     ///
@@ -2455,7 +2458,7 @@ pub trait SerializeCachedAsync<K, V>: ConcurrentCachedAsync<K, V> {
         &self,
         k: &K,
         v: &V,
-    ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 /// Autoref-specialization shim used by the generated `#[concurrent_cached]` set site
@@ -2493,7 +2496,7 @@ pub mod __set_dispatch {
             &self,
             key: K,
             value: &V,
-        ) -> Result<Option<V>, <S as ConcurrentCacheBase>::Error> {
+        ) -> Result<(), <S as ConcurrentCacheBase>::Error> {
             SerializeCached::cache_set_ref(self.store, &key, value)
         }
     }
@@ -2501,7 +2504,7 @@ pub mod __set_dispatch {
     // FALLBACK arm: trait method, reached only when the inherent one is pruned. Requires V: Clone.
     pub trait SetDispatchFallback<K, V> {
         type Error;
-        fn cache_set_dispatch(&self, key: K, value: &V) -> Result<Option<V>, Self::Error>;
+        fn cache_set_dispatch(&self, key: K, value: &V) -> Result<(), Self::Error>;
     }
 
     impl<S, K, V> SetDispatchFallback<K, V> for SetDispatch<'_, S, K, V>
@@ -2511,8 +2514,10 @@ pub mod __set_dispatch {
     {
         type Error = <S as ConcurrentCacheBase>::Error;
         #[inline]
-        fn cache_set_dispatch(&self, key: K, value: &V) -> Result<Option<V>, Self::Error> {
-            ConcurrentCached::cache_set(self.store, key, value.clone())
+        fn cache_set_dispatch(&self, key: K, value: &V) -> Result<(), Self::Error> {
+            // The set site discards the previous value; drop it here so the
+            // borrowed and owned arms share a `Result<(), _>` shape.
+            ConcurrentCached::cache_set(self.store, key, value.clone()).map(|_| ())
         }
     }
 }
@@ -2568,8 +2573,7 @@ pub mod __set_dispatch_async {
             &self,
             key: K,
             value: &V,
-        ) -> impl Future<Output = Result<Option<V>, <S as ConcurrentCacheBase>::Error>> + Send
-        {
+        ) -> impl Future<Output = Result<(), <S as ConcurrentCacheBase>::Error>> + Send {
             let store = self.store;
             async move { SerializeCachedAsync::async_cache_set_ref(store, &key, value).await }
         }
@@ -2583,7 +2587,7 @@ pub mod __set_dispatch_async {
             &self,
             key: K,
             value: &V,
-        ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send;
     }
 
     impl<S, K, V> SetDispatchAsyncFallback<K, V> for SetDispatchAsync<'_, S, K, V>
@@ -2598,10 +2602,12 @@ pub mod __set_dispatch_async {
             &self,
             key: K,
             value: &V,
-        ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send {
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             let v = value.clone();
             let store = self.store;
-            async move { ConcurrentCachedAsync::async_cache_set(store, key, v).await }
+            // The set site discards the previous value; drop it here so both arms
+            // share a `Result<(), _>` shape.
+            async move { ConcurrentCachedAsync::async_cache_set(store, key, v).await.map(|_| ()) }
         }
     }
 }

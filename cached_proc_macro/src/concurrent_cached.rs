@@ -1489,10 +1489,10 @@ fn get_redis_cache_type_and_create(
                 };
                 let refresh = args.refresh;
                 if is_async {
-                    quote! { #krate::AsyncRedisCache::builder().prefix(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                    quote! { #krate::AsyncRedisCache::builder(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                 } else {
                     quote! {
-                        #krate::RedisCache::builder().prefix(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                        #krate::RedisCache::builder(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                     }
                 }
             } else if is_async {
@@ -1551,7 +1551,7 @@ fn get_disk_cache_type_and_create(
         }
         None => {
             let create = quote! {
-                #krate::RedbCache::builder().name(#cache_name)
+                #krate::RedbCache::builder(#cache_name)
             };
             let create = match ttl_duration {
                 None => create,

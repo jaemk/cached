@@ -27,8 +27,7 @@ mod sync_tests {
     use std::sync::{Arc, Barrier};
 
     fn try_build(prefix: &str) -> Option<RedisCache<String, String>> {
-        RedisCache::<String, String>::builder()
-            .prefix(prefix)
+        RedisCache::<String, String>::builder(prefix)
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -138,8 +137,7 @@ mod async_tests {
     use tokio::sync::Barrier;
 
     async fn try_build(prefix: &str) -> Option<AsyncRedisCache<String, String>> {
-        AsyncRedisCache::<String, String>::builder()
-            .prefix(prefix)
+        AsyncRedisCache::<String, String>::builder(prefix)
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
