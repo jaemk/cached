@@ -42,3 +42,13 @@ moves to the changelog and migration guide; the spec stays here for history.
 | [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Needs research |
 | [0025](0025-redb-disk-path-introspection.md) | redb resolved-path introspection + temp fallback | Needs research |
 | [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Needs research |
+| [0027](0027-sync-writes-default-revert.md) | `sync_writes` default flip and revert | Implemented |
+| [0028](0028-per-entry-expiry-and-set-ttl-zero.md) | Per-entry expiry model and `set_ttl(0)` semantics | Implemented |
+| [0029](0029-self-healing-deserialization-default.md) | Self-healing deserialization default | Implemented |
+| [0030](0030-force-refresh-result-fallback-interaction.md) | `force_refresh` and `result_fallback` interaction | Implemented |
+| [0031](0031-redis-backward-read-version-gate.md) | Redis backward-read version gate | Implemented |
+| [0032](0032-cached-async-to-get-or-set-async-rename.md) | `CachedAsync` renamed to `CachedGetOrSetAsync` | Implemented |
+| [0033](0033-redb-revalidate-in-write-txn.md) | redb re-validate-in-write-txn design | Implemented |
+| [0034](0034-prime-companion-body-before-lock.md) | Prime companion runs body before lock | Implemented |
+| [0035](0035-seeded-per-key-lock-bucket-hasher.md) | Seeded per-key lock-bucket hasher | Implemented |
+| [0036](0036-in-impl-static-placement.md) | `in_impl` static placement | Implemented |
