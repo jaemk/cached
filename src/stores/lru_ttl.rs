@@ -665,7 +665,6 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
-        let key_for_evict = key.clone();
         let ttl = self.ttl;
         let setter = || {
             // Anchor the expiry AFTER the factory runs so a slow factory does
@@ -675,6 +674,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
             let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
             TimedEntry { expires_at, value }
         };
+        // On replacement the store returns the STORED key/entry of the displaced value, so the
+        // callback sees the instance that was actually cached, not the (equal-but-distinct)
+        // lookup key (C1/C8).
         let (was_present, was_valid, old_entry, entry) =
             self.store
                 .get_or_set_with_if(key, setter, |entry| Self::entry_live(entry.expires_at));
@@ -689,9 +691,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
-            if let Some(old) = old_entry {
+            if let Some((old_key, old)) = old_entry {
                 if let Some(on_evict) = &self.on_evict {
-                    on_evict(&key_for_evict, &old.value);
+                    on_evict(&old_key, &old.value);
                 }
                 self.evictions.fetch_add(1, Ordering::Relaxed);
             }
@@ -705,7 +707,6 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         key: K,
         f: F,
     ) -> Result<&mut V, E> {
-        let key_for_evict = key.clone();
         let ttl = self.ttl;
         let setter = || {
             // Anchor the expiry after the factory succeeds (CORE-3).
@@ -714,6 +715,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
             let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
             Ok(TimedEntry { expires_at, value })
         };
+        // On replacement the store returns the STORED key/entry of the displaced value (C1/C8).
         let (was_present, was_valid, old_entry, entry) =
             self.store
                 .try_get_or_set_with_if(key, setter, |entry| Self::entry_live(entry.expires_at))?;
@@ -728,9 +730,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
-            if let Some(old) = old_entry {
+            if let Some((old_key, old)) = old_entry {
                 if let Some(on_evict) = &self.on_evict {
-                    on_evict(&key_for_evict, &old.value);
+                    on_evict(&old_key, &old.value);
                 }
                 self.evictions.fetch_add(1, Ordering::Relaxed);
             }
@@ -978,7 +980,6 @@ where
         Fut: Future<Output = V> + Send + 'a,
     {
         async move {
-            let key_for_evict = key.clone();
             let ttl = self.ttl;
             let setter = || async move {
                 // Anchor the expiry after the factory resolves (CORE-3).
@@ -987,6 +988,7 @@ where
                 let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
                 TimedEntry { expires_at, value }
             };
+            // On replacement the store returns the STORED key/entry of the displaced value (C1/C8).
             let (was_present, was_valid, old_entry, entry) = self
                 .store
                 .get_or_set_with_if_async(key, setter, |entry| Self::entry_live(entry.expires_at))
@@ -1002,9 +1004,9 @@ where
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
             } else {
-                if let Some(old) = old_entry {
+                if let Some((old_key, old)) = old_entry {
                     if let Some(on_evict) = &self.on_evict {
-                        on_evict(&key_for_evict, &old.value);
+                        on_evict(&old_key, &old.value);
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1027,7 +1029,6 @@ where
         Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
         async move {
-            let key_for_evict = key.clone();
             let ttl = self.ttl;
             let setter = || async move {
                 let new_val = f().await?;
@@ -1038,6 +1039,7 @@ where
                     value: new_val,
                 })
             };
+            // On replacement the store returns the STORED key/entry of the displaced value (C1/C8).
             let (was_present, was_valid, old_entry, entry) = self
                 .store
                 .try_get_or_set_with_if_async(key, setter, |entry| {
@@ -1055,9 +1057,9 @@ where
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
             } else {
-                if let Some(old) = old_entry {
+                if let Some((old_key, old)) = old_entry {
                     if let Some(on_evict) = &self.on_evict {
-                        on_evict(&key_for_evict, &old.value);
+                        on_evict(&old_key, &old.value);
                     }
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                 }
