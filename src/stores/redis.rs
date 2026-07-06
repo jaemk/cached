@@ -1346,6 +1346,18 @@ where
         }))
     }
 
+    /// Remove a cached value.
+    ///
+    /// Returns the previous value stored under `key`, if any.
+    ///
+    /// The entry is always removed, regardless of whether the stored bytes can be
+    /// deserialized. The behavior when the previous value fails to deserialize depends
+    /// on the [`strict_deserialization`](RedisCacheBuilder::strict_deserialization) setting:
+    ///
+    /// - **Default (non-strict):** the corrupt entry is removed and the method returns
+    ///   `Ok(None)` (the undecodable previous value is discarded).
+    /// - **Strict (`strict_deserialization(true)`):** the corrupt entry is still removed
+    ///   and the method returns `Err(RedisCacheError::CacheDeserialization { .. })`.
     fn cache_remove(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
         let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
@@ -1356,10 +1368,11 @@ where
         let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
         match res.0 {
             None => Ok(None),
-            Some(bytes) => {
-                let v: CachedRedisValue<V> = deserialize_cached_redis_value(&bytes)?;
-                Ok(Some(v.value))
-            }
+            Some(bytes) => match deserialize_cached_redis_value(&bytes) {
+                Ok(v) => Ok(Some(v.value)),
+                Err(_) if !self.strict_deserialization => Ok(None),
+                Err(e) => Err(e),
+            },
         }
     }
 
@@ -2241,7 +2254,18 @@ mod async_redis {
             }))
         }
 
-        /// Remove a cached value
+        /// Remove a cached value.
+        ///
+        /// Returns the previous value stored under `key`, if any.
+        ///
+        /// The entry is always removed, regardless of whether the stored bytes can be
+        /// deserialized. The behavior when the previous value fails to deserialize depends
+        /// on the [`strict_deserialization`](AsyncRedisCacheBuilder::strict_deserialization) setting:
+        ///
+        /// - **Default (non-strict):** the corrupt entry is removed and the method returns
+        ///   `Ok(None)` (the undecodable previous value is discarded).
+        /// - **Strict (`strict_deserialization(true)`):** the corrupt entry is still removed
+        ///   and the method returns `Err(RedisCacheError::CacheDeserialization { .. })`.
         async fn async_cache_remove(&self, key: &K) -> Result<Option<V>, Self::Error> {
             let mut conn = self.connection.clone();
             let mut pipe = redis::pipe();
@@ -2255,10 +2279,11 @@ mod async_redis {
                 .map_err(RedisCacheError::redis)?;
             match res.0 {
                 None => Ok(None),
-                Some(bytes) => {
-                    let v: CachedRedisValue<V> = super::deserialize_cached_redis_value(&bytes)?;
-                    Ok(Some(v.value))
-                }
+                Some(bytes) => match super::deserialize_cached_redis_value(&bytes) {
+                    Ok(v) => Ok(Some(v.value)),
+                    Err(_) if !self.strict_deserialization => Ok(None),
+                    Err(e) => Err(e),
+                },
             }
         }
 
@@ -2781,6 +2806,284 @@ mod async_redis {
                 );
                 cause = c.source();
             }
+        }
+
+        /// BUG-2 (async, default mode): `async_cache_remove` on a key with corrupt
+        /// stored bytes returns `Ok(None)` and the key is deleted. The corrupt bytes
+        /// must NOT surface as `Err(CacheDeserialization)` in default (non-strict) mode.
+        #[tokio::test]
+        async fn async_cache_remove_corrupt_default_mode_returns_ok_none() {
+            let prefix = format!("{}:async-remove-corrupt-default", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            // Default mode: corrupt previous value must be silently discarded as Ok(None).
+            let result = c.async_cache_remove(&1).await;
+            assert!(
+                result.is_ok(),
+                "async_cache_remove must not error in default mode on corrupt entry; got: {result:?}"
+            );
+            assert!(
+                result.unwrap().is_none(),
+                "async_cache_remove must return Ok(None) for corrupt entry in default mode"
+            );
+
+            // The key must be gone after remove regardless of decode failure.
+            assert!(
+                !key_exists(&key),
+                "async_cache_remove must delete the key even when bytes are corrupt"
+            );
+        }
+
+        /// BUG-2 (async, strict mode): `async_cache_remove` on a key with corrupt
+        /// stored bytes returns `Err(CacheDeserialization)` in strict mode AND the key
+        /// is still deleted (the GET+DEL pipeline already ran atomically).
+        #[tokio::test]
+        async fn async_cache_remove_corrupt_strict_mode_returns_error_and_key_is_gone() {
+            let prefix = format!("{}:async-remove-corrupt-strict", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .strict_deserialization(true)
+                .build()
+                .await
+                .unwrap();
+
+            // Strict mode: must return a deserialization error.
+            let err = c
+                .async_cache_remove(&1)
+                .await
+                .expect_err("strict async_cache_remove must return Err for corrupt entry");
+            assert!(
+                err.is_deserialization(),
+                "expected CacheDeserialization error, got: {err:?}"
+            );
+
+            // The key must be gone -- the GET+DEL pipeline already ran.
+            assert!(
+                !key_exists(&key),
+                "key must be deleted even when strict async_cache_remove errors"
+            );
+        }
+
+        /// TEST-2 (connection-manager): building an `AsyncRedisCache` with
+        /// `client_side_caching(true)`, `connection_manager(true)`, and a URL that
+        /// pins `protocol=resp2` must be rejected with
+        /// `Resp2DowngradeWithClientSideCaching`. This is the connection-manager
+        /// sibling of `client_side_caching_rejects_resp2_url` (multiplexed path).
+        /// No Redis server is required -- the guard fires before connection is attempted.
+        #[cfg(all(feature = "redis_connection_manager", feature = "redis_async_cache"))]
+        #[tokio::test]
+        async fn connection_manager_client_side_caching_rejects_resp2_url() {
+            let url_with_resp2 = "redis://127.0.0.1:6399?protocol=resp2";
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(url_with_resp2)
+                .client_side_caching(true)
+                .connection_manager(true)
+                .build()
+                .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching)
+                ),
+                "expected Resp2DowngradeWithClientSideCaching on connection-manager path, got: {result:?}"
+            );
+        }
+
+        /// TEST-2 (connection-manager, positive counterpart): with
+        /// `connection_manager(true)` + `client_side_caching(true)` and a URL that
+        /// pins `protocol=resp3`, the RESP2 guard must NOT fire on the
+        /// connection-manager path. Without this the rejection test could pass
+        /// vacuously (e.g. if the guard fired for every connection-manager build).
+        /// It may still fail for other reasons (e.g. no server), just not the guard.
+        #[cfg(all(feature = "redis_connection_manager", feature = "redis_async_cache"))]
+        #[tokio::test]
+        async fn connection_manager_client_side_caching_accepts_resp3_url() {
+            let url_with_resp3 = "redis://127.0.0.1:6399?protocol=resp3";
+
+            let result = AsyncRedisCacheBuilder::<String, String>::new()
+                .prefix("test")
+                .ttl(Duration::from_secs(1))
+                .connection_string(url_with_resp3)
+                .client_side_caching(true)
+                .connection_manager(true)
+                .build()
+                .await;
+
+            assert!(
+                !matches!(
+                    result,
+                    Err(RedisCacheBuildError::Resp2DowngradeWithClientSideCaching)
+                ),
+                "resp3 URL must not trigger the RESP2 guard on the connection-manager path; got: {result:?}"
+            );
+        }
+
+        /// BUG-2 (async, happy path): `async_cache_remove` on a VALID stored value
+        /// returns `Ok(Some(value))` and the key is gone afterward (a follow-up get
+        /// is a miss). Async parity for the sync remove-and-return contract.
+        #[tokio::test]
+        async fn async_cache_remove_valid_value_returns_some_and_deletes_key() {
+            let prefix = format!("{}:async-remove-valid", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
+            assert_eq!(
+                c.async_cache_remove(&1).await.unwrap(),
+                Some(100),
+                "async_cache_remove must return the stored value"
+            );
+            assert!(!key_exists(&key), "async_cache_remove must delete the key");
+            assert_eq!(
+                c.async_cache_get(&1).await.unwrap(),
+                None,
+                "get after remove must be a miss"
+            );
+        }
+
+        /// BUG-2 (async, missing key): `async_cache_remove` on a key that was never
+        /// stored returns `Ok(None)` (the `res.0 == None` branch), not an error.
+        #[tokio::test]
+        async fn async_cache_remove_missing_key_returns_ok_none() {
+            let prefix = format!("{}:async-remove-missing", now_millis());
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            let result = c.async_cache_remove(&12345).await;
+            assert!(
+                result.is_ok(),
+                "async_cache_remove on a missing key must not error; got: {result:?}"
+            );
+            assert_eq!(
+                result.unwrap(),
+                None,
+                "async_cache_remove on a missing key must return Ok(None)"
+            );
+        }
+
+        /// BUG-2 (async `async_cache_remove_entry` delegation, valid value): returns
+        /// `Ok(Some((key, value)))` and deletes the key. Pins that the entry variant
+        /// forwards the key alongside the removed value.
+        #[tokio::test]
+        async fn async_cache_remove_entry_valid_returns_key_and_value() {
+            let prefix = format!("{}:async-remove-entry-valid", now_millis());
+            let key = format!("cached-redis-store:{}:7", prefix);
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            assert!(c.async_cache_set(7, 700).await.unwrap().is_none());
+            assert_eq!(
+                c.async_cache_remove_entry(&7).await.unwrap(),
+                Some((7, 700)),
+                "async_cache_remove_entry must return the key and the stored value"
+            );
+            assert!(
+                !key_exists(&key),
+                "async_cache_remove_entry must delete the key"
+            );
+        }
+
+        /// BUG-2 (async `async_cache_remove_entry` delegation, default mode): corrupt
+        /// bytes are discarded as `Ok(None)` (the entry delegates to
+        /// `async_cache_remove`) and the key is deleted. Direct coverage of the
+        /// delegation, previously only inferred.
+        #[tokio::test]
+        async fn async_cache_remove_entry_corrupt_default_mode_returns_ok_none() {
+            let prefix = format!("{}:async-remove-entry-corrupt-default", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .build()
+                .await
+                .unwrap();
+
+            let result = c.async_cache_remove_entry(&1).await;
+            assert!(
+                result.is_ok(),
+                "async_cache_remove_entry must not error in default mode on corrupt entry; got: {result:?}"
+            );
+            assert_eq!(
+                result.unwrap(),
+                None,
+                "async_cache_remove_entry must return Ok(None) for a corrupt entry in default mode"
+            );
+            assert!(
+                !key_exists(&key),
+                "async_cache_remove_entry must delete the key even when bytes are corrupt"
+            );
+        }
+
+        /// BUG-2 (async `async_cache_remove_entry` delegation, strict mode): corrupt
+        /// bytes surface as the exact `RedisCacheError::CacheDeserialization { .. }`
+        /// variant (not merely any Err) and the key is still deleted. Direct coverage
+        /// of the strict delegation, matching the variant by shape.
+        #[tokio::test]
+        async fn async_cache_remove_entry_corrupt_strict_mode_returns_error_and_key_is_gone() {
+            let prefix = format!("{}:async-remove-entry-corrupt-strict", now_millis());
+            let key = format!("cached-redis-store:{}:1", prefix);
+            plant_raw(&key, b"\xff\xfe\xfd");
+
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
+                .prefix(prefix)
+                .ttl(Duration::from_secs(3600))
+                .connection_string("redis://127.0.0.1:6399")
+                .strict_deserialization(true)
+                .build()
+                .await
+                .unwrap();
+
+            let err = c
+                .async_cache_remove_entry(&1)
+                .await
+                .expect_err("strict async_cache_remove_entry must return Err for corrupt entry");
+            assert!(
+                matches!(err, RedisCacheError::CacheDeserialization { .. }),
+                "expected the exact CacheDeserialization variant, got: {err:?}"
+            );
+            assert!(
+                !key_exists(&key),
+                "key must be deleted even when strict async_cache_remove_entry errors"
+            );
         }
     }
 
@@ -3555,5 +3858,257 @@ mod tests {
         assert_eq!(c.cache_get(&1).unwrap(), Some(42));
 
         let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
+    }
+
+    /// BUG-2 (sync, default mode): `cache_remove` on a key with corrupt stored bytes
+    /// returns `Ok(None)` and the key is deleted. The corrupt bytes must NOT surface
+    /// as `Err(CacheDeserialization)` in default (non-strict) mode.
+    #[test]
+    fn cache_remove_corrupt_default_mode_returns_ok_none() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:remove-corrupt-default", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        // Plant garbage bytes so deserialization will fail.
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        // Default mode: corrupt entry must be silently discarded as Ok(None).
+        let result = c.cache_remove(&1);
+        assert!(
+            result.is_ok(),
+            "cache_remove must not error in default mode on corrupt entry; got: {result:?}"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "cache_remove must return Ok(None) for corrupt entry in default mode"
+        );
+
+        // The key must be gone after remove regardless of decode failure.
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(
+            !exists,
+            "cache_remove must delete the key even when bytes are corrupt"
+        );
+    }
+
+    /// BUG-2 (sync, strict mode): `cache_remove` on a key with corrupt stored bytes
+    /// returns `Err(CacheDeserialization)` in strict mode AND the key is still deleted
+    /// (the pipeline already ran GET+DEL atomically).
+    #[test]
+    fn cache_remove_corrupt_strict_mode_returns_error_and_key_is_gone() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:remove-corrupt-strict", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .strict_deserialization(true)
+            .build()
+            .unwrap();
+
+        // Strict mode: must return a deserialization error.
+        let err = c
+            .cache_remove(&1)
+            .expect_err("strict cache_remove must return Err for corrupt entry");
+        assert!(
+            err.is_deserialization(),
+            "expected CacheDeserialization error, got: {err:?}"
+        );
+
+        // The key must still be gone -- the GET+DEL pipeline already ran.
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(
+            !exists,
+            "key must be deleted even when strict cache_remove errors"
+        );
+    }
+
+    /// BUG-2 (sync, happy path): `cache_remove` on a VALID stored value returns
+    /// `Ok(Some(value))` and the key is actually gone afterward (a follow-up get
+    /// returns None). Locks the non-regressed remove-and-return contract next to
+    /// the corrupt-path tests. The pre-existing `remove` test asserts the returned
+    /// value but never verifies the key was deleted.
+    #[test]
+    fn cache_remove_valid_value_returns_some_and_deletes_key() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:remove-valid", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        assert!(c.cache_set(1, 100).unwrap().is_none());
+        assert_eq!(
+            c.cache_remove(&1).unwrap(),
+            Some(100),
+            "cache_remove must return the stored value"
+        );
+        // The key is physically gone...
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(!exists, "cache_remove must delete the key");
+        // ...and a follow-up get is a miss.
+        assert_eq!(
+            c.cache_get(&1).unwrap(),
+            None,
+            "get after remove must be a miss"
+        );
+    }
+
+    /// BUG-2 (sync, missing key): `cache_remove` on a key that was never stored
+    /// returns `Ok(None)` (the `res.0 == None` branch), not an error.
+    #[test]
+    fn cache_remove_missing_key_returns_ok_none() {
+        let prefix = format!("{}:remove-missing", now_millis());
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        let result = c.cache_remove(&12345);
+        assert!(
+            result.is_ok(),
+            "cache_remove on a missing key must not error; got: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "cache_remove on a missing key must return Ok(None)"
+        );
+    }
+
+    /// BUG-2 (sync `cache_remove_entry` delegation, valid value): the entry variant
+    /// must return `Ok(Some((key, value)))` and delete the key. Pins that
+    /// `cache_remove_entry` forwards the key alongside the removed value.
+    #[test]
+    fn cache_remove_entry_valid_returns_key_and_value() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:remove-entry-valid", now_millis());
+        let key = format!("cached-redis-store:{}:7", prefix);
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        assert!(c.cache_set(7, 700).unwrap().is_none());
+        assert_eq!(
+            c.cache_remove_entry(&7).unwrap(),
+            Some((7, 700)),
+            "cache_remove_entry must return the key and the stored value"
+        );
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(!exists, "cache_remove_entry must delete the key");
+    }
+
+    /// BUG-2 (sync `cache_remove_entry` delegation, default mode): corrupt bytes
+    /// must be discarded as `Ok(None)` (the entry delegates to `cache_remove`, so it
+    /// inherits the non-strict self-heal) and the key is deleted. Direct coverage —
+    /// the delegation was previously only inferred.
+    #[test]
+    fn cache_remove_entry_corrupt_default_mode_returns_ok_none() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:remove-entry-corrupt-default", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+
+        let result = c.cache_remove_entry(&1);
+        assert!(
+            result.is_ok(),
+            "cache_remove_entry must not error in default mode on corrupt entry; got: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "cache_remove_entry must return Ok(None) for a corrupt entry in default mode"
+        );
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(
+            !exists,
+            "cache_remove_entry must delete the key even when bytes are corrupt"
+        );
+    }
+
+    /// BUG-2 (sync `cache_remove_entry` delegation, strict mode): corrupt bytes must
+    /// surface as the exact `RedisCacheError::CacheDeserialization { .. }` variant
+    /// (not merely any Err) and the key is still deleted. Direct coverage of the
+    /// strict delegation, and the only place the exact variant is matched by shape.
+    #[test]
+    fn cache_remove_entry_corrupt_strict_mode_returns_error_and_key_is_gone() {
+        let mut conn = redis::Client::open("redis://127.0.0.1:6399")
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let prefix = format!("{}:remove-entry-corrupt-strict", now_millis());
+        let key = format!("cached-redis-store:{}:1", prefix);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(b"\xff\xfe\xfd".as_ref())
+            .query(&mut conn)
+            .unwrap();
+
+        let c: RedisCache<u32, u32> = RedisCache::builder()
+            .prefix(prefix)
+            .ttl(Duration::from_secs(3600))
+            .strict_deserialization(true)
+            .build()
+            .unwrap();
+
+        let err = c
+            .cache_remove_entry(&1)
+            .expect_err("strict cache_remove_entry must return Err for corrupt entry");
+        assert!(
+            matches!(err, RedisCacheError::CacheDeserialization { .. }),
+            "expected the exact CacheDeserialization variant, got: {err:?}"
+        );
+        let exists: bool = redis::cmd("EXISTS").arg(&key).query(&mut conn).unwrap();
+        assert!(
+            !exists,
+            "key must be deleted even when strict cache_remove_entry errors"
+        );
     }
 }
