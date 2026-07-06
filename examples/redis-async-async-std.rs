@@ -9,9 +9,9 @@ See also `redis-async-tokio` for the same example on the Tokio runtime.
 Note: `redis_smol_native_tls` enables TLS via native-tls. If you need plain-text connections
 only, you can enable `redis/smol-comp` directly instead.
 
-Note: `redis_smol_native_tls` transitively enables `tokio` (through cached's `async`
-feature) so that cached's internal sync primitives compile, but the Tokio
-runtime is never started — all async execution is driven by async-std.
+Note: cached's `async` feature (pulled in transitively here) only adds the pure-Rust
+`async-lock` dependency for its internal async primitives; it does not pull in Tokio.
+All async execution is driven by async-std/smol.
 
 Start redis if you don't already have one:
     docker run --rm --name async-cached-redis-example -p 6379:6379 -d redis
@@ -37,7 +37,7 @@ enum ExampleError {
     RedisError(String),
 }
 
-// When the macro constructs your RedisCache instance, the connection string
+// When the macro constructs your AsyncRedisCache instance, the connection string
 // will be pulled from the env var: `CACHED_REDIS_CONNECTION_STRING`.
 #[concurrent_cached(
     redis = true,
@@ -54,8 +54,7 @@ async fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder()
-            .prefix("cache_redis_async_std_example_cached_sleep_secs")
+        AsyncRedisCache::builder("cache_redis_async_std_example_cached_sleep_secs")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()
@@ -85,8 +84,7 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder()
-            .prefix("cache_redis_async_std_example_cached_sleep_secs_config")
+        AsyncRedisCache::builder("cache_redis_async_std_example_cached_sleep_secs_config")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)

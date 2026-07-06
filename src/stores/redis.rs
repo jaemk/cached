@@ -644,11 +644,14 @@ use thiserror::Error;
 
 /// Error returned when building a [`RedisCache`]/[`AsyncRedisCache`].
 ///
-/// Configuration problems (a missing `prefix`/`ttl`, or a zero `ttl`) surface as the
-/// transparent [`Build`](Self::Build) variant wrapping a [`BuildError`](super::BuildError):
+/// Configuration problems (a missing `prefix`, or an explicitly-set zero `ttl`)
+/// surface as the transparent [`Build`](Self::Build) variant wrapping a
+/// [`BuildError`](super::BuildError). The TTL is optional: an unset TTL is not an
+/// error (entries are stored without expiry).
 ///
 /// ```ignore
-/// match RedisCache::<String, u32>::builder().build() {
+/// // `RedisCacheBuilder::new()` omits the required prefix, so `build` reports it.
+/// match RedisCacheBuilder::<String, u32>::new().build() {
 ///     Err(RedisCacheBuildError::Build(BuildError::MissingRequired(field))) => { /* e.g. "prefix" */ }
 ///     Err(RedisCacheBuildError::Build(BuildError::InvalidValue { field, reason })) => { /* e.g. "ttl" */ }
 ///     _ => {}
@@ -733,9 +736,11 @@ where
 {
     /// Initialize a `RedisCacheBuilder`.
     ///
-    /// Both the key `prefix` and the `ttl` are required; set them with
-    /// [`prefix`](Self::prefix) and [`ttl`](Self::ttl) (or [`ttl_secs`](Self::ttl_secs) /
-    /// [`ttl_millis`](Self::ttl_millis)) before calling [`build`](Self::build).
+    /// The key `prefix` is required; set it with [`prefix`](Self::prefix) before
+    /// calling [`build`](Self::build) (or use [`RedisCache::builder`] to supply it
+    /// positionally). The TTL is optional; when left unset, entries are stored
+    /// without expiry. Set it with [`ttl`](Self::ttl) (or
+    /// [`ttl_secs`](Self::ttl_secs) / [`ttl_millis`](Self::ttl_millis)).
     #[must_use]
     pub fn new() -> RedisCacheBuilder<K, V> {
         Self {
@@ -754,8 +759,13 @@ where
         }
     }
 
-    /// Specify the cache TTL as a `Duration` (required).
-    /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`.
+    /// Specify the cache TTL as a `Duration` (optional).
+    ///
+    /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`. When no
+    /// TTL is set, entries are stored without expiry (a plain `SET`) and persist
+    /// until explicitly removed. An explicitly-set TTL must be greater than zero
+    /// (a zero TTL is rejected by [`build`](Self::build) with `InvalidValue`; use
+    /// no TTL at all to disable expiry).
     ///
     /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
@@ -966,8 +976,7 @@ where
     /// # Errors
     ///
     /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
-    /// - `Build(BuildError::MissingRequired("ttl"))`: no TTL was set.
-    /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
+    /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: an explicitly-set TTL is zero.
     /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
     ///   the prefix are empty. `cache_clear` would otherwise issue `SCAN MATCH *`
     ///   and delete every key in the Redis database.
@@ -975,14 +984,25 @@ where
     ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
     /// - `Connection` / `Pool`: the Redis client or connection pool could not
     ///   be created.
+    ///
+    /// The TTL is optional: when no TTL is set, entries are stored without expiry
+    /// (a plain `SET`, no `PSETEX`/`PEXPIRE`) and persist until explicitly removed.
     pub fn build(self) -> Result<RedisCache<K, V>, RedisCacheBuildError> {
         // Validate required fields before any IO/connection attempt so the
         // missing-required error is returned without needing a server.
         if self.prefix.is_none() {
             return Err(super::BuildError::MissingRequired("prefix").into());
         }
-        let ttl = self.ttl.ok_or(super::BuildError::MissingRequired("ttl"))?;
-        super::validate_ttl(ttl)?;
+        // TTL is optional. When unset, store entries with no expiry (represented
+        // internally by a zero `Duration`, the "expiry disabled" sentinel). An
+        // explicitly-set TTL still must be greater than zero.
+        let ttl = match self.ttl {
+            Some(ttl) => {
+                super::validate_ttl(ttl)?;
+                ttl
+            }
+            None => Duration::ZERO,
+        };
         let prefix = self.prefix.as_deref().unwrap_or_default();
         if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
             return Err(RedisCacheBuildError::EmptyScope);
@@ -1059,16 +1079,20 @@ where
     K: Display,
     V: Serialize + DeserializeOwned,
 {
-    /// Initialize a `RedisCacheBuilder`.
+    /// Initialize a `RedisCacheBuilder` with the required key `prefix`.
     ///
-    /// The key `prefix` and `ttl` are required; set them via
-    /// [`RedisCacheBuilder::prefix`] and [`RedisCacheBuilder::ttl`] before calling
-    /// [`build`](RedisCacheBuilder::build). If either is missing, `build` returns
-    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`)` rather
-    /// than panicking.
+    /// The `prefix` namespaces every key this cache reads and writes; it can be
+    /// overridden later via [`prefix`](RedisCacheBuilder::prefix). A TTL is
+    /// optional (see [`ttl`](RedisCacheBuilder::ttl)); when unset, entries are
+    /// stored without expiry.
+    ///
+    /// To construct a builder without supplying the prefix up front, use
+    /// [`RedisCacheBuilder::new`] directly; `build` then returns
+    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`("prefix"))`
+    /// if the prefix is never set.
     #[must_use]
-    pub fn builder() -> RedisCacheBuilder<K, V> {
-        RedisCacheBuilder::new()
+    pub fn builder(prefix: impl Into<String>) -> RedisCacheBuilder<K, V> {
+        RedisCacheBuilder::new().prefix(prefix.into())
     }
 
     fn generate_key(&self, key: &K) -> String {
@@ -1641,9 +1665,12 @@ mod async_redis {
     {
         /// Initialize an `AsyncRedisCacheBuilder`.
         ///
-        /// Both the key `prefix` and the `ttl` are required; set them with
-        /// [`prefix`](Self::prefix) and [`ttl`](Self::ttl) (or [`ttl_secs`](Self::ttl_secs) /
-        /// [`ttl_millis`](Self::ttl_millis)) before calling [`build`](Self::build).
+        /// The key `prefix` is required; set it with [`prefix`](Self::prefix)
+        /// before calling [`build`](Self::build) (or use
+        /// [`AsyncRedisCache::builder`] to supply it positionally). The TTL is
+        /// optional; when left unset, entries are stored without expiry. Set it
+        /// with [`ttl`](Self::ttl) (or [`ttl_secs`](Self::ttl_secs) /
+        /// [`ttl_millis`](Self::ttl_millis)).
         #[must_use]
         pub fn new() -> AsyncRedisCacheBuilder<K, V> {
             Self {
@@ -1661,8 +1688,13 @@ mod async_redis {
             }
         }
 
-        /// Specify the cache TTL as a `Duration` (required).
-        /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`.
+        /// Specify the cache TTL as a `Duration` (optional).
+        ///
+        /// TTL is stored with millisecond precision via `PSETEX`/`PEXPIRE`. When
+        /// no TTL is set, entries are stored without expiry (a plain `SET`) and
+        /// persist until explicitly removed. An explicitly-set TTL must be greater
+        /// than zero (a zero TTL is rejected by [`build`](Self::build) with
+        /// `InvalidValue`; use no TTL at all to disable expiry).
         ///
         /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
         #[must_use]
@@ -1993,8 +2025,7 @@ mod async_redis {
         /// # Errors
         ///
         /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
-        /// - `Build(BuildError::MissingRequired("ttl"))`: no TTL was set.
-        /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
+        /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: an explicitly-set TTL is zero.
         /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
         ///   the prefix are empty. `async_cache_clear` would otherwise issue
         ///   `SCAN MATCH *` and delete every key in the Redis database.
@@ -2003,16 +2034,24 @@ mod async_redis {
         /// - `Connection`: the Redis client or the selected connection (multiplexed,
         ///   or the connection manager when `.connection_manager(true)` is set) could
         ///   not be created.
+        ///
+        /// The TTL is optional: when no TTL is set, entries are stored without
+        /// expiry (a plain `SET`) and persist until explicitly removed.
         pub async fn build(self) -> Result<AsyncRedisCache<K, V>, RedisCacheBuildError> {
             // Validate required fields before any IO/connection attempt so the
             // missing-required error is returned without needing a server.
             if self.prefix.is_none() {
                 return Err(super::super::BuildError::MissingRequired("prefix").into());
             }
-            let ttl = self
-                .ttl
-                .ok_or(super::super::BuildError::MissingRequired("ttl"))?;
-            super::super::validate_ttl(ttl)?;
+            // TTL is optional. When unset, store entries with no expiry (zero
+            // `Duration` sentinel). An explicitly-set TTL still must be > 0.
+            let ttl = match self.ttl {
+                Some(ttl) => {
+                    super::super::validate_ttl(ttl)?;
+                    ttl
+                }
+                None => Duration::ZERO,
+            };
             let prefix = self.prefix.as_deref().unwrap_or_default();
             if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
                 return Err(RedisCacheBuildError::EmptyScope);
@@ -2114,14 +2153,18 @@ mod async_redis {
         K: Display + Send + Sync,
         V: Serialize + DeserializeOwned + Send,
     {
-        /// Initialize an `AsyncRedisCacheBuilder`.
+        /// Initialize an `AsyncRedisCacheBuilder` with the required key `prefix`.
         ///
-        /// The key `prefix` and `ttl` are required; set them via
-        /// [`AsyncRedisCacheBuilder::prefix`] and [`AsyncRedisCacheBuilder::ttl`]
-        /// before calling [`build`](AsyncRedisCacheBuilder::build).
+        /// The `prefix` namespaces every key this cache reads and writes; it can
+        /// be overridden later via [`prefix`](AsyncRedisCacheBuilder::prefix). A
+        /// TTL is optional (see [`ttl`](AsyncRedisCacheBuilder::ttl)); when unset,
+        /// entries are stored without expiry.
+        ///
+        /// To construct a builder without supplying the prefix up front, use
+        /// [`AsyncRedisCacheBuilder::new`] directly.
         #[must_use]
-        pub fn builder() -> AsyncRedisCacheBuilder<K, V> {
-            AsyncRedisCacheBuilder::new()
+        pub fn builder(prefix: impl Into<String>) -> AsyncRedisCacheBuilder<K, V> {
+            AsyncRedisCacheBuilder::new().prefix(prefix.into())
         }
 
         fn generate_key(&self, key: &K) -> String {
@@ -2590,8 +2633,7 @@ mod async_redis {
 
         #[tokio::test]
         async fn test_async_redis_cache() {
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(format!("{}:async-redis-cache-test", now_millis()))
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(format!("{}:async-redis-cache-test", now_millis()))
                 .ttl(Duration::from_secs(2))
                 .build()
                 .await
@@ -2661,8 +2703,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -2698,8 +2739,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .strict_deserialization(true)
@@ -2731,8 +2771,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -2762,8 +2801,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -2841,8 +2879,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -2876,8 +2913,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .strict_deserialization(true)
@@ -2968,8 +3004,7 @@ mod async_redis {
             let prefix = format!("{}:async-remove-valid", now_millis());
             let key = format!("cached-redis-store:{}:1", prefix);
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -2995,8 +3030,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_missing_key_returns_ok_none() {
             let prefix = format!("{}:async-remove-missing", now_millis());
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -3023,8 +3057,7 @@ mod async_redis {
             let prefix = format!("{}:async-remove-entry-valid", now_millis());
             let key = format!("cached-redis-store:{}:7", prefix);
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -3053,8 +3086,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .build()
@@ -3087,8 +3119,7 @@ mod async_redis {
             let key = format!("cached-redis-store:{}:1", prefix);
             plant_raw(&key, b"\xff\xfe\xfd");
 
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder()
-                .prefix(prefix)
+            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
                 .connection_string("redis://127.0.0.1:6399")
                 .strict_deserialization(true)
@@ -3645,8 +3676,7 @@ mod tests {
 
     #[test]
     fn redis_cache() {
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(format!("{}:redis-cache-test", now_millis()))
+        let c: RedisCache<u32, u32> = RedisCache::builder(format!("{}:redis-cache-test", now_millis()))
             .ttl(Duration::from_secs(2))
             .namespace("in-tests:")
             .build()
@@ -3677,8 +3707,7 @@ mod tests {
 
     #[test]
     fn remove() {
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(format!("{}:redis-cache-test-remove", now_millis()))
+        let c: RedisCache<u32, u32> = RedisCache::builder(format!("{}:redis-cache-test-remove", now_millis()))
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -3707,8 +3736,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -3741,8 +3769,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .strict_deserialization(true)
             .build()
@@ -3782,8 +3809,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -3818,8 +3844,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -3862,8 +3887,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -3902,8 +3926,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -3944,8 +3967,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .strict_deserialization(true)
             .build()
@@ -3982,8 +4004,7 @@ mod tests {
         let prefix = format!("{}:remove-valid", now_millis());
         let key = format!("cached-redis-store:{}:1", prefix);
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -4010,8 +4031,7 @@ mod tests {
     #[test]
     fn cache_remove_missing_key_returns_ok_none() {
         let prefix = format!("{}:remove-missing", now_millis());
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -4040,8 +4060,7 @@ mod tests {
         let prefix = format!("{}:remove-entry-valid", now_millis());
         let key = format!("cached-redis-store:{}:7", prefix);
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -4074,8 +4093,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -4115,8 +4133,7 @@ mod tests {
             .query(&mut conn)
             .unwrap();
 
-        let c: RedisCache<u32, u32> = RedisCache::builder()
-            .prefix(prefix)
+        let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
             .strict_deserialization(true)
             .build()

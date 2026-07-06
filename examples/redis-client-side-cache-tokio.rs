@@ -4,10 +4,11 @@ RESP3 client-side caching (the `redis_async_cache` feature), Tokio runtime.
 invalidation-tracked copy of fetched keys, cutting round-trips for hot keys
 while staying consistent via server push invalidation.
 
-Note: client-side caching requires RESP3, which is only supported over Tokio
-(`redis_async_cache` enables the Tokio RESP3 client-side-caching path and is
-TLS-agnostic). There is no async-std equivalent. Add `redis_tokio_native_tls`
-or `redis_tokio_rustls` separately if TLS connectivity is required.
+Note: client-side caching requires RESP3. The `redis_async_cache` capability
+feature is runtime-agnostic (it enables the RESP3 client-side-caching path and is
+TLS-agnostic); pair it with a runtime feature. This example uses Tokio; add
+`redis_tokio_native_tls` or `redis_tokio_rustls` separately if TLS connectivity is
+required.
 
 Start a RESP3-capable redis (redis 6+, e.g. the `redis` image) if not already running:
     docker run --rm --name cached-csc-example -p 6379:6379 -d redis
@@ -38,8 +39,7 @@ enum ExampleError {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder()
-            .prefix("cached-csc-example")
+        AsyncRedisCache::builder("cached-csc-example")
             .ttl(Duration::from_secs(30))
             .client_side_caching(true)
             .build()

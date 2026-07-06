@@ -463,8 +463,7 @@ enum ExampleError {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder()
-            .prefix("cached_redis_prefix")
+        AsyncRedisCache::builder("cached_redis_prefix")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()

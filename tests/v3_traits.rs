@@ -653,8 +653,7 @@ mod redb_serialize_cached {
     use tempfile::TempDir;
 
     fn build_cache(dir: &TempDir, name: &str) -> RedbCache<u32, String> {
-        RedbCache::<u32, String>::builder()
-            .name(name)
+        RedbCache::<u32, String>::builder(name)
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache")
@@ -707,8 +706,7 @@ mod redb_serialize_cached {
     #[test]
     fn cache_set_ref_ttl_expiry() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder()
-            .name("serialize_cached_ttl_expiry")
+        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_ttl_expiry")
             .disk_directory(dir.path())
             .ttl(Duration::from_millis(100))
             .build()
@@ -740,8 +738,7 @@ mod redb_serialize_cached_async {
     #[tokio::test]
     async fn async_cache_set_ref_round_trip() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder()
-            .name("serialize_cached_async_round_trip")
+        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_round_trip")
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache");
@@ -769,8 +766,7 @@ mod redb_serialize_cached_async {
     #[tokio::test]
     async fn async_cache_set_ref_overwrite() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder()
-            .name("serialize_cached_async_overwrite")
+        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_overwrite")
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache");
@@ -1172,8 +1168,7 @@ fn concurrent_redb_refresh_on_hit_getter_reflects_setter() {
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
-    let cache: RedbCache<u32, u32> = RedbCache::builder()
-        .name("concurrent_redb_refresh_getter")
+    let cache: RedbCache<u32, u32> = RedbCache::builder("concurrent_redb_refresh_getter")
         .disk_directory(dir.path())
         .ttl(Duration::from_secs(60))
         .build()
@@ -1622,15 +1617,18 @@ mod sharded_set_ttl_zero {
 
 // ── Builder missing-required errors are server-free (C1) ──────────────────────
 //
-// The redis/redb builders are now no-arg; the former positional args
-// (`prefix`/`ttl` for redis, `name` for redb) are required setters. A `build()`
-// with a required field unset must return `BuildError::MissingRequired(...)`
-// WITHOUT attempting any IO/connection, so these tests need no live server.
+// `RedisCache::builder(prefix)` and `RedbCache::builder(name)` take the required
+// first field positionally. Constructing the builder directly via
+// `RedisCacheBuilder::new()` / `RedbCacheBuilder::new()` omits it, and `build()`
+// must then return `BuildError::MissingRequired(...)` WITHOUT attempting any
+// IO/connection, so these tests need no live server. Redis `ttl` is optional
+// (unset => entries stored without expiry), so it is never a missing-required
+// field.
 #[cfg(feature = "redb_store")]
 #[test]
 fn redb_builder_missing_name_is_server_free_error() {
-    use cached::{BuildError, RedbCache, RedbCacheBuildError};
-    let result = RedbCache::<u32, u32>::builder().build();
+    use cached::{BuildError, RedbCacheBuildError, RedbCacheBuilder};
+    let result = RedbCacheBuilder::<u32, u32>::new().build();
     assert!(
         matches!(
             result,
@@ -1645,10 +1643,10 @@ fn redb_builder_missing_name_is_server_free_error() {
 #[cfg(feature = "redis_store")]
 #[test]
 fn redis_builder_missing_required_is_server_free_error() {
-    use cached::{BuildError, RedisCache, RedisCacheBuildError};
+    use cached::{BuildError, RedisCacheBuildError, RedisCacheBuilder};
 
-    // No prefix and no ttl -> prefix is reported first.
-    let result = RedisCache::<u32, u32>::builder().build();
+    // No prefix -> prefix is reported, before any connection attempt.
+    let result = RedisCacheBuilder::<u32, u32>::new().build();
     assert!(
         matches!(
             result,
@@ -1657,18 +1655,6 @@ fn redis_builder_missing_required_is_server_free_error() {
             )))
         ),
         "expected Build(MissingRequired(\"prefix\"))"
-    );
-
-    // prefix set, ttl unset -> ttl is reported, still before any connection attempt.
-    let result = RedisCache::<u32, u32>::builder().prefix("x").build();
-    assert!(
-        matches!(
-            result,
-            Err(RedisCacheBuildError::Build(BuildError::MissingRequired(
-                "ttl"
-            )))
-        ),
-        "expected Build(MissingRequired(\"ttl\"))"
     );
 }
 
@@ -1701,8 +1687,7 @@ mod concurrent_trait_split_no_collision {
     #[test]
     fn redb_shared_helpers_resolve_without_fully_qualified_syntax() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let cache: RedbCache<String, u32> = RedbCache::builder()
-            .name("collision-probe")
+        let cache: RedbCache<String, u32> = RedbCache::builder("collision-probe")
             .disk_directory(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -1753,8 +1738,7 @@ mod concurrent_trait_split_no_collision {
     #[test]
     fn concurrent_try_set_ttl_zero_is_rejected() {
         let redb_dir = tempfile::TempDir::new().expect("temp dir");
-        let redb: RedbCache<String, u32> = RedbCache::builder()
-            .name("try-set-ttl-zero")
+        let redb: RedbCache<String, u32> = RedbCache::builder("try-set-ttl-zero")
             .disk_directory(redb_dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -1818,8 +1802,7 @@ mod concurrent_trait_split_no_collision {
     #[tokio::test]
     async fn redb_shared_helpers_resolve_unqualified_in_async_context() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let cache: RedbCache<String, u32> = RedbCache::builder()
-            .name("collision-probe-async")
+        let cache: RedbCache<String, u32> = RedbCache::builder("collision-probe-async")
             .disk_directory(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -1872,8 +1855,7 @@ mod concurrent_base_unknown_size_defaults {
     #[test]
     fn redb_len_and_is_empty_default_to_unknown() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let cache: RedbCache<String, u32> = RedbCache::builder()
-            .name("unknown-size-defaults")
+        let cache: RedbCache<String, u32> = RedbCache::builder("unknown-size-defaults")
             .disk_directory(dir.path())
             .ttl(Duration::from_secs(60))
             .build()

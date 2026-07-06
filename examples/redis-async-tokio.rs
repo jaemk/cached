@@ -28,7 +28,7 @@ enum ExampleError {
     RedisError(String),
 }
 
-// When the macro constructs your RedisCache instance, the connection string
+// When the macro constructs your AsyncRedisCache instance, the connection string
 // will be pulled from the env var: `CACHED_REDIS_CONNECTION_STRING`;
 #[concurrent_cached(
     redis = true,
@@ -45,8 +45,7 @@ async fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder()
-            .prefix("cache_redis_example_cached_sleep_secs")
+        AsyncRedisCache::builder("cache_redis_example_cached_sleep_secs")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()
@@ -76,8 +75,7 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder()
-            .prefix("cache_redis_example_cached_sleep_secs_config")
+        AsyncRedisCache::builder("cache_redis_example_cached_sleep_secs_config")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)

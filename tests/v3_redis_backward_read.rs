@@ -44,8 +44,7 @@ fn redis_backward_read_legacy_json_entry() {
     let prefix = "v3_backward_read_legacy";
     let namespace = "";
 
-    let cache = RedisCache::<String, String>::builder()
-        .prefix(prefix)
+    let cache = RedisCache::<String, String>::builder(prefix)
         .namespace(namespace)
         .ttl(Duration::from_secs(60))
         .build()
@@ -118,8 +117,7 @@ fn redis_msgpack_round_trip_struct_value() {
 
     let prefix = "v3_msgpack_struct_rt";
 
-    let cache = RedisCache::<String, Point>::builder()
-        .prefix(prefix)
+    let cache = RedisCache::<String, Point>::builder(prefix)
         .namespace("")
         .ttl(Duration::from_secs(60))
         .build()
@@ -173,8 +171,7 @@ fn redis_subsecond_ttl_precision_via_pttl() {
     let prefix = "v3_subsecond_ttl_pttl";
     let ttl_ms = 750u64;
 
-    let cache = RedisCache::<String, String>::builder()
-        .prefix(prefix)
+    let cache = RedisCache::<String, String>::builder(prefix)
         .namespace("")
         .ttl(Duration::from_millis(ttl_ms))
         .build()

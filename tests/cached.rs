@@ -2586,7 +2586,7 @@ mod disk_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         ty = "cached::RedbCache<u32, u32>",
-        create = r##" { RedbCache::builder().name("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
+        create = r##" { RedbCache::builder("cached_disk_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building disk cache") } "##
     )]
     fn cached_disk_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -2613,7 +2613,7 @@ mod disk_tests {
         map_error = r##"|e| TestError::DiskError(format!("{:?}", e))"##,
         refresh = false,
         ty = "cached::RedbCache<u32, u32>",
-        create = r##" { RedbCache::builder().name("cached_disk_refresh_false_create").build().expect("error building disk cache") } "##
+        create = r##" { RedbCache::builder("cached_disk_refresh_false_create").build().expect("error building disk cache") } "##
     )]
     fn cached_disk_refresh_false_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4541,7 +4541,7 @@ mod redis_tests {
     #[concurrent_cached(
         map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
         ty = "cached::RedisCache<u32, u32>",
-        create = r##" { RedisCache::builder().prefix("cache_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
+        create = r##" { RedisCache::builder("cache_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().expect("error building redis cache") } "##
     )]
     fn cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
         if n < 5 {
@@ -4621,7 +4621,7 @@ mod redis_tests {
         #[concurrent_cached(
             map_error = r##"|e| TestError::RedisError(format!("{:?}", e))"##,
             ty = "cached::AsyncRedisCache<u32, u32>",
-            create = r##" { AsyncRedisCache::builder().prefix("async_cached_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
+            create = r##" { AsyncRedisCache::builder("async_cached_redis_test_cache_create").ttl(Duration::from_secs(1)).refresh_on_hit(true).build().await.expect("error building async redis cache") } "##
         )]
         async fn async_cached_redis_cache_create(n: u32) -> Result<u32, TestError> {
             if n < 5 {
@@ -4647,8 +4647,7 @@ mod redis_tests {
 
         #[tokio::test]
         async fn async_redis_builder_aliases_and_zero_ttl_validation() {
-            let result = cached::AsyncRedisCache::<String, String>::builder()
-                .prefix("async-zero-ttl")
+            let result = cached::AsyncRedisCache::<String, String>::builder("async-zero-ttl")
                 .ttl(Duration::ZERO)
                 .build()
                 .await;
@@ -4668,8 +4667,7 @@ mod redis_tests {
             use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync};
 
             let prefix = "async_test_set_ttl_zero_no_expiry";
-            let cache = AsyncRedisCache::<String, String>::builder()
-                .prefix(prefix)
+            let cache = AsyncRedisCache::<String, String>::builder(prefix)
                 .ttl(Duration::from_secs(30))
                 .namespace("")
                 .build()
@@ -4746,8 +4744,7 @@ mod redis_tests {
             use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync, SerializeCachedAsync};
 
             let prefix = "async_test_set_ref_zero_ttl";
-            let cache = AsyncRedisCache::<String, String>::builder()
-                .prefix(prefix)
+            let cache = AsyncRedisCache::<String, String>::builder(prefix)
                 .ttl(Duration::from_secs(30))
                 .namespace("")
                 .build()
@@ -4826,8 +4823,7 @@ mod redis_tests {
             use cached::{ConcurrentCacheTtl, ConcurrentCachedAsync};
 
             let prefix = "async_test_refresh_disabled_reenabled";
-            let cache = AsyncRedisCache::<String, String>::builder()
-                .prefix(prefix)
+            let cache = AsyncRedisCache::<String, String>::builder(prefix)
                 .ttl(Duration::from_secs(100))
                 .namespace("")
                 .refresh_on_hit(true)
@@ -4915,8 +4911,7 @@ mod redis_tests {
         async fn async_redis_try_set_ttl_zero_and_nonzero() {
             use cached::{ConcurrentCacheTtl, SetTtlError};
 
-            let cache = AsyncRedisCache::<String, String>::builder()
-                .prefix("async_test_try_set_ttl")
+            let cache = AsyncRedisCache::<String, String>::builder("async_test_try_set_ttl")
                 .ttl(Duration::from_secs(30))
                 .namespace("")
                 .build()
@@ -4957,8 +4952,7 @@ mod redis_tests {
         async fn async_redis_refresh_on_hit_trait_getter_reflects_setter() {
             use cached::ConcurrentCacheTtl;
 
-            let cache = AsyncRedisCache::<String, String>::builder()
-                .prefix("async_test_refresh_getter")
+            let cache = AsyncRedisCache::<String, String>::builder("async_test_refresh_getter")
                 .ttl(Duration::from_secs(30))
                 .namespace("")
                 .build()
@@ -4986,8 +4980,7 @@ mod redis_tests {
         async fn async_redis_cache_size_len_is_empty_unknown() {
             use cached::{ConcurrentCacheBase, ConcurrentCachedAsync};
 
-            let cache = AsyncRedisCache::<String, String>::builder()
-                .prefix("async_test_cache_size_unknown")
+            let cache = AsyncRedisCache::<String, String>::builder("async_test_cache_size_unknown")
                 .ttl(Duration::from_secs(30))
                 .namespace("")
                 .build()
@@ -5031,15 +5024,13 @@ mod redis_tests {
     fn test_redis_cache_clear_scoped() {
         // Build two caches with different prefixes under an empty namespace so
         // only the SCAN scope (prefix) distinguishes them.
-        let cache_a = RedisCache::<String, String>::builder()
-            .prefix("test_clear_scope_a")
+        let cache_a = RedisCache::<String, String>::builder("test_clear_scope_a")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
             .expect("build cache_a");
 
-        let cache_b = RedisCache::<String, String>::builder()
-            .prefix("test_clear_scope_b")
+        let cache_b = RedisCache::<String, String>::builder("test_clear_scope_b")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5088,8 +5079,7 @@ mod redis_tests {
 
     #[test]
     fn test_redis_cache_set_ref_round_trip() {
-        let cache = RedisCache::<String, String>::builder()
-            .prefix("test_set_ref_rt")
+        let cache = RedisCache::<String, String>::builder("test_set_ref_rt")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5158,8 +5148,7 @@ mod redis_tests {
     #[test]
     fn test_redis_set_ttl_zero_writes_key_without_expiry() {
         let prefix = "test_set_ttl_zero_no_expiry";
-        let cache = RedisCache::<String, String>::builder()
-            .prefix(prefix)
+        let cache = RedisCache::<String, String>::builder(prefix)
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5214,8 +5203,7 @@ mod redis_tests {
     #[test]
     fn test_redis_unset_ttl_writes_key_without_expiry() {
         let prefix = "test_unset_ttl_no_expiry";
-        let cache = RedisCache::<String, String>::builder()
-            .prefix(prefix)
+        let cache = RedisCache::<String, String>::builder(prefix)
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5248,8 +5236,7 @@ mod redis_tests {
     #[test]
     fn test_redis_refresh_on_hit_disabled_ttl_skips_expire_preexisting_key() {
         let prefix = "test_refresh_disabled_skips_expire";
-        let cache = RedisCache::<String, String>::builder()
-            .prefix(prefix)
+        let cache = RedisCache::<String, String>::builder(prefix)
             .ttl(Duration::from_secs(100))
             .namespace("")
             .refresh_on_hit(true)
@@ -5297,8 +5284,7 @@ mod redis_tests {
     #[test]
     fn test_redis_refresh_on_hit_reenabled_ttl_adds_expire_to_persistent_key() {
         let prefix = "test_refresh_reenabled_adds_expire";
-        let cache = RedisCache::<String, String>::builder()
-            .prefix(prefix)
+        let cache = RedisCache::<String, String>::builder(prefix)
             .ttl(Duration::ZERO) // start disabled — strict build path is exercised elsewhere
             .namespace("")
             .refresh_on_hit(true)
@@ -5308,8 +5294,7 @@ mod redis_tests {
             cache.is_err(),
             "build() must reject a zero ttl even on the refresh path"
         );
-        let cache = RedisCache::<String, String>::builder()
-            .prefix(prefix)
+        let cache = RedisCache::<String, String>::builder(prefix)
             .ttl(Duration::from_secs(100))
             .namespace("")
             .refresh_on_hit(true)
@@ -5352,8 +5337,7 @@ mod redis_tests {
     // the moved getter/setter would be caught here without inspecting raw Redis state.
     #[test]
     fn test_redis_set_ttl_nonzero_round_trip() {
-        let cache = RedisCache::<String, String>::builder()
-            .prefix("test_set_ttl_nonzero_round_trip")
+        let cache = RedisCache::<String, String>::builder("test_set_ttl_nonzero_round_trip")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5390,8 +5374,7 @@ mod redis_tests {
     fn test_redis_cache_size_len_is_empty_unknown() {
         use cached::ConcurrentCacheBase;
 
-        let cache = RedisCache::<String, String>::builder()
-            .prefix("test_redis_cache_size_unknown")
+        let cache = RedisCache::<String, String>::builder("test_redis_cache_size_unknown")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5436,8 +5419,7 @@ mod redis_tests {
     // now reflects the setter through trait dispatch.
     #[test]
     fn test_redis_refresh_on_hit_trait_getter_reflects_setter() {
-        let cache = RedisCache::<String, String>::builder()
-            .prefix("test_redis_refresh_getter_reflects_setter")
+        let cache = RedisCache::<String, String>::builder("test_redis_refresh_getter_reflects_setter")
             .ttl(Duration::from_secs(30))
             .namespace("")
             .build()
@@ -5908,8 +5890,7 @@ fn test_fallible_builders_return_build_error() {
 #[test]
 fn redb_cache_builder_zero_ttl_validation() {
     // `RedbCache` rejects a zero TTL at build time.
-    let result = cached::RedbCache::<String, String>::builder()
-        .name("zero-ttl")
+    let result = cached::RedbCache::<String, String>::builder("zero-ttl")
         .ttl(cached::time::Duration::ZERO)
         .build();
     assert!(matches!(
@@ -5923,8 +5904,7 @@ fn redb_cache_builder_zero_ttl_validation() {
 #[cfg(feature = "redis_store")]
 #[test]
 fn redis_cache_builder_aliases_and_zero_ttl_validation() {
-    let result = cached::RedisCache::<String, String>::builder()
-        .prefix("zero-ttl")
+    let result = cached::RedisCache::<String, String>::builder("zero-ttl")
         .ttl(cached::time::Duration::ZERO)
         .build();
     assert!(matches!(
