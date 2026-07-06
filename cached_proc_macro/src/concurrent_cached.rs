@@ -1520,6 +1520,18 @@ fn get_disk_cache_type_and_create(
     cache_value_ty: &proc_macro2::TokenStream,
     fn_ident: &Ident,
 ) -> Result<(proc_macro2::TokenStream, proc_macro2::TokenStream), syn::Error> {
+    // `cache_prefix_block` is redis-only; on the disk path it would be silently
+    // ignored (the redb table name comes from `name`). Reject it, mirroring the
+    // sharded path's rejection of redis/disk-only attributes.
+    if args.cache_prefix_block.is_some() {
+        return Err(syn::Error::new(
+            fn_ident.span(),
+            "`cache_prefix_block` is redis-only and does not apply to the disk (`redb`) path; \
+             the redb table name comes from `name`, so set `name` instead (or remove \
+             `cache_prefix_block`)",
+        ));
+    }
+
     // A custom `ty` on the disk path is only honored when the user also supplies a
     // matching `create` block. Without `create` the macro would build the DEFAULT store
     // (`RedbCache`) via its default builder while declaring the cache as the custom `ty`,

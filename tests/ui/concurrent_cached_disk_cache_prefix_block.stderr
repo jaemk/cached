@@ -1,0 +1,5 @@
+error: `cache_prefix_block` is redis-only and does not apply to the disk (`redb`) path; the redb table name comes from `name`, so set `name` instead (or remove `cache_prefix_block`)
+  --> tests/ui/concurrent_cached_disk_cache_prefix_block.rs:10:4
+   |
+10 | fn my_fn(k: i32) -> Result<i32, String> {
+   |    ^^^^^
