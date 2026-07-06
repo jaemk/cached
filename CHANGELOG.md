@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `SerializeCached::cache_set_ref` and `SerializeCachedAsync::async_cache_set_ref` return `Result<(), Self::Error>` instead of `Result<Option<V>, Self::Error>`. The previous value is no longer fetched on the IO-backed stores (removes a per-write read+decode round-trip on redis). Call `cache_get` first if you need the prior value. Custom `SerializeCached` impls must update their return type.
+- `ConcurrentCacheBase::len` is removed (it duplicated `cache_size`); `ConcurrentCacheBase::is_empty` is renamed to `cache_is_empty`. The inherent `len()` and `is_empty()` on the six sharded concrete types are unchanged. **Migration:** replace `<T: ConcurrentCacheBase>::len(...)` with `cache_size(...)` and `is_empty(...)` with `cache_is_empty(...)`.
+- `RedbCache::builder`, `RedisCache::builder`, and `AsyncRedisCache::builder` now take the primary required field as a positional argument: `RedbCache::builder(name)`, `RedisCache::builder(prefix)`, `AsyncRedisCache::builder(prefix)`. The no-arg `RedbCacheBuilder::new()` / `RedisCacheBuilder::new()` / `AsyncRedisCacheBuilder::new()` entry points on the builder structs are unchanged.
+- The redis TTL is now optional: omitting `.ttl(...)` before `build()` stores keys without expiry (equivalent to `unset_ttl()`). A TTL that is set must be greater than zero. `RedisCacheBuildError::MissingRequired("ttl")` is no longer returned. **Migration:** if your build path detected the absent-ttl error, set the TTL explicitly or rely on the no-expiry default; a zero TTL still returns `InvalidValue`.
+- `#[concurrent_cached(disk = true, cache_prefix_block = ...)]` is a compile error. `cache_prefix_block` is a redis-only attribute; the redb table name derives from the `name` attribute. Remove `cache_prefix_block` from disk-backed `#[concurrent_cached]` uses.
+
+### Fixed
+
+- On expired-entry replacement via `cache_get_or_set_with_mut` / `cache_try_get_or_set_with_mut`, the `on_evict` callback on `LruCache`, `LruTtlCache`, and `ExpiringLruCache` now receives the stored key of the evicted entry rather than the lookup key. Key types where equal instances may be non-identical (case-insensitive keys, interned strings) previously received the wrong key instance.
+- `TtlSortedCache::cache_get_or_set_with_mut` and `cache_try_get_or_set_with_mut` now leave the expired entry in place when the factory returns `Err` or panics, matching `TtlCache` and `LruTtlCache`. Previously the expired entry was removed before the factory ran, so a factory failure left the key absent. `TtlSortedCache::set_max_size` now evicts eagerly down to the new bound (matching `LruCache`), instead of deferring eviction to the next insert.
+- `ExpiringCache::cache_get_or_set_with_mut` now fires `on_evict` while the old entry is still present in the store, then inserts the new value, matching `TtlCache`. Previously the new value was inserted first, so a callback that read the store observed the new entry.
+- redb self-heal (`strict_deserialization = false`): the entry is re-read inside the write transaction before deletion, so a concurrent valid `cache_set` that commits between the corrupt-bytes read and the self-heal write is no longer discarded.
+- redis self-heal: the delete is now conditional via a Lua script that compares stored bytes before deleting, so a concurrent `PSETEX` of a valid value that races the GET is not overwritten.
+
+### Added
+
+- `ConcurrentCloneCached::get_with_expiry_status` provided-method alias for `cache_get_with_expiry_status`, matching the `CloneCached::get_with_expiry_status` alias on the single-owner trait.
+- `RedbCache::async_remove_expired_entries` runs the expired-entry sweep on the `blocking` thread pool, making it usable from async contexts without blocking the runtime.
+- `serde` cargo feature enables `serde` and `rmp-serde` without requiring `redis_store` or `redb_store`. Use it to implement `SerializeCached` on a custom store type.
+- `RedisCacheError` and `RedbCacheError` implement a custom `Debug` that redacts the `cached_value` bytes in `CacheDeserialization` variants (rendered as `<N bytes redacted>`), preventing raw application data from appearing in debug output.
+- `#[source]` on `RedisCacheBuildError::Connection` and `RedisCacheBuildError::Pool`, aligning them with the `#[source]`-annotated variants on `RedbCacheBuildError`.
+
 ## [3.0.0-rc.4 / cached_proc_macro 3.0.0-rc.4 / cached_proc_macro_types 3.0.0-rc.4] - 2026-07-05
 
 > Changes since rc.3, all non-breaking. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md).
@@ -295,6 +319,7 @@
   alongside if TLS is required.
 - `redis_async_cache` is now also TLS-agnostic: it pulls `redis_tokio` + `redis/cache-aio`.
   Add `redis_tokio_native_tls` or `redis_tokio_rustls` alongside if TLS is required.
+  _Updated before 3.0.0: `redis_async_cache` depends only on `redis/aio` and no longer implies `redis_tokio`; pair it with a runtime feature separately. See "Feature and dependency changes" in the 3.0.0-rc.3 notes._
 - **Migration:** if you were relying on `redis_tokio`, `redis_smol`, or `redis_async_cache`
   for TLS connectivity, add the appropriate TLS backend feature (`redis_tokio_native_tls` /
   `redis_tokio_rustls` for Tokio; `redis_smol_native_tls` / `redis_smol_rustls` for smol)
@@ -304,16 +329,19 @@
 - MSRV raised from 1.85 to 1.89 (required by `redb` 4.x).
 
 #### `DiskCache` backend: sled → redb ([#237](https://github.com/jaemk/cached/issues/237))
-- Renamed `DiskCache` → `RedbCache` (names the backend explicitly, like `RedisCache`); `DiskCache`, `DiskCacheBuilder`, `DiskCacheError`, and `DiskCacheBuildError` remain as type aliases, so existing code keeps compiling.
+- Renamed `DiskCache` -> `RedbCache` (names the backend explicitly, like `RedisCache`); `DiskCache`, `DiskCacheBuilder`, `DiskCacheError`, and `DiskCacheBuildError` remain as type aliases, so existing code keeps compiling.
+  _Superseded before 3.0.0: the type aliases were removed later in this same rc.1 entry (see "API audit follow-ups" below). Rename `DiskCache*` to `RedbCache*` directly._
 - `DiskCache` is now backed by [`redb`](https://crates.io/crates/redb) 4.x instead of the unmaintained `sled`, dropping the RustSec-flagged `fxhash` transitive dependency. Still pure-Rust (no C toolchain).
 - On-disk format changed: existing caches are not read (entries are recomputed); `DISK_FILE_VERSION` was bumped.
 - `RedbCacheError::Storage` and `RedbCacheBuildError::Storage` now wrap `redb::Error` instead of `sled::Error`; `RedbCacheBuildError` gained an `Io` variant and dropped the never-constructed `MissingDiskPath` variant.
 - Removed `DiskCache::connection()` / `connection_mut()`, `DiskCacheBuilder::connection_config`, and the `connection_config` macro attribute. The backend handle is no longer exposed.
 - `durable` maps to redb durability and defaults to `true` (durable, fsync per write), so a disk cache persists by default. Set `false` to trade durability for write throughput: writes then use `Durability::None`, which is not persisted until a later durable commit, so they can be lost on process exit or crash; call `RedbCache::flush()` / `async_flush()` to force one.
+- `DiskCacheBuilder::sync_to_disk_on_cache_change` is renamed to `durable`; the default flipped from `false` (no fsync) to `true` (durable). **Migration:** replace `.sync_to_disk_on_cache_change(false)` with `.durable(false)` to keep the no-fsync behavior; callers that set `.sync_to_disk_on_cache_change(true)` can drop the call entirely since `true` is now the default.
 
 #### `new()` constructor consistency for stores
 - In-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`, and all six sharded variants) gained `Type::new()` / `Type::new(required_field)` constructors that return a ready-to-use cache. `builder()` is still available for non-default configuration.
 - `RedbCache::new` (and its `DiskCache` alias), `RedisCache::new`, and `AsyncRedisCache::new` are removed. These previously returned a *builder*, conflicting with the convention that `new()` returns a ready store. Replace `::new(` with `::builder(` on these three types; the rest of the builder chain is unchanged.
+  _Updated before 3.0.0: the builders now take the required field as a positional argument: `RedbCache::builder(name)`, `RedisCache::builder(prefix)`, `AsyncRedisCache::builder(prefix)`. See "Store builder API uniformity" below._
 
 #### Macro `ttl` attribute replaced by `ttl_secs`, `ttl_millis`, and Duration expression
 - `ttl = <integer>` (bare whole-second integer) is removed from `#[cached]` / `#[once]` / `#[concurrent_cached]`. The macro now accepts three mutually exclusive forms: `ttl_secs = N` (whole seconds, replaces the old integer form), `ttl_millis = N` (milliseconds, new in this release), or `ttl = "<Duration expr>"` (a string-literal Duration expression, e.g. `ttl = "Duration::from_secs(60)"`). Using the old bare-integer form produces an error directing you to `ttl_secs`.
@@ -330,6 +358,7 @@
 - Split the concurrent cache trait surface to eliminate the remaining `E0034` "multiple applicable items in scope" error. `ConcurrentCached` and `ConcurrentCachedAsync` previously each declared identical synchronous helpers (`cache_size`, `len`, `is_empty`, `ttl`, `set_ttl`, `unset_ttl`, `refresh_on_hit`, `set_refresh_on_hit`); on a store implementing both traits (`RedbCache`, every `Sharded*` store) calling one of those with both traits in scope failed to compile. Those helpers now live on two new shared traits: introspection (`type Error`, `cache_size`, `len`, `is_empty`) on `ConcurrentCacheBase` (the supertrait of both concurrent traits, mirroring the single-owner `Cached` core), and the global-TTL controls (`ttl`, `set_ttl`, `unset_ttl`, `refresh_on_hit`, `set_refresh_on_hit`, plus a new validated `try_set_ttl` that rejects a zero `Duration` with `SetTtlError::ZeroTtl`) on `ConcurrentCacheTtl`. Only the TTL-capable concurrent stores (`ShardedTtlCache`, `ShardedLruTtlCache`, `RedisCache`, `AsyncRedisCache`, `RedbCache`) implement `ConcurrentCacheTtl`; the non-TTL sharded stores no longer expose `set_ttl`/`ttl`/etc. Both new traits are re-exported from the crate root and the prelude. **Migration:** custom `impl ConcurrentCached`/`ConcurrentCachedAsync` blocks must move their `type Error` (and any `cache_size`/`len`/`is_empty` override) into a single `impl ConcurrentCacheBase for X` block, and any TTL behavior into `impl ConcurrentCacheTtl for X`. Callers using `cached::prelude::*` need no change (both traits are imported); callers importing the concurrent traits individually should add `ConcurrentCacheBase` / `ConcurrentCacheTtl` where they call those helpers.
 - `CacheTtl` and `CacheEvict` are now single-owner (`&mut self`) traits only, since `&mut self` was unusable on stores held through `Arc`/`static`. `CacheTtl` was removed from `DiskCache`, `RedisCache`, `AsyncRedisCache`, `ShardedTtlCache`, and `ShardedLruTtlCache`; `CacheEvict` from the four TTL/expiring sharded stores. Set TTL on concurrent stores via `ConcurrentCacheTtl::set_ttl` (`&self`), and evict via the new `ConcurrentCacheEvict` trait (`fn evict(&self) -> usize`, implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`). Single-owner in-memory stores are unchanged.
 - `Cached::cache_get_or_set_with` / `cache_try_get_or_set_with` (and their `get_or_set_with` / `try_get_or_set_with` aliases) and `CachedAsync::async_get_or_set_with` / `async_try_get_or_set_with` now return `&V` / `Result<&V, E>` instead of `&mut V` / `Result<&mut V, E>` ([#179](https://github.com/jaemk/cached/issues/179)). New `*_mut` variants (`cache_get_or_set_with_mut`, `cache_try_get_or_set_with_mut`, `get_or_set_with_mut`, `try_get_or_set_with_mut`, `async_get_or_set_with_mut`, `async_try_get_or_set_with_mut`) preserve the mutable-reference behavior. External `impl`s of these traits must update their method signatures and implement the new `*_mut` required methods.
+  _Note: the `CachedAsync` async method names cited above (`async_get_or_set_with`, `async_try_get_or_set_with`) were renamed to `async_cache_get_or_set_with` / `async_cache_try_get_or_set_with` by the same rc.1 entry (see "CachedAsync method renames" below), then `CachedAsync` was renamed to `CachedGetOrSetAsync` in rc.3. These intermediate names never appeared in any shipped release._
 - `refresh_on_hit` and `set_refresh_on_hit` are now **required** methods on `CacheTtl` and `ConcurrentCacheTtl` (the trait-default bodies that returned `false` were removed). This fixes a latent bug: the concurrent stores (`ShardedTtlCache`, `ShardedLruTtlCache`, `RedisCache`, `AsyncRedisCache`, `RedbCache`) overrode only `set_refresh_on_hit`, so `ConcurrentCacheTtl::refresh_on_hit` always reported `false` through trait dispatch even after `set_refresh_on_hit(true)`; it now correctly reflects the configured flag. **Migration:** custom `impl CacheTtl`/`impl ConcurrentCacheTtl` blocks must now provide both methods explicitly (a non-refreshing store can return `false` and treat the setter as a no-op).
 
 #### Other breaking changes
@@ -342,9 +371,11 @@
 
 #### Redis and disk store changes
 - Redis values are now serialized with MessagePack (`rmp-serde`) instead of JSON; the `redis_store` feature pulls `rmp-serde` instead of `serde_json`. Old (2.x) JSON-format entries are read transparently: the store tries MessagePack first, then falls back to `serde_json` for entries that carry a `version` key in the JSON object, and serves the value without recompute. New writes use MessagePack; old entries are rewritten as MessagePack on their next write. `RedisCacheError`'s serialize/deserialize variants carry `rmp_serde::encode::Error` / `rmp_serde::decode::Error` instead of `serde_json::Error`.
+  _Updated before 3.0.0: the serialize/deserialize error sources are boxed as `Box<dyn std::error::Error + Send + Sync>` (see "redis/redb error types decoupled from their backing crates" in the 3.0.0-rc.3 notes); `rmp_serde::*::Error` is not directly pattern-matchable._
 - Redis TTL now uses the millisecond commands `PSETEX` / `PEXPIRE`; sub-second TTLs are honored to the millisecond instead of rounded up to the next whole second. Whole-second TTLs are unchanged. Requires Redis 2.6+.
 - `RedisCache::connection_string()` / `AsyncRedisCache::connection_string()` now return a `ConnectionString` newtype whose `Display` and `Debug` both redact credentials. Call `.reveal()` on the returned value to get the raw URL string.
 - `RedbCacheError` and `RedbCacheBuildError` are now struct variants (named fields) matching the redis enums; `RedbCacheBuildError::Connection` is renamed `Storage`. The serialize/deserialize variants on both backends carry MessagePack error types, and `CacheDeserialization` gains a `cached_value: Vec<u8>` field holding the bytes that failed to decode. **Migration:** tuple patterns like `CacheSerialization(e)` become `CacheSerialization { source }`.
+  _Updated before 3.0.0: the serialize/deserialize error sources on both backends are boxed (see "redis/redb error types decoupled from their backing crates" in the 3.0.0-rc.3 notes)._
 
 #### Sharded store and error-type renames
 - `ShardedCache` renamed to `ShardedUnboundCache` (along with `ShardedCacheBase` -> `ShardedUnboundCacheBase` and `ShardedCacheBuilder` -> `ShardedUnboundCacheBuilder`). The old name read as the umbrella for the whole sharded family while it only named the unbounded variant; the new name is parallel with `ShardedLruCache`, `ShardedTtlCache`, and the rest. No deprecated alias - rename at the call site.
@@ -374,10 +405,12 @@
 - The `Expires` trait gained a default method `expires_at(&self) -> Option<Instant>` returning the value's expiry instant when tracked (`None` by default / when unknown). It is advisory/observability only; `is_expired()` remains the authoritative liveness check. Existing `impl Expires` blocks (which provide only `is_expired`) get the default for free.
 
 #### Store builder API uniformity (C1)
+> Updated before 3.0.0: the builders take the primary required field as a positional argument -- `RedbCache::builder(name)`, `RedisCache::builder(prefix)`, `AsyncRedisCache::builder(prefix)`. The no-arg `::builder()` entry point described below was superseded; redis `ttl` is optional (no set ttl stores keys without expiry).
 - `RedbCache::builder(name)`, `RedisCache::builder(prefix, ttl)`, and `AsyncRedisCache::builder(prefix, ttl)` now take no arguments: `::builder()`. Required fields (`name`, `prefix`, `ttl`) are set via dedicated setters and validated in `build()`, which returns `BuildError::MissingRequired(field_name)` if a required field is absent. All store builders now share a uniform no-arg `::builder()` entry point.
 
 #### `CachedAsync` method renames (I1)
-- The four `async_get_or_set_with*` methods on the `CachedAsync` trait are renamed with the `cache_` namespace infix, matching the `Cached` trait convention: `async_get_or_set_with` → `async_cache_get_or_set_with`, `async_get_or_set_with_mut` → `async_cache_get_or_set_with_mut`, `async_try_get_or_set_with` → `async_cache_try_get_or_set_with`, `async_try_get_or_set_with_mut` → `async_cache_try_get_or_set_with_mut`. The four shorthand methods are likewise renamed: `get_async` → `async_cache_get`, `set_async` → `async_cache_set`, `remove_async` → `async_cache_remove`, `clear_async` → `async_cache_clear`. Every `CachedAsync` method now uses the `async_cache_*` namespace. The `ConcurrentCachedAsync` trait is unchanged.
+> Superseded before 3.0.0: `CachedAsync` was renamed to `CachedGetOrSetAsync` and its four sync passthroughs (`async_cache_get` / `async_cache_set` / `async_cache_remove` / `async_cache_clear`) removed. See the "`CachedAsync` renamed to `CachedGetOrSetAsync`; sync passthroughs removed" entry in the 3.0.0-rc.3 notes.
+- The four `async_get_or_set_with*` methods on the `CachedAsync` trait are renamed with the `cache_` namespace infix, matching the `Cached` trait convention: `async_get_or_set_with` -> `async_cache_get_or_set_with`, `async_get_or_set_with_mut` -> `async_cache_get_or_set_with_mut`, `async_try_get_or_set_with` -> `async_cache_try_get_or_set_with`, `async_try_get_or_set_with_mut` -> `async_cache_try_get_or_set_with_mut`. The four shorthand methods are likewise renamed: `get_async` -> `async_cache_get`, `set_async` -> `async_cache_set`, `remove_async` -> `async_cache_remove`, `clear_async` -> `async_cache_clear`. Every `CachedAsync` method now uses the `async_cache_*` namespace. The `ConcurrentCachedAsync` trait is unchanged.
 
 #### Error vocabulary for TTL validation (I4+I5)
 - `BuildError::InvalidTtl { ttl }` is removed. A zero TTL at build time now yields `BuildError::InvalidValue { field: "ttl", reason: "must be greater than zero" }`, which is more general (the variant can represent other field-validation failures) and more descriptive.
@@ -405,6 +438,7 @@
 #### Runtime decoupling: `async_tokio_rt_multi_thread` removed; `async` no longer pulls tokio; `async_sync` re-exports changed
 - `async_tokio_rt_multi_thread` cargo feature removed. Users who need `tokio/rt-multi-thread` (e.g. for `#[tokio::test]`) must add `tokio` with `rt-multi-thread` directly to their own dev-dependencies.
 - The `async` feature no longer implies `tokio`. It now pulls only `async-lock` and `blocking` (runtime-agnostic). smol/async-std async users no longer compile tokio.
+  _Updated before 3.0.0: `blocking` moved from `async` to `redb_store` (see "Feature and dependency changes" in the 3.0.0-rc.3 notes); `async` depends only on `dep:async-lock` at HEAD._
 - `cached::async_sync::{Mutex, RwLock, OnceCell}` now re-export from `async-lock` instead of `tokio::sync`. `OnceCell` from `async-lock` has no `const_new()`; replace with `OnceCell::new()`.
 - Async `RedbCache` runs blocking redb work on the `blocking` crate's thread pool instead of `tokio::spawn_blocking`, making it runtime-agnostic. `RedbCacheError::BackgroundTaskFailed` variant removed.
 
@@ -431,8 +465,10 @@
 - `#[must_use]` parity across the sharded builders, and the `with_hasher` doc alias is spread to every sharded builder's `hasher` method for discoverability.
 - Malformed `key` / `convert` macro attributes now produce a contextual error explaining what the attribute expects, with an example, instead of a bare `syn` "unexpected token".
 - `redis_connection_manager` now builds on the `redis_tokio` feature instead of re-listing redis sub-features (resolved feature set unchanged).
+  _Updated before 3.0.0: `redis_connection_manager` is runtime-agnostic and no longer implies `redis_tokio` (see "Feature and dependency changes" in the 3.0.0-rc.3 notes)._
 - `ConcurrentCached` / `ConcurrentCachedAsync` gained a defaulted `cache_get_or_set_with` / `async_cache_get_or_set_with` (with a `get_or_set_with` alias), mirroring the single-owner traits. The default is a get-then-set (non-atomic; a concurrent miss may run the factory more than once).
 - `ConcurrentCached` / `ConcurrentCachedAsync` gained a defaulted `refresh_on_hit()` getter, and `set_refresh_on_hit` is now defaulted (`{ false }`) so custom impls no longer need to write it.
+  _Superseded before 3.0.0: `refresh_on_hit` and `set_refresh_on_hit` are required methods on `ConcurrentCacheTtl` (see the "Trait API changes" entry above in this rc.1 section)._
 - `RedisCache` and `AsyncRedisCache` now implement `Clone` (Arc-backed pool / cloneable connection). `RedbCache` stays non-`Clone`.
 - The `name` macro attribute is validated as a Rust identifier: an invalid `name` now produces a spanned "`name` must be a valid Rust identifier" error instead of a macro panic.
 - `#[once]` and `#[concurrent_cached]` now reject the `#[cached]`-only sync attributes (`sync_lock`, `unsync_reads`, and `sync_writes_buckets` on `#[concurrent_cached]`) with a clear "not supported on this macro" message instead of a generic unknown-field error.
@@ -464,6 +500,8 @@
 - Macro attributes `convert`, `create`, `force_refresh`, `map_error`, `cache_prefix_block` accept unquoted Rust in addition to the existing quoted-string form. `force_refresh = true` (bare bool) is now valid.
 - `map_error` is optional on `#[concurrent_cached(disk = true)]` and Redis-backed `#[concurrent_cached]`; when omitted the generated code uses `.map_err(Into::into)?`.
 - `companions_vis = "<vis>"` attribute on all three macros controls the visibility of generated `{fn}_no_cache` and `{fn}_prime_cache` companions.
+- `RedisCacheError`, `RedbCacheError`, and their build-error siblings expose `is_deserialization() -> bool`, a predicate returning `true` for `CacheDeserialization` variants, so callers can distinguish a codec failure from a storage or network error without a full match.
+- The `async_core` cargo feature enables the async trait definitions (`CachedAsync` / `SerializeCachedAsync` / `ConcurrentCachedAsync` and their supertrait machinery) without pulling the `async-lock` runtime dependency. Use it when you need the async trait bounds but supply your own synchronization. For most users the `async` feature is the right choice; it also enables `async-lock`.
 
 ## [2.0.2]
 - Docs/tests only (no API change): document the `Expires` trait / `expires = true` as the idiomatic way to set a dynamic, per-entry TTL (a lifetime computed at call time rather than the uniform `ttl = N`), with a runnable example reference, and add a regression test for the runtime-argument-driven TTL case ([#246](https://github.com/jaemk/cached/issues/246)).
