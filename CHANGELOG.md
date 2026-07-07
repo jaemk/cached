@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.5 / cached_proc_macro 3.0.0-rc.5] - 2026-07-07
+
 ### Breaking Changes
 
 - `SerializeCached::cache_set_ref` and `SerializeCachedAsync::async_cache_set_ref` return `Result<(), Self::Error>` instead of `Result<Option<V>, Self::Error>`. The previous value is no longer fetched on the IO-backed stores (removes a per-write read+decode round-trip on redis). Call `cache_get` first if you need the prior value. Custom `SerializeCached` impls must update their return type.
