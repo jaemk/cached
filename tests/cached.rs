@@ -5407,11 +5407,12 @@ mod redis_tests {
     // now reflects the setter through trait dispatch.
     #[test]
     fn test_redis_refresh_on_hit_trait_getter_reflects_setter() {
-        let cache = RedisCache::<String, String>::builder("test_redis_refresh_getter_reflects_setter")
-            .ttl(Duration::from_secs(30))
-            .namespace("")
-            .build()
-            .expect("build cache");
+        let cache =
+            RedisCache::<String, String>::builder("test_redis_refresh_getter_reflects_setter")
+                .ttl(Duration::from_secs(30))
+                .namespace("")
+                .build()
+                .expect("build cache");
 
         // Trait getter starts false (builder default).
         assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));

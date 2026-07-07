@@ -101,11 +101,7 @@ mod lru_ttl {
             64,
             "capacity must be shards * per_shard_cap = 4 * 16 = 64"
         );
-        assert_eq!(
-            cache.shards(),
-            4,
-            "shard count must be exactly 4"
-        );
+        assert_eq!(cache.shards(), 4, "shard count must be exactly 4");
     }
 
     /// With `shards(4).max_size(8)` the effective capacity is 64, so inserting

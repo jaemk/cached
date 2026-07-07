@@ -661,10 +661,13 @@ mod concurrent_clone_cached_peek {
 
         // Alias returns the same shape as the underlying method.
         let via_alias = ConcurrentCloneCached::get_with_expiry_status(&cache, &1);
-        assert_eq!(via_alias, (Some(42), false), "alias returns (value, expired)");
+        assert_eq!(
+            via_alias,
+            (Some(42), false),
+            "alias returns (value, expired)"
+        );
 
-        let (absent, absent_expired) =
-            ConcurrentCloneCached::get_with_expiry_status(&cache, &999);
+        let (absent, absent_expired) = ConcurrentCloneCached::get_with_expiry_status(&cache, &999);
         assert_eq!(absent, None);
         assert!(!absent_expired);
 

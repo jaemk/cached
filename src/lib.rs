@@ -2673,7 +2673,11 @@ pub mod __set_dispatch_async {
             let store = self.store;
             // The set site discards the previous value; drop it here so both arms
             // share a `Result<(), _>` shape.
-            async move { ConcurrentCachedAsync::async_cache_set(store, key, v).await.map(|_| ()) }
+            async move {
+                ConcurrentCachedAsync::async_cache_set(store, key, v)
+                    .await
+                    .map(|_| ())
+            }
         }
     }
 }

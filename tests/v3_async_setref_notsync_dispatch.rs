@@ -139,9 +139,7 @@ impl ConcurrentCachedAsync<u32, NotSyncVal> for NotSyncStore {
         async move { Ok(result) }
     }
 
-    fn async_cache_clear(
-        &self,
-    ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
+    fn async_cache_clear(&self) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
     where
         Self: Sync,
     {
@@ -149,9 +147,7 @@ impl ConcurrentCachedAsync<u32, NotSyncVal> for NotSyncStore {
         async move { Ok(()) }
     }
 
-    fn async_cache_reset(
-        &self,
-    ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
+    fn async_cache_reset(&self) -> impl std::future::Future<Output = Result<(), Infallible>> + Send
     where
         Self: Sync,
     {

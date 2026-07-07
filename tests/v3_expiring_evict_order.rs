@@ -83,11 +83,17 @@ fn on_evict_fires_before_insert_in_get_or_set_with_mut() {
 
     let returned = cache.cache_get_or_set_with_mut(1, || {
         events.lock().unwrap().push("factory");
-        Val { id: 20, expired: false }
+        Val {
+            id: 20,
+            expired: false,
+        }
     });
 
     // Returned reference must be the new value.
-    assert_eq!(returned.id, 20, "returned reference must point to the new value");
+    assert_eq!(
+        returned.id, 20,
+        "returned reference must point to the new value"
+    );
 
     // factory runs before on_evict (ordering side channel).
     {
@@ -126,8 +132,17 @@ fn on_evict_callback_arg_is_old_value_in_get_or_set_with_mut() {
         .build()
         .unwrap();
 
-    cache.cache_set(1, Val { id: 10, expired: true });
-    cache.cache_get_or_set_with_mut(1, || Val { id: 20, expired: false });
+    cache.cache_set(
+        1,
+        Val {
+            id: 10,
+            expired: true,
+        },
+    );
+    cache.cache_get_or_set_with_mut(1, || Val {
+        id: 20,
+        expired: false,
+    });
 
     assert_eq!(
         *evict_id.lock().unwrap(),
@@ -161,11 +176,17 @@ fn on_evict_fires_before_insert_in_try_get_or_set_with_mut() {
     let result: Result<&mut Val, std::convert::Infallible> =
         cache.cache_try_get_or_set_with_mut(1, || {
             events.lock().unwrap().push("factory");
-            Ok(Val { id: 20, expired: false })
+            Ok(Val {
+                id: 20,
+                expired: false,
+            })
         });
     let returned = result.expect("infallible factory cannot fail");
 
-    assert_eq!(returned.id, 20, "returned reference must point to the new value");
+    assert_eq!(
+        returned.id, 20,
+        "returned reference must point to the new value"
+    );
 
     {
         let ev = events.lock().unwrap();
@@ -200,9 +221,19 @@ fn on_evict_callback_arg_is_old_value_in_try_get_or_set_with_mut() {
         .build()
         .unwrap();
 
-    cache.cache_set(1, Val { id: 10, expired: true });
-    let _: Result<_, std::convert::Infallible> =
-        cache.cache_try_get_or_set_with_mut(1, || Ok(Val { id: 20, expired: false }));
+    cache.cache_set(
+        1,
+        Val {
+            id: 10,
+            expired: true,
+        },
+    );
+    let _: Result<_, std::convert::Infallible> = cache.cache_try_get_or_set_with_mut(1, || {
+        Ok(Val {
+            id: 20,
+            expired: false,
+        })
+    });
 
     assert_eq!(
         *evict_id.lock().unwrap(),
@@ -242,11 +273,17 @@ mod async_tests {
         let returned = cache
             .async_cache_get_or_set_with_mut(1, || async {
                 events.lock().unwrap().push("factory");
-                Val { id: 20, expired: false }
+                Val {
+                    id: 20,
+                    expired: false,
+                }
             })
             .await;
 
-        assert_eq!(returned.id, 20, "returned reference must point to the new value");
+        assert_eq!(
+            returned.id, 20,
+            "returned reference must point to the new value"
+        );
 
         {
             let ev = events.lock().unwrap();
@@ -288,12 +325,18 @@ mod async_tests {
         let result: Result<&mut Val, std::convert::Infallible> = cache
             .async_cache_try_get_or_set_with_mut(1, || async {
                 events.lock().unwrap().push("factory");
-                Ok(Val { id: 20, expired: false })
+                Ok(Val {
+                    id: 20,
+                    expired: false,
+                })
             })
             .await;
         let returned = result.expect("infallible factory cannot fail");
 
-        assert_eq!(returned.id, 20, "returned reference must point to the new value");
+        assert_eq!(
+            returned.id, 20,
+            "returned reference must point to the new value"
+        );
 
         {
             let ev = events.lock().unwrap();

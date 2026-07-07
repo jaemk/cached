@@ -663,9 +663,7 @@ pub enum RedbCacheError {
 impl std::fmt::Debug for RedbCacheError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Storage { source } => {
-                f.debug_struct("Storage").field("source", source).finish()
-            }
+            Self::Storage { source } => f.debug_struct("Storage").field("source", source).finish(),
             Self::CacheDeserialization {
                 source,
                 cached_value,
@@ -1508,12 +1506,10 @@ mod tests {
     #[test]
     fn ttl_secs_and_ttl_millis_set_duration() {
         // No disk needed -- inspect the builder's ttl field without calling build().
-        let b = RedbCache::<u32, u32>::builder("ttl-secs-builder")
-            .ttl_secs(7);
+        let b = RedbCache::<u32, u32>::builder("ttl-secs-builder").ttl_secs(7);
         assert_eq!(b.ttl, Some(Duration::from_secs(7)));
 
-        let b = RedbCache::<u32, u32>::builder("ttl-millis-builder")
-            .ttl_millis(250);
+        let b = RedbCache::<u32, u32>::builder("ttl-millis-builder").ttl_millis(250);
         assert_eq!(b.ttl, Some(Duration::from_millis(250)));
     }
 
@@ -1735,12 +1731,13 @@ mod tests {
     #[test]
     fn cache_get_returns_serialize_error_when_refresh_fails() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> = RedbCache::builder("serialize_error_on_refresh")
-            .disk_directory(tmp_dir.path())
-            .ttl(Duration::from_secs(10))
-            .refresh_on_hit(true)
-            .build()
-            .expect("error building disk cache");
+        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> =
+            RedbCache::builder("serialize_error_on_refresh")
+                .disk_directory(tmp_dir.path())
+                .ttl(Duration::from_secs(10))
+                .refresh_on_hit(true)
+                .build()
+                .expect("error building disk cache");
         let cached = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
         raw_insert(
             &cache,
@@ -2495,10 +2492,11 @@ mod tests {
     // Smoke test for the default disk directory: a full get/set/remove
     // round-trip succeeds when `disk_directory` is left at its default.
     fn does_not_break_when_constructed_using_default_disk_directory() {
-        let cache: RedbCache<u32, u32> = RedbCache::builder(format!("{}-disk-cache-test-default-dir", now_millis()))
-            // use the default disk directory
-            .build()
-            .unwrap();
+        let cache: RedbCache<u32, u32> =
+            RedbCache::builder(format!("{}-disk-cache-test-default-dir", now_millis()))
+                // use the default disk directory
+                .build()
+                .unwrap();
 
         let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(
@@ -3223,12 +3221,13 @@ mod tests {
     #[test]
     fn cache_serialization_error_is_struct_variant() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> = RedbCache::builder("ser-error-struct-variant")
-            .disk_directory(tmp_dir.path())
-            .ttl(Duration::from_secs(10))
-            .refresh_on_hit(true)
-            .build()
-            .expect("error building disk cache");
+        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> =
+            RedbCache::builder("ser-error-struct-variant")
+                .disk_directory(tmp_dir.path())
+                .ttl(Duration::from_secs(10))
+                .refresh_on_hit(true)
+                .build()
+                .expect("error building disk cache");
         let fixture = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
         raw_insert(
             &cache,

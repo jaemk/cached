@@ -63,10 +63,7 @@ mod sync_tests {
         // removed (its current value still equals the corrupt bytes read).
         assert_eq!(cache.cache_get(&key).unwrap(), None);
 
-        let exists: bool = redis::cmd("EXISTS")
-            .arg(full_key)
-            .query(&mut conn)
-            .unwrap();
+        let exists: bool = redis::cmd("EXISTS").arg(full_key).query(&mut conn).unwrap();
         assert!(!exists, "still-corrupt entry must be deleted by self-heal");
     }
 

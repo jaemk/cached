@@ -66,7 +66,9 @@ mod sync_tests {
 
         let key = "k".to_string();
         // The setter returns `()` -- pin the unit shape at the call site.
-        let out: () = cache.cache_set_ref(&key, &"v".to_string()).expect("set_ref");
+        let out: () = cache
+            .cache_set_ref(&key, &"v".to_string())
+            .expect("set_ref");
         assert_eq!(out, ());
 
         let ttl = raw_ttl_secs(&cache, "v3_setref_sync_unset:k");
@@ -120,7 +122,9 @@ mod sync_tests {
     fn cache_set_ref_over_corrupt_previous_returns_ok_unit() {
         let prefix = "v3_setref_sync_corrupt";
         let Some(cache) = try_build(prefix, Some(Duration::from_secs(60))) else {
-            eprintln!("skipping cache_set_ref_over_corrupt_previous_returns_ok_unit: no live redis");
+            eprintln!(
+                "skipping cache_set_ref_over_corrupt_previous_returns_ok_unit: no live redis"
+            );
             return;
         };
         cache.cache_clear().expect("clear");

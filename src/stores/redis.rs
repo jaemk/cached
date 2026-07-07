@@ -2666,11 +2666,12 @@ mod async_redis {
 
         #[tokio::test]
         async fn test_async_redis_cache() {
-            let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(format!("{}:async-redis-cache-test", now_millis()))
-                .ttl(Duration::from_secs(2))
-                .build()
-                .await
-                .unwrap();
+            let c: AsyncRedisCache<u32, u32> =
+                AsyncRedisCache::builder(format!("{}:async-redis-cache-test", now_millis()))
+                    .ttl(Duration::from_secs(2))
+                    .build()
+                    .await
+                    .unwrap();
 
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
@@ -3707,11 +3708,12 @@ mod tests {
 
     #[test]
     fn redis_cache() {
-        let c: RedisCache<u32, u32> = RedisCache::builder(format!("{}:redis-cache-test", now_millis()))
-            .ttl(Duration::from_secs(2))
-            .namespace("in-tests:")
-            .build()
-            .unwrap();
+        let c: RedisCache<u32, u32> =
+            RedisCache::builder(format!("{}:redis-cache-test", now_millis()))
+                .ttl(Duration::from_secs(2))
+                .namespace("in-tests:")
+                .build()
+                .unwrap();
 
         assert!(c.cache_get(&1).unwrap().is_none());
 
@@ -3738,10 +3740,11 @@ mod tests {
 
     #[test]
     fn remove() {
-        let c: RedisCache<u32, u32> = RedisCache::builder(format!("{}:redis-cache-test-remove", now_millis()))
-            .ttl(Duration::from_secs(3600))
-            .build()
-            .unwrap();
+        let c: RedisCache<u32, u32> =
+            RedisCache::builder(format!("{}:redis-cache-test-remove", now_millis()))
+                .ttl(Duration::from_secs(3600))
+                .build()
+                .unwrap();
 
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_set(2, 200).unwrap().is_none());

@@ -56,9 +56,12 @@ fn try_get_or_set_with_mut_err_keeps_expired_entry() {
     );
 
     // A successful call now replaces the expired entry and fires on_evict exactly once.
-    let val: Result<&mut u32, &'static str> =
-        cache.cache_try_get_or_set_with_mut(1, || Ok(99));
-    assert_eq!(val, Ok(&mut 99), "successful factory replaces the expired value");
+    let val: Result<&mut u32, &'static str> = cache.cache_try_get_or_set_with_mut(1, || Ok(99));
+    assert_eq!(
+        val,
+        Ok(&mut 99),
+        "successful factory replaces the expired value"
+    );
     assert_eq!(
         evicted.load(Ordering::Relaxed),
         1,
@@ -136,7 +139,11 @@ fn set_max_size_shrink_evicts_immediately() {
     for k in 0..5u32 {
         cache.cache_set(k, k * 10);
     }
-    assert_eq!(cache.cache_size(), 5, "all five entries stored before shrink");
+    assert_eq!(
+        cache.cache_size(),
+        5,
+        "all five entries stored before shrink"
+    );
     assert_eq!(cache.cache_evictions(), Some(0));
 
     let prev = cache.set_max_size(2);

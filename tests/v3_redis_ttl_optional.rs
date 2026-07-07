@@ -20,7 +20,8 @@ fn try_build(prefix: &str, ttl: Option<Duration>) -> Option<RedisCache<String, S
 // Raw redis `TTL` (seconds) for the namespace-less key `{prefix}:{key}`.
 // -1 == persistent (no expiry), -2 == absent, otherwise remaining seconds.
 fn raw_ttl_secs(cache: &RedisCache<String, String>, prefix: &str, key: &str) -> i64 {
-    let client = redis::Client::open(cache.connection_string().reveal()).expect("open redis client");
+    let client =
+        redis::Client::open(cache.connection_string().reveal()).expect("open redis client");
     let mut conn = client.get_connection().expect("redis connection");
     redis::cmd("TTL")
         .arg(format!("{prefix}:{key}"))

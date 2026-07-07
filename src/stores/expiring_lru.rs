@@ -464,7 +464,8 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         // callback sees the instance that was actually cached, not the (equal-but-distinct)
         // lookup key (C1/C8).
         let (was_present, was_valid, old_val, v) =
-            self.store.get_or_set_with_if(k, counted_f, |v| !v.is_expired());
+            self.store
+                .get_or_set_with_if(k, counted_f, |v| !v.is_expired());
         if was_present && was_valid {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else if let Some((old_key, old)) = old_val {

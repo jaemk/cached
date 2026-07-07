@@ -70,7 +70,10 @@ fn lru_ttl_get_or_set_evict_receives_stored_key() {
     // Look up the equal-but-distinct upper-case key; the expired entry is replaced and
     // on_evict must fire with the STORED key "Hello".
     let v = cache.cache_get_or_set_with_mut(CiKey("HELLO".into()), || 2);
-    assert_eq!(*v, 2, "expired entry should be replaced by the factory value");
+    assert_eq!(
+        *v, 2,
+        "expired entry should be replaced by the factory value"
+    );
 
     let seen = seen.lock().unwrap();
     assert_eq!(
@@ -236,9 +239,8 @@ fn expiring_lru_panicking_factory_still_counts_miss_on_both_variants() {
     let mut c2: ExpiringLruCache<u32, Flag> =
         ExpiringLruCache::builder().max_size(8).build().unwrap();
     let r2 = catch_unwind(AssertUnwindSafe(|| {
-        let _ = c2.cache_try_get_or_set_with_mut::<_, ()>(1, || -> Result<Flag, ()> {
-            panic!("boom")
-        });
+        let _ =
+            c2.cache_try_get_or_set_with_mut::<_, ()>(1, || -> Result<Flag, ()> { panic!("boom") });
     }));
     assert!(r2.is_err(), "factory panic should propagate");
     assert_eq!(
