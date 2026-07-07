@@ -1287,12 +1287,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // Emit a guard for the time-based stores (`expires` -> ExpiringCache/
-    // ExpiringLruCache, a `ttl` -> TtlCache/LruTtlCache) so a missing
-    // `time_stores` feature produces a clear `compile_error!` rather than an
-    // obscure "cannot find `TtlCache` in `cached`". Custom `ty`/`create` stores
-    // opt out (the user supplies the type).
-    let time_stores_guard = if (args.expires || has_ttl) && args.ty.is_none() {
+    // Emit a guard for the time-based TTL stores (a `ttl`/`ttl_secs`/`ttl_millis`
+    // -> TtlCache/LruTtlCache) so a missing `time_stores` feature produces a clear
+    // `compile_error!` rather than an obscure "cannot find `TtlCache` in `cached`".
+    // `expires` selects ExpiringCache/ExpiringLruCache, which are not gated on
+    // `time_stores`, so it opts out; custom `ty` stores opt out too (the user
+    // supplies the type).
+    let time_stores_guard = if has_ttl && args.ty.is_none() {
         quote! { #krate::__require_time_stores_feature!{} }
     } else {
         quote! {}

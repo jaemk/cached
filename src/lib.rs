@@ -744,8 +744,8 @@ macro_rules! __require_async_feature {
 }
 
 /// Guard macro emitted by `#[cached]`/`#[concurrent_cached]` whenever the selected store is
-/// one of the time-based stores (`TtlCache`/`LruTtlCache`/the expiring stores), i.e. when a
-/// `ttl`/`ttl_secs`/`ttl_millis`/`expires` attribute is used. When the `time_stores` feature
+/// one of the time-based TTL stores (`TtlCache`/`LruTtlCache`/`TtlSortedCache`), i.e. when a
+/// `ttl`/`ttl_secs`/`ttl_millis` attribute is used. When the `time_stores` feature
 /// is enabled this expands to nothing; when it is disabled it expands to a `compile_error!`
 /// pointing at the missing feature, a clearer diagnostic than the raw "cannot find `TtlCache`
 /// in `cached`" error that would otherwise appear.
@@ -764,7 +764,7 @@ macro_rules! __require_time_stores_feature {
 macro_rules! __require_time_stores_feature {
     () => {
         compile_error!(
-            "#[cached]/#[concurrent_cached] with a `ttl`/`ttl_secs`/`ttl_millis`/`expires` \
+            "#[cached]/#[concurrent_cached] with a `ttl`/`ttl_secs`/`ttl_millis` \
              attribute requires the `time_stores` feature of the `cached` crate"
         );
     };
