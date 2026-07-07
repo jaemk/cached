@@ -1227,10 +1227,17 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // make cached static, cached function and prime cached function doc comments
     let cache_ident_doc = format!("Cached static for the [`{}`] function.", fn_ident);
     let prime_fn_indent_doc = format!("Primes the cached function [`{}`].", fn_ident);
-    let cache_fn_doc_extra = format!(
-        "This is a cached function that uses the [`{}`] cached static.",
-        cache_ident
-    );
+    // When `in_impl`, the cache static is function-local (not a module-scope item),
+    // so an intra-doc link to it would be dead; describe it plainly instead.
+    let cache_fn_doc_extra = if args.in_impl {
+        "This is a cached method; its cache static is function-local to the method body."
+            .to_string()
+    } else {
+        format!(
+            "This is a cached function that uses the [`{}`] cached static.",
+            cache_ident
+        )
+    };
     fill_in_attributes(&mut attributes, cache_fn_doc_extra);
 
     // `prime_do_set_return_block`: used by the priming function. For `result_fallback`,
@@ -1362,10 +1369,27 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // Emit a `time_stores` guard only for the default sharded TTL path
+    // (`ShardedTtlCache`/`ShardedLruTtlCache`), which is gated behind the
+    // `time_stores` feature. The sharded expiring stores are not gated, and
+    // redis/disk/custom stores supply their own type, so those opt out.
+    let time_stores_guard = if !args.redis
+        && !args.disk
+        && args.ty.is_none()
+        && args.create.is_none()
+        && !args.expires
+        && has_ttl
+    {
+        quote! { #krate::__require_time_stores_feature!{} }
+    } else {
+        quote! {}
+    };
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
             #async_feature_guard
+            #time_stores_guard
             // Cached static (module scope unless `in_impl`)
             #module_static
             // Inner origin fn as a sibling impl method (only when `in_impl`)
@@ -1384,6 +1408,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     } else {
         quote! {
             #async_feature_guard
+            #time_stores_guard
             // Cached static (module scope unless `in_impl`)
             #module_static
             // Inner origin fn as a sibling impl method (only when `in_impl`)
@@ -1489,10 +1514,10 @@ fn get_redis_cache_type_and_create(
                 };
                 let refresh = args.refresh;
                 if is_async {
-                    quote! { #krate::AsyncRedisCache::builder().prefix(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
+                    quote! { #krate::AsyncRedisCache::builder(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().await.unwrap_or_else(|e| panic!("error constructing AsyncRedisCache in #[concurrent_cached] macro: {e}")) }
                 } else {
                     quote! {
-                        #krate::RedisCache::builder().prefix(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
+                        #krate::RedisCache::builder(#cache_prefix_block).ttl(#ttl_dur).refresh_on_hit(#refresh).build().unwrap_or_else(|e| panic!("error constructing RedisCache in #[concurrent_cached] macro: {e}"))
                     }
                 }
             } else if is_async {
@@ -1520,6 +1545,18 @@ fn get_disk_cache_type_and_create(
     cache_value_ty: &proc_macro2::TokenStream,
     fn_ident: &Ident,
 ) -> Result<(proc_macro2::TokenStream, proc_macro2::TokenStream), syn::Error> {
+    // `cache_prefix_block` is redis-only; on the disk path it would be silently
+    // ignored (the redb table name comes from `name`). Reject it, mirroring the
+    // sharded path's rejection of redis/disk-only attributes.
+    if args.cache_prefix_block.is_some() {
+        return Err(syn::Error::new(
+            fn_ident.span(),
+            "`cache_prefix_block` is redis-only and does not apply to the disk (`redb`) path; \
+             the redb table name comes from `name`, so set `name` instead (or remove \
+             `cache_prefix_block`)",
+        ));
+    }
+
     // A custom `ty` on the disk path is only honored when the user also supplies a
     // matching `create` block. Without `create` the macro would build the DEFAULT store
     // (`RedbCache`) via its default builder while declaring the cache as the custom `ty`,
@@ -1551,7 +1588,7 @@ fn get_disk_cache_type_and_create(
         }
         None => {
             let create = quote! {
-                #krate::RedbCache::builder().name(#cache_name)
+                #krate::RedbCache::builder(#cache_name)
             };
             let create = match ttl_duration {
                 None => create,

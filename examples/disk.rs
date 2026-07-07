@@ -72,8 +72,7 @@ fn main() {
     // for write throughput; call `flush()` at a chosen point (periodically or
     // before shutdown) to force a single durable commit that persists them all.
     use cached::RedbCache;
-    let cache: RedbCache<u64, u64> = RedbCache::builder()
-        .name("disk-example-flush")
+    let cache: RedbCache<u64, u64> = RedbCache::builder("disk-example-flush")
         .durable(false)
         .build()
         .unwrap();

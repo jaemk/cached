@@ -1,15 +1,25 @@
 # 0017 - Orthogonal redis runtime x TLS features
 
-Status: Needs research
+Status: Capability axis resolved; TLS orthogonality needs research
 
 ## Current state
 
-- Eight redis features encode a runtime x TLS cross-product by hand: redis_smol,
-  redis_smol_native_tls, redis_smol_rustls, redis_tokio, redis_tokio_native_tls,
-  redis_tokio_rustls, plus redis_async_cache and redis_connection_manager
-  (`Cargo.toml:30-46`).
-- The AsyncRedisCache export is gated on 8-way `any(...)` cfg lists (`src/lib.rs:595`,
-  `src/stores/mod.rs:281`).
+- Eight redis features have been reorganized into a 6-runtime / 2-capability split
+  (`Cargo.toml:42-62`).
+  - Runtime features (6): `redis_smol`, `redis_smol_native_tls`, `redis_smol_rustls`,
+    `redis_tokio`, `redis_tokio_native_tls`, `redis_tokio_rustls`.
+  - Capability features (2): `redis_connection_manager`, `redis_async_cache`; both depend only
+    on `redis/aio` and carry no runtime -- they must be paired with a runtime feature to
+    connect.
+- The capability axis was resolved in commit 62083dd: capability features no longer pull
+  `redis_tokio`; the connection manager is now additive (per-cache `.connection_manager(true)`
+  opt-in rather than a global type swap); CI feature checks pair each capability with both
+  runtimes.
+- `AsyncRedisCache` is gated on the 6 runtime features only; the 2 capability features are
+  deliberately excluded from the gate (`src/lib.rs:619-645`, `src/stores/mod.rs:340-362`).
+- TLS remains fused with the runtime: `redis_smol_native_tls`, `redis_smol_rustls`,
+  `redis_tokio_native_tls`, `redis_tokio_rustls` each encode a runtime+TLS combination rather
+  than composable axes.
 
 ## Desired work
 

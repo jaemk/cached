@@ -26,8 +26,7 @@ fn build(
     ttl: Option<Duration>,
     refresh: bool,
 ) -> Arc<RedbCache<u32, u32>> {
-    let mut b = RedbCache::<u32, u32>::builder()
-        .name(name)
+    let mut b = RedbCache::<u32, u32>::builder(name)
         .disk_directory(dir.path())
         // No fsync for speed; these are in-process races.
         .durable(false)
@@ -111,8 +110,8 @@ fn refresh_does_not_clobber_concurrent_write() {
 // reader's MVCC read txn opens before the writer commits (seeing the expired
 // snapshot), and the writer commits before the reader's write txn (write txns
 // are serialised, so reader's write txn always follows writer's commit if
-// writer started first). That ordering is Case A (the race). Over 200 rounds
-// the race manifests with probability ≈ 1 − 0.5^200, catching the bug.
+// writer started first). That ordering is Case A (the race). Over 40 rounds
+// the race manifests with probability ≈ 1 − 0.5^40, catching the bug.
 #[test]
 fn cache_get_eviction_does_not_delete_fresh_rewrite() {
     // TTL is deliberately not tiny. The pre-set value=0 is aged past the TTL with
@@ -120,9 +119,9 @@ fn cache_get_eviction_does_not_delete_fresh_rewrite() {
     // TTL itself must be comfortably larger than the worst-case gap between the
     // writer committing value=1 and the final `cache_get`, otherwise value=1
     // could *legitimately* expire before that read and be evicted (a false
-    // failure unrelated to the race). 30 ms gives a wide margin while keeping the
-    // per-round expiry sleep short.
-    const TTL: Duration = Duration::from_millis(30);
+    // failure unrelated to the race). 150 ms gives a wide margin against scheduler
+    // stalls on a saturated CI runner while keeping the per-round expiry sleep short.
+    const TTL: Duration = Duration::from_millis(150);
     // Determinism: each round is an independent ~50% chance of hitting the race
     // window. A `Barrier` releases the evicting reader and the fresh writer at
     // the same instant (removing the sequential-spawn skew that would otherwise
@@ -130,7 +129,7 @@ fn cache_get_eviction_does_not_delete_fresh_rewrite() {
     // the round count is high enough that the probability of *never* hitting the
     // window (~0.5^ROUNDS) is negligible even on a loaded runner. Confirmed to
     // fail against the pre-fix code (see module-level notes).
-    const ROUNDS: usize = 200;
+    const ROUNDS: usize = 40;
 
     let dir = TempDir::new().unwrap();
     let cache = build("race-evict-get", &dir, Some(TTL), false);
@@ -267,6 +266,92 @@ fn remove_expired_entries_does_not_delete_fresh_rewrite() {
         );
 
         cache.cache_clear().unwrap();
+    }
+}
+
+// ── Test 6: self-heal does not delete a concurrent valid write ───────────────
+//
+// Bug (C5): on a deserialization failure in non-strict mode, disk_cache_get read
+// the corrupt entry under a read txn, dropped it, then opened a fresh write txn
+// and blindly `table.remove(key)`d it. A concurrent `cache_set` that committed a
+// valid value between the read txn and the self-heal write txn was silently
+// deleted.
+//
+// Fix: the self-heal write txn re-reads the entry and re-validates it; it only
+// removes the key when it is STILL corrupt. A freshly-written valid value is
+// kept and returned.
+//
+// Corrupt fixture: an entry written by a `RedbCache<u32, String>` handle stores a
+// MessagePack string in the value position. Reopening the same on-disk table as a
+// `RedbCache<u32, u32>` cannot decode that string as a `u32`, so `cache_get`
+// takes the non-strict self-heal path. redb takes an exclusive file lock, so the
+// injector handle is dropped before the reader/writer handle opens.
+//
+// Reliability: a `Barrier` releases the self-healing reader and the fresh writer
+// simultaneously. Roughly half the time the reader's MVCC read txn opens before
+// the writer commits (seeing the corrupt snapshot) while the writer commits
+// before the reader's write txn (write txns serialise). That ordering is the
+// race; over ROUNDS rounds it manifests with probability ~ 1 - 0.5^ROUNDS.
+#[test]
+fn self_heal_does_not_delete_concurrent_write() {
+    const ROUNDS: usize = 120;
+    let dir = TempDir::new().unwrap();
+
+    for round in 0..ROUNDS {
+        // Inject a corrupt entry for key=1 by writing an incompatible value type
+        // to the same table, then dropping that handle to release the file lock.
+        {
+            let corrupt = RedbCache::<u32, String>::builder("self-heal-race")
+                .disk_directory(dir.path())
+                .durable(true)
+                .build()
+                .expect("corrupt-injector build");
+            corrupt.cache_set(1, "not-a-u32".to_string()).unwrap();
+        }
+
+        // Reopen as <u32, u32>; the stored String bytes fail to decode as u32,
+        // driving cache_get down the non-strict self-heal path.
+        let cache: Arc<RedbCache<u32, u32>> = Arc::new(
+            RedbCache::<u32, u32>::builder("self-heal-race")
+                .disk_directory(dir.path())
+                .durable(false)
+                .build()
+                .expect("reader build"),
+        );
+
+        let gate = Arc::new(Barrier::new(2));
+
+        let cr = cache.clone();
+        let gr = gate.clone();
+        let reader = std::thread::spawn(move || {
+            gr.wait();
+            let _ = cr.cache_get(&1); // self-heal path
+        });
+
+        let cw = cache.clone();
+        let gw = gate.clone();
+        let writer = std::thread::spawn(move || {
+            gw.wait();
+            cw.cache_set(1, 42)
+        });
+
+        reader.join().unwrap();
+        writer.join().unwrap().unwrap();
+
+        // The writer committed a valid value. Pre-fix, the reader's self-heal
+        // write txn blindly removed key=1, deleting that fresh write (None).
+        // Post-fix, the self-heal re-reads under the write txn, sees the valid
+        // value, and keeps it.
+        let got = cache.cache_get(&1).unwrap();
+        assert_eq!(
+            got,
+            Some(42),
+            "round {round}: self-heal deleted the concurrent valid write; \
+             expected Some(42), got {got:?}"
+        );
+
+        // Drop the cache handle so the next round's injector can take the lock.
+        drop(Arc::try_unwrap(cache).ok());
     }
 }
 

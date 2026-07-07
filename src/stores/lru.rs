@@ -13,6 +13,14 @@ use {super::CachedGetOrSetAsync, std::future::Future};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Outcome of a get-or-set operation on the inner [`LruCache`]:
+/// `(was_present, was_valid, displaced_entry, &mut current_value)`.
+///
+/// `displaced_entry` is the STORED `(K, V)` that was replaced when an existing-but-invalid
+/// entry was overwritten (its own key, not the caller's lookup key), or `None` on a fresh
+/// insert or a valid hit. Wrapper stores thread that key to their `on_evict` callback (C1/C8).
+type GetOrSetOutcome<'a, K, V> = (bool, bool, Option<(K, V)>, &'a mut V);
+
 /// Least Recently Used / `Sized` Cache
 ///
 /// Stores up to a specified size before beginning
@@ -476,7 +484,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         key: K,
         f: F,
         is_valid: FC,
-    ) -> (bool, bool, Option<V>, &mut V) {
+    ) -> GetOrSetOutcome<'_, K, V> {
         let hash = self.hash(&key);
         let index = self.get_index(hash, &key);
         if let Some(index) = index {
@@ -492,7 +500,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
                 }
             }
             let old_val = if replace_existing {
-                self.order.set(index, (key, f())).map(|(_, v)| v)
+                self.order.set(index, (key, f()))
             } else {
                 None
             };
@@ -519,7 +527,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         key: K,
         f: F,
         is_valid: FC,
-    ) -> Result<(bool, bool, Option<V>, &mut V), E> {
+    ) -> Result<GetOrSetOutcome<'_, K, V>, E> {
         let hash = self.hash(&key);
         let index = self.get_index(hash, &key);
         if let Some(index) = index {
@@ -536,7 +544,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
             }
             let old_val = if replace_existing {
                 let new_val = f()?;
-                self.order.set(index, (key, new_val)).map(|(_, v)| v)
+                self.order.set(index, (key, new_val))
             } else {
                 None
             };
@@ -628,7 +636,7 @@ where
         key: K,
         f: F,
         is_valid: FC,
-    ) -> (bool, bool, Option<V>, &mut V)
+    ) -> GetOrSetOutcome<'_, K, V>
     where
         V: Send,
         F: FnOnce() -> Fut + Send,
@@ -648,7 +656,7 @@ where
             }
             let old_val = if replace_existing {
                 let new_val = f().await;
-                self.order.set(index, (key, new_val)).map(|(_, v)| v)
+                self.order.set(index, (key, new_val))
             } else {
                 None
             };
@@ -676,7 +684,7 @@ where
         key: K,
         f: F,
         is_valid: FC,
-    ) -> Result<(bool, bool, Option<V>, &mut V), E>
+    ) -> Result<GetOrSetOutcome<'_, K, V>, E>
     where
         V: Send,
         F: FnOnce() -> Fut + Send,
@@ -696,7 +704,7 @@ where
             }
             let old_val = if replace_existing {
                 let new_val = f().await?;
-                self.order.set(index, (key, new_val)).map(|(_, v)| v)
+                self.order.set(index, (key, new_val))
             } else {
                 None
             };

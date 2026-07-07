@@ -21,7 +21,12 @@ Status: MessagePack switch implemented; pluggable codec needs research
 
 ## Notes
 
-- The MessagePack switch is a wire-format change; existing Redis entries are recomputed on miss,
-  same tradeoff already accepted for the sled->redb backend change.
+- The MessagePack switch is a wire-format change; existing Redis entries written by cached 2.x
+  are read transparently via the exact-version JSON gate in `deserialize_cached_redis_value`:
+  the deserializer tries MessagePack first, then falls back to the pre-3.0 JSON format only if
+  the bytes parse as JSON **and** carry `"version": 1` (exact-value check, not merely presence).
+  Entries that match neither path return a deserialization error; nothing is silently recomputed.
+  See `tests/v3_redis_backward_read.rs` (test `redis_backward_read_legacy_json_entry`) for
+  end-to-end coverage.
 - Land the Redis error-enum edits together with 0005.
 - The pluggable-codec design is unresolved and tracked for later.

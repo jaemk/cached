@@ -37,4 +37,6 @@ fn compile_fail_proc_macro_v3() {
     // `create` block is rejected up front (it would otherwise build the default store).
     t.compile_fail("tests/ui/concurrent_cached_redis_ty_without_create.rs");
     t.compile_fail("tests/ui/concurrent_cached_disk_ty_without_create.rs");
+    // `cache_prefix_block` (redis-only) rejected on the disk path.
+    t.compile_fail("tests/ui/concurrent_cached_disk_cache_prefix_block.rs");
 }

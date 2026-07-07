@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "3.0.0-rc.4"
+version = "3.0.0-rc.5"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -24,7 +24,11 @@ proc_macro = ["dep:cached_proc_macro", "dep:cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
 async_core = []
 async = ["async_core", "dep:async-lock"]
-redis_store = ["dep:redis", "dep:r2d2", "dep:serde", "dep:rmp-serde", "dep:serde_json"]
+# Serialization support for custom `SerializeCached` stores without an IO store.
+# Pulls the MessagePack codec (`serde` + `rmp-serde`); the IO-store features below
+# enable it transitively.
+serde = ["dep:serde", "dep:rmp-serde"]
+redis_store = ["serde", "dep:redis", "dep:r2d2", "dep:serde_json"]
 # Runtime axis: the redis async capabilities below (`redis_connection_manager`,
 # `redis_async_cache`) express only the redis capability and are runtime-agnostic;
 # the async runtime is chosen separately via `redis_tokio` (or its TLS variants) or
@@ -65,11 +69,11 @@ redis_async_cache = ["redis_store", "async", "redis/cache-aio"]
 # `redb_store` rather than `async`. Redis-only and in-memory async builds do not
 # pay for it. The `blocking::unblock` call sites are `#[cfg(feature = "async")]`,
 # so a sync-only `redb_store` build enables the dependency without invoking it.
-redb_store = ["dep:redb", "dep:serde", "dep:rmp-serde", "dep:directories", "dep:blocking"]
+redb_store = ["serde", "dep:redb", "dep:directories", "dep:blocking"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
-version = "3.0.0-rc.4"
+version = "3.0.0-rc.5"
 path = "cached_proc_macro"
 optional = true
 

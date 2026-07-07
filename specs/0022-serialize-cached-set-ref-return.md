@@ -1,6 +1,6 @@
 # 0022 - cache_set_ref returning previous value
 
-Status: Needs research
+Status: Implemented (DEC-1=A)
 
 ## Current state
 
@@ -19,3 +19,12 @@ Status: Needs research
 - Performance: avoids a previous-value decode nobody on the fast path consumes (extra round trip
   on Redis, extra table read on redb).
 - Migration: custom impls drop the previous-value computation; macro users unaffected.
+
+## Decision
+
+DEC-1=A: `cache_set_ref` and `async_cache_set_ref` now return `Result<(), Self::Error>`.
+The redis impl no longer round-trips a GET on the write path; the redb impl drops the prior
+table read. Callers that want the previous value must call `cache_get` explicitly (see
+generated `__set_dispatch`/`__set_dispatch_async` for the updated call sites).
+Migration: custom `SerializeCached` impls must change the return type to `Result<(), ...>`
+and return `Ok(())`.

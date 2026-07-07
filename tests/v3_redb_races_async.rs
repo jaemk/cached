@@ -25,8 +25,7 @@ fn build(
     ttl: Option<Duration>,
     refresh: bool,
 ) -> Arc<RedbCache<u32, u32>> {
-    let mut b = RedbCache::<u32, u32>::builder()
-        .name(name)
+    let mut b = RedbCache::<u32, u32>::builder(name)
         .disk_directory(dir.path())
         // No fsync for speed; these are in-process races.
         .durable(false)
@@ -135,4 +134,47 @@ async fn async_cache_get_eviction_does_not_delete_fresh_rewrite() {
              entry; expected Some(1), got {got:?}"
         );
     }
+}
+
+// ── async_remove_expired_entries ─────────────────────────────────────────────
+//
+// The async sweep runs the same TTL sweep as the sync `remove_expired_entries`
+// on a background thread. It must remove entries whose TTL elapsed, count them,
+// and leave fresh entries in place.
+#[tokio::test]
+async fn async_remove_expired_entries_sweeps_and_counts() {
+    const TTL: Duration = Duration::from_millis(50);
+    let dir = TempDir::new().unwrap();
+    let cache = build("async-remove-expired", &dir, Some(TTL), false);
+
+    // Two entries that will expire.
+    cache.async_cache_set(10, 100).await.unwrap();
+    cache.async_cache_set(20, 200).await.unwrap();
+    tokio::time::sleep(TTL + Duration::from_millis(20)).await;
+
+    // One fresh entry inserted after the sleep.
+    cache.async_cache_set(30, 300).await.unwrap();
+
+    let removed = cache.async_remove_expired_entries().await.unwrap();
+    assert_eq!(removed, 2, "expected exactly 2 expired entries removed");
+
+    assert_eq!(
+        cache.async_cache_get(&30).await.unwrap(),
+        Some(300),
+        "the fresh entry must survive the async sweep"
+    );
+    assert_eq!(cache.async_cache_get(&10).await.unwrap(), None);
+    assert_eq!(cache.async_cache_get(&20).await.unwrap(), None);
+}
+
+// No TTL configured: the async sweep removes nothing and returns 0.
+#[tokio::test]
+async fn async_remove_expired_entries_no_ttl_returns_zero() {
+    let dir = TempDir::new().unwrap();
+    let cache = build("async-remove-expired-no-ttl", &dir, None, false);
+
+    cache.async_cache_set(1, 1).await.unwrap();
+    let removed = cache.async_remove_expired_entries().await.unwrap();
+    assert_eq!(removed, 0, "no TTL means no expirations");
+    assert_eq!(cache.async_cache_get(&1).await.unwrap(), Some(1));
 }

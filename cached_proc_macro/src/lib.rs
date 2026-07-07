@@ -97,6 +97,7 @@ use proc_macro::TokenStream;
 ///   **Note:** when `cache_none = true`, the underlying store holds `Option<T>` as its value type,
 ///   so a direct `.cache_get()` on the generated cache static returns `Option<Option<T>>` - the outer
 ///   `Option` is the cache hit/miss, the inner `Option` is the stored value.
+///   Mutually exclusive with `with_cached_flag`.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return`,
 ///   `Result<cached::Return<T>, E>`, or `Option<cached::Return<T>>`,
 ///   the `cached::Return.was_cached()` flag will be updated when a cached value is returned.
@@ -116,7 +117,7 @@ use proc_macro::TokenStream;
 ///   `ttl`, `ttl_secs`, or `ttl_millis` (uses `TtlCache`), `max_size` + `ttl`/`ttl_secs`/`ttl_millis` (uses `LruTtlCache`), and
 ///   `expires` (uses `ExpiringCache`/`ExpiringLruCache`).
 ///   A custom `ty` that implements `CloneCached` is also accepted.
-///   Requires a `Result<T, E>` return type. Mutually exclusive with `cache_err` and `sync_writes`.
+///   Requires a `Result<T, E>` return type. Mutually exclusive with `cache_err`, `with_cached_flag`, and `sync_writes`.
 ///   Requires the cache key type to implement `Clone` (the fallback path re-caches the key). The
 ///   default key already satisfies this, so it only matters with a custom non-`Clone` `key`/`convert`.
 /// - `expires`: (optional, bool) Auto-select an expiry-aware store whose entries expire based on
@@ -129,7 +130,11 @@ use proc_macro::TokenStream;
 ///   Compatible with `result_fallback`: on `Err`, returns the last-cached `Ok` value wrapped in `Ok(...)`,
 ///   even if that value's `is_expired()` returns `true`. Callers must check the value's expiry themselves
 ///   if they need to distinguish a fresh result from a stale fallback.
-///   Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `unsync_reads`, and `refresh`.
+///   Mutually exclusive with `ttl`, `ty`, `create`, `with_cached_flag`, `cache_none`, `cache_err`, `unsync_reads`, and `refresh`.
+/// - `companions_vis`: (optional, string) override the visibility of the generated `{fn}_no_cache` and
+///   `{fn}_prime_cache` companions independently of the cached function's own visibility.
+///   Accepts any Rust visibility expression (e.g. `"pub"`, `"pub(crate)"`, `"pub(super)"`, or `""` for
+///   private). When not specified, the companions inherit the cached function's visibility.
 ///
 /// ## Note
 /// The `ty` and `key` attributes must be in a `String`
@@ -185,9 +190,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   block. Note: `#[once]` stores a single value for all calls, so an `in_impl` `#[once]`
 ///   method shares one cached value across every instance of the type. Priming is unavailable here:
 ///   the `{fn}_prime_cache` companion is not generated for `in_impl` methods, because the cache static
-///   is function-local and cannot be shared with a separate prime sibling. The `{fn}_no_cache` sibling
-///   (the uncached origin function) is still generated and inherits the method's visibility, so a
-///   `pub` cached method exposes a `pub {fn}_no_cache` cache-bypass sibling on the same `impl`.
+///   is function-local and cannot be shared with a separate prime sibling. A `{fn}_no_cache` companion
+///   (the uncached origin function) is generated as a `#[doc(hidden)]` impl method and inherits the
+///   method's visibility, so a `pub` cached method exposes a `pub {fn}_no_cache` cache-bypass sibling
+///   on the same `impl`.
 /// - `sync_writes`: (optional, bool or string) specify whether to synchronize the execution of writing of uncached values.
 ///   **Default: `"disabled"`** - when not specified, uncached calls are not synchronized.
 ///   When set to `true` or `"default"`, uncached execution is synchronized by locking the whole
@@ -196,6 +202,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   single value for all arguments.
 /// - `cache_err`: (optional, bool) If your function returns a `Result`, also cache `Err` values (by default only `Ok` is cached).
 /// - `cache_none`: (optional, bool) If your function returns an `Option`, also cache `None` values (by default only `Some` is cached).
+///   Mutually exclusive with `with_cached_flag`.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return`,
 ///   `Result<cached::Return<T>, E>`, or `Option<cached::Return<T>>`,
 ///   the `cached::Return.was_cached()` flag will be updated when a cached value is returned.
@@ -211,7 +218,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   skipped and the function re-executes; on success the new value replaces the old one.
 ///   If the function returns `Err`/`None`, the expired entry is left in place and the error/none
 ///   is returned to the caller - subsequent calls will re-execute the function until it succeeds.
-///   Mutually exclusive with `ttl` and `with_cached_flag`.
+///   Mutually exclusive with `ttl`, `with_cached_flag`, `cache_none`, and `cache_err`.
+/// - `companions_vis`: (optional, string) override the visibility of the generated `{fn}_no_cache` and
+///   `{fn}_prime_cache` companions independently of the cached function's own visibility.
+///   Accepts any Rust visibility expression (e.g. `"pub"`, `"pub(crate)"`, `"pub(super)"`, or `""` for
+///   private). When not specified, the companions inherit the cached function's visibility.
 ///
 /// `Result`/`Option` detection is exact: the macro matches only the bare identifiers `Result`
 /// and `Option` (including qualified forms like `std::result::Result<T, E>`). Type aliases are
@@ -295,7 +306,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `name`: (optional, string) specify the name for the generated cache, defaults to the function name uppercase.
 /// - `redis`: (optional, bool) default to a `RedisCache` or `AsyncRedisCache`. If the store fails to
 ///   build, the failure surfaces as a panic on the first call to the cached function.
-/// - `disk`: (optional, bool) selects `RedbCache` (the default disk engine), this must be set to true even if `type` and `create` are specified.
+/// - `disk`: (optional, bool) selects `RedbCache` as the default disk engine and enables the
+///   `disk_dir` and `durable` builder attributes. Required to activate those disk-specific attributes
+///   or to default the store type to `RedbCache`; may be omitted when providing a fully custom store
+///   via `ty`/`create` without any disk-specific attributes.
 ///   `redb` is used synchronously. On an `async fn`, `redb`'s blocking I/O is run off the async
 ///   runtime via `blocking::unblock` (so it does not stall the runtime); no Tokio runtime is
 ///   required. If the store fails to build, the failure surfaces as a panic on the first call to
@@ -308,9 +322,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   `shards = 1` or the builder's `per_shard_max_size`.
 /// - `ttl`: (optional, Duration string) TTL as a Duration-expression string literal, e.g.
 ///   `ttl = "Duration::from_secs(60)"`. For the default in-memory path, selects `ShardedTtlCache`
-///   or `ShardedLruTtlCache` (requires the `time_stores` feature). For `redis` and `disk` stores,
-///   sets the key/entry TTL on those backends. Mutually exclusive with `ttl_secs`, `ttl_millis`,
-///   and `expires`.
+///   or `ShardedLruTtlCache` (requires the `time_stores` feature). For `redis` stores without a
+///   `create` block, a `ttl` is required (a compile error is emitted otherwise); when set it must
+///   be > 0 (a zero duration is a build error). The underlying `RedisCache`/`AsyncRedisCache`
+///   builder itself accepts an optional ttl (unset means no expiry); use a `create` block to
+///   build a no-ttl redis cache. For `disk` stores, sets the entry TTL on the redb
+///   backend. Mutually exclusive with `ttl_secs`, `ttl_millis`, and `expires`.
 /// - `ttl_secs`: (optional, u64) TTL as a whole number of seconds. Equivalent to
 ///   `ttl = "Duration::from_secs(N)"` but accepts a bare integer. Selects the same stores as `ttl`.
 ///   Mutually exclusive with `ttl`, `ttl_millis`, and `expires`.
@@ -338,8 +355,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   part of the cache key - the cache is shared across all instances of the type. Note: the
 ///   `{fn}_prime_cache` companion is not generated for `in_impl` methods - the cache static is
 ///   function-local and cannot be shared with a separate prime sibling, so priming is not supported there.
-///   The `{fn}_no_cache` sibling (the uncached origin function) is still generated and inherits the
-///   method's visibility, so a `pub` cached method exposes a `pub {fn}_no_cache` cache-bypass sibling.
+///   A `{fn}_no_cache` companion (the uncached origin function) is generated as a `#[doc(hidden)]` impl
+///   method and inherits the method's visibility, so a `pub` cached method exposes a `pub {fn}_no_cache`
+///   cache-bypass sibling on the same `impl`.
 /// - `shards`: (optional, usize) number of shards for the default in-memory store. Rounded up to
 ///   the next power of two. If omitted, defaults to `available_parallelism() x 4`, clamped to
 ///   8-1024; an explicit value is only rounded up to a power of two and is not clamped.
@@ -351,20 +369,29 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `expires`: (optional, bool) select a per-value expiry store. The cached value type must
 ///   implement the `Expires` trait. Without `max_size`, selects `ShardedExpiringCache` (unbounded);
 ///   with `max_size = N`, selects `ShardedExpiringLruCache` (LRU-bounded). Mutually exclusive with
-///   `ttl`, `redis`, `disk`, `ty`, `create`, and `refresh`. May be combined with
-///   `with_cached_flag`; in that case the inner `T` of `Return<T>` (not `Return<T>` itself)
-///   must implement `Expires`. When the function returns `Option<T>`, `None` is not cached
+///   `ttl`, `redis`, `disk`, `ty`, `create`, `refresh`, `cache_none`, and `cache_err`. May be
+///   combined with `with_cached_flag`; in that case the inner `T` of `Return<T>` (not `Return<T>`
+///   itself) must implement `Expires`. When the function returns `Option<T>`, `None` is not cached
 ///   by default (implicit smart-option), and the inner `T` (not `Option<T>`)
 ///   must implement `Expires`. When a cached entry is found but `is_expired()` returns `true`,
 ///   the function re-executes and the result is treated as a fresh uncached value; the returned
 ///   `Return<T>` will have `was_cached()` returning `false` in this case.
-/// - `ty`: (optional, string type) explicitly specify the cache store type to use.
-/// - `cache_prefix_block`: (optional, string expr) specify an expression used to create the string used as a
-///   prefix for all cache keys of this function, e.g. `cache_prefix_block = r##"{ "my_prefix" }"##`.
-///   When not specified, the cache prefix will be constructed from the name of the function. This
-///   could result in unexpected conflicts between concurrent_cached-functions of the same name, so it's
-///   recommended that you specify a prefix you're sure will be unique.
-/// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g. `create = r##"{ CacheType::new() }"##`.
+/// - `ty`: (optional, string type) explicitly specify the cache store type to use. When `ty` is
+///   specified, `create` must also be specified (the macro cannot construct a custom store type without
+///   a matching `create` block; omitting `create` is a compile error on every path).
+/// - `cache_prefix_block`: (optional, string expr; **redis path only**) specify an expression used to
+///   create the string used as a prefix for redis keys for this function, e.g.
+///   `cache_prefix_block = r##"{ "my_prefix" }"##`. Only meaningful when `redis = true` without a
+///   `create` block; has no effect on the in-memory or disk paths, and is rejected when combined with
+///   `create` (a `create` block constructs the entire store, making the prefix irrelevant).
+///   When not specified, the prefix defaults to `"cached::macros::concurrent_cached::{fn_name}"`.
+///   Unexpected key conflicts can occur between functions with the same name, so specifying a unique
+///   prefix is recommended.
+/// - `create`: (optional, string expr) specify an expression used to create a new cache store, e.g.
+///   `create = r##"{ CacheType::new() }"##`. When `create` is specified, the following store-builder
+///   attributes are rejected (they would be silently ignored since `create` fully constructs the
+///   store): `ttl`, `ttl_secs`, `ttl_millis`, `refresh`, `cache_prefix_block`, `disk_dir`,
+///   `durable`, `max_size`, `shards`.
 /// - `key`: (optional, string type) specify what type to use for the cache key, e.g. `key = "u32"`.
 ///   When `key` is specified, `convert` must also be specified.
 /// - `convert`: (optional, string expr) specify an expression used to convert function arguments to a cache
@@ -373,6 +400,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `cache_none`: (optional, bool) If your function returns an `Option<T>`, also cache `None` values.
 ///   By default `None` is returned without being stored; set `cache_none = true` to store `None` as well.
 ///   Only supported on the default in-memory sharded path; combining it with `redis`/`disk`/custom `ty` is a compile error.
+///   Mutually exclusive with `with_cached_flag`.
 ///   **Note:** when `cache_none = true`, the underlying store holds `Option<T>` as its value type,
 ///   so a direct `.cache_get()` call returns `Option<Option<T>>` - the outer `Option` is the
 ///   cache hit/miss indicator; the inner `Option` is the cached value.
@@ -413,7 +441,12 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   exclusive with `create`. Using it on the in-memory or `redis` path is a compile error.
 /// - `durable`: (optional, bool) in the case of `RedbCache` specify whether to synchronize the cache to disk
 ///   (fsync) on each cache change. Defaults to `true` (durable). Set `false` to trade durability for write
-///   throughput. Requires `disk = true`; using it on the in-memory or `redis` path is a compile error.
+///   throughput. Requires `disk = true`; mutually exclusive with `create`; using it on the in-memory or
+///   `redis` path is a compile error.
+/// - `companions_vis`: (optional, string) override the visibility of the generated `{fn}_no_cache` and
+///   `{fn}_prime_cache` companions independently of the cached function's own visibility.
+///   Accepts any Rust visibility expression (e.g. `"pub"`, `"pub(crate)"`, `"pub(super)"`, or `""` for
+///   private). When not specified, the companions inherit the cached function's visibility.
 ///
 /// ## Note
 /// The `ty` and `key` attributes must be in a `String`

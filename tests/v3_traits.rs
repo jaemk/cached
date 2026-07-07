@@ -456,23 +456,23 @@ mod concurrent_len_is_empty {
             .expect("build ShardedUnboundCache");
 
         // Empty initially.
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         cache.cache_set(1, 10).unwrap();
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
 
         cache.cache_set(2, 20).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
 
         cache.cache_remove(&1).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
 
         cache.cache_clear().unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 
     /// `len` and `is_empty` on ShardedLruCache.
@@ -483,19 +483,19 @@ mod concurrent_len_is_empty {
             .build()
             .expect("build ShardedLruCache");
 
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         cache.cache_set(42, 99).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
 
         cache.cache_set(43, 100).unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
 
         cache.cache_reset().unwrap();
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -517,25 +517,25 @@ mod concurrent_len_is_empty_async {
             .build()
             .expect("build ShardedUnboundCache");
 
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(1)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
 
         ConcurrentCachedAsync::async_cache_clear(&cache)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 
     /// Async `len`/`is_empty` on ShardedTtlCache, exercising the time-bounded store.
@@ -549,8 +549,8 @@ mod concurrent_len_is_empty_async {
             .build()
             .expect("build ShardedTtlCache");
 
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
 
         ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
             .await
@@ -558,14 +558,14 @@ mod concurrent_len_is_empty_async {
         ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(2)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(false)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(2)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(false)));
 
         ConcurrentCachedAsync::async_cache_reset(&cache)
             .await
             .expect("infallible");
-        assert_eq!(ConcurrentCacheBase::len(&cache), Ok(Some(0)));
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(0)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
     }
 }
 
@@ -643,6 +643,42 @@ mod concurrent_clone_cached_peek {
         assert_eq!(val2, Some(77), "entry must survive the peek");
         assert!(expired2, "entry must still be expired after peek");
     }
+
+    /// `get_with_expiry_status` is the provided ergonomic alias for
+    /// `cache_get_with_expiry_status` (mirroring the single-owner `CloneCached`
+    /// alias): it returns the same `(value, expired)` shape and, unlike the peek
+    /// variant, counts the read (a live entry increments hits).
+    #[test]
+    fn get_with_expiry_status_alias_matches_and_counts() {
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .expect("build ShardedTtlCache");
+
+        ConcurrentCached::cache_set(&cache, 1, 42).expect("infallible");
+
+        let before = cache.metrics();
+
+        // Alias returns the same shape as the underlying method.
+        let via_alias = ConcurrentCloneCached::get_with_expiry_status(&cache, &1);
+        assert_eq!(
+            via_alias,
+            (Some(42), false),
+            "alias returns (value, expired)"
+        );
+
+        let (absent, absent_expired) = ConcurrentCloneCached::get_with_expiry_status(&cache, &999);
+        assert_eq!(absent, None);
+        assert!(!absent_expired);
+
+        // Unlike the side-effect-free peek, get_* counts the read: the live hit bumps hits.
+        let after = cache.metrics();
+        assert_eq!(
+            after.hits,
+            before.hits.map(|h| h + 1),
+            "live get must count a hit"
+        );
+    }
 }
 
 #[cfg(feature = "redb_store")]
@@ -653,8 +689,7 @@ mod redb_serialize_cached {
     use tempfile::TempDir;
 
     fn build_cache(dir: &TempDir, name: &str) -> RedbCache<u32, String> {
-        RedbCache::<u32, String>::builder()
-            .name(name)
+        RedbCache::<u32, String>::builder(name)
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache")
@@ -671,21 +706,20 @@ mod redb_serialize_cached {
         let value: String = "hello".to_string();
 
         // Borrowed set: `key` and `value` are still owned by the caller afterward.
-        let prev = cache
+        // cache_set_ref returns `()` (no previous value read back).
+        cache
             .cache_set_ref(&key, &value)
             .expect("cache_set_ref failed");
-        assert_eq!(prev, None);
         assert_eq!(key, 42);
         assert_eq!(value, "hello");
 
         // Read back the value written via the borrowed setter.
         assert_eq!(cache.cache_get(&key).unwrap(), Some("hello".to_string()));
 
-        // Overwriting returns the previous value (proving same storage as cache_set).
-        let prev = cache
+        // Overwriting stores the new value (proving same storage as cache_set).
+        cache
             .cache_set_ref(&key, &"world".to_string())
             .expect("cache_set_ref overwrite failed");
-        assert_eq!(prev, Some("hello".to_string()));
         assert_eq!(cache.cache_get(&key).unwrap(), Some("world".to_string()));
     }
 
@@ -707,8 +741,7 @@ mod redb_serialize_cached {
     #[test]
     fn cache_set_ref_ttl_expiry() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder()
-            .name("serialize_cached_ttl_expiry")
+        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_ttl_expiry")
             .disk_directory(dir.path())
             .ttl(Duration::from_millis(100))
             .build()
@@ -717,10 +750,9 @@ mod redb_serialize_cached {
         let key: u32 = 1;
         let value: String = "expires".to_string();
 
-        let prev = cache
+        cache
             .cache_set_ref(&key, &value)
             .expect("cache_set_ref failed");
-        assert_eq!(prev, None);
 
         // Entry is present immediately after insertion.
         assert_eq!(cache.cache_get(&key).unwrap(), Some("expires".to_string()));
@@ -740,8 +772,7 @@ mod redb_serialize_cached_async {
     #[tokio::test]
     async fn async_cache_set_ref_round_trip() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder()
-            .name("serialize_cached_async_round_trip")
+        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_round_trip")
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache");
@@ -749,11 +780,10 @@ mod redb_serialize_cached_async {
         let key: u32 = 7;
         let value: String = "async".to_string();
 
-        let prev = cache
+        cache
             .async_cache_set_ref(&key, &value)
             .await
             .expect("async_cache_set_ref failed");
-        assert_eq!(prev, None);
         // Caller still owns the borrowed inputs.
         assert_eq!(key, 7);
         assert_eq!(value, "async");
@@ -764,32 +794,29 @@ mod redb_serialize_cached_async {
         );
     }
 
-    /// Overwriting an existing entry via `async_cache_set_ref` returns the previous value
-    /// and the store reflects the new value on the next read.
+    /// Overwriting an existing entry via `async_cache_set_ref` returns `()` and the
+    /// store reflects the new value on the next read.
     #[tokio::test]
     async fn async_cache_set_ref_overwrite() {
         let dir = TempDir::new().unwrap();
-        let cache: RedbCache<u32, String> = RedbCache::builder()
-            .name("serialize_cached_async_overwrite")
+        let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_overwrite")
             .disk_directory(dir.path())
             .build()
             .expect("error building redb cache");
 
         let key: u32 = 99;
 
-        // First insert: no previous value.
-        let prev = cache
+        // First insert.
+        cache
             .async_cache_set_ref(&key, &"first".to_string())
             .await
             .expect("async_cache_set_ref first failed");
-        assert_eq!(prev, None);
 
-        // Overwrite: previous value is returned.
-        let prev = cache
+        // Overwrite.
+        cache
             .async_cache_set_ref(&key, &"second".to_string())
             .await
             .expect("async_cache_set_ref overwrite failed");
-        assert_eq!(prev, Some("first".to_string()));
 
         // Store reflects the new value.
         assert_eq!(
@@ -1172,8 +1199,7 @@ fn concurrent_redb_refresh_on_hit_getter_reflects_setter() {
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
-    let cache: RedbCache<u32, u32> = RedbCache::builder()
-        .name("concurrent_redb_refresh_getter")
+    let cache: RedbCache<u32, u32> = RedbCache::builder("concurrent_redb_refresh_getter")
         .disk_directory(dir.path())
         .ttl(Duration::from_secs(60))
         .build()
@@ -1622,15 +1648,18 @@ mod sharded_set_ttl_zero {
 
 // ── Builder missing-required errors are server-free (C1) ──────────────────────
 //
-// The redis/redb builders are now no-arg; the former positional args
-// (`prefix`/`ttl` for redis, `name` for redb) are required setters. A `build()`
-// with a required field unset must return `BuildError::MissingRequired(...)`
-// WITHOUT attempting any IO/connection, so these tests need no live server.
+// `RedisCache::builder(prefix)` and `RedbCache::builder(name)` take the required
+// first field positionally. Constructing the builder directly via
+// `RedisCacheBuilder::new()` / `RedbCacheBuilder::new()` omits it, and `build()`
+// must then return `BuildError::MissingRequired(...)` WITHOUT attempting any
+// IO/connection, so these tests need no live server. Redis `ttl` is optional
+// (unset => entries stored without expiry), so it is never a missing-required
+// field.
 #[cfg(feature = "redb_store")]
 #[test]
 fn redb_builder_missing_name_is_server_free_error() {
-    use cached::{BuildError, RedbCache, RedbCacheBuildError};
-    let result = RedbCache::<u32, u32>::builder().build();
+    use cached::{BuildError, RedbCacheBuildError, RedbCacheBuilder};
+    let result = RedbCacheBuilder::<u32, u32>::new().build();
     assert!(
         matches!(
             result,
@@ -1645,10 +1674,10 @@ fn redb_builder_missing_name_is_server_free_error() {
 #[cfg(feature = "redis_store")]
 #[test]
 fn redis_builder_missing_required_is_server_free_error() {
-    use cached::{BuildError, RedisCache, RedisCacheBuildError};
+    use cached::{BuildError, RedisCacheBuildError, RedisCacheBuilder};
 
-    // No prefix and no ttl -> prefix is reported first.
-    let result = RedisCache::<u32, u32>::builder().build();
+    // No prefix -> prefix is reported, before any connection attempt.
+    let result = RedisCacheBuilder::<u32, u32>::new().build();
     assert!(
         matches!(
             result,
@@ -1657,18 +1686,6 @@ fn redis_builder_missing_required_is_server_free_error() {
             )))
         ),
         "expected Build(MissingRequired(\"prefix\"))"
-    );
-
-    // prefix set, ttl unset -> ttl is reported, still before any connection attempt.
-    let result = RedisCache::<u32, u32>::builder().prefix("x").build();
-    assert!(
-        matches!(
-            result,
-            Err(RedisCacheBuildError::Build(BuildError::MissingRequired(
-                "ttl"
-            )))
-        ),
-        "expected Build(MissingRequired(\"ttl\"))"
     );
 }
 
@@ -1701,17 +1718,15 @@ mod concurrent_trait_split_no_collision {
     #[test]
     fn redb_shared_helpers_resolve_without_fully_qualified_syntax() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let cache: RedbCache<String, u32> = RedbCache::builder()
-            .name("collision-probe")
+        let cache: RedbCache<String, u32> = RedbCache::builder("collision-probe")
             .disk_directory(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build RedbCache");
 
-        // cache_size lives on ConcurrentCacheBase (single impl) -- no E0034.
+        // cache_size / cache_is_empty live on ConcurrentCacheBase (single impl) -- no E0034.
         assert_eq!(cache.cache_size().expect("cache_size"), None);
-        assert_eq!(cache.len().expect("len"), None);
-        assert_eq!(cache.is_empty().expect("is_empty"), None);
+        assert_eq!(cache.cache_is_empty().expect("cache_is_empty"), None);
 
         // set_ttl / ttl / unset_ttl live on ConcurrentCacheTtl -- no E0034 even with
         // both ConcurrentCached and ConcurrentCachedAsync in scope.
@@ -1753,8 +1768,7 @@ mod concurrent_trait_split_no_collision {
     #[test]
     fn concurrent_try_set_ttl_zero_is_rejected() {
         let redb_dir = tempfile::TempDir::new().expect("temp dir");
-        let redb: RedbCache<String, u32> = RedbCache::builder()
-            .name("try-set-ttl-zero")
+        let redb: RedbCache<String, u32> = RedbCache::builder("try-set-ttl-zero")
             .disk_directory(redb_dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -1799,7 +1813,7 @@ mod concurrent_trait_split_no_collision {
     fn non_ttl_sharded_store_base_helpers_resolve() {
         let cache: ShardedUnboundCache<u32, u32> =
             ShardedUnboundCache::builder().build().expect("build");
-        assert_eq!(ConcurrentCacheBase::is_empty(&cache), Ok(Some(true)));
+        assert_eq!(ConcurrentCacheBase::cache_is_empty(&cache), Ok(Some(true)));
         cache.cache_set(1, 10).expect("infallible");
         assert_eq!(ConcurrentCacheBase::cache_size(&cache), Ok(Some(1)));
     }
@@ -1818,8 +1832,7 @@ mod concurrent_trait_split_no_collision {
     #[tokio::test]
     async fn redb_shared_helpers_resolve_unqualified_in_async_context() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let cache: RedbCache<String, u32> = RedbCache::builder()
-            .name("collision-probe-async")
+        let cache: RedbCache<String, u32> = RedbCache::builder("collision-probe-async")
             .disk_directory(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -1872,8 +1885,7 @@ mod concurrent_base_unknown_size_defaults {
     #[test]
     fn redb_len_and_is_empty_default_to_unknown() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let cache: RedbCache<String, u32> = RedbCache::builder()
-            .name("unknown-size-defaults")
+        let cache: RedbCache<String, u32> = RedbCache::builder("unknown-size-defaults")
             .disk_directory(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -1887,11 +1899,11 @@ mod concurrent_base_unknown_size_defaults {
         );
 
         // len delegates to cache_size -> also None.
-        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
 
         // is_empty maps an unknown size through to None (NOT Some(true)).
         assert_eq!(
-            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
             None
         );
 
@@ -1901,9 +1913,9 @@ mod concurrent_base_unknown_size_defaults {
             ConcurrentCacheBase::cache_size(&cache).expect("cache_size"),
             None
         );
-        assert_eq!(ConcurrentCacheBase::len(&cache).expect("len"), None);
+        assert_eq!(ConcurrentCacheBase::cache_size(&cache).expect("len"), None);
         assert_eq!(
-            ConcurrentCacheBase::is_empty(&cache).expect("is_empty"),
+            ConcurrentCacheBase::cache_is_empty(&cache).expect("is_empty"),
             None
         );
     }

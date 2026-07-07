@@ -330,8 +330,8 @@ pub fn main() {
     let _handler = std::thread::spawn(|| {
         loop {
             sleep(Duration::from_secs(60));
-            // keyed_prime_cache bypasses the cache and forces a fresh computation
-            // for the given key.
+            // keyed_prime_cache computes a fresh value for the given key and stores
+            // it in the cache, replacing any existing entry.
             keyed_prime_cache("hello");
         }
     });

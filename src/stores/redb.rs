@@ -37,7 +37,8 @@ use thiserror::Error;
 /// [`Build`](Self::Build) variant wrapping a [`BuildError`](super::BuildError):
 ///
 /// ```ignore
-/// match RedbCache::<String, u32>::builder().build() {
+/// // `RedbCacheBuilder::new()` omits the required name, so `build` reports it.
+/// match RedbCacheBuilder::<String, u32>::new().build() {
 ///     Err(RedbCacheBuildError::Build(BuildError::MissingRequired(field))) => { /* e.g. "name" */ }
 ///     Err(RedbCacheBuildError::Build(BuildError::InvalidValue { field, reason })) => { /* e.g. "ttl" */ }
 ///     _ => {}
@@ -539,15 +540,19 @@ where
     K: ToString,
     V: Serialize + DeserializeOwned,
 {
-    /// Initialize a `RedbCacheBuilder`.
+    /// Initialize a `RedbCacheBuilder` with the required cache `name`.
     ///
-    /// The cache name is required; set it via [`RedbCacheBuilder::name`] before
-    /// calling [`build`](RedbCacheBuilder::build). If it is missing, `build` returns
-    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`)` rather
-    /// than panicking.
+    /// The `name` is used as a cross-platform filename component for the on-disk
+    /// database file (see [`RedbCacheBuilder::name`] for the validity rules). It
+    /// can be overridden later via [`name`](RedbCacheBuilder::name).
+    ///
+    /// To construct a builder without supplying the name up front, use
+    /// [`RedbCacheBuilder::new`] directly; `build` then returns
+    /// `Err(`[`BuildError::MissingRequired`](super::BuildError::MissingRequired)`("name"))`
+    /// if the name is never set.
     #[must_use]
-    pub fn builder() -> RedbCacheBuilder<K, V> {
-        RedbCacheBuilder::new()
+    pub fn builder(name: impl Into<String>) -> RedbCacheBuilder<K, V> {
+        RedbCacheBuilder::new().name(name)
     }
 
     /// Return the path of the on-disk redb database file backing this cache.
@@ -561,113 +566,12 @@ where
     /// [`ConcurrentCacheEvict::evict`](crate::ConcurrentCacheEvict::evict), which
     /// also return `usize`).
     pub fn remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
-        let ttl = *self.ttl.lock();
-        let strict = self.strict_deserialization;
-
-        // DISK-5: if no TTL is configured, there are no TTL-based expirations.
-        let Some(ttl) = ttl else {
-            return Ok(0);
-        };
-
-        // Collect candidate expired keys under a read transaction. We cannot
-        // iterate and remove entries in the same transaction because the
-        // iterator borrows the read txn for its entire lifetime.
-        let mut expired_keys: Vec<String> = Vec::new();
-        {
-            let now = SystemTime::now();
-            let rtxn = self
-                .connection
-                .begin_read()
-                .map_err(RedbCacheError::storage)?;
-            let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
-            for item in table.iter().map_err(RedbCacheError::storage)? {
-                let (key, value) = item.map_err(RedbCacheError::storage)?;
-                let raw = value.value();
-                let raw_vec = raw.to_vec();
-                match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_vec) {
-                    Ok(cached) => {
-                        if now
-                            .duration_since(cached.created_at)
-                            .unwrap_or(Duration::from_secs(0))
-                            >= ttl
-                        {
-                            expired_keys.push(key.value().to_string());
-                        }
-                    }
-                    Err(e) if !strict => {
-                        // D2: undecodable entry is treated as an eviction candidate.
-                        expired_keys.push(key.value().to_string());
-                        let _ = e;
-                    }
-                    Err(e) => {
-                        return Err(RedbCacheError::deserialization(e, raw_vec));
-                    }
-                }
-            }
-        }
-
-        if expired_keys.is_empty() {
-            return Ok(0);
-        }
-
-        // Re-check each candidate key inside the write txn before removing it.
-        // A concurrent `cache_set` may have replaced one of these entries with a
-        // fresh value between the read scan above and now; skipping such entries
-        // ensures we never delete a live entry. The returned count reflects the
-        // number of entries *actually* removed, not the number found in the scan.
-        let mut removed = 0usize;
-        let now_write = SystemTime::now();
-        let wtxn = begin_write(&self.connection, self.durable)?;
-        {
-            let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
-            for key in &expired_keys {
-                // Re-read the entry under the write txn to obtain the
-                // authoritative state. Drop the access guard before mutating
-                // the table.
-                // guard is dropped after .map(); table can be mutated below.
-                let raw_bytes: Option<Vec<u8>> = table
-                    .get(key.as_str())
-                    .map_err(RedbCacheError::storage)?
-                    .map(|guard| guard.value().to_vec());
-
-                match raw_bytes {
-                    None => {
-                        // Already removed by a concurrent operation; skip.
-                    }
-                    Some(bytes) => {
-                        match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
-                            Ok(entry) => {
-                                if now_write
-                                    .duration_since(entry.created_at)
-                                    .unwrap_or(Duration::from_secs(0))
-                                    >= ttl
-                                {
-                                    table
-                                        .remove(key.as_str())
-                                        .map_err(RedbCacheError::storage)?;
-                                    removed += 1;
-                                }
-                                // else: entry was rewritten with a fresh timestamp by a
-                                // concurrent writer; leave it in place.
-                            }
-                            Err(e) if !strict => {
-                                // D2: corrupt under write txn too — evict it.
-                                table
-                                    .remove(key.as_str())
-                                    .map_err(RedbCacheError::storage)?;
-                                removed += 1;
-                                let _ = e;
-                            }
-                            Err(e) => {
-                                return Err(RedbCacheError::deserialization(e, bytes));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        wtxn.commit().map_err(RedbCacheError::storage)?;
-        Ok(removed)
+        remove_expired_entries_impl::<V>(
+            &self.connection,
+            *self.ttl.lock(),
+            self.strict_deserialization,
+            self.durable,
+        )
     }
 
     /// Force a durable (fsync) commit, persisting any writes made while
@@ -686,10 +590,13 @@ where
     }
 }
 
-/// Async counterpart of [`RedbCache::flush`].
+/// Async counterparts of the blocking `RedbCache` maintenance methods.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-impl<K, V> RedbCache<K, V> {
+impl<K, V> RedbCache<K, V>
+where
+    V: Serialize + DeserializeOwned + Send + 'static,
+{
     /// Async counterpart of [`flush`](RedbCache::flush): runs the durable (fsync)
     /// commit on a background thread (via the [`blocking`] crate) so it does not
     /// stall the async runtime.
@@ -697,10 +604,24 @@ impl<K, V> RedbCache<K, V> {
         let connection = self.connection.clone();
         blocking::unblock(move || redb_flush(&connection)).await
     }
+
+    /// Async counterpart of [`remove_expired_entries`](RedbCache::remove_expired_entries):
+    /// runs the O(n) TTL sweep on a background thread (via the [`blocking`] crate)
+    /// so it does not stall the async runtime. Returns the number of entries removed.
+    pub async fn async_remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
+        let connection = self.connection.clone();
+        let ttl = *self.ttl.lock();
+        let strict = self.strict_deserialization;
+        let durable = self.durable;
+        blocking::unblock(move || {
+            remove_expired_entries_impl::<V>(&connection, ttl, strict, durable)
+        })
+        .await
+    }
 }
 
 #[non_exhaustive]
-#[derive(Error, Debug)]
+#[derive(Error)]
 pub enum RedbCacheError {
     /// A redb storage or transaction error.
     ///
@@ -734,6 +655,32 @@ pub enum RedbCacheError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+}
+
+// Manual `Debug` that redacts the raw `cached_value` bytes (they may carry
+// sensitive application data read from disk) as `<N bytes redacted>`, so a `{:?}`
+// of the error never leaks the payload.
+impl std::fmt::Debug for RedbCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage { source } => f.debug_struct("Storage").field("source", source).finish(),
+            Self::CacheDeserialization {
+                source,
+                cached_value,
+            } => f
+                .debug_struct("CacheDeserialization")
+                .field("source", source)
+                .field(
+                    "cached_value",
+                    &format_args!("<{} bytes redacted>", cached_value.len()),
+                )
+                .finish(),
+            Self::CacheSerialization { source } => f
+                .debug_struct("CacheSerialization")
+                .field("source", source)
+                .finish(),
+        }
+    }
 }
 
 impl RedbCacheError {
@@ -856,15 +803,46 @@ where
     let cached: CachedDiskValue<V> = match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_bytes) {
         Ok(v) => v,
         Err(e) if !strict => {
-            // D2: self-heal — delete the corrupt entry and return a cache miss.
+            // D2/C5: self-heal. The entry read under the (now-dropped) read txn
+            // failed to decode. Do NOT blindly delete it: a concurrent
+            // `cache_set` may have committed a valid value between our read txn
+            // and now, and a blind remove would silently drop that fresh write.
+            //
+            // Instead re-read the entry under the write txn and re-validate.
+            // redb serialises write transactions, so this check-and-mutate is
+            // atomic against any concurrent writer (mirrors the refresh/expiry
+            // re-read at the mutation path below). Only delete if the entry is
+            // *still* corrupt; if it now decodes, adopt the fresh value and fall
+            // through to the normal TTL handling.
             let wtxn = begin_write(connection, durable)?;
-            {
+            let healed: Result<Option<CachedDiskValue<V>>, RedbCacheError> = {
                 let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
-                table.remove(key).map_err(RedbCacheError::storage)?;
-            }
+                // guard is dropped after .map(); table can be mutated below.
+                let current_bytes: Option<Vec<u8>> = table
+                    .get(key)
+                    .map_err(RedbCacheError::storage)?
+                    .map(|guard| guard.value().to_vec());
+                match current_bytes {
+                    // Entry vanished (concurrent remove/clear): nothing to heal.
+                    None => Ok(None),
+                    Some(bytes) => match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                        // A concurrent writer stored a valid value; keep it.
+                        Ok(v) => Ok(Some(v)),
+                        // Still corrupt under the write txn: evict it.
+                        Err(_) => {
+                            table.remove(key).map_err(RedbCacheError::storage)?;
+                            Ok(None)
+                        }
+                    },
+                }
+            };
+            let healed = healed?;
             wtxn.commit().map_err(RedbCacheError::storage)?;
             let _ = e;
-            return Ok(None);
+            match healed {
+                None => return Ok(None),
+                Some(v) => v,
+            }
         }
         Err(e) => return Err(RedbCacheError::deserialization(e, raw_bytes)),
     };
@@ -998,6 +976,27 @@ where
         .map(|cached| cached.value))
 }
 
+/// Insert `serialized` under `key` without reading back the displaced value.
+/// Backs [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref):
+/// the previous `AccessGuard` returned by `insert` is dropped without being
+/// materialized or decoded, saving a byte copy and a deserialize on every write.
+fn disk_cache_set_no_return(
+    connection: &Database,
+    key: &str,
+    serialized: Vec<u8>,
+    durable: bool,
+) -> Result<(), RedbCacheError> {
+    let wtxn = begin_write(connection, durable)?;
+    {
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        table
+            .insert(key, serialized.as_slice())
+            .map_err(RedbCacheError::storage)?;
+    }
+    wtxn.commit().map_err(RedbCacheError::storage)?;
+    Ok(())
+}
+
 fn disk_cache_remove<V>(
     connection: &Database,
     key: &str,
@@ -1106,6 +1105,122 @@ fn redb_flush(connection: &Database) -> Result<(), RedbCacheError> {
         .map_err(RedbCacheError::storage)?;
     wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(())
+}
+
+/// Shared implementation of [`RedbCache::remove_expired_entries`]. Kept as a free
+/// function so both the synchronous method and the async
+/// [`RedbCache::async_remove_expired_entries`] (which runs it via
+/// [`blocking::unblock`]) share one source of truth for the sweep behavior.
+fn remove_expired_entries_impl<V>(
+    connection: &Database,
+    ttl: Option<Duration>,
+    strict: bool,
+    durable: bool,
+) -> Result<usize, RedbCacheError>
+where
+    V: Serialize + DeserializeOwned,
+{
+    // DISK-5: if no TTL is configured, there are no TTL-based expirations.
+    let Some(ttl) = ttl else {
+        return Ok(0);
+    };
+
+    // Collect candidate expired keys under a read transaction. We cannot
+    // iterate and remove entries in the same transaction because the
+    // iterator borrows the read txn for its entire lifetime.
+    let mut expired_keys: Vec<String> = Vec::new();
+    {
+        let now = SystemTime::now();
+        let rtxn = connection.begin_read().map_err(RedbCacheError::storage)?;
+        let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        for item in table.iter().map_err(RedbCacheError::storage)? {
+            let (key, value) = item.map_err(RedbCacheError::storage)?;
+            let raw = value.value();
+            let raw_vec = raw.to_vec();
+            match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_vec) {
+                Ok(cached) => {
+                    if now
+                        .duration_since(cached.created_at)
+                        .unwrap_or(Duration::from_secs(0))
+                        >= ttl
+                    {
+                        expired_keys.push(key.value().to_string());
+                    }
+                }
+                Err(e) if !strict => {
+                    // D2: undecodable entry is treated as an eviction candidate.
+                    expired_keys.push(key.value().to_string());
+                    let _ = e;
+                }
+                Err(e) => {
+                    return Err(RedbCacheError::deserialization(e, raw_vec));
+                }
+            }
+        }
+    }
+
+    if expired_keys.is_empty() {
+        return Ok(0);
+    }
+
+    // Re-check each candidate key inside the write txn before removing it.
+    // A concurrent `cache_set` may have replaced one of these entries with a
+    // fresh value between the read scan above and now; skipping such entries
+    // ensures we never delete a live entry. The returned count reflects the
+    // number of entries *actually* removed, not the number found in the scan.
+    let mut removed = 0usize;
+    let now_write = SystemTime::now();
+    let wtxn = begin_write(connection, durable)?;
+    {
+        let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+        for key in &expired_keys {
+            // Re-read the entry under the write txn to obtain the
+            // authoritative state. Drop the access guard before mutating
+            // the table.
+            // guard is dropped after .map(); table can be mutated below.
+            let raw_bytes: Option<Vec<u8>> = table
+                .get(key.as_str())
+                .map_err(RedbCacheError::storage)?
+                .map(|guard| guard.value().to_vec());
+
+            match raw_bytes {
+                None => {
+                    // Already removed by a concurrent operation; skip.
+                }
+                Some(bytes) => {
+                    match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                        Ok(entry) => {
+                            if now_write
+                                .duration_since(entry.created_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                >= ttl
+                            {
+                                table
+                                    .remove(key.as_str())
+                                    .map_err(RedbCacheError::storage)?;
+                                removed += 1;
+                            }
+                            // else: entry was rewritten with a fresh timestamp by a
+                            // concurrent writer; leave it in place.
+                        }
+                        Err(e) if !strict => {
+                            // D2: corrupt under write txn too — evict it.
+                            table
+                                .remove(key.as_str())
+                                .map_err(RedbCacheError::storage)?;
+                            removed += 1;
+                            let _ = e;
+                        }
+                        Err(e) => {
+                            return Err(RedbCacheError::deserialization(e, bytes));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    wtxn.commit().map_err(RedbCacheError::storage)?;
+    Ok(removed)
 }
 
 /// Behavior on a corrupt stored value (one whose bytes fail to deserialize):
@@ -1233,12 +1348,13 @@ where
     V: Serialize + DeserializeOwned,
 {
     /// Serializes from the borrowed `value` (no clone) and writes it under
-    /// `key.to_string()`, returning the previous value if any. Equivalent to
-    /// [`ConcurrentCached::cache_set`] but avoids taking ownership of `value`.
-    fn cache_set_ref(&self, key: &K, value: &V) -> Result<Option<V>, RedbCacheError> {
+    /// `key.to_string()`. Equivalent to [`ConcurrentCached::cache_set`] but avoids
+    /// taking ownership of `value` and does not read back the previous value.
+    /// Call [`ConcurrentCached::cache_get`] first if you need the prior value.
+    fn cache_set_ref(&self, key: &K, value: &V) -> Result<(), RedbCacheError> {
         let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
             .map_err(RedbCacheError::serialization)?;
-        disk_cache_set(&self.connection, &key.to_string(), serialized, self.durable)
+        disk_cache_set_no_return(&self.connection, &key.to_string(), serialized, self.durable)
     }
 }
 
@@ -1343,6 +1459,7 @@ where
     /// Serializes from the borrowed `value` (no clone) before moving the bytes
     /// onto the background thread. Async counterpart of
     /// [`SerializeCached::cache_set_ref`](crate::SerializeCached::cache_set_ref).
+    /// Does not read back the previous value.
     ///
     /// Serialization happens eagerly (before the returned future is awaited) so the
     /// borrowed `&V` is never held across the `.await`. This keeps the `V: Send`
@@ -1351,7 +1468,7 @@ where
         &self,
         key: &K,
         value: &V,
-    ) -> impl std::future::Future<Output = Result<Option<V>, RedbCacheError>> + Send {
+    ) -> impl std::future::Future<Output = Result<(), RedbCacheError>> + Send {
         let connection = self.connection.clone();
         let key = key.to_string();
         let durable = self.durable;
@@ -1360,8 +1477,10 @@ where
             .map_err(RedbCacheError::serialization);
         async move {
             let serialized = serialized?;
-            blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable))
-                .await
+            blocking::unblock(move || {
+                disk_cache_set_no_return(&connection, &key, serialized, durable)
+            })
+            .await
         }
     }
 }
@@ -1387,36 +1506,29 @@ mod tests {
     #[test]
     fn ttl_secs_and_ttl_millis_set_duration() {
         // No disk needed -- inspect the builder's ttl field without calling build().
-        let b = RedbCache::<u32, u32>::builder()
-            .name("ttl-secs-builder")
-            .ttl_secs(7);
+        let b = RedbCache::<u32, u32>::builder("ttl-secs-builder").ttl_secs(7);
         assert_eq!(b.ttl, Some(Duration::from_secs(7)));
 
-        let b = RedbCache::<u32, u32>::builder()
-            .name("ttl-millis-builder")
-            .ttl_millis(250);
+        let b = RedbCache::<u32, u32>::builder("ttl-millis-builder").ttl_millis(250);
         assert_eq!(b.ttl, Some(Duration::from_millis(250)));
     }
 
     #[test]
     fn ttl_setters_override_last_writer_wins() {
         // ttl(secs=10) then ttl_secs(5) -> 5s
-        let b = RedbCache::<u32, u32>::builder()
-            .name("ttl-override-a")
+        let b = RedbCache::<u32, u32>::builder("ttl-override-a")
             .ttl(Duration::from_secs(10))
             .ttl_secs(5);
         assert_eq!(b.ttl, Some(Duration::from_secs(5)));
 
         // ttl_secs then ttl_millis -> the millis value
-        let b = RedbCache::<u32, u32>::builder()
-            .name("ttl-override-b")
+        let b = RedbCache::<u32, u32>::builder("ttl-override-b")
             .ttl_secs(10)
             .ttl_millis(500);
         assert_eq!(b.ttl, Some(Duration::from_millis(500)));
 
         // ttl_millis then ttl -> the ttl value
-        let b = RedbCache::<u32, u32>::builder()
-            .name("ttl-override-c")
+        let b = RedbCache::<u32, u32>::builder("ttl-override-c")
             .ttl_millis(500)
             .ttl(Duration::from_secs(3));
         assert_eq!(b.ttl, Some(Duration::from_secs(3)));
@@ -1427,8 +1539,7 @@ mod tests {
         // RedbCache has no `new()` (builder-only); the ttl_secs convenience
         // setter produces a working disk cache that respects the TTL.
         let dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("ttl-secs-roundtrip")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("ttl-secs-roundtrip")
             .disk_directory(dir.path())
             .ttl_secs(60)
             .build()
@@ -1443,8 +1554,7 @@ mod tests {
         // entries expire immediately: an entry written under a short ttl survives well
         // past it once expiry is disabled.
         let dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("set-ttl-zero-disables")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("set-ttl-zero-disables")
             .disk_directory(dir.path())
             .ttl_millis(20)
             .build()
@@ -1468,8 +1578,7 @@ mod tests {
         // the shorter ttl would have expired (as long as an expiring read has not already
         // evicted it). Neither entry is ever rewritten.
         let dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("set-ttl-retroactive")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("set-ttl-retroactive")
             .disk_directory(dir.path())
             .ttl_secs(3600)
             .build()
@@ -1511,8 +1620,7 @@ mod tests {
         // clearly exceeded the TTL. Uses a never-read key so eviction-on-read
         // cannot pre-delete the entry and mask the revival.
         let dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("unset-ttl-retroactive")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("unset-ttl-retroactive")
             .disk_directory(dir.path())
             .ttl_millis(5)
             .build()
@@ -1623,13 +1731,13 @@ mod tests {
     #[test]
     fn cache_get_returns_serialize_error_when_refresh_fails() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> = RedbCache::builder()
-            .name("serialize_error_on_refresh")
-            .disk_directory(tmp_dir.path())
-            .ttl(Duration::from_secs(10))
-            .refresh_on_hit(true)
-            .build()
-            .expect("error building disk cache");
+        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> =
+            RedbCache::builder("serialize_error_on_refresh")
+                .disk_directory(tmp_dir.path())
+                .ttl(Duration::from_secs(10))
+                .refresh_on_hit(true)
+                .build()
+                .expect("error building disk cache");
         let cached = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
         raw_insert(
             &cache,
@@ -1648,8 +1756,7 @@ mod tests {
     #[test]
     fn cache_get_returns_decode_error_for_corrupted_value_in_strict_mode() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-cache-get-strict")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-get-strict")
             .disk_directory(tmp_dir.path())
             .strict_deserialization(true)
             .build()
@@ -1668,8 +1775,7 @@ mod tests {
     #[test]
     fn cache_get_self_heals_corrupted_entry_by_default() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-cache-get-default")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-get-default")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1684,8 +1790,7 @@ mod tests {
     #[test]
     fn cache_delete_removes_corrupted_value_without_decoding() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-cache-delete")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-delete")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1699,8 +1804,7 @@ mod tests {
     #[test]
     fn cache_set_overwrites_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-cache-set")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-set")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1715,8 +1819,7 @@ mod tests {
     #[test]
     fn cache_remove_removes_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-cache-remove")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-cache-remove")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1731,8 +1834,7 @@ mod tests {
     #[test]
     fn cache_remove_entry_round_trips_and_removes_corrupted_value() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("remove-entry-roundtrip")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("remove-entry-roundtrip")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -1757,8 +1859,7 @@ mod tests {
     #[test]
     fn cache_remove_entry_returns_expired_but_present_entry() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("remove-entry-expired")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("remove-entry-expired")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_1_SEC)
             .build()
@@ -1780,8 +1881,7 @@ mod tests {
     fn flush_forces_durable_commit_and_preserves_data() {
         let tmp_dir = temp_dir!();
         // Opt into Durability::None writes so flush() has buffered writes to persist.
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("flush-test")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("flush-test")
             .disk_directory(tmp_dir.path())
             .durable(false)
             .build()
@@ -1802,16 +1902,14 @@ mod tests {
         // writes are present. (The fsync itself is not observable from a graceful
         // in-process reopen, so this checks the round-trip, not crash durability.)
         drop(cache);
-        let reopened: RedbCache<u32, u32> = RedbCache::builder()
-            .name("flush-test")
+        let reopened: RedbCache<u32, u32> = RedbCache::builder("flush-test")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error re-opening cache");
         assert_that!(reopened.cache_get(&TEST_KEY), ok(some(eq(&TEST_VAL))));
 
         // flush is a safe no-op on an already-durable cache, and on an empty cache.
-        let durable: RedbCache<u32, u32> = RedbCache::builder()
-            .name("flush-test-durable")
+        let durable: RedbCache<u32, u32> = RedbCache::builder("flush-test-durable")
             .disk_directory(tmp_dir.path())
             .durable(true)
             .build()
@@ -1834,8 +1932,7 @@ mod tests {
         // release redb's exclusive lock.
         let target = temp_dir!();
         {
-            let _seed: RedbCache<u32, u32> = RedbCache::builder()
-                .name(NAME)
+            let _seed: RedbCache<u32, u32> = RedbCache::builder(NAME)
                 .disk_directory(target.path())
                 .build()
                 .unwrap();
@@ -1845,8 +1942,7 @@ mod tests {
         let dir = temp_dir!();
         std::os::unix::fs::symlink(&target_file, dir.path().join(&file_name)).unwrap();
 
-        let result = RedbCache::<u32, u32>::builder()
-            .name(NAME)
+        let result = RedbCache::<u32, u32>::builder(NAME)
             .disk_directory(dir.path())
             .build();
         assert!(result.is_err(), "a symlinked db path must be rejected");
@@ -1861,8 +1957,7 @@ mod tests {
         let link = link_parent.path().join("linkdir");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
 
-        let result = RedbCache::<u32, u32>::builder()
-            .name("symlink-dir")
+        let result = RedbCache::<u32, u32>::builder("symlink-dir")
             .disk_directory(&link)
             .build();
         assert!(
@@ -1885,8 +1980,7 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let _c: RedbCache<u32, u32> = RedbCache::builder()
-            .name(NAME)
+        let _c: RedbCache<u32, u32> = RedbCache::builder(NAME)
             .disk_directory(dir.path())
             .build()
             .unwrap();
@@ -1908,8 +2002,7 @@ mod tests {
 
         let dir_a = temp_dir!();
         let src = dir_a.path().join(&file_name);
-        let a: RedbCache<u32, u32> = RedbCache::builder()
-            .name(NAME)
+        let a: RedbCache<u32, u32> = RedbCache::builder(NAME)
             .disk_directory(dir_a.path())
             .durable(false) // opt into Durability::None writes
             .build()
@@ -1919,8 +2012,7 @@ mod tests {
         // Snapshot before flush: a fresh instance on the copy must NOT see the entry.
         let dir_before = temp_dir!();
         std::fs::copy(&src, dir_before.path().join(&file_name)).unwrap();
-        let before: RedbCache<u32, u32> = RedbCache::builder()
-            .name(NAME)
+        let before: RedbCache<u32, u32> = RedbCache::builder(NAME)
             .disk_directory(dir_before.path())
             .build()
             .unwrap();
@@ -1934,8 +2026,7 @@ mod tests {
         a.flush().unwrap();
         let dir_after = temp_dir!();
         std::fs::copy(&src, dir_after.path().join(&file_name)).unwrap();
-        let after: RedbCache<u32, u32> = RedbCache::builder()
-            .name(NAME)
+        let after: RedbCache<u32, u32> = RedbCache::builder(NAME)
             .disk_directory(dir_after.path())
             .build()
             .unwrap();
@@ -1950,8 +2041,7 @@ mod tests {
     #[test]
     fn remove_expired_entries_returns_decode_error_for_corrupted_value_in_strict_mode() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-sweep-strict")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-sweep-strict")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
             .strict_deserialization(true)
@@ -1970,8 +2060,7 @@ mod tests {
     #[test]
     fn remove_expired_entries_self_heals_corrupted_entries_by_default() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("corrupted-sweep-default")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("corrupted-sweep-default")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
             .build()
@@ -1990,8 +2079,7 @@ mod tests {
     #[test]
     fn remove_expired_entries_returns_count_of_removed_entries() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("sweep-count")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-count")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_1_SEC)
             .build()
@@ -2018,8 +2106,7 @@ mod tests {
     #[test]
     fn remove_expired_entries_returns_zero_when_no_ttl_configured() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("sweep-no-ttl")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-no-ttl")
             .disk_directory(tmp_dir.path())
             // No TTL set -- entries never expire.
             .build()
@@ -2042,8 +2129,7 @@ mod tests {
     #[test]
     fn remove_expired_entries_sweeps_corrupt_and_expired_but_keeps_live() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("sweep-mixed-corrupt-live-expired")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-mixed-corrupt-live-expired")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(60))
             .build()
@@ -2110,8 +2196,7 @@ mod tests {
     #[test]
     fn remove_expired_entries_strict_mode_aborts_and_leaves_corrupt_entry() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("sweep-strict-leaves-corrupt")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-strict-leaves-corrupt")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
             .strict_deserialization(true)
@@ -2135,8 +2220,7 @@ mod tests {
     #[test]
     fn cache_get_self_heal_then_recompute_produces_hit() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("self-heal-then-recompute")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("self-heal-then-recompute")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
@@ -2182,8 +2266,7 @@ mod tests {
     #[googletest::test]
     fn cache_get_after_cache_remove_returns_none() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -2228,8 +2311,7 @@ mod tests {
     #[googletest::test]
     fn cache_clear_empties_the_table() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("test-cache-clear")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache-clear")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -2254,8 +2336,7 @@ mod tests {
     #[googletest::test]
     fn values_expire_when_lifespan_elapses_returning_none() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_2_SECS)
             .build()
@@ -2292,8 +2373,7 @@ mod tests {
     fn set_ttl_to_a_different_ttl_is_respected() {
         // COPY PASTE of [values_expire_when_lifespan_elapses_returning_none]
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_2_SECS)
             .build()
@@ -2372,8 +2452,7 @@ mod tests {
         const LIFE_SPAN: Duration = LIFE_SPAN_2_SECS;
         const HALF_LIFE_SPAN: Duration = LIFE_SPAN_1_SEC;
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("test-cache")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN)
             .refresh_on_hit(true) // ENABLE REFRESH - this is what we're testing
@@ -2413,11 +2492,11 @@ mod tests {
     // Smoke test for the default disk directory: a full get/set/remove
     // round-trip succeeds when `disk_directory` is left at its default.
     fn does_not_break_when_constructed_using_default_disk_directory() {
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name(format!("{}-disk-cache-test-default-dir", now_millis()))
-            // use the default disk directory
-            .build()
-            .unwrap();
+        let cache: RedbCache<u32, u32> =
+            RedbCache::builder(format!("{}-disk-cache-test-default-dir", now_millis()))
+                // use the default disk directory
+                .build()
+                .unwrap();
 
         let cached = cache.cache_get(&TEST_KEY).unwrap();
         assert_that!(
@@ -2468,8 +2547,7 @@ mod tests {
                 const CACHE_NAME: &str = "test-cache";
 
                 {
-                    let cache: RedbCache<u32, u32> = RedbCache::builder()
-                        .name(CACHE_NAME)
+                    let cache: RedbCache<u32, u32> = RedbCache::builder(CACHE_NAME)
                         .disk_directory(cache_tmp_dir.path())
                         .durable(set_durable) // WHAT'S BEING TESTED
                         .build()
@@ -2480,8 +2558,7 @@ mod tests {
                     // file is released before we re-open it below.
                 }
 
-                let recovered_cache: RedbCache<u32, u32> = RedbCache::builder()
-                    .name(CACHE_NAME)
+                let recovered_cache: RedbCache<u32, u32> = RedbCache::builder(CACHE_NAME)
                     .disk_directory(cache_tmp_dir.path())
                     .durable(set_durable)
                     .build()
@@ -2593,8 +2670,7 @@ mod tests {
         use crate::ConcurrentCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("test-cache-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("test-cache-async")
             .disk_directory(tmp_dir.path())
             .ttl(LIFE_SPAN_1_SEC)
             .build()
@@ -2641,8 +2717,7 @@ mod tests {
         use crate::ConcurrentCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("remove-entry-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("remove-entry-async")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -2673,19 +2748,18 @@ mod tests {
     #[test]
     fn cache_set_ref_round_trips() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("set-ref-roundtrip")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("set-ref-roundtrip")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
 
         let key = TEST_KEY;
         let value = TEST_VAL;
-        // cache_set_ref writes from a borrow; the previous value is None.
+        // cache_set_ref writes from a borrow and returns `()` (no previous value).
         assert_that!(
             crate::SerializeCached::cache_set_ref(&cache, &key, &value),
-            ok(none()),
-            "cache_set_ref on a new key should return None"
+            ok(eq(&())),
+            "cache_set_ref on a new key should return Ok(())"
         );
         // cache_get must return the value that was written via cache_set_ref.
         assert_that!(
@@ -2693,12 +2767,12 @@ mod tests {
             ok(some(eq(&value))),
             "cache_get after cache_set_ref should return the written value"
         );
-        // A second cache_set_ref displaces the first and returns it.
+        // A second cache_set_ref displaces the first; it still returns `()`.
         let value2 = TEST_VAL_1;
         assert_that!(
             crate::SerializeCached::cache_set_ref(&cache, &key, &value2),
-            ok(some(eq(&value))),
-            "cache_set_ref over an existing entry should return the old value"
+            ok(eq(&())),
+            "cache_set_ref over an existing entry should return Ok(())"
         );
         assert_that!(
             cache.cache_get(&key),
@@ -2710,8 +2784,7 @@ mod tests {
     #[test]
     fn debug_smoke_exposes_non_secret_fields_only() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("debug-smoke")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("debug-smoke")
             .disk_directory(tmp_dir.path())
             .ttl_secs(60)
             .refresh_on_hit(true)
@@ -2749,8 +2822,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("")
+                RedbCache::<u32, u32>::builder("")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2760,8 +2832,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("bad/name")
+                RedbCache::<u32, u32>::builder("bad/name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2773,8 +2844,7 @@ mod tests {
         // module-path-derived name such as "a::b" no longer builds.
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("ok:name")
+                RedbCache::<u32, u32>::builder("ok:name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2785,8 +2855,7 @@ mod tests {
         // Other NTFS/Windows-reserved characters are rejected too.
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("star*name")
+                RedbCache::<u32, u32>::builder("star*name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2796,8 +2865,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("q?name")
+                RedbCache::<u32, u32>::builder("q?name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2807,8 +2875,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("lt<name")
+                RedbCache::<u32, u32>::builder("lt<name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2818,8 +2885,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("bad\\name")
+                RedbCache::<u32, u32>::builder("bad\\name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2829,8 +2895,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("..")
+                RedbCache::<u32, u32>::builder("..")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2840,8 +2905,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name(".")
+                RedbCache::<u32, u32>::builder(".")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2851,8 +2915,7 @@ mod tests {
 
         // A valid name must still build successfully.
         assert!(
-            RedbCache::<u32, u32>::builder()
-                .name("valid-cache-name")
+            RedbCache::<u32, u32>::builder("valid-cache-name")
                 .disk_directory(tmp_dir.path())
                 .build()
                 .is_ok(),
@@ -2861,8 +2924,7 @@ mod tests {
 
         // Still-allowed characters (alphanumerics, '_', '-') must build.
         assert!(
-            RedbCache::<u32, u32>::builder()
-                .name("My_Cache-Name_123")
+            RedbCache::<u32, u32>::builder("My_Cache-Name_123")
                 .disk_directory(tmp_dir.path())
                 .build()
                 .is_ok(),
@@ -2876,8 +2938,7 @@ mod tests {
 
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name("bad\0name")
+                RedbCache::<u32, u32>::builder("bad\0name")
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2893,8 +2954,7 @@ mod tests {
         let tmp_dir = temp_dir!();
         assert!(
             matches!(
-                RedbCache::<u32, u32>::builder()
-                    .name(name)
+                RedbCache::<u32, u32>::builder(name)
                     .disk_directory(tmp_dir.path())
                     .build(),
                 Err(RedbCacheBuildError::InvalidCacheName)
@@ -2907,8 +2967,7 @@ mod tests {
     fn assert_name_accepted(name: &str, why: &str) {
         let tmp_dir = temp_dir!();
         assert!(
-            RedbCache::<u32, u32>::builder()
-                .name(name)
+            RedbCache::<u32, u32>::builder(name)
                 .disk_directory(tmp_dir.path())
                 .build()
                 .is_ok(),
@@ -2974,19 +3033,18 @@ mod tests {
         use crate::SerializeCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("set-ref-roundtrip-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("set-ref-roundtrip-async")
             .disk_directory(tmp_dir.path())
             .build()
             .expect("error building disk cache");
 
         let key = TEST_KEY;
         let value = TEST_VAL;
-        // async_cache_set_ref writes from a borrow; the previous value is None.
+        // async_cache_set_ref writes from a borrow and returns `()` (no previous value).
         assert_eq!(
             cache.async_cache_set_ref(&key, &value).await.unwrap(),
-            None,
-            "async_cache_set_ref on a new key should return None"
+            (),
+            "async_cache_set_ref on a new key should return Ok(())"
         );
         // async_cache_get must return the value that was written via async_cache_set_ref.
         use crate::ConcurrentCachedAsync;
@@ -2995,12 +3053,12 @@ mod tests {
             Some(value),
             "async_cache_get after async_cache_set_ref should return the written value"
         );
-        // A second async_cache_set_ref displaces the first.
+        // A second async_cache_set_ref displaces the first; it still returns `()`.
         let value2 = TEST_VAL_1;
         assert_eq!(
             cache.async_cache_set_ref(&key, &value2).await.unwrap(),
-            Some(value),
-            "async_cache_set_ref over an existing entry should return the old value"
+            (),
+            "async_cache_set_ref over an existing entry should return Ok(())"
         );
         assert_eq!(
             cache.async_cache_get(&key).await.unwrap(),
@@ -3015,8 +3073,7 @@ mod tests {
         use crate::ConcurrentCachedAsync;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("flush-test-async")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("flush-test-async")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -3044,8 +3101,7 @@ mod tests {
         use futures::executor::block_on;
 
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("futures-block-on-test")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("futures-block-on-test")
             .disk_directory(tmp_dir.path())
             .build()
             .unwrap();
@@ -3106,8 +3162,7 @@ mod tests {
     fn cache_get_decode_error_carries_raw_bytes() {
         let tmp_dir = temp_dir!();
         // strict_deserialization=true so we get an error to inspect.
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("decode-error-carries-bytes")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("decode-error-carries-bytes")
             .disk_directory(tmp_dir.path())
             .strict_deserialization(true)
             .build()
@@ -3137,8 +3192,7 @@ mod tests {
     fn remove_expired_entries_decode_error_carries_raw_bytes() {
         let tmp_dir = temp_dir!();
         // strict_deserialization=true so we get an error to inspect.
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("sweep-decode-error-bytes")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-decode-error-bytes")
             .disk_directory(tmp_dir.path())
             .ttl(Duration::from_secs(1))
             .strict_deserialization(true)
@@ -3167,13 +3221,13 @@ mod tests {
     #[test]
     fn cache_serialization_error_is_struct_variant() {
         let tmp_dir = temp_dir!();
-        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> = RedbCache::builder()
-            .name("ser-error-struct-variant")
-            .disk_directory(tmp_dir.path())
-            .ttl(Duration::from_secs(10))
-            .refresh_on_hit(true)
-            .build()
-            .expect("error building disk cache");
+        let cache: RedbCache<u32, SerializeFailsAfterDeserialize> =
+            RedbCache::builder("ser-error-struct-variant")
+                .disk_directory(tmp_dir.path())
+                .ttl(Duration::from_secs(10))
+                .refresh_on_hit(true)
+                .build()
+                .expect("error building disk cache");
         let fixture = CachedDiskValue::new(SerializeFailsAfterDeserialize { fail: false });
         raw_insert(
             &cache,
@@ -3194,8 +3248,7 @@ mod tests {
         use std::error::Error;
         let tmp_dir = temp_dir!();
         // Use strict mode so we get an error from cache_get.
-        let cache: RedbCache<u32, u32> = RedbCache::builder()
-            .name("deser-source-wired")
+        let cache: RedbCache<u32, u32> = RedbCache::builder("deser-source-wired")
             .disk_directory(tmp_dir.path())
             .strict_deserialization(true)
             .build()
@@ -3253,8 +3306,7 @@ mod tests {
             let parent = temp_dir!();
             // Point to a non-existent subdirectory so create_cache_dir must create it.
             let cache_dir = parent.path().join("sub").join("cache");
-            let cache: RedbCache<u32, u32> = RedbCache::builder()
-                .name("perm-dir-explicit")
+            let cache: RedbCache<u32, u32> = RedbCache::builder("perm-dir-explicit")
                 .disk_directory(&cache_dir)
                 .build()
                 .expect("build must succeed");
@@ -3273,8 +3325,7 @@ mod tests {
         #[test]
         fn redb_file_is_created_with_mode_0600() {
             let dir = temp_dir!();
-            let cache: RedbCache<u32, u32> = RedbCache::builder()
-                .name("perm-file")
+            let cache: RedbCache<u32, u32> = RedbCache::builder("perm-file")
                 .disk_directory(dir.path())
                 .build()
                 .expect("build must succeed");

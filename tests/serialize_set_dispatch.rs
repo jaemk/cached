@@ -95,11 +95,12 @@ mod stores {
     }
 
     impl SerializeCached<u32, Counted> for SerStore {
-        /// Serialize from &Counted — never clones Counted.
-        fn cache_set_ref(&self, k: &u32, v: &Counted) -> Result<Option<Counted>, Infallible> {
+        /// Serialize from &Counted — never clones Counted. Does not read back the
+        /// previous value.
+        fn cache_set_ref(&self, k: &u32, v: &Counted) -> Result<(), Infallible> {
             let s = counted_to_string(v);
-            let mut map = self.map.lock().unwrap();
-            Ok(map.insert(*k, s).map(|s| counted_from_str(&s)))
+            self.map.lock().unwrap().insert(*k, s);
+            Ok(())
         }
     }
 
@@ -397,16 +398,11 @@ mod async_serialize_store {
             &self,
             k: &u32,
             v: &AsyncVal,
-        ) -> impl std::future::Future<Output = Result<Option<AsyncVal>, Infallible>> + Send
-        {
+        ) -> impl std::future::Future<Output = Result<(), Infallible>> + Send {
             let s = async_val_to_string(v);
             let k = *k;
-            let prev = {
-                let mut map = self.map.lock().unwrap();
-                map.insert(k, s)
-            };
-            let prev_val = prev.map(|s| async_val_from_str(&s));
-            async move { Ok(prev_val) }
+            self.map.lock().unwrap().insert(k, s);
+            async move { Ok(()) }
         }
     }
 

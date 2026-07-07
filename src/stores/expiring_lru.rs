@@ -448,21 +448,31 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
-        let key_for_evict = k.clone();
+        // Count the miss the instant the factory runs, matching the try variant so the two
+        // paths agree even when the factory panics (C10). The inner store invokes the factory
+        // only on a miss (vacant slot or expired entry), so a hit never counts one.
+        let counted_f = {
+            let misses = &self.misses;
+            move || {
+                misses.fetch_add(1, Ordering::Relaxed);
+                f()
+            }
+        };
         // get_or_set_with_if will set the value in the cache if an existing
         // value is not valid, which, in our case, is if the value has expired.
+        // On replacement it hands back the STORED key/value of the displaced entry, so the
+        // callback sees the instance that was actually cached, not the (equal-but-distinct)
+        // lookup key (C1/C8).
         let (was_present, was_valid, old_val, v) =
-            self.store.get_or_set_with_if(k, f, |v| !v.is_expired());
+            self.store
+                .get_or_set_with_if(k, counted_f, |v| !v.is_expired());
         if was_present && was_valid {
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
-            if let Some(old) = old_val {
-                if let Some(on_evict) = &self.on_evict {
-                    on_evict(&key_for_evict, &old);
-                }
-                self.evictions.fetch_add(1, Ordering::Relaxed);
+        } else if let Some((old_key, old)) = old_val {
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&old_key, &old);
             }
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         v
     }
@@ -471,7 +481,6 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         key: K,
         f: F,
     ) -> Result<&mut V, E> {
-        let key_for_evict = key.clone();
         // Count the miss the instant the factory runs. The inner store calls it only on a miss
         // (vacant slot or expired entry), so a hit never counts one; and because the increment
         // lands before `f` returns, an `Err` still records the miss instead of losing it on the
@@ -483,14 +492,15 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
                 f()
             }
         };
+        // On replacement the store returns the STORED key/value of the displaced entry (C1/C8).
         let (was_present, was_valid, old_val, v) =
             self.store
                 .try_get_or_set_with_if(key, counted_f, |v| !v.is_expired())?;
         if was_present && was_valid {
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else if let Some(old) = old_val {
+        } else if let Some((old_key, old)) = old_val {
             if let Some(on_evict) = &self.on_evict {
-                on_evict(&key_for_evict, &old);
+                on_evict(&old_key, &old);
             }
             self.evictions.fetch_add(1, Ordering::Relaxed);
         }
@@ -626,21 +636,27 @@ where
         Fut: Future<Output = V> + Send + 'a,
     {
         async move {
-            let key_for_evict = k.clone();
+            // Count the miss when the factory runs (miss path only), matching the try variant
+            // so the two paths agree on a panicking factory (C10).
+            let counted_f = {
+                let misses = &self.misses;
+                move || {
+                    misses.fetch_add(1, Ordering::Relaxed);
+                    f()
+                }
+            };
+            // On replacement the store returns the STORED key/value of the displaced entry (C1/C8).
             let (was_present, was_valid, old_val, v) = self
                 .store
-                .get_or_set_with_if_async(k, f, |v| !v.is_expired())
+                .get_or_set_with_if_async(k, counted_f, |v| !v.is_expired())
                 .await;
             if was_present && was_valid {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-            } else {
-                if let Some(old) = old_val {
-                    if let Some(on_evict) = &self.on_evict {
-                        on_evict(&key_for_evict, &old);
-                    }
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
+            } else if let Some((old_key, old)) = old_val {
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(&old_key, &old);
                 }
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
             }
             v
         }
@@ -659,7 +675,6 @@ where
         Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
         async move {
-            let key_for_evict = k.clone();
             // Count the miss when the factory is invoked (miss path only), so an `Err` from the
             // async factory still records it instead of losing it on the `?` early return.
             // Mirrors the sync try path and `ExpiringCache` (EXP-2).
@@ -670,15 +685,16 @@ where
                     f()
                 }
             };
+            // On replacement the store returns the STORED key/value of the displaced entry (C1/C8).
             let (was_present, was_valid, old_val, v) = self
                 .store
                 .try_get_or_set_with_if_async(k, counted_f, |v| !v.is_expired())
                 .await?;
             if was_present && was_valid {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-            } else if let Some(old) = old_val {
+            } else if let Some((old_key, old)) = old_val {
                 if let Some(on_evict) = &self.on_evict {
-                    on_evict(&key_for_evict, &old);
+                    on_evict(&old_key, &old);
                 }
                 self.evictions.fetch_add(1, Ordering::Relaxed);
             }

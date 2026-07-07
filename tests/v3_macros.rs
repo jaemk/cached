@@ -2463,6 +2463,98 @@ mod companions_vis_tests {
     }
 }
 
+// ── Item #9b: companions_vis on #[once] ──────────────────────────────────────
+
+// For free functions `#[once]` nests the `_no_cache` origin inside the cached
+// fn body (it cannot be a module-level companion because it has no per-call key
+// and the cache is a single shared static). The only module-level companion
+// that carries `companions_vis` on the free-function path is `_prime_cache`.
+// These tests verify that `companions_vis` is honoured for that companion.
+mod companions_vis_once_tests {
+    use cached::macros::once;
+
+    // `companions_vis = "pub(crate)"`: the `_prime_cache` companion must be
+    // callable from inside this module. If the knob is ignored the companion
+    // would get the fn's own visibility (`pub`), but reachability from the test
+    // is the positive signal regardless.
+    #[once(companions_vis = "pub(crate)")]
+    pub fn companions_vis_once_fn() -> u32 {
+        21
+    }
+
+    #[test]
+    fn test_companions_vis_once_pub_crate_produces_pub_crate_prime_cache() {
+        // Calling `_prime_cache` directly only compiles if it is pub(crate) or
+        // more visible. The function always runs the body, so the return value
+        // must match.
+        let val = companions_vis_once_fn_prime_cache();
+        assert_eq!(
+            val, 21,
+            "companions_vis on #[once]: prime_cache companion returned wrong value"
+        );
+    }
+
+    // Default (no companions_vis): companion inherits the fn's own visibility.
+    #[once]
+    pub fn default_companions_vis_once_fn() -> u32 {
+        22
+    }
+
+    #[test]
+    fn test_companions_vis_once_default_inherits_fn_visibility() {
+        // With no `companions_vis` the companion is `pub` (matching the fn).
+        // Calling it from this sibling test confirms it is accessible.
+        let val = default_companions_vis_once_fn_prime_cache();
+        assert_eq!(
+            val, 22,
+            "default companions_vis on #[once]: prime_cache companion returned wrong value"
+        );
+    }
+}
+
+// ── Item #9c: companions_vis on #[concurrent_cached] ─────────────────────────
+
+// `#[concurrent_cached]` also nests `_no_cache` inside the cached fn body for
+// free functions. The module-level companion that carries `companions_vis` is
+// `_prime_cache`. These tests verify the knob is honoured for that macro.
+mod companions_vis_concurrent_tests {
+    use cached::macros::concurrent_cached;
+
+    // `companions_vis = "pub(crate)"`: the `_prime_cache` companion must be
+    // callable from inside this module.
+    #[concurrent_cached(key = "u32", convert = { n }, companions_vis = "pub(crate)")]
+    pub fn companions_vis_concurrent_fn(n: u32) -> u32 {
+        n * 11
+    }
+
+    #[test]
+    fn test_companions_vis_concurrent_pub_crate_produces_pub_crate_prime_cache() {
+        // Calling `_prime_cache` directly only compiles if it is pub(crate) or
+        // more visible. `_prime_cache` always runs the body and stores the
+        // result, so the return value must match `n * 11`.
+        let val = companions_vis_concurrent_fn_prime_cache(3);
+        assert_eq!(
+            val, 33,
+            "companions_vis on #[concurrent_cached]: prime_cache companion returned wrong value"
+        );
+    }
+
+    // Default (no companions_vis): companion inherits the fn's own visibility.
+    #[concurrent_cached(key = "u32", convert = { n })]
+    pub fn default_companions_vis_concurrent_fn(n: u32) -> u32 {
+        n + 10
+    }
+
+    #[test]
+    fn test_companions_vis_concurrent_default_inherits_fn_visibility() {
+        let val = default_companions_vis_concurrent_fn_prime_cache(7);
+        assert_eq!(
+            val, 17,
+            "default companions_vis on #[concurrent_cached]: prime_cache companion returned wrong value"
+        );
+    }
+}
+
 // ── G1 positive: generic `#[once]` with a concrete value type ────────────────
 // A generic `#[once]` function is valid as long as the return type does not name
 // any of the function's own type or const parameters. The guard added in G1

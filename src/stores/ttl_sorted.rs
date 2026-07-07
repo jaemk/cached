@@ -482,6 +482,12 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Set the maximum number of entries. When reached, the next entries to expire are evicted.
     /// Returns the previous value if one was set.
     ///
+    /// If the new bound is smaller than the current entry count, entries are evicted immediately
+    /// (in expiry order, next-to-expire first) so the cache is within the new bound on return,
+    /// firing `on_evict` and counting each eviction. This matches
+    /// [`LruCache::set_max_size`](super::LruCache::set_max_size), which also evicts down to the
+    /// new bound eagerly rather than deferring to the next insert.
+    ///
     /// The backing map grows on demand as entries are inserted (it is not pre-reserved here),
     /// matching [`LruCache::set_max_size`](super::LruCache::set_max_size); so this cannot abort
     /// on a capacity-overflowing `max_size`.
@@ -503,6 +509,12 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         assert!(max_size > 0, "max_size must be greater than zero");
         let prev = self.size_limit;
         self.size_limit = Some(max_size);
+        // Evict down to the new bound immediately rather than waiting for the next insert, so a
+        // shrink takes effect on return (matching `LruCache::set_max_size`). `retain_latest`
+        // drops the next-to-expire entries first, firing `on_evict` and counting each eviction.
+        if self.map.len() > max_size {
+            let _ = self.retain_latest(max_size, false);
+        }
         prev
     }
 
@@ -913,17 +925,27 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
-        if self.cache_get(&key).is_some() {
+        // Check liveness WITHOUT removing the entry, then run the factory, then replace on
+        // success. This mirrors `TtlCache` / `LruTtlCache`: a factory panic leaves the stale
+        // entry in place instead of dropping it (and does not fire `on_evict` prematurely).
+        // The borrow from `map.get` ends with the `matches!`, so the counters/`get_mut` below
+        // are free to borrow `self` again (the Polonius limitation, see `cache_get`).
+        let live = matches!(self.map.get(&key), Some(entry) if !entry.is_expired());
+        if live {
+            self.hits.increment();
             return self
                 .map
                 .get_mut(&key)
                 .map(|entry| &mut entry.value)
-                // Invariant: cache_get confirmed the entry exists and is not expired.
-                // No other code path removes it between the check and this get_mut.
+                // Invariant: the liveness check above confirmed the entry exists and is not
+                // expired. No other code path removes it between the check and this get_mut.
                 .expect("cache entry vanished");
         }
-        // `set_and_get_mut` never drops the value (it saturates an unrepresentable
-        // TTL instead of erroring), so this path is panic-free.
+        self.misses.increment();
+        // Miss or expired entry: build the value first. `set_and_get_mut` inserts it and, when
+        // it displaces an expired entry, fires `on_evict` and counts one eviction (insert_inner).
+        // It never drops the value (it saturates an unrepresentable TTL instead of erroring), so
+        // this path is panic-free once `f()` has produced a value.
         self.set_and_get_mut(key, f())
     }
 
@@ -932,16 +954,23 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
         key: K,
         f: F,
     ) -> Result<&mut V, E> {
-        if self.cache_get(&key).is_some() {
+        // Same structure as `cache_get_or_set_with_mut`: check liveness without removing, run
+        // the factory, replace only on `Ok`. On `Err` the (expired or absent) entry is left
+        // exactly as it was and `on_evict` does not fire, matching `TtlCache` / `LruTtlCache`.
+        let live = matches!(self.map.get(&key), Some(entry) if !entry.is_expired());
+        if live {
+            self.hits.increment();
             return Ok(self
                 .map
                 .get_mut(&key)
                 .map(|entry| &mut entry.value)
-                // Invariant: same as cache_get_or_set_with above.
+                // Invariant: same as cache_get_or_set_with_mut above.
                 .expect("cache entry vanished"));
         }
+        self.misses.increment();
+        let value = f()?;
         // `set_and_get_mut` never drops the value, so this path is panic-free.
-        Ok(self.set_and_get_mut(key, f()?))
+        Ok(self.set_and_get_mut(key, value))
     }
 
     fn cache_remove<Q>(&mut self, key: &Q) -> Option<V>
