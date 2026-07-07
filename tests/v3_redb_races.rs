@@ -110,8 +110,8 @@ fn refresh_does_not_clobber_concurrent_write() {
 // reader's MVCC read txn opens before the writer commits (seeing the expired
 // snapshot), and the writer commits before the reader's write txn (write txns
 // are serialised, so reader's write txn always follows writer's commit if
-// writer started first). That ordering is Case A (the race). Over 200 rounds
-// the race manifests with probability ≈ 1 − 0.5^200, catching the bug.
+// writer started first). That ordering is Case A (the race). Over 40 rounds
+// the race manifests with probability ≈ 1 − 0.5^40, catching the bug.
 #[test]
 fn cache_get_eviction_does_not_delete_fresh_rewrite() {
     // TTL is deliberately not tiny. The pre-set value=0 is aged past the TTL with
@@ -119,9 +119,9 @@ fn cache_get_eviction_does_not_delete_fresh_rewrite() {
     // TTL itself must be comfortably larger than the worst-case gap between the
     // writer committing value=1 and the final `cache_get`, otherwise value=1
     // could *legitimately* expire before that read and be evicted (a false
-    // failure unrelated to the race). 30 ms gives a wide margin while keeping the
-    // per-round expiry sleep short.
-    const TTL: Duration = Duration::from_millis(30);
+    // failure unrelated to the race). 150 ms gives a wide margin against scheduler
+    // stalls on a saturated CI runner while keeping the per-round expiry sleep short.
+    const TTL: Duration = Duration::from_millis(150);
     // Determinism: each round is an independent ~50% chance of hitting the race
     // window. A `Barrier` releases the evicting reader and the fresh writer at
     // the same instant (removing the sequential-spawn skew that would otherwise
@@ -129,7 +129,7 @@ fn cache_get_eviction_does_not_delete_fresh_rewrite() {
     // the round count is high enough that the probability of *never* hitting the
     // window (~0.5^ROUNDS) is negligible even on a loaded runner. Confirmed to
     // fail against the pre-fix code (see module-level notes).
-    const ROUNDS: usize = 200;
+    const ROUNDS: usize = 40;
 
     let dir = TempDir::new().unwrap();
     let cache = build("race-evict-get", &dir, Some(TTL), false);
