@@ -4,6 +4,7 @@
 //! bytes may carry sensitive application data).
 
 // A recognizable byte pattern that must never appear verbatim in Debug output.
+#[cfg(any(feature = "redb_store", feature = "redis_store"))]
 const SECRET: &[u8] = b"SUPER_SECRET_PAYLOAD_0xDEADBEEF";
 
 #[cfg(feature = "redb_store")]
