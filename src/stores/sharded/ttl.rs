@@ -635,28 +635,35 @@ where
             expires_at,
             value: v,
         };
-        // Capture the displaced entry. When an `on_evict` callback is configured, remove-then-
-        // insert so the owned old key is available to fire the callback after the lock is
-        // released (the sharded on_evict-after-unlock invariant); otherwise a plain insert.
-        let old: Option<(Option<K>, TimedEntry<V>)> = if self.inner.on_evict.is_some() {
+        // Capture the displaced entry and evaluate expiry while the write lock is still held
+        // (B2: avoids a TOCTOU where the entry crosses the expiry threshold between unlock and
+        // the check). When an `on_evict` callback is configured, remove-then-insert so the
+        // owned old key can fire the callback after the lock is released (on_evict-after-unlock).
+        let old: Option<(Option<K>, TimedEntry<V>, bool)> = if self.inner.on_evict.is_some() {
             let mut guard = shard.lock.write();
             let removed = guard.remove_entry(&k);
             guard.insert(k, new_entry);
-            removed.map(|(ok, e)| (Some(ok), e))
+            removed.map(|(ok, e)| {
+                let expired = e.expires_at.is_some_and(|t| Instant::now() >= t);
+                (Some(ok), e, expired)
+            })
         } else {
-            shard.lock.write().insert(k, new_entry).map(|e| (None, e))
+            shard.lock.write().insert(k, new_entry).map(|e| {
+                let expired = e.expires_at.is_some_and(|t| Instant::now() >= t);
+                (None, e, expired)
+            })
         };
         match old {
             // A displaced expired value is filtered from the return (matching cache_remove and
             // the single-owner TTL stores); fire on_evict and count an eviction for it.
-            Some((key, entry)) if entry.expires_at.is_some_and(|t| Instant::now() >= t) => {
+            Some((key, entry, true)) => {
                 if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
                     cb(key, &entry.value);
                 }
                 self.inner.evictions.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
-            Some((_, entry)) => Ok(Some(entry.value)),
+            Some((_, entry, false)) => Ok(Some(entry.value)),
             None => Ok(None),
         }
     }
@@ -1780,5 +1787,54 @@ mod tests {
             .build()
             .unwrap();
         use_trait(&c, 1, 100);
+    }
+
+    // B2 regression: expiry is evaluated while the write lock is held, so the decision
+    // to filter the displaced entry and fire on_evict is made from the state observed
+    // under the lock rather than from a later (possibly different) `Instant::now()`.
+    #[test]
+    fn displaced_expired_entry_skips_return_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+        let fired = Arc::new(AtomicU64::new(0));
+        let fired2 = fired.clone();
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_, _| {
+                fired2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        // Insert an entry and let it expire.
+        SyncConcurrentCached::cache_set(&c, 1, 100).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let before = c.metrics().evictions.unwrap();
+        // Overwriting the expired entry: must return None, fire on_evict, and count eviction.
+        let result = SyncConcurrentCached::cache_set(&c, 1, 200).unwrap();
+        assert_eq!(result, None, "displaced expired entry must not be returned");
+        assert_eq!(
+            c.metrics().evictions.unwrap(),
+            before + 1,
+            "eviction counter must increment for displaced expired entry"
+        );
+        assert_eq!(
+            fired.load(AOrd::Relaxed),
+            1,
+            "on_evict must fire exactly once for the displaced expired entry"
+        );
+        // Overwriting the now-live entry: must return the value, no new on_evict.
+        let before2 = c.metrics().evictions.unwrap();
+        let result2 = SyncConcurrentCached::cache_set(&c, 1, 300).unwrap();
+        assert_eq!(result2, Some(200), "displaced live entry must be returned");
+        assert_eq!(
+            c.metrics().evictions.unwrap(),
+            before2,
+            "overwriting a live entry must not increment evictions"
+        );
+        assert_eq!(
+            fired.load(AOrd::Relaxed),
+            1,
+            "on_evict must not fire again for a displaced live entry"
+        );
     }
 }

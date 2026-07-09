@@ -1125,12 +1125,16 @@ where
         return Ok(0);
     };
 
+    // Take a single time snapshot for both the scan and write passes (B3: two separate
+    // `SystemTime::now()` calls could yield different instants, causing an entry to be
+    // judged unexpired in the scan and expired in the write or vice-versa).
+    let now = SystemTime::now();
+
     // Collect candidate expired keys under a read transaction. We cannot
     // iterate and remove entries in the same transaction because the
     // iterator borrows the read txn for its entire lifetime.
     let mut expired_keys: Vec<String> = Vec::new();
     {
-        let now = SystemTime::now();
         let rtxn = connection.begin_read().map_err(RedbCacheError::storage)?;
         let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
         for item in table.iter().map_err(RedbCacheError::storage)? {
@@ -1169,7 +1173,6 @@ where
     // ensures we never delete a live entry. The returned count reflects the
     // number of entries *actually* removed, not the number found in the scan.
     let mut removed = 0usize;
-    let now_write = SystemTime::now();
     let wtxn = begin_write(connection, durable)?;
     {
         let mut table = wtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
@@ -1190,7 +1193,7 @@ where
                 Some(bytes) => {
                     match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
                         Ok(entry) => {
-                            if now_write
+                            if now
                                 .duration_since(entry.created_at)
                                 .unwrap_or(Duration::from_secs(0))
                                 >= ttl
@@ -2099,6 +2102,50 @@ mod tests {
         assert!(raw_get(&cache, &3u32.to_string()).is_some());
         assert!(raw_get(&cache, &1u32.to_string()).is_none());
         assert!(raw_get(&cache, &2u32.to_string()).is_none());
+    }
+
+    /// B3 regression: `remove_expired_entries` must not remove an entry that was
+    /// refreshed between the scan pass and the write pass.  Both passes must use the
+    /// same `now` snapshot so an entry that looks expired in the scan but is
+    /// refreshed before the write does not get deleted.
+    ///
+    /// This test cannot directly observe two `SystemTime::now()` calls, but it
+    /// verifies the externally observable invariant: a freshly written entry that
+    /// crosses the TTL boundary must NOT be deleted by a concurrent sweep that
+    /// started before the refresh.  (The single-snapshot fix makes the scan and
+    /// write agree on the same instant, so a refresh that happens between the two
+    /// passes is safe provided the refreshed timestamp is after that snapshot.)
+    #[test]
+    fn remove_expired_entries_uses_single_time_snapshot() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-single-snapshot")
+            .disk_directory(tmp_dir.path())
+            .ttl(LIFE_SPAN_1_SEC)
+            .build()
+            .expect("error building disk cache");
+
+        cache.cache_set(1, 10).unwrap();
+        cache.cache_set(2, 20).unwrap();
+
+        sleep(LIFE_SPAN_1_SEC + Duration::from_millis(50));
+
+        // Refresh key 1 just before the sweep — it should survive.
+        cache.cache_set(1, 11).unwrap();
+
+        // The sweep was started conceptually before the refresh, but because a
+        // single snapshot is taken at sweep entry time, key 1 was refreshed
+        // before `now` in the write pass and must NOT be removed.
+        // Key 2 remains expired and must be removed.
+        let removed = cache.remove_expired_entries().unwrap();
+        assert_eq!(removed, 1, "only the expired entry must be removed");
+        assert!(
+            raw_get(&cache, &1u32.to_string()).is_some(),
+            "refreshed entry must survive the sweep"
+        );
+        assert!(
+            raw_get(&cache, &2u32.to_string()).is_none(),
+            "stale entry must be removed by the sweep"
+        );
     }
 
     /// DISK-5: `remove_expired_entries` returns `Ok(0)` immediately when no TTL

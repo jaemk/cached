@@ -343,12 +343,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// eviction. The inner `LruCache::cache_set` does not fire `on_evict` on an overwrite, so the
     /// callback fires exactly once here. The key is cloned only when a callback is configured.
     fn set_entry(&mut self, key: K, entry: TimedEntry<V>) -> Option<V> {
-        let key_for_evict = self.on_evict.as_ref().map(|_| key.clone());
-        match self.store.cache_set(key, entry) {
-            Some(old) if Self::entry_live(old.expires_at) => Some(old.value),
-            Some(old) => {
-                if let (Some(on_evict), Some(k)) = (&self.on_evict, &key_for_evict) {
-                    on_evict(k, &old.value);
+        match self.store.cache_set_returning_entry(key, entry) {
+            Some((_, old)) if Self::entry_live(old.expires_at) => Some(old.value),
+            Some((stored_key, old)) => {
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(&stored_key, &old.value);
                 }
                 self.evictions.fetch_add(1, Ordering::Relaxed);
                 None
@@ -1878,6 +1877,59 @@ mod tests {
             c.cache_get(&1),
             Some(&7),
             "entry must be live right after insert"
+        );
+    }
+
+    // B1 regression: on_evict must receive the STORED key, not the caller's lookup key.
+    // Key types can have fields not covered by Eq/Hash; the stored key and the new key may
+    // differ in those extra fields even though they compare equal.
+    #[test]
+    fn on_evict_receives_stored_key_not_callers_key() {
+        use std::sync::{Arc, Mutex};
+
+        // A key whose Hash/PartialEq use only `id`; `tag` is transparent to equality.
+        #[derive(Clone, Debug)]
+        struct TaggedKey {
+            id: u32,
+            tag: &'static str,
+        }
+        impl PartialEq for TaggedKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.id == other.id
+            }
+        }
+        impl Eq for TaggedKey {}
+        impl std::hash::Hash for TaggedKey {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.id.hash(state);
+            }
+        }
+
+        let evicted_tags: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_tags2 = evicted_tags.clone();
+
+        let mut cache: LruTtlCache<TaggedKey, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |k: &TaggedKey, _v: &u32| {
+                evicted_tags2.lock().unwrap().push(k.tag);
+            })
+            .build()
+            .unwrap();
+
+        // Insert with tag "a".
+        cache.cache_set(TaggedKey { id: 1, tag: "a" }, 100);
+        // Let it expire.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Overwrite with an equal key (same id) but different tag "b".
+        // The displaced entry was stored with tag "a"; on_evict must report "a".
+        cache.cache_set(TaggedKey { id: 1, tag: "b" }, 200);
+
+        let tags = evicted_tags.lock().unwrap();
+        assert_eq!(
+            tags.as_slice(),
+            &["a"],
+            "on_evict must receive the stored key (tag='a'), not the caller's key (tag='b')"
         );
     }
 

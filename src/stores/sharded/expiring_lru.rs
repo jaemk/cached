@@ -142,11 +142,14 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
         let n = self.inner.shards.len();
         let shards = (0..n)
             .map(|i| {
+                // Load the hit/miss counters under the read lock so the metrics snapshot is
+                // consistent with the entry snapshot (B4: loading after drop(guard) could yield
+                // counters newer than the cloned entries).
                 let guard = self.inner.shards[i].lock.read();
                 let store_copy = guard.clone();
-                drop(guard);
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);
                 let misses = self.inner.shards[i].misses.load(Ordering::Relaxed);
+                drop(guard);
                 let shard = Shard {
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
@@ -1967,6 +1970,46 @@ mod tests {
                 v: 42,
                 expired: false,
             },
+        );
+    }
+
+    // B4 regression: deep_clone must load hit/miss counters under the read lock so the
+    // metrics snapshot is consistent with the captured entry state.
+    #[test]
+    fn deep_clone_metrics_consistent_with_entry_snapshot() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1) // single shard: deterministic counters
+            .max_size(16)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1,
+            Val {
+                v: 1,
+                expired: false,
+            },
+        )
+        .unwrap();
+        // Generate exactly 3 hits and 2 misses.
+        SyncConcurrentCached::cache_get(&c, &1).unwrap(); // hit
+        SyncConcurrentCached::cache_get(&c, &1).unwrap(); // hit
+        SyncConcurrentCached::cache_get(&c, &1).unwrap(); // hit
+        SyncConcurrentCached::cache_get(&c, &99).unwrap(); // miss
+        SyncConcurrentCached::cache_get(&c, &98).unwrap(); // miss
+
+        let clone = c.deep_clone();
+        let m = clone.metrics();
+        assert_eq!(m.hits, Some(3), "deep_clone must capture the hit counter");
+        assert_eq!(
+            m.misses,
+            Some(2),
+            "deep_clone must capture the miss counter"
+        );
+        assert_eq!(
+            clone.len(),
+            1,
+            "deep_clone must capture the entry snapshot"
         );
     }
 }

@@ -146,11 +146,14 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
         let n = self.inner.shards.len();
         let shards = (0..n)
             .map(|i| {
+                // Load the hit/miss counters under the read lock so the metrics snapshot is
+                // consistent with the entry snapshot (B4: loading after drop(guard) could yield
+                // counters newer than the cloned entries).
                 let guard = self.inner.shards[i].lock.read();
                 let store_copy = guard.clone();
-                drop(guard);
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);
                 let misses = self.inner.shards[i].misses.load(Ordering::Relaxed);
+                drop(guard);
                 let shard = Shard {
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
@@ -459,28 +462,35 @@ where
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
-        // Capture the displaced value. When an `on_evict` callback is configured, remove-then-
-        // insert so the owned old key can fire the callback after the lock is released (the
-        // sharded on_evict-after-unlock invariant); otherwise a plain insert.
-        let old: Option<(Option<K>, V)> = if self.inner.on_evict.is_some() {
+        // Capture the displaced value and evaluate is_expired() while the write lock is still
+        // held (B2: avoids a TOCTOU where an entry crosses the expiry threshold between unlock
+        // and the check). When an `on_evict` callback is configured, remove-then-insert so the
+        // owned old key can fire the callback after the lock is released (on_evict-after-unlock).
+        let old: Option<(Option<K>, V, bool)> = if self.inner.on_evict.is_some() {
             let mut guard = shard.lock.write();
             let removed = guard.remove_entry(&k);
             guard.insert(k, v);
-            removed.map(|(ok, v)| (Some(ok), v))
+            removed.map(|(ok, old_v)| {
+                let expired = old_v.is_expired();
+                (Some(ok), old_v, expired)
+            })
         } else {
-            shard.lock.write().insert(k, v).map(|v| (None, v))
+            shard.lock.write().insert(k, v).map(|old_v| {
+                let expired = old_v.is_expired();
+                (None, old_v, expired)
+            })
         };
         match old {
             // A displaced expired value is filtered from the return (matching cache_remove and
             // the single-owner expiring stores); fire on_evict and count an eviction for it.
-            Some((key, old_v)) if old_v.is_expired() => {
+            Some((key, old_v, true)) => {
                 if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
                     cb(key, &old_v);
                 }
                 self.inner.evictions.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
-            Some((_, old_v)) => Ok(Some(old_v)),
+            Some((_, old_v, false)) => Ok(Some(old_v)),
             None => Ok(None),
         }
     }
@@ -1621,6 +1631,123 @@ mod tests {
         assert!(removed);
         let removed: bool = c.delete(&1);
         assert!(!removed);
+    }
+
+    // B4 regression: deep_clone must load hit/miss counters under the read lock so the
+    // metrics snapshot is consistent with the captured entry state.  After performing
+    // a fixed number of gets, the cloned cache's metrics must reflect exactly those
+    // operations (not a potentially newer reading from after the lock was released).
+    #[test]
+    fn deep_clone_metrics_consistent_with_entry_snapshot() {
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(1) // single shard: deterministic counters
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1,
+            Val {
+                v: 1,
+                expired: false,
+            },
+        )
+        .unwrap();
+        // Generate exactly 2 hits and 1 miss.
+        SyncConcurrentCached::cache_get(&c, &1).unwrap(); // hit
+        SyncConcurrentCached::cache_get(&c, &1).unwrap(); // hit
+        SyncConcurrentCached::cache_get(&c, &99).unwrap(); // miss
+
+        let clone = c.deep_clone();
+        let m = clone.metrics();
+        assert_eq!(m.hits, Some(2), "deep_clone must capture the hit counter");
+        assert_eq!(
+            m.misses,
+            Some(1),
+            "deep_clone must capture the miss counter"
+        );
+        assert_eq!(
+            clone.len(),
+            1,
+            "deep_clone must capture the entry snapshot"
+        );
+    }
+
+    // B2 regression: is_expired() is evaluated while the write lock is held, so the
+    // decision to fire on_evict and return None is consistent with the state observed
+    // under the lock, not a later (possibly different) instant.
+    #[test]
+    fn displaced_expired_entry_skips_return_fires_on_evict_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+        let fired = Arc::new(AtomicU64::new(0));
+        let fired2 = fired.clone();
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .on_evict(move |_, _| {
+                fired2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        // Insert a value that is already expired.
+        SyncConcurrentCached::cache_set(
+            &c,
+            42,
+            Val {
+                v: 1,
+                expired: true,
+            },
+        )
+        .unwrap();
+        let before_evictions = c.metrics().evictions.unwrap();
+        // Overwriting the expired entry: must return None (not the expired value),
+        // must fire on_evict exactly once, and must count one eviction.
+        let result = SyncConcurrentCached::cache_set(
+            &c,
+            42,
+            Val {
+                v: 2,
+                expired: false,
+            },
+        )
+        .unwrap()
+        .map(|v| v.v);
+        assert_eq!(result, None, "displaced expired entry must not be returned");
+        assert_eq!(
+            c.metrics().evictions.unwrap(),
+            before_evictions + 1,
+            "eviction counter must increment for displaced expired entry"
+        );
+        assert_eq!(
+            fired.load(AOrd::Relaxed),
+            1,
+            "on_evict must fire exactly once for the displaced expired entry"
+        );
+        // Overwriting a live entry returns the old value and does not fire on_evict.
+        let before_evictions2 = c.metrics().evictions.unwrap();
+        let result2 = SyncConcurrentCached::cache_set(
+            &c,
+            42,
+            Val {
+                v: 3,
+                expired: false,
+            },
+        )
+        .unwrap()
+        .map(|v| v.v);
+        assert_eq!(
+            result2,
+            Some(2),
+            "displaced live entry must be returned as Some"
+        );
+        assert_eq!(
+            c.metrics().evictions.unwrap(),
+            before_evictions2,
+            "overwriting a live entry must not increment evictions"
+        );
+        assert_eq!(
+            fired.load(AOrd::Relaxed),
+            1,
+            "on_evict must not fire again for a displaced live entry"
+        );
     }
 
     #[test]

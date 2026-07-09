@@ -3172,6 +3172,54 @@ mod async_redis {
                 "key must be deleted even when strict async_cache_remove_entry errors"
             );
         }
+
+        // B5: url_pins_resp2 must be case-sensitive, matching redis-rs 1.x which
+        // compares the `protocol=` query value with exact lowercase literals ("resp2",
+        // "2").  A mixed-case value like "RESP2" must NOT be treated as pinning RESP2
+        // because redis-rs would reject or ignore it rather than downgrading.
+        #[cfg(feature = "redis_async_cache")]
+        #[test]
+        fn url_pins_resp2_is_case_sensitive() {
+            // Exact lowercase matches: must return true.
+            assert!(
+                AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=resp2"
+                ),
+                "protocol=resp2 must be detected"
+            );
+            assert!(
+                AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=2"
+                ),
+                "protocol=2 must be detected"
+            );
+            // Mixed-case: redis-rs does not recognize these, so we must not either.
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=RESP2"
+                ),
+                "protocol=RESP2 (uppercase) must NOT be treated as pinning RESP2"
+            );
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=Resp2"
+                ),
+                "protocol=Resp2 (mixed case) must NOT be treated as pinning RESP2"
+            );
+            // RESP3 and no protocol: must return false.
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=resp3"
+                ),
+                "protocol=resp3 must not be detected as RESP2"
+            );
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379"
+                ),
+                "no protocol param must not be detected as RESP2"
+            );
+        }
     }
 
     #[cfg(test)]
