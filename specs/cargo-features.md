@@ -1,0 +1,38 @@
+# Cargo feature flags
+
+The `cached` crate gates optional stores, backends, and runtimes behind Cargo features. Defaults:
+`proc_macro`, `ahash`, `time_stores`.
+
+## FEAT-1
+
+Core: `proc_macro` (the `#[cached]` / `#[once]` / `#[concurrent_cached]` macros), `ahash` (ahash
+hasher for internal maps), `time_stores` (`TtlCache`, `LruTtlCache`, `TtlSortedCache` and their
+sharded variants).
+
+## FEAT-2
+
+Async: `async_core` (support marker, no runtime; for custom async runtimes), `async`
+(runtime-agnostic, pulls `async-lock`, no tokio). Making `async_core` internal is an open
+direction ([design/0016-async-core-internal-feature.md](design/0016-async-core-internal-feature.md)).
+
+## FEAT-3
+
+Redis: `redis_store` (sync), `redis_tokio` / `redis_smol` (async runtimes, imply `redis_store` +
+`async`), their `_native_tls` / `_rustls` TLS variants, plus the capability features
+`redis_connection_manager` and `redis_async_cache` (RESP3 client-side caching). A capability
+feature requires a runtime feature (documented in `Cargo.toml`; the `redis` crate itself fails to
+build otherwise). Orthogonal runtime x TLS axes are an open direction
+([design/0017-redis-feature-axes.md](design/0017-redis-feature-axes.md)). See
+[store-redis.md](store-redis.md).
+
+## FEAT-4
+
+Disk: `redb_store` (disk-backed cache via `redb`; see [store-redb.md](store-redb.md)). redb 4.x
+raises the crate MSRV to 1.89.
+
+## FEAT-5
+
+Open feature directions: dropping `ahash` from the default set
+([design/0019-ahash-default-feature.md](design/0019-ahash-default-feature.md)) and an explicit
+`serde` feature for custom serialize stores
+([design/0026-serde-feature.md](design/0026-serde-feature.md)).

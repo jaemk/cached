@@ -155,8 +155,9 @@ cargo fmt --check
 
 ## Lint
 ```bash
-cargo clippy --all-features --all-targets --examples --tests
+cargo clippy --all-features --all-targets --examples --tests -- -D warnings
 ```
+CI treats warnings as errors (`make check/clippy` appends `-- -D warnings`). Run the command with `-D warnings` locally so you catch what CI catches; a lint that is only a warning on your machine still fails the pipeline.
 
 ---
 
@@ -187,7 +188,7 @@ TRYBUILD=overwrite cargo test --features "proc_macro,time_stores"
 ```bash
 make ci
 ```
-This runs: `make check` (fmt + clippy + readme) -> `make tests` -> `make examples`.
+This runs: `make check` (`check/fmt` + `check/readme` + `check/clippy` + `check/help`) -> `make tests` -> `make examples`.
 
 ---
 
@@ -215,7 +216,7 @@ Use `tests/cached.rs` for integration/behavioral tests and `tests/ui/` for compi
 ## Mandatory Verification After Every Change
 After making **any** code change, run these steps in order:
 1. **Format** — `cargo fmt`
-2. **Lint** — `cargo clippy --all-features --all-targets --examples --tests`
+2. **Lint** — `cargo clippy --all-features --all-targets --examples --tests -- -D warnings`
 3. **Test** — `make tests` (or `cargo test --all-features` with Redis running)
 4. If `src/lib.rs` changed — `make docs && make check/readme`
 
@@ -258,10 +259,34 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 
 ---
 
+## Specs
+
+`specs/` is the feature inventory: `specs/README.md` holds a `| Feature | Status | Spec |` table
+with one row per public feature (stores, macros, traits, builders, metrics, cargo features),
+each linking a per-feature doc with stable IDs (e.g. `REDIS-3`). `specs/design/` holds the
+design records behind the inventory: the 3.0 decision log, declined proposals, and open research
+directions, indexed in `specs/design/README.md`.
+
+- **Before changing public API or behavior, read the relevant `specs/*.md` feature doc**, then
+  follow its links into `specs/design/00NN-*.md` for the decision history (whether a direction is
+  settled, declined, or still open). Design-record statuses: **Implemented**, **Not implemented**
+  (agreed or declined; the file says which), **Needs research** (do not build until scoped).
+- When you add or change a feature, update its feature doc (append a new stable ID, never reuse
+  one) and add or amend the design record. Document-first: write the spec before the code.
+- The table is maintained by `.claude/skills/spec` -> `resources/spec.py` (also `~/.mind/store/skill/spec/resources/spec.py`):
+  `add`/`set`/`todo`/`sync` against `. --dir specs`. Do not hand-edit the table. Run
+  `spec.py sync . --dir specs` after changes to catch missing/orphan docs.
+
+---
+
 ## Important Paths
 
 | Path | Purpose |
 |---|---|
+| `specs/` | Feature inventory (`specs/README.md` table + per-feature `*.md` docs); consult before changing public API/behavior |
+| `specs/design/` | Design records / decision log behind the inventory, indexed in `specs/design/README.md` |
+| `benches/cache_benches.rs` | Cache benchmarks (`make bench`) |
+| `bin/` | Release helper scripts (`publish.sh`, `tag-release.sh`) |
 | `src/lib.rs` | Main library entry point + doc comments (source of truth for README) |
 | `src/stores/` | Cache store implementations |
 | `src/macros.rs` | Proc macro re-export module (`cached::macros`) |

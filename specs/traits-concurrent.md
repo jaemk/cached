@@ -1,0 +1,32 @@
+# Concurrent cache traits
+
+The self-synchronizing cache trait family with a shared `&self` API, implemented by the sharded,
+redis, and redb stores. Distinct from the `&mut self` single-owner family in
+[traits-core.md](traits-core.md).
+
+## CTRAIT-1
+
+`ConcurrentCacheBase` is the shared supertrait: it owns the associated `type Error` and the
+`cache_size` / `cache_is_empty` accessors. Both `ConcurrentCached<K, V>` and
+`ConcurrentCachedAsync<K, V>` extend it, per
+[design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
+
+## CTRAIT-2
+
+`ConcurrentCached<K, V>` is the sync self-synchronizing API (`cache_get`, `cache_set`,
+`cache_remove`, `cache_get_or_set_with`, and the fallible variants, all returning
+`Result<_, Self::Error>`). `ConcurrentCachedAsync<K, V>` is its async counterpart.
+`ConcurrentCachedExt` provides the deduplicated method names.
+
+## CTRAIT-3
+
+`ConcurrentCacheTtl` provides `&self` TTL control (`ttl()` / `set_ttl()` / `unset_ttl()` /
+`try_set_ttl()` / `refresh_on_hit()`) on concurrent TTL stores. `ConcurrentCacheEvict` provides
+the concurrent `evict()`.
+
+## CTRAIT-4
+
+`SerializeCached` / `SerializeCachedAsync` extend the concurrent traits for stores that persist
+serialized values (redis, redb), adding `cache_set_ref`. The `cache_set_ref` return of the
+previous value is an open direction
+([design/0022-serialize-cached-set-ref-return.md](design/0022-serialize-cached-set-ref-return.md)).

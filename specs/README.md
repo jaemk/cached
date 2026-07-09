@@ -1,54 +1,48 @@
-# Specs
+# Spec
 
-Tracked design items for `cached`, mostly breaking changes scoped to the 3.0 release. Each
-file documents one item: current state in the code, the desired work, and a status.
+Feature inventory for the `cached` workspace: every part of the public surface, documented with
+its implementation status. Each row links a per-feature doc describing the normative behavior;
+the docs cross-reference the [design records](design/README.md) for the reasoning behind each
+decision.
 
-This directory is a working record, not user-facing docs. Once an item ships, its substance
-moves to the changelog and migration guide; the spec stays here for history.
+## Feature status
 
-## Status legend
+Status values: `done` (implemented and covered by tests), `pending` (documented, not yet built;
+the default), `research` (needs investigation or design before it can be built). Keep each row's
+status current with `spec.py set`. The whole shipped surface is `done`; open design directions
+live in the [design records](design/README.md), not as rows here.
 
-- **Implemented** - landed on the 3.0 branch.
-- **Not implemented** - agreed direction, not yet built (or a conscious decision not to build).
-- **Needs research** - direction is plausible but unresolved; do not build until scoped.
+| Feature | Status | Spec |
+|---------|--------|------|
+| Unbound cache | done | [store-unbound.md](store-unbound.md) |
+| LRU cache | done | [store-lru.md](store-lru.md) |
+| TTL caches | done | [store-ttl.md](store-ttl.md) |
+| Per-value expiring caches | done | [store-expiring.md](store-expiring.md) |
+| Sharded concurrent caches | done | [store-sharded.md](store-sharded.md) |
+| Redis backend | done | [store-redis.md](store-redis.md) |
+| Disk (redb) backend | done | [store-redb.md](store-redb.md) |
+| `#[cached]` macro | done | [macro-cached.md](macro-cached.md) |
+| `#[once]` macro | done | [macro-once.md](macro-once.md) |
+| `#[concurrent_cached]` macro | done | [macro-concurrent-cached.md](macro-concurrent-cached.md) |
+| Core cache traits | done | [traits-core.md](traits-core.md) |
+| Async get-or-set | done | [trait-get-or-set-async.md](trait-get-or-set-async.md) |
+| Concurrent cache traits | done | [traits-concurrent.md](traits-concurrent.md) |
+| Store builders and eviction callbacks | done | [builders.md](builders.md) |
+| Cache metrics | done | [metrics.md](metrics.md) |
+| Cargo feature flags | done | [cargo-features.md](cargo-features.md) |
 
-## Index
+## Conventions
 
-| Spec | Item | Status |
-|---|---|---|
-| [0001](0001-non-sharded-custom-hasher.md) | Custom hasher on non-sharded stores | Implemented |
-| [0002](0002-size-iter-evict-semantics.md) | `len`/`size` vs `iter` vs `evict` semantics + docs | Implemented |
-| [0003](0003-redis-millisecond-ttl.md) | Redis millisecond TTL (`PSETEX`/`PEXPIRE`) | Implemented |
-| [0004](0004-redis-connection-string-redaction.md) | Redact `connection_string()` getter | Implemented |
-| [0005](0005-store-error-consistency.md) | redb/redis error naming + struct variants | Implemented |
-| [0006](0006-macro-quoted-attributes.md) | Retire quoted-string macro attrs | Not implemented (declined) |
-| [0007](0007-unbound-evictions-counter.md) | `ShardedUnboundCache` evictions counter | Not implemented (declined) |
-| [0008](0008-method-name-deduplication.md) | Collapse dual method names via extension trait | Implemented |
-| [0009](0009-cached-get-shared-receiver.md) | `Cached::get` taking `&self` | Needs research |
-| [0010](0010-read-optimized-sharded-lru.md) | Read-optimized sharded LRU variant | Needs research |
-| [0011](0011-redis-serialization-codec.md) | Redis -> MessagePack; pluggable codec | MessagePack implemented; codec needs research |
-| [0012](0012-concurrent-metrics-trait.md) | Expose sharded metrics through a trait | Implemented |
-| [0013](0013-macro-store-attribute-placement.md) | Friendly rejection of store attrs on `#[cached]` | Implemented |
-| [0014](0014-infallible-builders.md) | Infallible builders return the cache directly | Needs research |
-| [0015](0015-sharded-base-alias-collapse.md) | Collapse `*Base` + alias into a defaulted type param | Needs research |
-| [0016](0016-async-core-internal-feature.md) | Make `async_core` internal | Needs research |
-| [0017](0017-redis-feature-axes.md) | Orthogonal redis runtime x TLS features | Needs research |
-| [0018](0018-redis-key-escaping.md) | Escape redis namespace/prefix/key segments | Needs research |
-| [0019](0019-ahash-default-feature.md) | Drop `ahash` from default features | Needs research |
-| [0020](0020-argument-error-unification.md) | Unify single-variant argument errors | Needs research |
-| [0021](0021-redb-refresh-on-hit-cost.md) | Amortize redb refresh-on-hit write txns | Needs research |
-| [0022](0022-serialize-cached-set-ref-return.md) | `cache_set_ref` returning previous value | Needs research |
-| [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Needs research |
-| [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Needs research |
-| [0025](0025-redb-disk-path-introspection.md) | redb resolved-path introspection + temp fallback | Needs research |
-| [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Needs research |
-| [0027](0027-sync-writes-default-revert.md) | `sync_writes` default flip and revert | Implemented |
-| [0028](0028-per-entry-expiry-and-set-ttl-zero.md) | Per-entry expiry model and `set_ttl(0)` semantics | Implemented |
-| [0029](0029-self-healing-deserialization-default.md) | Self-healing deserialization default | Implemented |
-| [0030](0030-force-refresh-result-fallback-interaction.md) | `force_refresh` and `result_fallback` interaction | Implemented |
-| [0031](0031-redis-backward-read-version-gate.md) | Redis backward-read version gate | Implemented |
-| [0032](0032-cached-async-to-get-or-set-async-rename.md) | `CachedAsync` renamed to `CachedGetOrSetAsync` | Implemented |
-| [0033](0033-redb-revalidate-in-write-txn.md) | redb re-validate-in-write-txn design | Implemented |
-| [0034](0034-prime-companion-body-before-lock.md) | Prime companion runs body before lock | Implemented |
-| [0035](0035-seeded-per-key-lock-bucket-hasher.md) | Seeded per-key lock-bucket hasher | Implemented |
-| [0036](0036-in-impl-static-placement.md) | `in_impl` static placement | Implemented |
+- Each normative statement carries a stable ID (e.g. `UNBOUND-1`, `REDIS-3`). IDs are
+  append-only: retire an ID by marking it removed, never reuse the number.
+- Specs are document-first: a feature is documented (status `pending`, or `research` if it needs
+  design work) before implementation begins. Flip to `done` only once implemented and verified.
+- Feature docs are named `<slug>.md` and linked from the table above.
+- A feature doc states the shipped behavior and links the relevant [design records](design/README.md)
+  (`design/00NN-*.md`) for the decision history. When behavior changes, update the feature doc
+  and add or amend a design record.
+
+## Design records
+
+`design/` holds the per-decision log behind this inventory: 3.0 breaking-change items, declined
+proposals, and open research directions. See [design/README.md](design/README.md) for the index.
