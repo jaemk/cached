@@ -1665,11 +1665,7 @@ mod tests {
             Some(1),
             "deep_clone must capture the miss counter"
         );
-        assert_eq!(
-            clone.len(),
-            1,
-            "deep_clone must capture the entry snapshot"
-        );
+        assert_eq!(clone.len(), 1, "deep_clone must capture the entry snapshot");
     }
 
     // B2 regression: is_expired() is evaluated while the write lock is held, so the

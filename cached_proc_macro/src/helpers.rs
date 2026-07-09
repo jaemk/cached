@@ -242,7 +242,7 @@ impl FromMeta for SyncWriteMode {
 pub(super) fn validate_sync_writes_buckets(
     buckets: usize,
     span: proc_macro2::Span,
-) -> std::result::Result<(), syn::Error> {
+) -> Result<(), syn::Error> {
     if buckets == 0 {
         Err(syn::Error::new(
             span,

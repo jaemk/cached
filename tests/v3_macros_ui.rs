@@ -114,4 +114,13 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/concurrent_cached_name_reserved_raw_prefix.rs");
     // D11: `sync_writes_buckets` is inert on `#[once]` (no `by_key` support).
     t.compile_fail("tests/ui/once_sync_writes_buckets_inert.rs");
+    // T1: `force_refresh = true` (bare bool) is a compile error on `#[once]` and
+    // `#[concurrent_cached]`: the bare bool reaches `expr_to_block` which panics
+    // because `parse_quote! { true }` is not a valid Stmt without a semicolon.
+    // Pin the current behavior so any change to accept or reject bare bools is
+    // immediately visible.
+    t.compile_fail("tests/ui/once_force_refresh_bare_bool.rs");
+    t.compile_fail("tests/ui/concurrent_cached_force_refresh_bare_bool.rs");
+    // T1: `result_fallback = true` with `sync_writes = false` (Disabled) must compile.
+    t.pass("tests/ui/cached_result_fallback_sync_writes_disabled.rs");
 }

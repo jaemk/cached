@@ -2006,10 +2006,6 @@ mod tests {
             Some(2),
             "deep_clone must capture the miss counter"
         );
-        assert_eq!(
-            clone.len(),
-            1,
-            "deep_clone must capture the entry snapshot"
-        );
+        assert_eq!(clone.len(), 1, "deep_clone must capture the entry snapshot");
     }
 }

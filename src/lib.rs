@@ -825,9 +825,9 @@ impl<C, B> std::ops::Deref for KeyedCache<C, B> {
 /// avoid name clashes. Import those directly (e.g. `use cached::ShardedUnboundCache;`).
 pub mod prelude {
     pub use crate::{
-        CacheEvict, Cached, CachedExt, CachedIter, CachedPeek, CachedRead, CloneCached,
-        ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached,
-        ConcurrentCachedExt, ConcurrentCloneCached, Expires, SerializeCached,
+        CacheEvict, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek, CachedRead,
+        CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl,
+        ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires, SerializeCached,
     };
 
     #[cfg(feature = "time_stores")]
@@ -2036,6 +2036,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
+    #[must_use = "cache_get returns the looked-up value; ignoring it discards the result"]
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Insert a key, value pair and return the previous value at the key, if any,
@@ -2047,6 +2048,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
+    #[must_use = "cache_set returns the previous value; ignoring it discards the displaced entry"]
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached value, returning it if it was both present and still live.
@@ -2328,6 +2330,7 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails.
+    #[must_use = "async_cache_get returns the looked-up value; ignoring it discards the result"]
     #[doc(alias = "async_get")]
     #[doc(alias = "cache_get")]
     fn async_cache_get(&self, k: &K)
@@ -2342,6 +2345,7 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails.
+    #[must_use = "async_cache_set returns the previous value; ignoring it discards the displaced entry"]
     #[doc(alias = "async_set")]
     #[doc(alias = "cache_set")]
     fn async_cache_set(

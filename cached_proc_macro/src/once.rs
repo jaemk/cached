@@ -81,11 +81,36 @@ struct OnceMacroArgs {
     #[darling(default)]
     ty: Option<String>,
     #[darling(default)]
-    create: Option<String>,
-    #[darling(default)]
     key: Option<String>,
     #[darling(default)]
     convert: Option<syn::Expr>,
+}
+
+/// Intercept `#[once]`-specific rejected attributes before darling's `from_list`
+/// runs, so callers see a targeted error instead of the generic "Unknown field" message.
+///
+/// Currently intercepts: `create` (once manages its own single-value storage).
+fn reject_once_specific_attrs(attr_args: &[NestedMeta]) -> Result<(), syn::Error> {
+    for arg in attr_args {
+        let Some(meta) = (match arg {
+            NestedMeta::Meta(meta) => Some(meta),
+            NestedMeta::Lit(_) => None,
+        }) else {
+            continue;
+        };
+        let Some(ident) = meta.path().get_ident().map(ToString::to_string) else {
+            continue;
+        };
+        if ident == "create" {
+            return Err(syn::Error::new(
+                meta.span(),
+                "`create` is not supported on `#[once]`; \
+                 `#[once]` manages its own single-value storage and does not take a custom store \
+                 constructor",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -96,6 +121,9 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
     if let Err(e) = reject_concurrent_only_attrs("once", &attr_args) {
+        return e.to_compile_error().into();
+    }
+    if let Err(e) = reject_once_specific_attrs(&attr_args) {
         return e.to_compile_error().into();
     }
     let args = match OnceMacroArgs::from_list(&attr_args) {
@@ -310,16 +338,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             fn_ident.span(),
             "`ty` is not supported on `#[once]`; \
              `#[once]` manages its own single-value storage and does not take a custom store type",
-        )
-        .to_compile_error()
-        .into();
-    }
-    if args.create.is_some() {
-        return syn::Error::new(
-            fn_ident.span(),
-            "`create` is not supported on `#[once]`; \
-             `#[once]` manages its own single-value storage and does not take a custom store \
-             constructor",
         )
         .to_compile_error()
         .into();

@@ -1,0 +1,13 @@
+error: custom attribute panicked
+ --> tests/ui/once_force_refresh_bare_bool.rs:6:1
+  |
+6 | #[once(force_refresh = true)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: message: unexpected end of input, expected semicolon
+
+error[E0425]: cannot find function `f` in this scope
+  --> tests/ui/once_force_refresh_bare_bool.rs:12:13
+   |
+12 |     let _ = f(1);
+   |             ^ not found in this scope
