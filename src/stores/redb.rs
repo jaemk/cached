@@ -92,6 +92,8 @@ impl RedbCacheBuildError {
 static DISK_FILE_PREFIX: &str = "cached_disk_cache";
 // Bumped whenever the on-disk format changes (the redb migration, then dropping the
 // per-entry `version` field), so an incompatible older file is never read.
+// Starts at 3 to distinguish from the sled-era DiskCache format (versions 1 and 2
+// were the sled-backed DiskCache; those files are incompatible and are never read).
 const DISK_FILE_VERSION: u64 = 3;
 
 impl<K, V> Default for RedbCacheBuilder<K, V>
@@ -141,8 +143,9 @@ where
     ///
     /// **TTL is optional.** When no TTL is set (the default), entries never
     /// expire and are kept until explicitly removed or the cache is cleared.
-    /// This is the primary difference from [`RedisCache`](crate::stores::RedisCache),
-    /// where a TTL is required.
+    /// Unlike `RedbCache`, which tracks expiry client-side via a stored `created_at`
+    /// timestamp, [`RedisCache`](crate::stores::RedisCache) relies on server-side TTL
+    /// commands (`PSETEX`/`PEXPIRE`). Both stores make TTL optional in 3.0.
     ///
     /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
@@ -482,8 +485,9 @@ fn reject_if_symlink(path: &Path, what: &str) -> Result<(), std::io::Error> {
 /// # TTL
 ///
 /// TTL is **optional**. When no TTL is configured (the default), entries never expire and
-/// persist until explicitly removed or the cache is cleared. This differs from
-/// [`RedisCache`](crate::stores::RedisCache), where a TTL is required. Set a TTL via
+/// persist until explicitly removed or the cache is cleared. `RedbCache` tracks expiry
+/// client-side via a stored `created_at` timestamp; [`RedisCache`](crate::stores::RedisCache)
+/// uses server-side TTL commands and is equally optional. Set a TTL via
 /// [`RedbCacheBuilder::ttl`] / [`RedbCacheBuilder::ttl_secs`] / [`RedbCacheBuilder::ttl_millis`]
 /// at build time, or update it at runtime with [`ConcurrentCacheTtl::set_ttl`].
 ///
@@ -1227,11 +1231,14 @@ where
 }
 
 /// Behavior on a corrupt stored value (one whose bytes fail to deserialize):
-/// `cache_get` and `remove_expired_entries` surface a
-/// [`RedbCacheError::CacheDeserialization`]. `cache_set`, `cache_remove`, and
-/// `cache_remove_entry` instead succeed — they write/remove the entry regardless and
-/// report the undecodable previous value as `Ok(None)` (a write that took effect is
-/// never reported as an error). The same holds for the `ConcurrentCachedAsync` impl.
+///
+/// In the default mode (`strict_deserialization = false`), `cache_get` self-heals: the
+/// undecodable entry is deleted and `Ok(None)` is returned (a transparent miss). In strict
+/// mode (`strict_deserialization = true`), `cache_get` and `remove_expired_entries` surface
+/// [`RedbCacheError::CacheDeserialization`] instead. In both modes, `cache_set`,
+/// `cache_remove`, and `cache_remove_entry` succeed — they write/remove the entry regardless
+/// and report the undecodable previous value as `Ok(None)` (a write that took effect is never
+/// reported as an error). The same holds for the `ConcurrentCachedAsync` impl.
 ///
 /// `cache_get` can additionally surface a [`RedbCacheError::CacheSerialization`] when
 /// `refresh_on_hit` is enabled and re-serializing the just-read entry to rewrite its

@@ -847,13 +847,16 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         }
     }
 
-    /// Set a callback invoked when an entry is evicted. Fires in four situations:
+    /// Set a callback invoked when an entry is evicted. Fires in five situations:
     /// lazily during [`cache_get`](ConcurrentCached::cache_get) when a TTL-expired entry is
     /// found and removed; explicitly via [`evict`](ShardedTtlCacheBase::evict); on
-    /// explicit [`cache_remove`](ConcurrentCached::cache_remove); and on
-    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    /// explicit [`cache_remove`](ConcurrentCached::cache_remove); on
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and on
+    /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
     /// Does **not** fire on [`clear`](ShardedTtlCacheBase::clear);
     /// use [`cache_clear_with_on_evict`](ShardedTtlCacheBase::cache_clear_with_on_evict) to opt in.
+    /// [`cache_clear_with_on_evict`](ShardedTtlCacheBase::cache_clear_with_on_evict) fires
+    /// callbacks after releasing the shard lock.
     ///
     /// The closure must be `'static` (its captures cannot borrow from the local stack), but `K`
     /// and `V` themselves are not required to be `'static`.

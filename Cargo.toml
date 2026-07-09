@@ -22,6 +22,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["proc_macro", "ahash", "time_stores"]
 proc_macro = ["dep:cached_proc_macro", "dep:cached_proc_macro_types"]
 ahash = ["dep:ahash", "hashbrown/default"]
+# Runtime-agnostic async trait definitions (ConcurrentCachedAsync, CachedGetOrSetAsync,
+# etc.) without the async-lock dependency. Enabled by `async`. Kept public so callers
+# can access the async trait surface without pulling in async-lock (see design/0016).
 async_core = []
 async = ["async_core", "dep:async-lock"]
 # Serialization support for custom `SerializeCached` stores without an IO store.

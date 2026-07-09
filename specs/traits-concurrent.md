@@ -27,6 +27,8 @@ the concurrent `evict()`.
 ## CTRAIT-4
 
 `SerializeCached` / `SerializeCachedAsync` extend the concurrent traits for stores that persist
-serialized values (redis, redb), adding `cache_set_ref`. The `cache_set_ref` return of the
-previous value is an open direction
-([design/0022-serialize-cached-set-ref-return.md](design/0022-serialize-cached-set-ref-return.md)).
+serialized values (redis, redb), adding `cache_set_ref(&self, &K, &V) -> Result<(), Self::Error>`
+(and `async_cache_set_ref` on the async side). The method drops the previous value to avoid a
+per-write read+decode; callers that need the old value must call `cache_get` first. Implemented
+per [design/0022-serialize-cached-set-ref-return.md](design/0022-serialize-cached-set-ref-return.md)
+(DEC-1=A).

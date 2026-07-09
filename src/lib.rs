@@ -85,7 +85,7 @@ the `async_` prefix already prevents collisions with the sync methods.
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async_core`: Async trait definitions (the runtime-agnostic async cache traits) without the `async-lock` dependency. Enabled by `async`.
 - `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency; uses `async-lock`)
-- `serde`: MessagePack serialization support (`serde` + `rmp-serde`) for implementing a custom [`SerializeCached`] store without enabling a full IO-store feature. The `redis_store` and `redb_store` features enable it transitively.
+- `serde`: Enable the `serde` and `rmp-serde` codec dependencies used by [`SerializeCached`] implementations and the IO stores. The `redis_store` and `redb_store` features enable it transitively. Note: the `SerializeCached` and `SerializeCachedAsync` trait definitions are always present (no feature gate); this feature only enables the codec libraries needed to implement them.
 - `redis_store`: Include Redis cache store
 - `redis_smol`: Include async Redis support using `smol` (no TLS); implies `redis_store` and `async`
 - `redis_smol_native_tls`: `redis_smol` + TLS via `native-tls` (system TLS library)
@@ -2025,11 +2025,14 @@ pub trait ConcurrentCacheTtl {
 /// **Why key-lookup methods take `&K` instead of `&Q` (`Borrow<Q>`)**:
 ///
 /// [`Cached`] uses `Borrow<Q>` for all key-lookup methods (e.g. look up a `String` key with a
-/// `&str`). `ConcurrentCached` cannot follow the same pattern because its implementors include
-/// external stores (`RedbCache`, `RedisCache`) that must *serialize* the key in order to perform
-/// a lookup. A generic `&Q` where only `K: Borrow<Q>` carries no serialization guarantee, and
-/// adding a `Q: Serialize` bound to the trait would bleed a serde dependency into every
-/// `ConcurrentCached` implementation. All key-lookup methods therefore take `&K` directly.
+/// `&str`). `ConcurrentCached` cannot follow the same pattern for two reasons. The sharded
+/// in-memory stores must hash the key with the shard hasher to select the correct shard; a
+/// borrowed `&Q` may hash differently from the stored `K`, routing the lookup to the wrong shard.
+/// The IO stores (`RedbCache`, `RedisCache`) must serialize the key to perform a lookup; a generic
+/// `&Q` where only `K: Borrow<Q>` carries no serialization guarantee, and adding a `Q: Serialize`
+/// bound would bleed a serde dependency into every `ConcurrentCached` implementation. Both cases
+/// require the lookup key to produce the same result as the stored `K`; the concrete `&K` is
+/// the only type that guarantees this. All key-lookup methods therefore take `&K` directly.
 pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// Attempt to retrieve a cached value
     ///
@@ -2316,10 +2319,14 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
 /// **not** expose `get`/`set`/`remove`/`delete` short aliases. The `async_`-prefixed names are
 /// the full and only spelling of these operations.
 ///
-/// **Custom `!Sync` implementors**: the default method bodies (`async_cache_delete`,
-/// `async_cache_reset_metrics`) require `Self: Sync`
-/// so the returned future is `Send`. A store that is not `Sync` must provide its own override
-/// for these methods (even an identical no-op) rather than relying on the defaults.
+/// **Custom `!Sync` implementors**: `async_cache_clear`, `async_cache_reset`,
+/// `async_cache_delete`, and `async_cache_reset_metrics` each carry a `where Self: Sync`
+/// bound so the returned future is `Send`. `async_cache_clear` and `async_cache_reset`
+/// are required methods, so every implementor provides them; the `Self: Sync` bound means
+/// their futures are only `Send` when the store is `Sync`. `async_cache_delete` and
+/// `async_cache_reset_metrics` have default bodies that also require `Self: Sync`; a store
+/// that is not `Sync` must override them (even with an identical body) to remove the
+/// `Self: Sync` constraint on the returned future.
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
@@ -2503,13 +2510,14 @@ pub trait SerializeCached<K, V>: ConcurrentCached<K, V> {
 ///
 /// The async counterpart of [`SerializeCached`], implemented by `AsyncRedisCache` and `RedbCache`.
 ///
-/// Note that for the async set path the macro holds the `&V` across the set future, so the
-/// borrowed (clone-eliding) route is taken only when the store is also `Sync` and `V: Sync`.
-/// A custom `Send + !Sync` async store that implements this trait still falls back to the owned
-/// `async_cache_set` clone path (requiring `V: Clone`); a `Send + !Sync + !Clone` value cannot
-/// take either route and fails to compile. That failure surfaces as a trait-resolution error at the
-/// generated `#[concurrent_cached]` set site (referring to internal dispatch helpers), not at your
-/// `impl`; add a `V: Sync` or `V: Clone` bound to resolve it.
+/// The `#[concurrent_cached]` macro routes its async set through `__set_dispatch_async::cache_set_dispatch`,
+/// which prefers `async_cache_set_ref` (borrowed, no clone) when `S: SerializeCachedAsync + Sync`
+/// and `V: Sync`, and falls back to owned `async_cache_set` (cloning `V`) otherwise. A custom
+/// `Send + !Sync` async store that implements this trait still takes the clone fallback (requiring
+/// `V: Clone`); a `Send + !Sync + !Clone` value cannot take either route and fails to compile.
+/// That failure surfaces as a trait-resolution error at the generated set site (referring to
+/// `__set_dispatch_async` helpers), not at your `impl`; add a `V: Sync` or `V: Clone` bound
+/// to resolve it.
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 pub trait SerializeCachedAsync<K, V>: ConcurrentCachedAsync<K, V> {

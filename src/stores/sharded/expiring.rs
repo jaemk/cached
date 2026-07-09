@@ -648,13 +648,16 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
         }
     }
 
-    /// Set a callback invoked when an entry is evicted. Fires on expired-entry removal during
-    /// [`cache_get`](ConcurrentCached::cache_get), explicitly via
-    /// [`evict`](ShardedExpiringCacheBase::evict), on explicit
-    /// [`cache_remove`](ConcurrentCached::cache_remove), and on
-    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    /// Set a callback invoked when an entry is evicted. Fires in five situations:
+    /// on expired-entry removal during [`cache_get`](ConcurrentCached::cache_get);
+    /// explicitly via [`evict`](ShardedExpiringCacheBase::evict); on explicit
+    /// [`cache_remove`](ConcurrentCached::cache_remove); on
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and on
+    /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
     /// Does **not** fire on [`clear`](ShardedExpiringCacheBase::clear);
     /// use [`cache_clear_with_on_evict`](ShardedExpiringCacheBase::cache_clear_with_on_evict) to opt in.
+    /// [`cache_clear_with_on_evict`](ShardedExpiringCacheBase::cache_clear_with_on_evict) fires
+    /// callbacks after releasing the shard lock.
     ///
     /// The closure must be `'static` (its captures cannot borrow from the local stack), but `K`
     /// and `V` themselves are not required to be `'static`.

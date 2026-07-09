@@ -1,4 +1,4 @@
-error: `force_refresh` takes a curly-brace block string, e.g. `force_refresh = "{ id == 0 }"`
+error: `force_refresh` takes a curly-brace block, e.g. `force_refresh = { id == 0 }` (or the quoted form `force_refresh = "{ id == 0 }"`)
  --> tests/ui/cached_force_refresh_non_string.rs:3:41
   |
 3 | #[cached(ttl_secs = 60, force_refresh = true)]

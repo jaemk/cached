@@ -740,13 +740,17 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
         }
     }
 
-    /// Set a callback invoked when an entry is evicted. Fires for LRU capacity evictions,
-    /// expired-entry removal during [`cache_get`](ConcurrentCached::cache_get), explicitly via
-    /// [`evict`](ShardedExpiringLruCacheBase::evict), on explicit
-    /// [`cache_remove`](ConcurrentCached::cache_remove), and on
-    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    /// Set a callback invoked when an entry is evicted. Fires in six situations:
+    /// for LRU capacity evictions; expired-entry removal during
+    /// [`cache_get`](ConcurrentCached::cache_get); explicitly via
+    /// [`evict`](ShardedExpiringLruCacheBase::evict); on explicit
+    /// [`cache_remove`](ConcurrentCached::cache_remove); on
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and on
+    /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
     /// Does **not** fire on [`clear`](ShardedExpiringLruCacheBase::clear);
     /// use [`cache_clear_with_on_evict`](ShardedExpiringLruCacheBase::cache_clear_with_on_evict) to opt in.
+    /// [`cache_clear_with_on_evict`](ShardedExpiringLruCacheBase::cache_clear_with_on_evict) fires
+    /// callbacks after releasing the shard lock.
     ///
     /// Capacity-eviction callbacks run while the affected shard's write lock is held. Do not call
     /// methods on the same sharded cache from the callback; doing so can deadlock if the callback
