@@ -21,8 +21,10 @@ These cover the new attribute validations:
 - a `create` block combined with `ttl_millis` (the create-conflict rejection,
   #149) on both `#[cached]` and `#[concurrent_cached]`.
 
-All of these fire during macro expansion before any feature-gated store type is
-emitted, so `proc_macro` alone is sufficient (no `time_stores` needed).
+All of the compile-fail cases fire during macro expansion before any
+feature-gated store type is emitted, so `proc_macro` alone is sufficient (no
+`time_stores` needed). The one compile-pass case expands fully and is gated on
+`time_stores`.
 */
 
 #![cfg(feature = "proc_macro")]
@@ -122,5 +124,9 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/once_force_refresh_bare_bool.rs");
     t.compile_fail("tests/ui/concurrent_cached_force_refresh_bare_bool.rs");
     // T1: `result_fallback = true` with `sync_writes = false` (Disabled) must compile.
+    // Unlike the compile-fail cases above, this one expands fully and uses
+    // `ttl_secs` (result_fallback requires a ttl/expires/ty), so it needs the
+    // `time_stores` feature; covered by the time_stores/default/async CI targets.
+    #[cfg(feature = "time_stores")]
     t.pass("tests/ui/cached_result_fallback_sync_writes_disabled.rs");
 }
