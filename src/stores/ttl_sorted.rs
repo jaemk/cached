@@ -471,7 +471,7 @@ impl<K: Hash + Eq + Ord + Clone, V> TtlSortedCache<K, V> {
             .expect("TtlSortedCache::new requires a non-zero ttl")
     }
 
-    /// Return a builder for constructing an [`TtlSortedCache`].
+    /// Return a builder for constructing a [`TtlSortedCache`].
     #[must_use]
     pub fn builder() -> TtlSortedCacheBuilder<K, V> {
         TtlSortedCacheBuilder::default()

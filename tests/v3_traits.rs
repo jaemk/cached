@@ -2387,3 +2387,81 @@ mod hashmap_non_default_hasher {
         assert_eq!(Cached::cache_get(&mut map, &3), Some(&30));
     }
 }
+
+// ── T2: ConcurrentCached::cache_get_or_set_with is non-atomic ────────────────
+
+/// `ConcurrentCached::cache_get_or_set_with` (and its `ConcurrentCachedExt` alias
+/// `get_or_set_with`) is explicitly documented as a non-atomic get-then-set: two
+/// threads racing on the same missing key can both observe the miss, both run the
+/// init closure, and both store a value. This test pins that behavior deterministically
+/// using a `Barrier` inside each thread's closure so both threads are guaranteed to
+/// have observed the miss before either's closure returns.
+///
+/// If `cache_get_or_set_with` were ever made atomic (e.g. by holding the shard lock
+/// across the get and set), this test would deadlock, making the behavioral change
+/// immediately visible.
+#[test]
+fn concurrent_cache_get_or_set_with_is_non_atomic() {
+    use cached::{ConcurrentCached, ShardedUnboundCache};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    // A single-shard cache ensures both threads hit the same lock shard,
+    // making the race condition maximally reproducible.
+    let cache: Arc<ShardedUnboundCache<u32, u32>> = Arc::new(
+        ShardedUnboundCache::builder()
+            .shards(1)
+            .build()
+            .expect("build 1-shard ShardedUnboundCache"),
+    );
+
+    // Count how many times the init closure is invoked across both threads.
+    let call_count = Arc::new(AtomicU32::new(0));
+
+    // A 2-party barrier placed INSIDE each closure guarantees both threads have
+    // already observed the cache miss (and entered their respective closure) before
+    // either closure returns and the winning thread stores the value.
+    // If the implementation were to hold the shard lock across the get+set, the
+    // second thread would block on `cache_get` and never reach its closure, so the
+    // barrier would deadlock — that would mean the behavior changed and this test
+    // catches it.
+    let barrier = Arc::new(Barrier::new(2));
+
+    let cache_a = cache.clone();
+    let count_a = call_count.clone();
+    let barrier_a = barrier.clone();
+    let handle_a = std::thread::spawn(move || {
+        ConcurrentCached::cache_get_or_set_with(&*cache_a, 0u32, || {
+            count_a.fetch_add(1, Ordering::Relaxed);
+            barrier_a.wait();
+            99u32
+        })
+        .expect("cache_get_or_set_with must not fail on ShardedUnboundCache")
+    });
+
+    let cache_b = cache.clone();
+    let count_b = call_count.clone();
+    let barrier_b = barrier.clone();
+    let handle_b = std::thread::spawn(move || {
+        ConcurrentCached::cache_get_or_set_with(&*cache_b, 0u32, || {
+            count_b.fetch_add(1, Ordering::Relaxed);
+            barrier_b.wait();
+            99u32
+        })
+        .expect("cache_get_or_set_with must not fail on ShardedUnboundCache")
+    });
+
+    let r_a = handle_a.join().expect("thread A panicked");
+    let r_b = handle_b.join().expect("thread B panicked");
+
+    // Both calls must return the same value (99), regardless of which thread won.
+    assert_eq!(r_a, 99);
+    assert_eq!(r_b, 99);
+
+    // The non-atomicity guarantee: both closures ran.
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        2,
+        "both threads must have run the init closure (non-atomic get-then-set)"
+    );
+}

@@ -28,12 +28,13 @@ use proc_macro::TokenStream;
 ///   written in curly braces like `convert` (it is evaluated, not a magic flag and not a required
 ///   bool parameter). When it evaluates to `true`, any cached value is bypassed and the function body
 ///   is re-run and re-cached. Typically the condition is computed from existing arguments, e.g.
-///   `force_refresh = "{ id == 0 }"` to always recompute the sentinel id; there is no extra argument
-///   and the default key is correct as-is.
+///   `force_refresh = { id == 0 }` to always recompute the sentinel id; there is no extra argument
+///   and the default key is correct as-is. The legacy quoted form `force_refresh = "{ id == 0 }"` also
+///   works and is equivalent.
 ///
 ///   If instead you use a dedicated flag argument (e.g. `refresh: bool`), you must exclude it from
 ///   the cache key with `key` / `convert`:
-///   `#[cached(key = "u64", convert = "{ id }", force_refresh = "{ refresh }")] fn fetch(id: u64, refresh: bool)`.
+///   `#[cached(key = "u64", convert = "{ id }", force_refresh = { refresh })] fn fetch(id: u64, refresh: bool)`.
 ///   This is not optional. With the default key the flag is part of the key, so the two call shapes hit
 ///   different entries: a `refresh = true` call bypasses the read, recomputes, and stores under the
 ///   `(id, true)` key, while ordinary `refresh = false` calls read the `(id, false)` key. The forced
@@ -117,7 +118,7 @@ use proc_macro::TokenStream;
 ///   `ttl`, `ttl_secs`, or `ttl_millis` (uses `TtlCache`), `max_size` + `ttl`/`ttl_secs`/`ttl_millis` (uses `LruTtlCache`), and
 ///   `expires` (uses `ExpiringCache`/`ExpiringLruCache`).
 ///   A custom `ty` that implements `CloneCached` is also accepted.
-///   Requires a `Result<T, E>` return type. Mutually exclusive with `cache_err`, `with_cached_flag`, and `sync_writes`.
+///   Requires a `Result<T, E>` return type. Mutually exclusive with `cache_err`, `with_cached_flag`, and non-disabled `sync_writes` (`sync_writes = false` or an unset `sync_writes` is compatible).
 ///   Requires the cache key type to implement `Clone` (the fallback path re-caches the key). The
 ///   default key already satisfies this, so it only matters with a custom non-`Clone` `key`/`convert`.
 /// - `expires`: (optional, bool) Auto-select an expiry-aware store whose entries expire based on
@@ -182,10 +183,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   with `ttl`, `ttl_secs`, and `expires`.
 /// - `force_refresh`: (optional, expression block) a boolean expression over the function arguments,
 ///   in curly braces like `convert` (it is evaluated, not a magic flag), e.g.
-///   `force_refresh = "{ stale }"`. When it evaluates to `true`, the single cached value is bypassed
-///   and the body re-runs and re-caches. Because `#[once]` has no per-call key (one value is shared by
-///   all callers), there is no "exclude the flag from the key" caveat as on `#[cached]`: a forced
-///   recompute simply overwrites the one shared value. Orthogonal to `ttl` expiry.
+///   `force_refresh = { stale }`. The legacy quoted form `force_refresh = "{ stale }"` also works.
+///   When it evaluates to `true`, the single cached value is bypassed and the body re-runs and
+///   re-caches. Because `#[once]` has no per-call key (one value is shared by all callers), there is
+///   no "exclude the flag from the key" caveat as on `#[cached]`: a forced recompute simply
+///   overwrites the one shared value. Orthogonal to `ttl` expiry.
 /// - `in_impl`: (optional, bool) allow `#[once]` on a method that takes `self` inside an `impl`
 ///   block. Note: `#[once]` stores a single value for all calls, so an `in_impl` `#[once]`
 ///   method shares one cached value across every instance of the type. Priming is unavailable here:
@@ -338,13 +340,14 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   expiry, with redis applying the TTL at millisecond granularity via `PSETEX`/`PEXPIRE`.
 /// - `force_refresh`: (optional, expression block) a boolean expression over the function arguments,
 ///   in curly braces like `convert` (it is evaluated, not a magic flag), e.g.
-///   `force_refresh = "{ id == 0 }"`. When it evaluates to `true`, any cached value is bypassed and the
-///   function body is re-run and re-cached. If instead you use a dedicated flag argument (e.g.
-///   `refresh: bool`), you must exclude it from the cache key with `key` / `convert`. This is not
-///   optional. With the default key the flag is part of the key, so the two call shapes hit different
-///   entries: a `refresh = true` call bypasses the read, recomputes, and stores under the `(id, true)`
-///   key, while ordinary `refresh = false` calls read the `(id, false)` key. The forced recompute
-///   therefore lands in an entry that normal calls never read, so the refresh is silently lost (later
+///   `force_refresh = { id == 0 }`. The legacy quoted form `force_refresh = "{ id == 0 }"` also works.
+///   When it evaluates to `true`, any cached value is bypassed and the function body is re-run and
+///   re-cached. If instead you use a dedicated flag argument (e.g. `refresh: bool`), you must exclude
+///   it from the cache key with `key` / `convert`. This is not optional. With the default key the flag
+///   is part of the key, so the two call shapes hit different entries: a `refresh = true` call bypasses
+///   the read, recomputes, and stores under the `(id, true)` key, while ordinary `refresh = false`
+///   calls read the `(id, false)` key. The forced recompute therefore lands in an entry that normal
+///   calls never read, so the refresh is silently lost (later
 ///   `refresh = false` calls keep returning the stale value), and the `(id, true)` entry is written but
 ///   never read. Excluding the flag collapses both shapes onto the one `id` entry, so a forced recompute
 ///   overwrites exactly what subsequent calls read. Orthogonal to `refresh` (TTL renewal on a hit). With

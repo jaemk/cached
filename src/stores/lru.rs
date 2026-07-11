@@ -596,6 +596,29 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         }
     }
 
+    /// Insert or replace a cache entry, returning the **stored** key and value of the displaced
+    /// entry as `Some((stored_key, stored_value))`, or `None` for a new insertion.
+    ///
+    /// Unlike [`Cached::cache_set`], which returns only `Option<V>`, this method preserves the
+    /// full `(K, V)` pair of the entry that was actually stored. This matters when the key type
+    /// has fields not covered by `Hash`/`Eq` (e.g. a struct with an `id` used for equality and a
+    /// `tag` that is ignored): the caller's key and the stored key compare as equal but may
+    /// differ in those extra fields. Used by `LruTtlCache::set_entry` to pass the correct stored
+    /// key to `on_evict`.
+    #[cfg(feature = "time_stores")]
+    pub(super) fn cache_set_returning_entry(&mut self, key: K, val: V) -> Option<(K, V)> {
+        let hash = self.hash(&key);
+        let entry = if let Some(index) = self.get_index(hash, &key) {
+            self.order.set(index, (key, val))
+        } else {
+            let index = self.order.push_front((key, val));
+            self.insert_index(hash, index);
+            None
+        };
+        self.check_capacity();
+        entry
+    }
+
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
     /// evictions counter.
     ///

@@ -660,26 +660,29 @@ where
             expires_at,
             value: v,
         };
-        // Capture the displaced entry. When an `on_evict` callback is configured, pop-then-set
-        // (`pop_raw` is silent and returns the owned key) so the callback can fire after the lock
-        // is released; otherwise a plain set. The entry count is unchanged, so no capacity
-        // eviction is triggered by the re-insert.
-        let old: Option<(Option<K>, TimedEntry<V>)> = if self.inner.on_evict.is_some() {
+        // Capture the displaced entry and evaluate expiry while the write lock is still held
+        // (B2: avoids a TOCTOU where the entry crosses the expiry threshold between unlock and
+        // the check). When an `on_evict` callback is configured, pop-then-set (`pop_raw` is
+        // silent and returns the owned key) so the callback can fire after the lock is released;
+        // otherwise a plain set. The entry count is unchanged, no capacity eviction is triggered.
+        let old: Option<(Option<K>, TimedEntry<V>, bool)> = if self.inner.on_evict.is_some() {
             let mut guard = shard.lock.write();
             let removed = guard.pop_raw(&k);
             guard.cache_set(k, new_entry);
-            removed.map(|(ok, e)| (Some(ok), e))
+            removed.map(|(ok, e)| {
+                let expired = e.expires_at.is_some_and(|t| Instant::now() >= t);
+                (Some(ok), e, expired)
+            })
         } else {
-            shard
-                .lock
-                .write()
-                .cache_set(k, new_entry)
-                .map(|e| (None, e))
+            shard.lock.write().cache_set(k, new_entry).map(|e| {
+                let expired = e.expires_at.is_some_and(|t| Instant::now() >= t);
+                (None, e, expired)
+            })
         };
         match old {
             // A displaced expired value is filtered from the return (matching cache_remove and
             // the single-owner TTL stores); fire on_evict and count an eviction for it.
-            Some((key, entry)) if entry.expires_at.is_some_and(|t| Instant::now() >= t) => {
+            Some((key, entry, true)) => {
                 if let (Some(on_evict), Some(key)) = (&self.inner.on_evict, &key) {
                     on_evict(key, &entry.value);
                 }
@@ -688,7 +691,7 @@ where
                     .fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
-            Some((_, entry)) => Ok(Some(entry.value)),
+            Some((_, entry, false)) => Ok(Some(entry.value)),
             None => Ok(None),
         }
     }

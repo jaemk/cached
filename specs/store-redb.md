@@ -24,6 +24,7 @@ Errors are `RedbCacheError` (build: `RedbCacheBuildError`) with named variants, 
 ## REDB-4
 
 Implements the concurrent trait family (`ConcurrentCacheBase`, `ConcurrentCached`,
-`ConcurrentCacheTtl`). Resolved-path introspection and a temp-file fallback are an open direction
+`ConcurrentCacheTtl`). `disk_path()` ships (returns the resolved database path after build).
+Builder-side resolved-path introspection and a configurable temp-dir fallback remain open
 ([design/0025-redb-disk-path-introspection.md](design/0025-redb-disk-path-introspection.md)). See
 [traits-concurrent.md](traits-concurrent.md).

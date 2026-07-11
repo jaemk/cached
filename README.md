@@ -86,7 +86,7 @@ the `async_` prefix already prevents collisions with the sync methods.
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async_core`: Async trait definitions (the runtime-agnostic async cache traits) without the `async-lock` dependency. Enabled by `async`.
 - `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency; uses `async-lock`)
-- `serde`: MessagePack serialization support (`serde` + `rmp-serde`) for implementing a custom [`SerializeCached`] store without enabling a full IO-store feature. The `redis_store` and `redb_store` features enable it transitively.
+- `serde`: Enable the `serde` and `rmp-serde` codec dependencies used by [`SerializeCached`] implementations and the IO stores. The `redis_store` and `redb_store` features enable it transitively. Note: the `SerializeCached` and `SerializeCachedAsync` trait definitions are always present (no feature gate); this feature only enables the codec libraries needed to implement them.
 - `redis_store`: Include Redis cache store
 - `redis_smol`: Include async Redis support using `smol` (no TLS); implies `redis_store` and `async`
 - `redis_smol_native_tls`: `redis_smol` + TLS via `native-tls` (system TLS library)

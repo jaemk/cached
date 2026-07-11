@@ -1,0 +1,5 @@
+error: `force_refresh` takes a curly-brace block, e.g. `force_refresh = { id == 0 }` (or the quoted form `force_refresh = "{ id == 0 }"`)
+ --> tests/ui/concurrent_cached_force_refresh_bare_bool.rs:6:37
+  |
+6 | #[concurrent_cached(force_refresh = true)]
+  |                                     ^^^^

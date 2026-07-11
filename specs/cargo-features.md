@@ -11,9 +11,11 @@ sharded variants).
 
 ## FEAT-2
 
-Async: `async_core` (support marker, no runtime; for custom async runtimes), `async`
-(runtime-agnostic, pulls `async-lock`, no tokio). Making `async_core` internal is an open
-direction ([design/0016-async-core-internal-feature.md](design/0016-async-core-internal-feature.md)).
+Async: `async_core` (runtime-agnostic async trait definitions without async-lock; kept public
+for callers who want the trait surface without the async-lock dependency), `async`
+(enables `async_core` and pulls `async-lock`). Making `async_core` internal was declined
+([design/0016-async-core-internal-feature.md](design/0016-async-core-internal-feature.md),
+DEC-2=B).
 
 ## FEAT-3
 
@@ -32,7 +34,8 @@ raises the crate MSRV to 1.89.
 
 ## FEAT-5
 
-Open feature directions: dropping `ahash` from the default set
-([design/0019-ahash-default-feature.md](design/0019-ahash-default-feature.md)) and an explicit
-`serde` feature for custom serialize stores
-([design/0026-serde-feature.md](design/0026-serde-feature.md)).
+`ahash` remains in the default set (DEC-3=A per
+[design/0019-ahash-default-feature.md](design/0019-ahash-default-feature.md)). The explicit
+`serde = ["dep:serde", "dep:rmp-serde"]` feature shipped (DEC-6=A per
+[design/0026-serde-feature.md](design/0026-serde-feature.md)); `redis_store` and `redb_store`
+depend on it transitively.

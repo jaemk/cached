@@ -242,7 +242,7 @@ impl FromMeta for SyncWriteMode {
 pub(super) fn validate_sync_writes_buckets(
     buckets: usize,
     span: proc_macro2::Span,
-) -> std::result::Result<(), syn::Error> {
+) -> Result<(), syn::Error> {
     if buckets == 0 {
         Err(syn::Error::new(
             span,
@@ -574,15 +574,28 @@ pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: Stri
 /// same parsed block to build its `force_refresh_bypass` token, so the expression
 /// is extracted only once per macro expansion.
 ///
-/// If the `Expr` is already `Expr::Block`, its inner `Block` is used directly.
-/// Otherwise the expression is wrapped in a synthetic block so a bare expression
-/// (e.g. `force_refresh = { id == 0 }`) also works.
+/// Accepts an unquoted block (`force_refresh = { id == 0 }`, the preferred form)
+/// or a quoted block string (`force_refresh = "{ id == 0 }"`, the legacy form, which
+/// darling parses into an `Expr::Block` automatically). Rejects a bare literal (e.g.
+/// `force_refresh = true`) with a diagnostic directing the user to the block form.
 pub(super) fn parse_force_refresh_block(
     force_refresh: &Option<syn::Expr>,
     _span: Span,
 ) -> Result<Option<Block>, syn::Error> {
     match force_refresh {
         Some(expr) => {
+            // Reject a bare literal (e.g. `force_refresh = true`). Both the unquoted
+            // block form `force_refresh = { expr }` and the legacy quoted form
+            // `force_refresh = "{ expr }"` (which darling parses as Expr::Block) are
+            // accepted; a bare literal is neither and would panic in expr_to_block.
+            if let syn::Expr::Lit(lit) = expr {
+                return Err(syn::Error::new_spanned(
+                    lit,
+                    "`force_refresh` takes a curly-brace block, e.g. \
+                     `force_refresh = { id == 0 }` (or the quoted form \
+                     `force_refresh = \"{ id == 0 }\"`)",
+                ));
+            }
             let block = expr_to_block(expr.clone());
             Ok(Some(block))
         }

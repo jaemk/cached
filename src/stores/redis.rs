@@ -551,6 +551,60 @@ mod credential_leak_tests {
 }
 
 #[cfg(test)]
+mod error_explicit_source_tests {
+    // No Redis server needed -- verifies the explicit `#[source]` on
+    // `RedisCacheError::Redis`, `RedisCacheError::Pool`, and
+    // `RedisCacheBuildError::Pool` wires `std::error::Error::source()` correctly.
+    use super::{RedisCacheBuildError, RedisCacheError};
+    use std::error::Error;
+
+    /// `RedisCacheBuildError::Pool` must expose its inner error through `.source()`.
+    /// Constructs the variant directly (no live Redis needed) and verifies that
+    /// `source()` returns `Some(...)` pointing at the boxed error, and that the
+    /// returned reference downcasts to `std::io::Error`.
+    #[test]
+    fn redis_cache_build_error_pool_source_is_accessible() {
+        let inner = std::io::Error::other("synthetic pool error");
+        let err = RedisCacheBuildError::Pool {
+            source: Box::new(inner),
+        };
+        let src = err.source().expect("Pool source must be Some");
+        assert!(
+            src.downcast_ref::<std::io::Error>().is_some(),
+            "source should downcast to std::io::Error; got: {src:?}"
+        );
+    }
+
+    /// `RedisCacheError::Redis` must expose its inner error through `.source()`.
+    #[test]
+    fn redis_cache_error_redis_source_is_accessible() {
+        let inner = std::io::Error::other("synthetic redis error");
+        let err = RedisCacheError::Redis {
+            source: Box::new(inner),
+        };
+        let src = err.source().expect("Redis source must be Some");
+        assert!(
+            src.downcast_ref::<std::io::Error>().is_some(),
+            "source should downcast to std::io::Error; got: {src:?}"
+        );
+    }
+
+    /// `RedisCacheError::Pool` must expose its inner error through `.source()`.
+    #[test]
+    fn redis_cache_error_pool_source_is_accessible() {
+        let inner = std::io::Error::other("synthetic redis pool error");
+        let err = RedisCacheError::Pool {
+            source: Box::new(inner),
+        };
+        let src = err.source().expect("Pool source must be Some");
+        assert!(
+            src.downcast_ref::<std::io::Error>().is_some(),
+            "source should downcast to std::io::Error; got: {src:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod legacy_json_version_gate_tests {
     // No Redis server needed -- verifies that the S4 backward-read gate requires
     // the `version` key to equal the known version constant, not merely exist.
@@ -701,6 +755,8 @@ pub enum RedisCacheBuildError {
     /// while `client_side_caching` is enabled. Client-side caching requires
     /// RESP3; the combination is rejected at build time to prevent the
     /// invalidation listener from silently no-oping and serving stale data.
+    #[cfg(feature = "redis_async_cache")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "redis_async_cache")))]
     #[error(
         "client_side_caching requires RESP3 but the connection URL explicitly pins \
         protocol=resp2; remove the protocol parameter or set it to resp3"
@@ -1140,10 +1196,12 @@ where
 pub enum RedisCacheError {
     #[error("redis error")]
     Redis {
+        #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     #[error("redis pool error")]
     Pool {
+        #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     /// **Security note:** `cached_value` may contain sensitive application data
@@ -3170,6 +3228,52 @@ mod async_redis {
             assert!(
                 !key_exists(&key),
                 "key must be deleted even when strict async_cache_remove_entry errors"
+            );
+        }
+
+        // B5: url_pins_resp2 must be case-sensitive, matching redis-rs 1.x which
+        // compares the `protocol=` query value with exact lowercase literals ("resp2",
+        // "2").  A mixed-case value like "RESP2" must NOT be treated as pinning RESP2
+        // because redis-rs would reject or ignore it rather than downgrading.
+        #[cfg(feature = "redis_async_cache")]
+        #[test]
+        fn url_pins_resp2_is_case_sensitive() {
+            // Exact lowercase matches: must return true.
+            assert!(
+                AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=resp2"
+                ),
+                "protocol=resp2 must be detected"
+            );
+            assert!(
+                AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=2"
+                ),
+                "protocol=2 must be detected"
+            );
+            // Mixed-case: redis-rs does not recognize these, so we must not either.
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=RESP2"
+                ),
+                "protocol=RESP2 (uppercase) must NOT be treated as pinning RESP2"
+            );
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=Resp2"
+                ),
+                "protocol=Resp2 (mixed case) must NOT be treated as pinning RESP2"
+            );
+            // RESP3 and no protocol: must return false.
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2(
+                    "redis://127.0.0.1:6379?protocol=resp3"
+                ),
+                "protocol=resp3 must not be detected as RESP2"
+            );
+            assert!(
+                !AsyncRedisCacheBuilder::<String, String>::url_pins_resp2("redis://127.0.0.1:6379"),
+                "no protocol param must not be detected as RESP2"
             );
         }
     }

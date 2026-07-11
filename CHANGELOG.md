@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.6 / cached_proc_macro 3.0.0-rc.6] - 2026-07-09
+
+> Fixes from the 3.0.0 pre-release review. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md).
+
+### Breaking Changes
+
+- `RedisCacheBuildError::Resp2DowngradeWithClientSideCaching` is declared only with the `redis_async_cache` feature (it was never constructible without it). A `match` arm naming the variant in a build without the feature no longer compiles; gate the arm or rely on the `_` arm the `#[non_exhaustive]` enum already requires.
+
+### Fixed
+
+- `LruTtlCache::cache_set` over an existing entry now passes the stored key to `on_evict` instead of the caller's key. Key types where equal instances are non-identical previously received the wrong key instance (same class of bug fixed for the `*_mut` paths in rc.5).
+- `ShardedTtlCache`, `ShardedLruTtlCache`, and `ShardedExpiringCache` `cache_set` now evaluate the displaced entry's expiry while still holding the shard write lock. Previously the check ran after the lock was released, so an entry crossing the expiry boundary in that window could be misclassified (wrong return value and `on_evict` decision).
+- `ShardedExpiringCache` / `ShardedExpiringLruCache` `deep_clone` reads the hit/miss counters while still holding the shard read lock, so the cloned metrics are consistent with the cloned entries.
+- `RedbCache::remove_expired_entries` uses a single time snapshot for its scan and write passes; an entry can no longer be judged live in the scan and expired in the write (or vice versa).
+
+### Added
+
+- `cached::prelude` re-exports `CacheMetrics`, so `metrics()` call sites need no second import.
+- `#[must_use]` on `ConcurrentCached::{cache_get, cache_set}` and `ConcurrentCachedAsync::{async_cache_get, async_cache_set}`, matching the documented contract.
+- Explicit `#[source]` on `RedisCacheError::Redis` and `RedisCacheError::Pool`, with source-downcast tests.
+- The `force_refresh` parse error for a bare literal (e.g. `force_refresh = true`) now suggests the unquoted `{ ... }` block form; the `#[once]` rejection error for `create` points at the attribute instead of the function.
+
+### Documentation
+
+- Migration guides updated to the final rc surface: positional `builder(arg)` forms, `CachedGetOrSetAsync` / `async_cache_get_or_set_with*` names, and the `ConcurrentCacheBase` `cache_size` / `cache_is_empty` method set.
+- `on_evict` builder docs list the displaced-expired-entry trigger and the `cache_clear_with_on_evict` callback timing; `ConcurrentCached` documents why lookups take `&K` rather than `Q: Borrow`; the redb docs state the actual redb/redis TTL difference; `result_fallback` docs note only non-disabled `sync_writes` values conflict; `force_refresh` docs prefer the unquoted block form.
+
 ## [3.0.0-rc.5 / cached_proc_macro 3.0.0-rc.5] - 2026-07-07
 
 ### Breaking Changes
@@ -399,6 +426,7 @@
 - `cached_proc_macro_types` moved to edition 2024 and raised its `rust-version` to 1.89, matching the workspace; its version tracks `cached` in lockstep (3.0.0-rc.x), not a standalone `1.0`. `cached_proc_macro`'s `rust-version` is likewise raised to 1.89.
 
 #### API audit follow-ups
+- `LruTtlCache::iter_order` now returns `Vec<(K, (Option<Instant>, V))>` and `LruTtlCache::value_order` returns `Vec<(Option<Instant>, V)>`. The expiry instant is wrapped in `Option` (`None` means the entry never expires) to align with the per-entry expiry model introduced in this release. Previously both methods exposed a bare `Instant`. **Migration:** unwrap or pattern-match the `Option<Instant>` at call sites.
 - `Cached::cache_try_set` (and its `try_set` alias) now return `Result<Option<V>, CacheSetError>` instead of `Result<Option<V>, Box<dyn std::error::Error>>`. `CacheSetError` is a new `#[non_exhaustive]` enum (variant `TimeBounds`) re-exported from the crate root, so callers can match on the failure instead of handling an opaque boxed error. Custom `Cached` impls that override `cache_try_set` must update the return type.
 - The `DiskCache` / `DiskCacheBuilder` / `DiskCacheError` / `DiskCacheBuildError` aliases for the `Redb*` types are removed (the rename to `RedbCache` happened earlier in this release; the aliases are not carried forward). Rename `DiskCache*` to `RedbCache*`.
 - The `store()` accessors on `UnboundCache`, `TtlCache`, `LruTtlCache`, and `ExpiringLruCache` are removed. They exposed the internal backing map (and leaked the internal `TimedEntry<V>` wrapper) and existed on only some stores. Use the public `Cached` API (`cache_get`, `cache_size`, iteration helpers) instead.
