@@ -96,9 +96,14 @@ async fn async_refresh_does_not_clobber_concurrent_write() {
 async fn async_cache_get_eviction_does_not_delete_fresh_rewrite() {
     // See the sync counterpart: TTL must comfortably exceed the gap between the
     // writer committing value=1 and the final read, so value=1 cannot legitimately
-    // expire before that read (which would be a false failure).
-    const TTL: Duration = Duration::from_millis(30);
-    const ROUNDS: usize = 200;
+    // expire before that read (which would be a false failure). 150 ms matches the
+    // sync test's margin against scheduler stalls on a saturated CI runner; the
+    // async path needs it even more since every op also hops through the
+    // `blocking::unblock` thread pool. 40 rounds gives the same ~0.5^ROUNDS
+    // race-miss probability as the sync test while keeping the runtime down
+    // (each round sleeps TTL+6 ms to expire the pre-set value).
+    const TTL: Duration = Duration::from_millis(150);
+    const ROUNDS: usize = 40;
 
     let dir = TempDir::new().unwrap();
     let cache = build("async-race-evict-get", &dir, Some(TTL), false);
