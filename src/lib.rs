@@ -245,9 +245,10 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 - Expired values can remain allocated until a mutating operation, `evict`, or
   store-specific cleanup removes them.
 - `cache_remove` fires the `on_evict` callback (if set) and counts as an eviction for
-  every successful removal, across all stores that track evictions. `ShardedUnboundCache` is the
-  exception: it has no evictions counter and always returns `None` from
-  `metrics().evictions`, though its `on_evict` callback still fires. The `on_evict` column
+  every successful removal, across all stores that track evictions. The unbounded
+  non-expiring stores (`UnboundCache`, `ShardedUnboundCache`) are the exception: they have
+  no evictions counter and always return `None` from
+  `metrics().evictions`, though their `on_evict` callback still fires. The `on_evict` column
   above marks the unbounded stores where explicit removal is the *only* eviction trigger. For stores with
   expiry, removing a present-but-already-expired entry still evicts and fires `on_evict`,
   but `cache_remove` returns `None`; use `cache_delete` or `cache_remove_entry` when you
@@ -851,7 +852,8 @@ pub mod prelude {
 /// get-or-set family), so `dyn Cached<K, V>` does not work; use a concrete store
 /// type. For a trait-object-friendly cache use the internally-synchronized
 /// [`ConcurrentCached`] family instead, which keeps its one generic method out of
-/// the vtable (`dyn ConcurrentCached<K, V> + ConcurrentCacheBase<Error = E>`).
+/// the vtable (`dyn ConcurrentCached<K, V, Error = E>` — the `Error` associated
+/// type comes from the `ConcurrentCacheBase` supertrait and is specified inline).
 ///
 /// The async traits (`CachedGetOrSetAsync`, `ConcurrentCachedAsync`) use the `async_cache_*` spelling
 /// (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) so they never collide

@@ -166,8 +166,8 @@ where
     ///
     /// This is the infallible ergonomic API for the concrete type. Generic code over
     /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
-    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
-    /// method is in scope.
+    /// `get` alias from [`ConcurrentCachedExt`](crate::ConcurrentCachedExt)), callable as
+    /// `ConcurrentCachedExt::get(&store, k)` when this inherent method is in scope.
     #[must_use]
     pub fn get(&self, k: &K) -> Option<V> {
         ConcurrentCached::cache_get(self, k).unwrap()
@@ -597,11 +597,13 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
         }
     }
 
-    /// Set a callback invoked when an entry is evicted by LRU capacity pressure, explicit
-    /// [`cache_remove`](ConcurrentCached::cache_remove), or
-    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
-    /// Does **not** fire on [`clear`](ShardedLruCacheBase::clear);
-    /// use [`cache_clear_with_on_evict`](ShardedLruCacheBase::cache_clear_with_on_evict) to opt in.
+    /// Set a callback invoked when an entry is evicted. Fires in four situations:
+    /// on LRU capacity pressure; on explicit
+    /// [`cache_remove`](ConcurrentCached::cache_remove); on
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and for every
+    /// entry removed by
+    /// [`cache_clear_with_on_evict`](ShardedLruCacheBase::cache_clear_with_on_evict).
+    /// Does **not** fire on [`clear`](ShardedLruCacheBase::clear).
     ///
     /// Capacity-eviction callbacks run while the affected shard's write lock is held. Do not call
     /// methods on the same sharded cache from the callback; doing so can deadlock if the callback

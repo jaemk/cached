@@ -234,8 +234,8 @@ where
     ///
     /// This is the infallible ergonomic API for the concrete type. Generic code over
     /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
-    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
-    /// method is in scope.
+    /// `get` alias from [`ConcurrentCachedExt`](crate::ConcurrentCachedExt)), callable as
+    /// `ConcurrentCachedExt::get(&store, k)` when this inherent method is in scope.
     #[must_use]
     pub fn get(&self, k: &K) -> Option<V> {
         ConcurrentCached::cache_get(self, k).unwrap()

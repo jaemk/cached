@@ -584,8 +584,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     // return is skipped so the body re-runs and re-caches the single shared value.
     // The guard wraps the whole cached-value check (not just the return), so a
     // TTL'd entry's expiry test is bypassed too and the body always re-runs.
-    let force_refresh_guard = match build_force_refresh_guard(&args.force_refresh, fn_ident.span())
-    {
+    let force_refresh_guard = match build_force_refresh_guard(&args.force_refresh) {
         Ok(guard) => guard,
         Err(error) => return error.to_compile_error().into(),
     };

@@ -925,10 +925,23 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (Some(expr), false) => {
             // Verify the expression is a closure; other expression types are not
             // valid for `map_error`.
-            if !matches!(expr, syn::Expr::Closure(_)) {
+            let syn::Expr::Closure(closure) = expr else {
                 return syn::Error::new_spanned(
                     expr,
                     "`map_error` must be a closure, e.g. `map_error = |e| MyErr(e)`",
+                )
+                .to_compile_error()
+                .into();
+            };
+            // An async closure would pass the closure check but fail downstream at
+            // the `.map_err(...)` bound (`FnOnce`) with an opaque type error;
+            // reject it here with a pointed message instead.
+            if closure.asyncness.is_some() {
+                return syn::Error::new_spanned(
+                    expr,
+                    "`map_error` must be a synchronous closure (it is passed to \
+                     `Result::map_err`); remove the `async` keyword, e.g. \
+                     `map_error = |e| MyErr(e)`",
                 )
                 .to_compile_error()
                 .into();
@@ -1104,8 +1117,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // Orthogonal to `refresh` (TTL renewal on hit) (#146).
     // Parse the `force_refresh` predicate once; both the cached-hit guard and the
     // `result_fallback` bypass token below are built from this single parsed block.
-    let force_refresh_block = match parse_force_refresh_block(&args.force_refresh, fn_ident.span())
-    {
+    let force_refresh_block = match parse_force_refresh_block(&args.force_refresh) {
         Ok(block) => block,
         Err(error) => return error.to_compile_error().into(),
     };

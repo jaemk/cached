@@ -12,7 +12,9 @@
 # **enabled**
 CACHED_BASIC_EXAMPLES = async_std \
                         basic \
+                        expires_per_key \
                         kitchen_sink \
+                        struct_method \
                         tokio \
                         sharded \
                         sharded_expiring \
@@ -167,9 +169,17 @@ help: ## List all supported Make targets
 	done
 
 ################################################################################
+# Guard against the example targets silently expanding to nothing (e.g. the
+# .PHONY/implicit-rule interaction fixed below): every registered example must
+# expand to its own `run --example <name>` (or the wasm `build --target`) in a
+# dry run, not just "at least one command somewhere".
 .check-examples-expanded:
 	@output="$$( $(MAKE) -n --no-print-directory examples/basic examples/cargo examples/redis )"; \
-	echo "$$output" | grep -Eq 'run --example|build --target' || (>&2 echo 'Example targets did not expand to runnable commands'; exit 1)
+	for example in $(CACHED_BASIC_EXAMPLES) $(CACHED_REDIS_EXAMPLES); do \
+		echo "$$output" | grep -q -- "run --example $$example" \
+			|| (>&2 echo "Example target '$$example' did not expand to a runnable command"; exit 1) || exit 1; \
+	done; \
+	echo "$$output" | grep -q 'build --target' || (>&2 echo 'wasm example did not expand to a build command'; exit 1)
 
 # Runs all examples
 examples: .check-examples-expanded examples/basic examples/cargo examples/redis
@@ -180,7 +190,12 @@ examples/cargo: $(CACHED_CARGO_EXAMPLE_TARGETS)
 # Runs `redis` related examples. NOTE: depends on `docker/redis`
 examples/redis: $(CACHED_REDIS_EXAMPLE_TARGETS)
 
-examples/basic/%:
+# Static pattern rule (not an implicit `examples/basic/%:` one): these targets are
+# declared .PHONY via HELP_TARGETS, and make skips implicit-rule search for phony
+# targets, so an implicit rule here silently expands to "Nothing to be done" and no
+# example runs. A static pattern rule is an explicit rule per target, which .PHONY
+# targets do use.
+$(CACHED_BASIC_EXAMPLE_TARGETS): examples/basic/%:
 	@echo [$@]: Running example $*...
 	$(CARGO_COMMAND) run --example $* --all-features
 
@@ -195,7 +210,10 @@ examples/redis/redis-async-async-std: docker/redis
 	@echo [$@]: Running example redis-async-async-std...
 	$(CARGO_COMMAND) run --example redis-async-async-std --features "redis_smol_native_tls,proc_macro"
 
-examples/redis/%: docker/redis
+# Static pattern rule for the same .PHONY reason as the basic examples above.
+# redis-async-async-std is excluded: it has its own explicit rule with a narrower
+# feature set (smol), and a second recipe from this rule would conflict.
+$(filter-out examples/redis/redis-async-async-std,$(CACHED_REDIS_EXAMPLE_TARGETS)): examples/redis/%: docker/redis
 	@echo [$@]: Running example $*...
 	$(CARGO_COMMAND) run --example $* --all-features
 

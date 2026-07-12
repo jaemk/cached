@@ -1,0 +1,5 @@
+error: `map_error` must be a synchronous closure (it is passed to `Result::map_err`); remove the `async` keyword, e.g. `map_error = |e| MyErr(e)`
+ --> tests/ui/concurrent_cached_map_error_async_closure.rs:5:61
+  |
+5 | #[concurrent_cached(disk = true, ttl_secs = 60, map_error = async |e| format!("{e:?}"))]
+  |                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^
