@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.7 / cached_proc_macro 3.0.0-rc.7] - 2026-07-12
+
+### Breaking Changes
+
+- `RedisCacheBuilder::build()` / `AsyncRedisCacheBuilder::build()` reject an empty prefix with `Build(BuildError::InvalidValue { field: "prefix", .. })`. The prefix is what scopes `cache_clear` to one logical cache; with an empty prefix, `cache_clear` matches `<namespace>:*` and deletes the entries of every cache sharing the namespace (all of them, under the shared default namespace). The `RedisCacheBuildError::EmptyScope` variant from rc.3 (which fired only when namespace and prefix were both empty) is removed; the empty-prefix rejection subsumes it. See the [migration guide](docs/migrations/2.0-to-3.0.md#9-rediscachebuilderbuild--asyncrediscachebuilderbuild-reject-an-empty-prefix).
+- `#[concurrent_cached]` rejects an `async` closure for `map_error` at the macro with a pointed message. It previously passed macro validation and failed downstream at the `Result::map_err` `FnOnce` bound with an opaque type error.
+
+### Fixed
+
+- `RedbCache` default-directory resolution self-heals a pre-existing cache directory with legacy permissions. A directory created by an earlier `cached` version was created with the process umask (0775 under the umask-002 user-private-group default of Debian/Ubuntu) and permanently failed the security validation with "I/O error preparing the disk cache directory"; the app-derived candidate is now tightened to 0700 and re-validated (the chmod only succeeds for the owner, so an attacker-owned or symlinked directory still falls through to the next candidate instead of aborting).
+- `ShardedExpiringLruCache::cache_set` evaluates the displaced entry's `is_expired()` exactly once, under the shard write lock. It previously evaluated twice (once inside the lock for the eviction counter, once outside for `on_evict` and the return value), so a value crossing the expiry threshold between the two calls fired `on_evict` without counting the eviction. The other sharded expiring stores already evaluated once.
+- `RedisCacheBuildError::MissingConnectionString` redacts the env-var value carried by `std::env::VarError::NotUnicode`. The raw value is the connection string itself (credentials included) and was printed by both `Display` and `Debug`.
+- `RedisCacheBuildError` uses a manual `Debug` impl, matching `RedisCacheError` / `RedbCacheError` / `RedbCacheBuildError`.
+- `make examples` actually runs the registered examples again: the per-example targets are `.PHONY`, and make skips implicit-rule search for phony targets, so the `examples/basic/%` / `examples/redis/%` pattern rules silently expanded to nothing and only the two explicitly-ruled examples (`wasm`, `redis-async-async-std`) ran. The rules are now static pattern rules, `expires_per_key` and `struct_method` are registered, and the expansion guard checks every registered example expands to its own run command.
+
+### Documentation
+
+- `Cached`'s trait-object recipe is now the compiling form `dyn ConcurrentCached<K, V, Error = E>` (the previous `dyn ConcurrentCached<K, V> + ConcurrentCacheBase<Error = E>` spelling fails E0225: only one non-auto trait is allowed in `dyn`).
+- The sharded stores' inherent `get` docs name `ConcurrentCachedExt::get` as the trait-qualified call; the documented `ConcurrentCached::get(&store, k)` does not compile (the `get` alias lives on the extension trait).
+- The evictions-counter exception in the store comparison covers both unbounded non-expiring stores (`UnboundCache` and `ShardedUnboundCache` return `None` from `metrics().evictions`), not just the sharded one.
+- The migration guide's feature-name section no longer claims `serde` is a private `dep:` name: `serde` is a public feature (since rc.5) enabling `SerializeCached` support for custom stores; the feature table and error-message index now list it.
+- `RedisCache` / `AsyncRedisCache` struct docs describe the TTL as optional (entries built without one persist until removed) instead of always applied.
+- `strict_deserialization` docs (redis and redb) state that the previous value displaced by `cache_set` is discarded in both modes when it cannot be decoded, and that a strict-mode `remove_expired_entries` sweep aborts atomically (evictions from earlier in the pass are rolled back; covered by a new test).
+- `RedbCache::remove_expired_entries` no longer links `CacheEvict::evict` (a trait `RedbCache` does not implement); it explains the naming and `Result` return instead.
+- `ShardedLruCache`'s `on_evict` builder doc enumerates `cache_clear_with_on_evict` as a firing site, matching the other sharded stores; `cache_prefix_block` docs show the unquoted expression form.
+
 ## [3.0.0-rc.6 / cached_proc_macro 3.0.0-rc.6] - 2026-07-09
 
 > Fixes from the 3.0.0 pre-release review. The 2.x -> 3.0 upgrade is documented in the [migration guide](docs/migrations/2.0-to-3.0.md).
