@@ -223,7 +223,15 @@ where
     /// **Strict mode (`true`):** deserialization failures are surfaced as
     /// `Err(RedbCacheError::CacheDeserialization { .. })` and the entry is left in
     /// place. Use this if you prefer to detect data corruption rather than silently
-    /// skip it.
+    /// skip it. A strict-mode `remove_expired_entries` sweep aborts on the first
+    /// corrupt entry it hits, and because the whole sweep runs in one redb write
+    /// transaction, validly-expired entries removed earlier in that same pass are
+    /// rolled back too — the store is left exactly as it was before the call.
+    ///
+    /// In **both** modes, the previous value displaced by `cache_set` is silently
+    /// discarded when it cannot be decoded (the write itself succeeds and
+    /// `Ok(None)` is returned): the setting governs reads, not the best-effort
+    /// previous-value decode on writes.
     #[must_use]
     pub fn strict_deserialization(mut self, strict: bool) -> Self {
         self.strict_deserialization = strict;
@@ -258,20 +266,13 @@ where
         let mut last_error = None;
 
         for disk_dir in candidates {
-            match create_cache_dir(&disk_dir) {
-                Ok(()) => {
-                    // On unix, validate every directory we pick on the caller's
-                    // behalf (XDG candidates and the temp fallback), not just the
-                    // last one: reject symlinks and world/group-writable dirs to
-                    // guard against symlink-based TOCTOU attacks (SEC-4).
-                    #[cfg(unix)]
-                    validate_cache_dir(&disk_dir)?;
-                    return Ok(disk_dir);
-                }
-                // Fall through to the next candidate when this one is unusable
-                // because the filesystem denies writes: a read-only mount aborts
-                // with `ReadOnlyFilesystem` rather than `PermissionDenied`, so
-                // both must trigger the fallback to temp (DISK-9).
+            match prepare_default_cache_dir(&disk_dir) {
+                Ok(()) => return Ok(disk_dir),
+                // Fall through to the next candidate when this one is unusable:
+                // the filesystem denies writes (a read-only mount aborts with
+                // `ReadOnlyFilesystem` rather than `PermissionDenied`, so both
+                // must trigger the fallback to temp, DISK-9), or the directory
+                // failed the SEC-4 validation and could not be healed.
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -430,6 +431,38 @@ fn create_cache_dir(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
+/// Create (if needed) and validate one default-path candidate directory.
+///
+/// On unix the candidate must pass `validate_cache_dir` (SEC-4: no symlink, not
+/// group- or world-writable). A directory created by this crate is always 0700,
+/// but a pre-existing one from an earlier `cached` version was created with the
+/// process umask — 0775 under the user-private-group scheme common on
+/// Debian/Ubuntu (umask 002) — and would fail the validation forever. Since the
+/// candidate is an app-derived path (not user-supplied), self-heal that case by
+/// tightening the permissions to 0700 and re-validating. The chmod only succeeds
+/// for the owner, so an attacker-owned directory still fails validation and the
+/// caller falls through to the next candidate.
+fn prepare_default_cache_dir(disk_dir: &Path) -> Result<(), std::io::Error> {
+    create_cache_dir(disk_dir)?;
+    #[cfg(unix)]
+    {
+        if let Err(error) = validate_cache_dir(disk_dir) {
+            // Never chmod through a symlink; that error is not healable here.
+            if std::fs::symlink_metadata(disk_dir)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(error);
+            }
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(disk_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| error)?;
+            validate_cache_dir(disk_dir)?;
+        }
+    }
+    Ok(())
+}
+
 /// On unix, validate that a cache directory we resolved on the caller's behalf
 /// (an XDG candidate or the temp fallback) is not a symlink and is not group- or
 /// world-writable. Guards against symlink-based TOCTOU attacks where an adversary
@@ -566,9 +599,14 @@ where
     }
 
     /// Remove all entries whose TTL has elapsed, returning the number of entries
-    /// removed (aligning with [`CacheEvict::evict`](crate::CacheEvict::evict) /
-    /// [`ConcurrentCacheEvict::evict`](crate::ConcurrentCacheEvict::evict), which
-    /// also return `usize`).
+    /// removed. This is `RedbCache`'s counterpart to the in-memory stores'
+    /// [`ConcurrentCacheEvict::evict`](crate::ConcurrentCacheEvict::evict) (which also
+    /// returns the removed count); it has its own name and a `Result` return because
+    /// sweeping a disk store can fail, so `RedbCache` does not implement that trait.
+    ///
+    /// In strict-deserialization mode the sweep aborts on the first corrupt entry and
+    /// the whole pass is rolled back; see
+    /// [`RedbCacheBuilder::strict_deserialization`].
     pub fn remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
         remove_expired_entries_impl::<V>(
             &self.connection,
@@ -2268,6 +2306,46 @@ mod tests {
         );
     }
 
+    /// A strict-mode sweep that errors on a corrupt entry must leave the store
+    /// exactly as it was: the whole sweep runs in one redb write transaction, so
+    /// validly-expired entries removed earlier in the pass are rolled back when
+    /// the transaction aborts.
+    #[test]
+    fn remove_expired_entries_strict_mode_error_rolls_back_prior_evictions() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("sweep-strict-rolls-back")
+            .disk_directory(tmp_dir.path())
+            .ttl(LIFE_SPAN_1_SEC)
+            .strict_deserialization(true)
+            .build()
+            .expect("error building disk cache");
+
+        // A valid entry that will be expired by sweep time. Its key ("1") sorts
+        // before the corrupt entry's key ("5"), so the sweep visits it first.
+        cache.cache_set(1, 10).unwrap();
+        sleep(LIFE_SPAN_1_SEC + Duration::from_millis(50));
+        raw_insert(&cache, &5u32.to_string(), vec![0xc1, 0xc1, 0xc1]);
+
+        assert!(matches!(
+            cache.remove_expired_entries(),
+            Err(RedbCacheError::CacheDeserialization { .. })
+        ));
+        assert!(
+            raw_get(&cache, &1u32.to_string()).is_some(),
+            "the expired-but-valid entry must be rolled back, not removed"
+        );
+        assert!(
+            raw_get(&cache, &5u32.to_string()).is_some(),
+            "the corrupt entry must be left in place"
+        );
+
+        // A follow-up sweep in self-heal terms: removing the corrupt entry by key
+        // unblocks the sweep, which then removes the expired entry.
+        assert!(cache.cache_delete(&5).unwrap());
+        assert_eq!(cache.remove_expired_entries().unwrap(), 1);
+        assert!(raw_get(&cache, &1u32.to_string()).is_none());
+    }
+
     /// D2: after a self-healed miss the corrupt entry is gone; recomputing via
     /// `cache_set` and reading again must produce a HIT. Guards that the self-heal
     /// delete does not poison subsequent writes to the same key.
@@ -3442,6 +3520,53 @@ mod tests {
                 result.is_err(),
                 "validate_cache_dir must reject a world-writable dir"
             );
+            assert_eq!(
+                result.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+
+        /// A pre-existing default-path candidate left at 0775 by an earlier
+        /// `cached` version (created with the umask-002 user-private-group
+        /// default of Debian/Ubuntu) must be self-healed to 0700 and accepted,
+        /// not rejected forever.
+        #[test]
+        fn legacy_group_writable_default_dir_is_healed_to_0700() {
+            let parent = temp_dir!();
+            let dir = parent.path().join("legacy_cache");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir(&dir).expect("create_dir");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775))
+                .expect("set_permissions");
+
+            super::super::prepare_default_cache_dir(&dir)
+                .expect("a legacy 0775 candidate must be healed, not rejected");
+            let mode = std::fs::metadata(&dir).expect("metadata").mode() & 0o777;
+            assert_eq!(mode, 0o700, "healed dir must be 0700; got {mode:o}");
+        }
+
+        /// A fresh (not yet existing) default-path candidate is created at 0700.
+        #[test]
+        fn fresh_default_dir_is_created_and_accepted() {
+            let parent = temp_dir!();
+            let dir = parent.path().join("fresh_cache");
+            super::super::prepare_default_cache_dir(&dir).expect("fresh candidate must succeed");
+            let mode = std::fs::metadata(&dir).expect("metadata").mode() & 0o777;
+            assert_eq!(mode, 0o700, "fresh dir must be 0700; got {mode:o}");
+        }
+
+        /// A symlinked default-path candidate is not healed (never chmod through
+        /// a symlink); it errors with `PermissionDenied` so the default-path
+        /// search falls through to the next candidate.
+        #[test]
+        fn symlinked_default_dir_is_not_healed() {
+            let real_dir = temp_dir!();
+            let link_parent = temp_dir!();
+            let link_path = link_parent.path().join("symlink_cache");
+            std::os::unix::fs::symlink(real_dir.path(), &link_path).expect("symlink");
+
+            let result = super::super::prepare_default_cache_dir(&link_path);
+            assert!(result.is_err(), "a symlink candidate must be rejected");
             assert_eq!(
                 result.unwrap_err().kind(),
                 std::io::ErrorKind::PermissionDenied

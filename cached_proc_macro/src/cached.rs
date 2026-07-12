@@ -787,15 +787,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // The default is already `Disabled`, so when `result_fallback` is set and `sync_writes`
-    // was not explicitly specified, no override is required (the resolved value is already
-    // `Disabled`). This branch is a no-op but is kept for clarity and explicit-conflict
-    // detection above.
-    let sync_writes = if args.result_fallback && !sync_writes_explicit {
-        SyncWriteMode::Disabled
-    } else {
-        sync_writes
-    };
+    // No `sync_writes` override is needed for `result_fallback`: the default is already
+    // `Disabled`, and an explicit non-`Disabled` combination was rejected above.
 
     if args.result_fallback && !is_result_return {
         return syn::Error::new(
@@ -943,8 +936,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // re-runs and re-caches. `if !(block)` guards each hit return; with no
     // `force_refresh` the guard is `if true` (always take the cached value).
     // This is orthogonal to `refresh` (TTL renewal on hit) (#146).
-    let force_refresh_guard = match build_force_refresh_guard(&args.force_refresh, fn_ident.span())
-    {
+    let force_refresh_guard = match build_force_refresh_guard(&args.force_refresh) {
         Ok(guard) => guard,
         Err(error) => return error.to_compile_error().into(),
     };

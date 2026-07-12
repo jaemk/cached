@@ -95,6 +95,9 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/cached_convert_malformed_unquoted.rs");
     // Item #2: map_error = 5 (non-closure expression) rejected.
     t.compile_fail("tests/ui/concurrent_cached_map_error_non_closure.rs");
+    // map_error = async |e| ... (async closure) rejected with a pointed message
+    // instead of the opaque downstream FnOnce bound failure.
+    t.compile_fail("tests/ui/concurrent_cached_map_error_async_closure.rs");
     // G1: generic `#[once]` whose value type names a function type parameter.
     t.compile_fail("tests/ui/once_generic_value_type_rejected.rs");
     // G1: value type names the param *nested* inside another generic (`Vec<T>`) -

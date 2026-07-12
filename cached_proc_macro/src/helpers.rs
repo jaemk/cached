@@ -2,8 +2,8 @@ use darling::ast::NestedMeta;
 use darling::{Error, FromMeta};
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::Span;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::__private::Span;
 use quote::{format_ident, quote};
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
@@ -580,7 +580,6 @@ pub(super) fn with_cache_flag_error(output_span: Span, output_type_display: Stri
 /// `force_refresh = true`) with a diagnostic directing the user to the block form.
 pub(super) fn parse_force_refresh_block(
     force_refresh: &Option<syn::Expr>,
-    _span: Span,
 ) -> Result<Option<Block>, syn::Error> {
     match force_refresh {
         Some(expr) => {
@@ -653,9 +652,8 @@ pub(super) fn expr_value_tokens(expr: &syn::Expr) -> TokenStream2 {
 /// on hit) (#146). Shared by `#[cached]`, `#[concurrent_cached]`, and `#[once]`.
 pub(super) fn build_force_refresh_guard(
     force_refresh: &Option<syn::Expr>,
-    span: Span,
 ) -> Result<TokenStream2, syn::Error> {
-    match parse_force_refresh_block(force_refresh, span)? {
+    match parse_force_refresh_block(force_refresh)? {
         Some(block) => Ok(quote! { if !(#block) }),
         None => Ok(quote! { if true }),
     }

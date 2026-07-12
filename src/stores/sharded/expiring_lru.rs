@@ -181,8 +181,8 @@ where
     ///
     /// This is the infallible ergonomic API for the concrete type. Generic code over
     /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
-    /// trait's `get` alias), callable as `ConcurrentCached::get(&store, k)` when this inherent
-    /// method is in scope.
+    /// `get` alias from [`ConcurrentCachedExt`](crate::ConcurrentCachedExt)), callable as
+    /// `ConcurrentCachedExt::get(&store, k)` when this inherent method is in scope.
     #[must_use]
     pub fn get(&self, k: &K) -> Option<V> {
         ConcurrentCached::cache_get(self, k).unwrap()
@@ -462,28 +462,38 @@ where
         // on_evict can fire after the lock is released; otherwise a plain set. A displaced
         // expired value is counted as an eviction under the lock (matching cache_remove) and
         // filtered from the return; a live displaced value is returned to the caller unchanged.
-        let old: Option<(Option<K>, V)> = {
+        // `is_expired()` is evaluated exactly once, while the write lock is still held, and the
+        // result carried through the tuple (matching the other sharded expiring stores): a value
+        // crossing the expiry threshold between two evaluations would otherwise fire `on_evict`
+        // without counting the eviction.
+        let old: Option<(Option<K>, V, bool)> = {
             let mut guard = shard.lock.write();
             let old = if self.inner.on_evict.is_some() {
                 let removed = guard.pop_raw(&k);
                 guard.cache_set(k, v);
-                removed.map(|(ok, ov)| (Some(ok), ov))
+                removed.map(|(ok, ov)| {
+                    let expired = ov.is_expired();
+                    (Some(ok), ov, expired)
+                })
             } else {
-                guard.cache_set(k, v).map(|ov| (None, ov))
+                guard.cache_set(k, v).map(|ov| {
+                    let expired = ov.is_expired();
+                    (None, ov, expired)
+                })
             };
-            if matches!(&old, Some((_, ov)) if ov.is_expired()) {
+            if matches!(&old, Some((_, _, true))) {
                 guard.evictions.fetch_add(1, Ordering::Relaxed);
             }
             old
         };
         match old {
-            Some((key, ov)) if ov.is_expired() => {
+            Some((key, ov, true)) => {
                 if let (Some(on_evict), Some(key)) = (&self.inner.on_evict, &key) {
                     on_evict(key, &ov);
                 }
                 Ok(None)
             }
-            Some((_, ov)) => Ok(Some(ov)),
+            Some((_, ov, false)) => Ok(Some(ov)),
             None => Ok(None),
         }
     }

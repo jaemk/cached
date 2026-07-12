@@ -299,52 +299,109 @@ mod builder_ttl_setter_tests {
 }
 
 #[cfg(test)]
-mod builder_empty_scope_tests {
-    // No Redis server needed -- verifies the empty-scope guard in `build()`.
+mod builder_empty_prefix_tests {
+    // No Redis server needed -- verifies the empty-prefix guard in `build()`.
+    use super::super::BuildError;
     use super::{RedisCacheBuildError, RedisCacheBuilder};
     use crate::time::Duration;
 
     #[test]
-    fn empty_namespace_and_prefix_is_rejected() {
+    fn empty_prefix_with_default_namespace_is_rejected() {
+        // The dangerous shape: the default namespace is shared by every cache, so
+        // an empty prefix would let cache_clear delete all of their entries.
         let result = RedisCacheBuilder::<String, String>::new()
             .prefix("")
             .ttl(Duration::from_secs(1))
-            .namespace("")
             .build();
         assert!(
-            matches!(result, Err(RedisCacheBuildError::EmptyScope)),
-            "expected EmptyScope"
+            matches!(
+                result,
+                Err(RedisCacheBuildError::Build(BuildError::InvalidValue {
+                    field: "prefix",
+                    ..
+                }))
+            ),
+            "expected InvalidValue for empty prefix"
         );
     }
 
     #[test]
-    fn namespace_all_colons_and_empty_prefix_is_rejected() {
-        // ":::" trims to "" so the effective namespace is also empty.
+    fn empty_prefix_with_custom_namespace_is_rejected() {
         let result = RedisCacheBuilder::<String, String>::new()
             .prefix("")
             .ttl(Duration::from_secs(1))
-            .namespace(":::")
+            .namespace("my-ns")
             .build();
         assert!(
-            matches!(result, Err(RedisCacheBuildError::EmptyScope)),
-            "expected EmptyScope"
+            matches!(
+                result,
+                Err(RedisCacheBuildError::Build(BuildError::InvalidValue {
+                    field: "prefix",
+                    ..
+                }))
+            ),
+            "expected InvalidValue for empty prefix"
         );
     }
 
     #[test]
-    fn non_empty_prefix_builds_ok() {
+    fn non_empty_prefix_passes_the_guard() {
         // Guard must not fire when the prefix is set -- no real Redis needed
-        // because the build error would come before the connection attempt.
+        // because a build error past the guard would come from the connection
+        // path, not prefix validation.
         let result = RedisCacheBuilder::<String, String>::new()
             .prefix("my-prefix")
             .ttl(Duration::from_secs(1))
             .namespace("")
             .build();
-        // The only failure here would be a missing connection string, not EmptyScope.
         assert!(
-            !matches!(result, Err(RedisCacheBuildError::EmptyScope)),
-            "EmptyScope must not fire when prefix is non-empty"
+            !matches!(
+                result,
+                Err(RedisCacheBuildError::Build(BuildError::InvalidValue {
+                    field: "prefix",
+                    ..
+                }))
+            ),
+            "prefix guard must not fire when prefix is non-empty"
         );
+    }
+}
+
+#[cfg(test)]
+mod var_error_sanitize_tests {
+    use super::{RedisCacheBuildError, sanitize_var_error};
+
+    #[test]
+    fn not_unicode_value_is_redacted() {
+        #[cfg(unix)]
+        let raw = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"redis://user:s3cret@host\xff".to_vec())
+        };
+        #[cfg(not(unix))]
+        let raw = std::ffi::OsString::from("redis://user:s3cret@host");
+
+        let sanitized = sanitize_var_error(std::env::VarError::NotUnicode(raw));
+        let err = RedisCacheBuildError::MissingConnectionString {
+            env_key: "CACHED_REDIS_CONNECTION_STRING".to_string(),
+            error: sanitized,
+        };
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(
+            !display.contains("s3cret"),
+            "Display leaked the value: {display}"
+        );
+        assert!(!debug.contains("s3cret"), "Debug leaked the value: {debug}");
+        assert!(display.contains("[REDACTED connection string]"));
+    }
+
+    #[test]
+    fn not_present_is_preserved() {
+        assert!(matches!(
+            sanitize_var_error(std::env::VarError::NotPresent),
+            std::env::VarError::NotPresent
+        ));
     }
 }
 
@@ -720,7 +777,7 @@ use thiserror::Error;
 /// the variant (e.g. `Connection { .. }`, `Pool { .. }`) rather than
 /// downcast-inspecting the source.
 #[non_exhaustive]
-#[derive(Error, Debug)]
+#[derive(Error)]
 pub enum RedisCacheBuildError {
     /// Redis client or connection failed to open.
     ///
@@ -739,18 +796,19 @@ pub enum RedisCacheBuildError {
     },
     #[error(transparent)]
     Build(#[from] super::BuildError),
+    /// No connection string was set and the env var is absent or invalid.
+    ///
+    /// The `error` is always *sanitized* before it is stored here: a
+    /// [`VarError::NotUnicode`](std::env::VarError::NotUnicode) would otherwise
+    /// carry the raw env-var value — the connection string itself, credentials
+    /// included — and print it through `Display`/`Debug`. See
+    /// [`sanitize_var_error`].
     #[error("Connection string not specified or invalid in env var {env_key:?}: {error}")]
     MissingConnectionString {
         env_key: String,
         #[source]
         error: std::env::VarError,
     },
-    #[error(
-        "empty scope: namespace (after trimming trailing colons) and prefix are both empty; \
-        cache_clear would run SCAN MATCH * and delete every key in the Redis DB. \
-        Set a non-empty namespace or prefix."
-    )]
-    EmptyScope,
     /// The connection URL explicitly pins the RESP2 protocol (`?protocol=resp2`)
     /// while `client_side_caching` is enabled. Client-side caching requires
     /// RESP3; the combination is rejected at build time to prevent the
@@ -762,6 +820,49 @@ pub enum RedisCacheBuildError {
         protocol=resp2; remove the protocol parameter or set it to resp3"
     )]
     Resp2DowngradeWithClientSideCaching,
+}
+
+// Manual `Debug`, matching `RedisCacheError` / `RedbCacheError` / `RedbCacheBuildError`.
+// Every payload here is sanitized at construction (see the variant docs), so a derived
+// impl would not leak today; the manual impl keeps the whole error family on the same
+// pattern and gives future variants a single place where redaction is the norm.
+impl std::fmt::Debug for RedisCacheBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connection { source } => f
+                .debug_struct("Connection")
+                .field("source", source)
+                .finish(),
+            Self::Pool { source } => f.debug_struct("Pool").field("source", source).finish(),
+            Self::Build(e) => f.debug_tuple("Build").field(e).finish(),
+            Self::MissingConnectionString { env_key, error } => f
+                .debug_struct("MissingConnectionString")
+                .field("env_key", env_key)
+                .field("error", error)
+                .finish(),
+            #[cfg(feature = "redis_async_cache")]
+            Self::Resp2DowngradeWithClientSideCaching => {
+                f.write_str("Resp2DowngradeWithClientSideCaching")
+            }
+        }
+    }
+}
+
+/// Sanitize a [`std::env::VarError`] before storing it in
+/// [`RedisCacheBuildError::MissingConnectionString`].
+///
+/// `VarError::NotUnicode` carries the raw env-var value — for
+/// `CACHED_REDIS_CONNECTION_STRING` that is the connection string itself,
+/// credentials included — and `VarError`'s `Display`/`Debug` both print it.
+/// Replace the payload with a fixed redaction marker; the variant is kept so
+/// callers can still distinguish "unset" from "invalid unicode".
+fn sanitize_var_error(e: std::env::VarError) -> std::env::VarError {
+    match e {
+        std::env::VarError::NotPresent => std::env::VarError::NotPresent,
+        std::env::VarError::NotUnicode(_) => {
+            std::env::VarError::NotUnicode("[REDACTED connection string]".into())
+        }
+    }
 }
 
 impl RedisCacheBuildError {
@@ -871,17 +972,17 @@ where
         self
     }
 
-    /// Set the prefix for cache keys (required).
+    /// Set the prefix for cache keys (required, non-empty).
     /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
-    /// Empty prefix values are omitted from the generated key.
     ///
     /// **Note:** colons in the prefix are not escaped and can cause key collisions
     /// with differently-split namespace/prefix combinations sharing the same segments.
     ///
-    /// **Note:** the prefix is what scopes `cache_clear` to this logical cache.
-    /// With an empty prefix, `cache_clear` matches `<namespace>:*` and will delete
-    /// entries belonging to every cache that shares the same namespace. Set a unique
-    /// prefix per logical cache to ensure `cache_clear` is scoped correctly.
+    /// **Note:** the prefix is what scopes `cache_clear` to this logical cache, so
+    /// give each logical cache a distinct prefix. An empty prefix is rejected by
+    /// [`build`](Self::build) with `BuildError::InvalidValue`: it would make
+    /// `cache_clear` match `<namespace>:*` and delete entries belonging to every
+    /// cache that shares the same namespace.
     #[must_use]
     pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
         self.prefix = Some(prefix.as_ref().to_string());
@@ -940,12 +1041,16 @@ where
     /// When `false` (the default), a corrupt or otherwise undecodable cached
     /// value on the `cache_get` path is self-healed: the offending entry is
     /// deleted and the call returns `Ok(None)` (a miss), allowing the cached
-    /// function to recompute and overwrite. The previous-value returned by
-    /// `cache_set` is also silently discarded when it cannot be decoded.
+    /// function to recompute and overwrite.
     ///
-    /// When `true`, any deserialization failure returns
+    /// When `true`, a deserialization failure on the read path returns
     /// `Err(RedisCacheError::CacheDeserialization { .. })` immediately, matching
     /// the behavior of versions prior to 3.0.
+    ///
+    /// In **both** modes, the previous value displaced by `cache_set` is silently
+    /// discarded when it cannot be decoded (the write itself succeeds and
+    /// `Ok(None)` is returned): the setting governs reads, not the best-effort
+    /// previous-value decode on writes.
     #[must_use]
     pub fn strict_deserialization(mut self, strict: bool) -> Self {
         self.strict_deserialization = strict;
@@ -968,7 +1073,8 @@ where
             None => std::env::var(ENV_KEY).map(ConnectionString).map_err(|e| {
                 RedisCacheBuildError::MissingConnectionString {
                     env_key: ENV_KEY.to_string(),
-                    error: e,
+                    // `NotUnicode` carries the raw connection string; redact it.
+                    error: sanitize_var_error(e),
                 }
             }),
         }
@@ -1035,9 +1141,10 @@ where
     ///
     /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
     /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: an explicitly-set TTL is zero.
-    /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
-    ///   the prefix are empty. `cache_clear` would otherwise issue `SCAN MATCH *`
-    ///   and delete every key in the Redis database.
+    /// - `Build(BuildError::InvalidValue { field: "prefix", .. })`: the prefix is
+    ///   empty. The prefix scopes `cache_clear` to this cache; with an empty
+    ///   prefix, `cache_clear` would issue `SCAN MATCH <namespace>:*` and delete
+    ///   the entries of every cache sharing the namespace.
     /// - `MissingConnectionString`: no connection string was set and the
     ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
     /// - `Connection` / `Pool`: the Redis client or connection pool could not
@@ -1061,9 +1168,18 @@ where
             }
             None => Duration::ZERO,
         };
-        let prefix = self.prefix.as_deref().unwrap_or_default();
-        if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
-            return Err(RedisCacheBuildError::EmptyScope);
+        // The prefix is what scopes `cache_clear` to this logical cache: with an
+        // empty prefix, `cache_clear` matches `<namespace>:*` and deletes the
+        // entries of every cache sharing the namespace (all of them, under the
+        // shared default namespace). Reject it outright.
+        if self.prefix.as_deref().is_some_and(str::is_empty) {
+            return Err(super::BuildError::InvalidValue {
+                field: "prefix",
+                reason: "prefix must be non-empty: it is what scopes cache_clear to this \
+                         cache; with an empty prefix cache_clear would delete every key \
+                         under the namespace",
+            }
+            .into());
         }
         let connection_string = self.resolve_connection_string()?;
         let pool = self.create_pool()?;
@@ -1082,8 +1198,9 @@ where
 
 /// Cache store backed by redis
 ///
-/// Values have a ttl applied and enforced by redis.
-/// Uses an r2d2 connection pool under the hood.
+/// The TTL is optional and enforced by redis itself: entries built with a TTL
+/// expire server-side; entries built without one persist until explicitly
+/// removed. Uses an r2d2 connection pool under the hood.
 pub struct RedisCache<K, V> {
     pub(super) ttl: Mutex<Duration>,
     pub(super) refresh: AtomicBool,
@@ -1830,18 +1947,17 @@ mod async_redis {
             self
         }
 
-        /// Set the prefix for cache keys (required).
+        /// Set the prefix for cache keys (required, non-empty).
         /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
-        /// Empty prefix values are omitted from the generated key.
         ///
         /// **Note:** colons in the prefix are not escaped and can cause key collisions
         /// with differently-split namespace/prefix combinations sharing the same segments.
         ///
         /// **Note:** the prefix is what scopes `async_cache_clear` to this logical
-        /// cache. With an empty prefix, `async_cache_clear` matches `<namespace>:*`
-        /// and will delete entries belonging to every cache that shares the same
-        /// namespace. Set a unique prefix per logical cache to ensure
-        /// `async_cache_clear` is scoped correctly.
+        /// cache, so give each logical cache a distinct prefix. An empty prefix is
+        /// rejected by [`build`](Self::build) with `BuildError::InvalidValue`: it
+        /// would make `async_cache_clear` match `<namespace>:*` and delete entries
+        /// belonging to every cache that shares the same namespace.
         #[must_use]
         pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
             self.prefix = Some(prefix.as_ref().to_string());
@@ -1890,8 +2006,13 @@ mod async_redis {
         ///
         /// When `false` (the default), a corrupt or undecodable cached value on the
         /// `async_cache_get` path is self-healed: the entry is deleted and the call
-        /// returns `Ok(None)`. When `true`, any deserialization failure returns
-        /// `Err(RedisCacheError::CacheDeserialization { .. })`.
+        /// returns `Ok(None)`. When `true`, a deserialization failure on the read
+        /// path returns `Err(RedisCacheError::CacheDeserialization { .. })`.
+        ///
+        /// In **both** modes, the previous value displaced by `async_cache_set` is
+        /// silently discarded when it cannot be decoded (the write itself succeeds
+        /// and `Ok(None)` is returned): the setting governs reads, not the
+        /// best-effort previous-value decode on writes.
         #[must_use]
         pub fn strict_deserialization(mut self, strict: bool) -> Self {
             self.strict_deserialization = strict;
@@ -1915,7 +2036,8 @@ mod async_redis {
                 None => std::env::var(ENV_KEY).map(ConnectionString).map_err(|e| {
                     RedisCacheBuildError::MissingConnectionString {
                         env_key: ENV_KEY.to_string(),
-                        error: e,
+                        // `NotUnicode` carries the raw connection string; redact it.
+                        error: super::sanitize_var_error(e),
                     }
                 }),
             }
@@ -2114,9 +2236,10 @@ mod async_redis {
         ///
         /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
         /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: an explicitly-set TTL is zero.
-        /// - `EmptyScope`: both the namespace (after trimming trailing colons) and
-        ///   the prefix are empty. `async_cache_clear` would otherwise issue
-        ///   `SCAN MATCH *` and delete every key in the Redis database.
+        /// - `Build(BuildError::InvalidValue { field: "prefix", .. })`: the prefix
+        ///   is empty. The prefix scopes `async_cache_clear` to this cache; with an
+        ///   empty prefix, `async_cache_clear` would issue `SCAN MATCH <namespace>:*`
+        ///   and delete the entries of every cache sharing the namespace.
         /// - `MissingConnectionString`: no connection string was set and the
         ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
         /// - `Connection`: the Redis client or the selected connection (multiplexed,
@@ -2140,9 +2263,18 @@ mod async_redis {
                 }
                 None => Duration::ZERO,
             };
-            let prefix = self.prefix.as_deref().unwrap_or_default();
-            if self.namespace.trim_end_matches(':').is_empty() && prefix.is_empty() {
-                return Err(RedisCacheBuildError::EmptyScope);
+            // The prefix is what scopes `async_cache_clear` to this logical cache:
+            // with an empty prefix it matches `<namespace>:*` and deletes the
+            // entries of every cache sharing the namespace (all of them, under the
+            // shared default namespace). Reject it outright.
+            if self.prefix.as_deref().is_some_and(str::is_empty) {
+                return Err(super::super::BuildError::InvalidValue {
+                    field: "prefix",
+                    reason: "prefix must be non-empty: it is what scopes cache_clear to this \
+                             cache; with an empty prefix cache_clear would delete every key \
+                             under the namespace",
+                }
+                .into());
             }
             let connection_string = self.resolve_connection_string()?;
             let connection = self.create_connection().await?;
@@ -2161,7 +2293,9 @@ mod async_redis {
 
     /// Async cache store backed by redis.
     ///
-    /// Values have a TTL applied and enforced by Redis.
+    /// The TTL is optional and enforced by Redis itself: entries built with a
+    /// TTL expire server-side; entries built without one persist until
+    /// explicitly removed.
     /// Uses a `redis::aio::MultiplexedConnection` by default, or a
     /// `redis::aio::ConnectionManager` when the cache was built with
     /// [`AsyncRedisCacheBuilder::connection_manager(true)`](AsyncRedisCacheBuilder::connection_manager)
@@ -2589,18 +2723,25 @@ mod async_redis {
                 .as_millis()
         }
 
-        // No Redis server needed -- verifies the empty-scope guard in async `build()`.
+        // No Redis server needed -- verifies the empty-prefix guard in async `build()`.
         #[tokio::test]
-        async fn async_empty_namespace_and_prefix_is_rejected() {
+        async fn async_empty_prefix_is_rejected() {
             let result = AsyncRedisCacheBuilder::<String, String>::new()
                 .prefix("")
                 .ttl(Duration::from_secs(1))
-                .namespace("")
                 .build()
                 .await;
             assert!(
-                matches!(result, Err(RedisCacheBuildError::EmptyScope)),
-                "expected EmptyScope"
+                matches!(
+                    result,
+                    Err(RedisCacheBuildError::Build(
+                        crate::stores::BuildError::InvalidValue {
+                            field: "prefix",
+                            ..
+                        }
+                    ))
+                ),
+                "expected InvalidValue for empty prefix"
             );
         }
 
