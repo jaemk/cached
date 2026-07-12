@@ -382,9 +382,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `ty`: (optional, string type) explicitly specify the cache store type to use. When `ty` is
 ///   specified, `create` must also be specified (the macro cannot construct a custom store type without
 ///   a matching `create` block; omitting `create` is a compile error on every path).
-/// - `cache_prefix_block`: (optional, string expr; **redis path only**) specify an expression used to
+/// - `cache_prefix_block`: (optional, expr; **redis path only**) specify an expression used to
 ///   create the string used as a prefix for redis keys for this function, e.g.
-///   `cache_prefix_block = r##"{ "my_prefix" }"##`. Only meaningful when `redis = true` without a
+///   `cache_prefix_block = { "my_prefix" }` (or the legacy quoted form
+///   `cache_prefix_block = r##"{ "my_prefix" }"##`). Only meaningful when `redis = true` without a
 ///   `create` block; has no effect on the in-memory or disk paths, and is rejected when combined with
 ///   `create` (a `create` block constructs the entire store, making the prefix irrelevant).
 ///   When not specified, the prefix defaults to `"cached::macros::concurrent_cached::{fn_name}"`.
