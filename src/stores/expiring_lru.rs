@@ -79,7 +79,7 @@ pub trait Expires {
 /// behavior here could be folded into [`LruCache`] via a specialized `Cached<K, V>` impl
 /// for `V: Expires`, eliminating this separate type. Until then, the two must remain
 /// distinct because overlapping blanket impls are not allowed on stable Rust.
-pub struct ExpiringLruCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
+pub struct ExpiringLruCache<K, V, S = DefaultHashBuilder> {
     pub(super) store: LruCache<K, V, S>,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
@@ -87,7 +87,7 @@ pub struct ExpiringLruCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K: Hash + Eq, V: Expires, S> std::fmt::Debug for ExpiringLruCache<K, V, S> {
+impl<K, V, S> std::fmt::Debug for ExpiringLruCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExpiringLruCache")
             .field("hits", &self.hits.load(Ordering::Relaxed))
@@ -105,7 +105,7 @@ impl<K: Hash + Eq, V: Expires, S> std::fmt::Debug for ExpiringLruCache<K, V, S> 
 impl<K, V, S> PartialEq for ExpiringLruCache<K, V, S>
 where
     K: Clone + Hash + Eq,
-    V: Expires + PartialEq,
+    V: PartialEq,
     S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -116,7 +116,7 @@ where
 impl<K, V, S> Eq for ExpiringLruCache<K, V, S>
 where
     K: Clone + Hash + Eq,
-    V: Expires + Eq,
+    V: Eq,
     S: BuildHasher,
 {
 }
@@ -124,7 +124,7 @@ where
 impl<K, V, S> Clone for ExpiringLruCache<K, V, S>
 where
     K: Clone + Hash + Eq,
-    V: Expires + Clone,
+    V: Clone,
     S: Clone,
 {
     fn clone(&self) -> Self {
@@ -145,13 +145,13 @@ where
 /// `max_size` bounds the entry count via LRU. For a single global TTL applied to every entry,
 /// use [`LruTtlCache`](crate::stores::LruTtlCache) instead.
 #[doc(alias = "ttl")]
-pub struct ExpiringLruCacheBuilder<K, V: Expires, S = DefaultHashBuilder> {
+pub struct ExpiringLruCacheBuilder<K, V, S = DefaultHashBuilder> {
     size: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
     hasher: S,
 }
 
-impl<K, V: Expires> Default for ExpiringLruCacheBuilder<K, V, DefaultHashBuilder> {
+impl<K, V> Default for ExpiringLruCacheBuilder<K, V, DefaultHashBuilder> {
     fn default() -> Self {
         Self {
             size: None,
@@ -161,7 +161,7 @@ impl<K, V: Expires> Default for ExpiringLruCacheBuilder<K, V, DefaultHashBuilder
     }
 }
 
-impl<K, V: Expires, S> ExpiringLruCacheBuilder<K, V, S> {
+impl<K, V, S> ExpiringLruCacheBuilder<K, V, S> {
     /// Set the maximum number of entries.
     #[doc(alias = "size")]
     #[doc(alias = "capacity")]
@@ -522,6 +522,10 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
             other => other,
         }
     }
+    /// Removes the entry and returns the value only if it is still live;
+    /// an expired value is removed but reported as `None`. Use
+    /// [`cache_remove_entry`](Cached::cache_remove_entry) to receive the
+    /// value regardless of expiry.
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
@@ -531,6 +535,8 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
             .and_then(|(_, v)| if v.is_expired() { None } else { Some(v) })
     }
 
+    /// Removes the entry and returns it **regardless of expiry** (unlike
+    /// [`cache_remove`](Cached::cache_remove), which filters expired values).
     fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,

@@ -71,12 +71,15 @@ use proc_macro::TokenStream;
 ///   hash into a bucket, so two different keys may share a bucket and serialize unnecessarily
 ///   (false sharing). Increase this if you observe contention under high concurrency - a value
 ///   around 2-4x your expected peak concurrency eliminates most false sharing. Must be > 0.
+///   Only valid together with `sync_writes = "by_key"`; setting it with any other `sync_writes`
+///   mode is a compile error (the value would otherwise be silently ignored).
 /// - `sync_lock`: (optional, string) choose the generated cache lock. Defaults to `"rwlock"`. Use `"mutex"`
 ///   to force a mutex. `unsync_reads = true` requires an RwLock.
 /// - `unsync_reads`: (optional, bool) use `CachedRead::cache_get_read` under a shared read lock for the initial
 ///   cache lookup, while keeping writes synchronized. This only works for stores that implement `CachedRead`;
-///   recency-updating or refresh-on-hit stores intentionally do not. For non-mutating diagnostic lookups,
-///   use the separate `CachedPeek` trait directly on stores.
+///   recency-updating or refresh-on-hit stores intentionally do not. The built-in compliant stores are
+///   `UnboundCache` (the default) and `TtlSortedCache`; a custom `ty` may also implement `CachedRead`.
+///   For non-mutating diagnostic lookups, use the separate `CachedPeek` trait directly on stores.
 /// - `ty`: (optional, string type) The cache store type to use. Defaults to `UnboundCache`.
 ///   When `max_size` is specified, defaults to `LruCache`.
 ///   When `ttl` is specified, defaults to `TtlCache`.
@@ -108,11 +111,14 @@ use proc_macro::TokenStream;
 ///   to be named `Return<T>` passes the attribute check but then fails to
 ///   compile in the generated body (it calls `::cached::Return::new` /
 ///   `.set_was_cached`). Use a different name for any non-`cached` `Return` type.
-/// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead refresh the recently expired `Ok` value.
+/// - `result_fallback`: (optional, bool) If your function returns a `Result` and it fails, the cache will instead serve the expired `Ok` value.
 ///   In other words, refreshes are best-effort - returning `Ok` refreshes as usual but `Err` falls back to the last `Ok`.
-///   **Note:** the stale value's TTL is refreshed on *every* `Err` call - if the underlying
+///   **Note (TTL stores):** the stale value's TTL is refreshed on *every* `Err` call - if the underlying
 ///   operation stays down indefinitely, the stale entry will never expire. `ttl` bounds staleness
 ///   under normal (transient) failure; it does not bound it under permanent failure.
+///   **Note (`expires` stores):** there is no store TTL to refresh; the stale entry is re-stored
+///   as-is and each value's own `is_expired()` continues to govern access, so the stale value keeps
+///   being served while it reports itself expired and the operation keeps failing.
 ///   This is useful, for example, for keeping the last successful result of a network operation even during network disconnects.
 ///   *Note*, this option requires the cache type to implement `CloneCached`. The compatible built-in options are:
 ///   `ttl`, `ttl_secs`, or `ttl_millis` (uses `TtlCache`), `max_size` + `ttl`/`ttl_secs`/`ttl_millis` (uses `LruTtlCache`), and
@@ -194,8 +200,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   the `{fn}_prime_cache` companion is not generated for `in_impl` methods, because the cache static
 ///   is function-local and cannot be shared with a separate prime sibling. A `{fn}_no_cache` companion
 ///   (the uncached origin function) is generated as a `#[doc(hidden)]` impl method and inherits the
-///   method's visibility, so a `pub` cached method exposes a `pub {fn}_no_cache` cache-bypass sibling
-///   on the same `impl`.
+///   method's visibility (overridable with `companions_vis`), so a `pub` cached method exposes a
+///   `pub {fn}_no_cache` cache-bypass sibling on the same `impl`.
 /// - `sync_writes`: (optional, bool or string) specify whether to synchronize the execution of writing of uncached values.
 ///   **Default: `"disabled"`** - when not specified, uncached calls are not synchronized.
 ///   When set to `true` or `"default"`, uncached execution is synchronized by locking the whole
@@ -372,7 +378,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `expires`: (optional, bool) select a per-value expiry store. The cached value type must
 ///   implement the `Expires` trait. Without `max_size`, selects `ShardedExpiringCache` (unbounded);
 ///   with `max_size = N`, selects `ShardedExpiringLruCache` (LRU-bounded). Mutually exclusive with
-///   `ttl`, `redis`, `disk`, `ty`, `create`, `refresh`, `cache_none`, and `cache_err`. May be
+///   `ttl`, `redis`, `disk`, `ty`, `create`, `refresh`, `result_fallback`, `cache_none`, and `cache_err`. May be
 ///   combined with `with_cached_flag`; in that case the inner `T` of `Return<T>` (not `Return<T>`
 ///   itself) must implement `Expires`. When the function returns `Option<T>`, `None` is not cached
 ///   by default (implicit smart-option), and the inner `T` (not `Option<T>`)

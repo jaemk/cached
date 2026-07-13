@@ -397,8 +397,8 @@ use cached::LruCache;
 /// Use an explicit cache-type with a custom creation block and custom cache-key generating block
 #[cached(
     ty = "LruCache<String, usize>",
-    create = "{ LruCache::builder().max_size(100).build().unwrap() }",
-    convert = r#"{ format!("{}{}", a, b) }"#
+    create = LruCache::builder().max_size(100).build().unwrap(),
+    convert = { format!("{}{}", a, b) }
 )]
 fn keyed(a: &str, b: &str) -> usize {
     let size = a.len() + b.len();
@@ -682,7 +682,7 @@ pub use stores::{
     ConnectionString, RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
 #[cfg(feature = "time_stores")]
-#[doc(hidden)]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use stores::{HasEvict, NoEvict};
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
@@ -831,8 +831,10 @@ pub mod prelude {
         ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires, SerializeCached,
     };
 
-    #[cfg(feature = "time_stores")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+    // Unconditional, like `ConcurrentCacheTtl` above: the trait itself is not
+    // feature-gated (only the built-in stores implementing it require
+    // `time_stores`), so custom-store authors get it from the prelude in any
+    // feature configuration.
     pub use crate::CacheTtl;
 
     #[cfg(feature = "async_core")]
@@ -1430,6 +1432,7 @@ pub struct CacheMetrics {
 
 impl CacheMetrics {
     /// Return the cache hit ratio as a value in `[0.0, 1.0]`, or `None` if no lookups have occurred.
+    #[must_use]
     pub fn hit_ratio(&self) -> Option<f64> {
         let hits = self.hits?;
         let misses = self.misses?;

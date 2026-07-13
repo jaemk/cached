@@ -203,6 +203,9 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedLruTtlCacheBase<K
         let n = self.inner.shards.len();
         let shards = (0..n)
             .map(|i| {
+                // Load the hit/miss counters under the read lock so the metrics snapshot is
+                // consistent with the entry snapshot (B4: loading after drop(guard) could yield
+                // counters newer than the cloned entries).
                 let guard = self.inner.shards[i].lock.read();
                 let store_copy = guard.clone();
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);
@@ -988,8 +991,9 @@ impl<K, V, E, H> ShardedLruTtlCacheBuilder<K, V, E, H> {
 impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, NoEvict, H> {
     /// Set a callback invoked when an entry is evicted by LRU capacity pressure,
     /// TTL-expiry sweeps via [`evict`](ShardedLruTtlCacheBase::evict), explicit
-    /// [`cache_remove`](ConcurrentCached::cache_remove), or
-    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    /// [`cache_remove`](ConcurrentCached::cache_remove) or
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry), and on
+    /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
     /// Does **not** fire on [`clear`](ShardedLruTtlCacheBase::clear);
     /// use [`cache_clear_with_on_evict`](ShardedLruTtlCacheBase::cache_clear_with_on_evict) to opt in.
     ///

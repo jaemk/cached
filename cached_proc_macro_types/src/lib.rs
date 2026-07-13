@@ -18,7 +18,9 @@ impl<T> Return<T> {
         self.was_cached
     }
 
-    /// Sets the `was_cached` flag. Used by generated macro code.
+    /// Sets the `was_cached` flag. Used by generated macro code; not part of
+    /// the supported public API.
+    #[doc(hidden)]
     pub fn set_was_cached(&mut self, was_cached: bool) {
         self.was_cached = was_cached;
     }

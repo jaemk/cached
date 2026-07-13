@@ -482,6 +482,9 @@ where
                 })
             };
             if matches!(&old, Some((_, _, true))) {
+                // `guard.evictions` is the inner LRU counter (unlike expired-on-access removals
+                // in `cache_get`, which use the outer `self.inner.evictions` because `pop_raw`
+                // bypasses the inner counter). Both feed the combined sum in `metrics()`.
                 guard.evictions.fetch_add(1, Ordering::Relaxed);
             }
             old
@@ -498,6 +501,10 @@ where
         }
     }
 
+    /// Removes the entry and returns the value only if it is still live;
+    /// an expired value is removed but reported as `Ok(None)`. Use
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry) to
+    /// receive the value regardless of expiry.
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let removed = {
@@ -521,6 +528,9 @@ where
         }
     }
 
+    /// Removes the entry and returns it **regardless of expiry** (unlike
+    /// [`cache_remove`](ConcurrentCached::cache_remove), which filters
+    /// expired values).
     fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         let shard = self.shard_of(k);
         let removed = {
@@ -660,7 +670,7 @@ where
 /// while `max_size` bounds the entry count via LRU. For a single global TTL applied to every
 /// entry, use [`ShardedLruTtlCache`](crate::ShardedLruTtlCache) instead.
 #[doc(alias = "ttl")]
-pub struct ShardedExpiringLruCacheBuilder<K, V: Expires, H = DefaultShardHasher> {
+pub struct ShardedExpiringLruCacheBuilder<K, V, H = DefaultShardHasher> {
     shards: Option<usize>,
     max_size: Option<usize>,
     per_shard_max_size: Option<usize>,
@@ -670,7 +680,7 @@ pub struct ShardedExpiringLruCacheBuilder<K, V: Expires, H = DefaultShardHasher>
     _v: std::marker::PhantomData<V>,
 }
 
-impl<K, V: Expires> Default for ShardedExpiringLruCacheBuilder<K, V, DefaultShardHasher> {
+impl<K, V> Default for ShardedExpiringLruCacheBuilder<K, V, DefaultShardHasher> {
     fn default() -> Self {
         Self {
             shards: None,
@@ -684,7 +694,7 @@ impl<K, V: Expires> Default for ShardedExpiringLruCacheBuilder<K, V, DefaultShar
     }
 }
 
-impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
+impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// Set the requested total capacity (divided across shards via `div_ceil`).
     /// Mutually exclusive with [`per_shard_max_size`](Self::per_shard_max_size).
     ///
@@ -852,7 +862,7 @@ impl<K, V: Expires, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     ) -> Result<ShardedExpiringLruCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
-        V: Clone,
+        V: Clone + Expires,
         H: ShardHasher<K>,
     {
         let new_cache = self.build()?;
