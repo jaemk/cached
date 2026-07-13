@@ -5,6 +5,12 @@
 ### Breaking Changes
 
 - `#[cached]` rejects an explicit `sync_writes_buckets` when `sync_writes` is not `"by_key"` with a pointed compile error. The value was previously accepted and silently ignored (buckets only exist on the `by_key` path); `#[once]` already rejected the same inert combination.
+- `RedbCacheBuilder::disk_directory` renamed to `disk_dir`, matching the `disk_dir` attribute on `#[concurrent_cached]`. Breaking only vs the 3.0 rcs (the method did not exist in 2.x under either name).
+
+### Added
+
+- `ShardedLruCacheBase`, `ShardedLruTtlCacheBase`, and `ShardedExpiringLruCacheBase` (and their default-hasher aliases) now support runtime capacity resizing via `set_max_size(&self, usize) -> Option<usize>` and `try_set_max_size(&self, usize) -> Result<Option<usize>, SetMaxSizeError>`. Shrinking evicts LRU-excess entries per shard, fires `on_evict`, and increments the eviction counter; the same ceiling-division-plus-16-per-shard-floor policy the builders use is applied; resize is not atomic across shards (matches the documented `set_ttl` behavior).
+- New runnable example `examples/resilience.rs` covering `sync_writes = "by_key"`, `result_fallback`, and `force_refresh`.
 
 ### Changed
 
@@ -12,7 +18,7 @@
 - `ConnectionString` derives `PartialEq`, `Eq`, and `Hash` (comparing the raw unredacted URL).
 - `NoEvict` / `HasEvict` derive `Clone`, `Copy`, `Debug`, and `Default`, and are documented at the crate root (previously `#[doc(hidden)]` there but documented at `cached::stores`). They appear in `LruTtlCacheBuilder` / `ShardedLruTtlCacheBuilder` signatures, so they are findable on docs.rs now.
 - `cached::prelude` re-exports `CacheTtl` unconditionally, matching `ConcurrentCacheTtl` (the trait was never feature-gated; only the built-in stores implementing it require `time_stores`).
-- `Return::set_was_cached` is `#[doc(hidden)]` (macro plumbing, not supported public API).
+- `Return::set_was_cached` is `#[doc(hidden)]` (macro plumbing, not supported public API). The method remains `pub` and callable (no compile breakage); it is de-documented because only macro-generated code should set the flag -- use `Return::new` to construct a value and `was_cached()` to read the flag.
 - `#[must_use]` added to `CacheMetrics::hit_ratio` and the `iter_order` / `key_order` / `value_order` accessors on `LruCache` / `LruTtlCache`.
 
 ### Documentation
@@ -25,6 +31,8 @@
 - `#[cached]`'s `unsync_reads` doc names the built-in `CachedRead` stores (`UnboundCache`, `TtlSortedCache`); `result_fallback` distinguishes TTL-store refresh semantics from `expires`-store behavior; `#[once]`'s `in_impl` doc notes `companions_vis` also overrides the `_no_cache` sibling's visibility.
 - The crate-doc custom-store example uses the unquoted `create` / `convert` forms.
 - The error-source downcast tests are labeled as pinning non-contract behavior (the concrete source types stay out of the semver contract).
+- The `#[concurrent_cached(redis = true)]` shorthand now appears in the macro quick-reference table.
+- `Cached::cache_capacity` / `ConcurrentCacheBase::cache_capacity` docs clarify that capacity means the eviction bound (`max_size`), not pre-allocated memory.
 
 ## [3.0.0-rc.7 / cached_proc_macro 3.0.0-rc.7] - 2026-07-12
 

@@ -14,6 +14,7 @@ CACHED_BASIC_EXAMPLES = async_std \
                         basic \
                         expires_per_key \
                         kitchen_sink \
+                        resilience \
                         struct_method \
                         tokio \
                         sharded \
