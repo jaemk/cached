@@ -328,6 +328,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     }
 
     /// Return all entries in current LRU order (most-recently-used first) as a `Vec` of `(K, V)` pairs.
+    #[must_use]
     pub fn iter_order(&self) -> Vec<(K, V)>
     where
         K: Clone,
@@ -338,6 +339,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
 
     /// Return a `Vec` of keys in the current order from most
     /// to least recently used.
+    #[must_use]
     pub fn key_order(&self) -> Vec<K>
     where
         K: Clone,
@@ -347,6 +349,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
 
     /// Return a `Vec` of values in the current order from most
     /// to least recently used.
+    #[must_use]
     pub fn value_order(&self) -> Vec<V>
     where
         V: Clone,

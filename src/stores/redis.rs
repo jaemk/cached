@@ -722,7 +722,10 @@ mod legacy_json_version_gate_tests {
 /// `[REDACTED connection string]`, so the value is safe to log or include in error messages.
 /// The raw URL (including any password) is available via [`reveal`](Self::reveal) and must not
 /// be logged or exposed in error messages.
-#[derive(Clone)]
+///
+/// Equality and hashing compare the raw (unredacted) URL, so two values compare
+/// equal exactly when their underlying connection strings match.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ConnectionString(String);
 
 impl ConnectionString {
@@ -1399,6 +1402,12 @@ impl RedisCacheError {
 /// On-disk schema version stamped into every value written by this store.
 /// Shared by [`CachedRedisValue::new`] and [`CachedRedisValueRef::new`] so the
 /// two constructors cannot drift. The field type is `Option<u64>`.
+///
+/// Stability: the on-wire encoding (MessagePack, named fields `value`/`version`)
+/// is stable for the 3.x series — entries written by any 3.x release remain
+/// readable by every later 3.x release. Any schema change bumps this version,
+/// keeps a backward-read path within the same major version, and is otherwise
+/// reserved for a major release.
 const REDIS_VALUE_VERSION: Option<u64> = Some(1);
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1824,6 +1833,13 @@ mod async_redis {
     /// `redis_smol_rustls`. The capability features `redis_async_cache` /
     /// `redis_connection_manager` are additive opt-ins layered on top of a runtime; they do not
     /// provide `AsyncRedisCache` on their own.
+    ///
+    /// **No connection-pool settings:** unlike [`RedisCacheBuilder`](crate::stores::RedisCacheBuilder),
+    /// there are no `connection_pool_*` methods here. The async cache does not use an r2d2
+    /// pool; it multiplexes all operations over a single pipelined connection (or the
+    /// auto-reconnecting connection manager when enabled via
+    /// `connection_manager(true)`), so pool sizing does not apply. Throughput is governed
+    /// by redis pipelining rather than a pool bound.
     #[cfg_attr(
         docsrs,
         doc(cfg(any(
@@ -3612,8 +3628,10 @@ mod error_source_tests {
         );
     }
 
-    /// `RedisCacheError::CacheDeserialization` must expose its inner
-    /// `rmp_serde::decode::Error` via `Error::source()`.
+    /// `RedisCacheError::CacheDeserialization` must expose its inner decode
+    /// error via `Error::source()`. The downcast below pins current behavior
+    /// only — the concrete source type is non-contract (see the semver note on
+    /// the error type) and may change with the codec in a major release.
     #[test]
     fn cache_deserialization_has_source() {
         // Construct a decode error by trying to decode garbage bytes.
@@ -3647,8 +3665,10 @@ mod error_source_tests {
         }
     }
 
-    /// `RedisCacheError::CacheSerialization` must expose its inner
-    /// `rmp_serde::encode::Error` via `Error::source()`.
+    /// `RedisCacheError::CacheSerialization` must expose its inner encode
+    /// error via `Error::source()`. The downcast below pins current behavior
+    /// only — the concrete source type is non-contract (see the semver note on
+    /// the error type) and may change with the codec in a major release.
     #[test]
     fn cache_serialization_has_source() {
         // Construct an encode error via a type that fails to serialize.

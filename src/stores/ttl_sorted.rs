@@ -219,8 +219,8 @@ pub struct TtlSortedCache<K, V, S = DefaultHashBuilder> {
     // to support retaining/evicting without full traversal
     keys: BTreeSet<Stamped<K>>,
 
-    pub(crate) ttl: Duration,
-    pub(crate) size_limit: Option<usize>,
+    pub(super) ttl: Duration,
+    pub(super) size_limit: Option<usize>,
     // Preallocation hint captured at build so `cache_reset` can shrink back to
     // it instead of to zero, matching `TtlCache` (CORE-8).
     pub(super) initial_capacity: Option<usize>,

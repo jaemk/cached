@@ -51,7 +51,7 @@ use {super::CachedGetOrSetAsync, std::collections::hash_map::Entry, std::future:
 /// ```
 ///
 /// Note: This cache is in-memory only.
-pub struct ExpiringCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
+pub struct ExpiringCache<K, V, S = DefaultHashBuilder> {
     pub(super) store: UnboundCache<K, V, S>,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
@@ -59,7 +59,7 @@ pub struct ExpiringCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
     pub(super) on_evict: Option<super::OnEvict<K, V>>,
 }
 
-impl<K: Hash + Eq, V: Expires, S> std::fmt::Debug for ExpiringCache<K, V, S> {
+impl<K, V, S> std::fmt::Debug for ExpiringCache<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExpiringCache")
             .field("hits", &self.hits.load(Ordering::Relaxed))
@@ -76,7 +76,7 @@ impl<K: Hash + Eq, V: Expires, S> std::fmt::Debug for ExpiringCache<K, V, S> {
 impl<K, V, S> PartialEq for ExpiringCache<K, V, S>
 where
     K: Hash + Eq,
-    V: Expires + PartialEq,
+    V: PartialEq,
     S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -87,7 +87,7 @@ where
 impl<K, V, S> Eq for ExpiringCache<K, V, S>
 where
     K: Hash + Eq,
-    V: Expires + Eq,
+    V: Eq,
     S: BuildHasher,
 {
 }
@@ -95,7 +95,7 @@ where
 impl<K, V, S> Clone for ExpiringCache<K, V, S>
 where
     K: Clone + Hash + Eq,
-    V: Expires + Clone,
+    V: Clone,
     S: Clone,
 {
     fn clone(&self) -> Self {
@@ -116,13 +116,13 @@ where
 /// single global TTL applied to every entry, use [`TtlCache`](crate::stores::TtlCache) or
 /// [`LruTtlCache`](crate::stores::LruTtlCache) instead.
 #[doc(alias = "ttl")]
-pub struct ExpiringCacheBuilder<K, V: Expires, S = DefaultHashBuilder> {
+pub struct ExpiringCacheBuilder<K, V, S = DefaultHashBuilder> {
     capacity: Option<usize>,
     on_evict: Option<super::OnEvict<K, V>>,
     hasher: S,
 }
 
-impl<K, V: Expires> Default for ExpiringCacheBuilder<K, V, DefaultHashBuilder> {
+impl<K, V> Default for ExpiringCacheBuilder<K, V, DefaultHashBuilder> {
     fn default() -> Self {
         Self {
             capacity: None,
@@ -132,7 +132,7 @@ impl<K, V: Expires> Default for ExpiringCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
-impl<K, V: Expires, S> ExpiringCacheBuilder<K, V, S> {
+impl<K, V, S> ExpiringCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional).
     #[must_use]
     pub fn initial_capacity(mut self, capacity: usize) -> Self {
@@ -448,6 +448,10 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         }
     }
 
+    /// Removes the entry and returns the value only if it is still live;
+    /// an expired value is removed but reported as `None`. Use
+    /// [`cache_remove_entry`](Cached::cache_remove_entry) to receive the
+    /// value regardless of expiry.
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
@@ -457,6 +461,8 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
             .and_then(|(_, v)| if v.is_expired() { None } else { Some(v) })
     }
 
+    /// Removes the entry and returns it **regardless of expiry** (unlike
+    /// [`cache_remove`](Cached::cache_remove), which filters expired values).
     fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,

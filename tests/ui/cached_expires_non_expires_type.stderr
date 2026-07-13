@@ -4,9 +4,44 @@ error[E0277]: the trait bound `u32: Expires` is not satisfied
 3 | #[cached(expires = true)]
   | ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Expires` is not implemented for `u32`
   |
-note: required by a bound in `ExpiringCache`
+note: required by a bound in `ExpiringCache::<K, V>::builder`
  --> src/stores/expiring.rs
   |
-  | pub struct ExpiringCache<K: Hash + Eq, V: Expires, S = DefaultHashBuilder> {
-  |                                           ^^^^^^^ required by this bound in `ExpiringCache`
+  | impl<K: Hash + Eq, V: Expires> ExpiringCache<K, V> {
+  |                       ^^^^^^^ required by this bound in `ExpiringCache::<K, V>::builder`
+...
+  |     pub fn builder() -> ExpiringCacheBuilder<K, V> {
+  |            ------- required by a bound in this associated function
+  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `cache_get` exists for struct `lock_api::rwlock::RwLockWriteGuard<'_, parking_lot::raw_rwlock::RawRwLock, ExpiringCache<u32, u32>>`, but its trait bounds were not satisfied
+ --> tests/ui/cached_expires_non_expires_type.rs:3:1
+  |
+3 | #[cached(expires = true)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
+  |
+ ::: src/stores/expiring.rs
+  |
+  | pub struct ExpiringCache<K, V, S = DefaultHashBuilder> {
+  | ------------------------------------------------------ doesn't satisfy `ExpiringCache<u32, u32>: Cached<u32, u32>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `u32: Expires`
+          which is required by `ExpiringCache<u32, u32>: Cached<u32, u32>`
+  = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `cache_set` exists for struct `lock_api::rwlock::RwLockWriteGuard<'_, parking_lot::raw_rwlock::RawRwLock, ExpiringCache<u32, u32>>`, but its trait bounds were not satisfied
+ --> tests/ui/cached_expires_non_expires_type.rs:3:1
+  |
+3 | #[cached(expires = true)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
+  |
+ ::: src/stores/expiring.rs
+  |
+  | pub struct ExpiringCache<K, V, S = DefaultHashBuilder> {
+  | ------------------------------------------------------ doesn't satisfy `ExpiringCache<u32, u32>: Cached<u32, u32>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `u32: Expires`
+          which is required by `ExpiringCache<u32, u32>: Cached<u32, u32>`
   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

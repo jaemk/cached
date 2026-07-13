@@ -495,6 +495,10 @@ where
         }
     }
 
+    /// Removes the entry and returns the value only if it is still live;
+    /// an expired value is removed but reported as `Ok(None)`. Use
+    /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry) to
+    /// receive the value regardless of expiry.
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let removed = shard.lock.write().remove_entry(k);
@@ -513,6 +517,9 @@ where
         }
     }
 
+    /// Removes the entry and returns it **regardless of expiry** (unlike
+    /// [`cache_remove`](ConcurrentCached::cache_remove), which filters
+    /// expired values).
     fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
         let shard = self.shard_of(k);
         let removed = shard.lock.write().remove_entry(k);
@@ -600,7 +607,7 @@ where
 /// [`ShardedTtlCache`](crate::ShardedTtlCache) or
 /// [`ShardedLruTtlCache`](crate::ShardedLruTtlCache) instead.
 #[doc(alias = "ttl")]
-pub struct ShardedExpiringCacheBuilder<K, V: Expires, H = DefaultShardHasher> {
+pub struct ShardedExpiringCacheBuilder<K, V, H = DefaultShardHasher> {
     shards: Option<usize>,
     hasher: Option<H>,
     on_evict: Option<OnEvict<K, V>>,
@@ -608,7 +615,7 @@ pub struct ShardedExpiringCacheBuilder<K, V: Expires, H = DefaultShardHasher> {
     _v: std::marker::PhantomData<V>,
 }
 
-impl<K, V: Expires> Default for ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
+impl<K, V> Default for ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
     fn default() -> Self {
         Self {
             shards: None,
@@ -620,7 +627,7 @@ impl<K, V: Expires> Default for ShardedExpiringCacheBuilder<K, V, DefaultShardHa
     }
 }
 
-impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
+impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
     /// Set the number of shards (rounded up to the next power of two).
     #[must_use]
     pub fn shards(mut self, shards: usize) -> Self {
@@ -688,7 +695,7 @@ impl<K, V: Expires, H> ShardedExpiringCacheBuilder<K, V, H> {
     ) -> Result<ShardedExpiringCacheBase<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
-        V: Clone,
+        V: Clone + Expires,
         H: ShardHasher<K>,
     {
         let new_cache = self.build()?;

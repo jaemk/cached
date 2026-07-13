@@ -197,6 +197,9 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedTtlCacheBase<K, V
         let n = self.inner.shards.len();
         let shards = (0..n)
             .map(|i| {
+                // Load the hit/miss counters under the read lock so the metrics snapshot is
+                // consistent with the entry snapshot (B4: loading after drop(guard) could yield
+                // counters newer than the cloned entries).
                 let guard = self.inner.shards[i].lock.read();
                 let store_copy = guard.clone();
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);

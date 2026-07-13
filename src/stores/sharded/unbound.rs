@@ -315,7 +315,9 @@ where
     /// If no `on_evict` callback is configured, this is equivalent to [`clear`](Self::clear).
     ///
     /// **Note:** `ShardedUnboundCache` does not track eviction counts — `metrics().evictions` always
-    /// returns `None` regardless of whether `on_evict` fires.
+    /// returns `None` regardless of whether `on_evict` fires. This differs from the
+    /// eviction-tracking sharded stores, whose `cache_clear_with_on_evict` always counts the
+    /// removed entries as evictions; the unbounded store has no eviction counter to increment.
     pub fn cache_clear_with_on_evict(&self) {
         if self.inner.on_evict.is_none() {
             return self.clear();

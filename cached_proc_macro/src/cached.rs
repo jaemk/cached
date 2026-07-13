@@ -76,8 +76,11 @@ struct CachedMacroArgs {
     /// `Some(ByKey)` = explicit `sync_writes = "by_key"`.
     #[darling(default)]
     sync_writes: Option<SyncWriteMode>,
-    #[darling(default = "default_sync_writes_buckets")]
-    sync_writes_buckets: usize,
+    /// `None` = not specified by user (resolves to `default_sync_writes_buckets()`).
+    /// Kept as an `Option` so an explicit value combined with a non-`by_key`
+    /// `sync_writes` can be rejected instead of silently ignored.
+    #[darling(default)]
+    sync_writes_buckets: Option<usize>,
     #[darling(default)]
     sync_lock: Option<SyncLock>,
     #[darling(default)]
@@ -769,7 +772,23 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         (true, true) => unreachable!("return type cannot be both Result and Option"),
     };
 
-    if let Err(error) = validate_sync_writes_buckets(args.sync_writes_buckets, fn_ident.span()) {
+    // An explicit `sync_writes_buckets` only takes effect with `sync_writes = "by_key"`;
+    // reject the inert combination instead of silently ignoring the value.
+    if args.sync_writes_buckets.is_some() && sync_writes != SyncWriteMode::ByKey {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`sync_writes_buckets` only applies to `sync_writes = \"by_key\"` \
+             (it sets the number of per-key lock buckets); it has no effect with \
+             any other `sync_writes` mode. Add `sync_writes = \"by_key\"` or \
+             remove `sync_writes_buckets`.",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let sync_writes_buckets = args
+        .sync_writes_buckets
+        .unwrap_or_else(default_sync_writes_buckets);
+    if let Err(error) = validate_sync_writes_buckets(sync_writes_buckets, fn_ident.span()) {
         return error.to_compile_error().into();
     }
 
@@ -832,8 +851,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-
-    let sync_writes_buckets = args.sync_writes_buckets;
 
     let set_cache_and_return = quote! {
         #set_cache_block

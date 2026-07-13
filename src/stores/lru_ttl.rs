@@ -81,13 +81,19 @@ where
 }
 
 /// Typestate marker for [`LruTtlCacheBuilder`]: no eviction callback set.
+///
+/// This appears as the builder's `E` type parameter default. It only encodes
+/// builder state; most code never names it directly.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct NoEvict;
 
 /// Typestate marker for [`LruTtlCacheBuilder`]: eviction callback has been set.
 ///
 /// When this marker is active, [`LruTtlCacheBuilder::build`] requires
 /// `K: 'static` and `V: 'static` because the callback must be wired into
-/// the inner LRU store.
+/// the inner LRU store. It only encodes builder state; most code never
+/// names it directly.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct HasEvict;
 
 /// Builder for [`LruTtlCache`].
@@ -396,6 +402,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// Return an iterator of key-value pairs with their expiry instants
     /// in the current order from most to least recently used.
     /// Items past their expiry will be excluded.
+    #[must_use]
     pub fn iter_order(&self) -> Vec<(K, (Option<Instant>, V))>
     where
         K: Clone,
@@ -418,6 +425,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// Return a `Vec` of keys in the current order from most
     /// to least recently used.
     /// Items past their expiry will be excluded.
+    #[must_use]
     pub fn key_order(&self) -> Vec<K>
     where
         K: Clone,
@@ -438,6 +446,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// Return a `Vec` of (expiry, value) pairs in the current order
     /// from most to least recently used.
     /// Items past their expiry will be excluded.
+    #[must_use]
     pub fn value_order(&self) -> Vec<(Option<Instant>, V)>
     where
         V: Clone,

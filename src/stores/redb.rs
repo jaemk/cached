@@ -94,6 +94,12 @@ static DISK_FILE_PREFIX: &str = "cached_disk_cache";
 // per-entry `version` field), so an incompatible older file is never read.
 // Starts at 3 to distinguish from the sled-era DiskCache format (versions 1 and 2
 // were the sled-backed DiskCache; those files are incompatible and are never read).
+//
+// Stability: the on-disk format (this version in the file name, the redb table
+// name, and the MessagePack `CachedDiskValue` field names/order) is stable for the
+// 3.x series — files written by any 3.x release remain readable by every later 3.x
+// release. A format change bumps this version (isolating old files rather than
+// corrupting them) and is otherwise reserved for a major release.
 const DISK_FILE_VERSION: u64 = 3;
 
 impl<K, V> Default for RedbCacheBuilder<K, V>
@@ -3374,7 +3380,9 @@ mod tests {
     }
 
     /// `std::error::Error::source()` on `RedbCacheError::CacheDeserialization`
-    /// must return the underlying decode error.
+    /// must return the underlying decode error. The downcast below pins current
+    /// behavior only — the concrete source type is non-contract (see the semver
+    /// note on the error type) and may change with the codec in a major release.
     #[test]
     fn cache_deserialization_error_source_is_wired() {
         use std::error::Error;
@@ -3400,7 +3408,10 @@ mod tests {
     }
 
     /// `RedbCacheBuildError::Storage`'s `source` field is wired as the
-    /// `std::error::Error::source()` of the wrapper.
+    /// `std::error::Error::source()` of the wrapper. The downcast below pins
+    /// current behavior only — the concrete source type is non-contract (see
+    /// the semver note on the error type) and may change with the storage
+    /// engine in a major release.
     #[test]
     fn build_error_storage_source_is_wired() {
         use std::error::Error;
