@@ -1,6 +1,6 @@
 use std::hash::Hash;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
@@ -10,7 +10,8 @@ use crate::{
 };
 
 use super::{
-    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
+    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
+    per_shard_cap_from_total, shard_index,
 };
 use crate::Cached;
 use crate::ConcurrentCacheEvict;
@@ -25,7 +26,9 @@ struct ExpiringLruInner<K, V, H> {
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
     evictions: AtomicU64,
-    total_capacity: usize,
+    /// Total logical capacity (sum of per-shard caps). Stored as `AtomicUsize` so
+    /// [`set_max_size`](ShardedExpiringLruCacheBase::set_max_size) can update it from `&self`.
+    total_capacity: AtomicUsize,
 }
 
 /// A fully-concurrent, partitioned, LRU size-bounded in-memory cache with per-value expiry.
@@ -73,7 +76,10 @@ impl<K, V, H> std::fmt::Debug for ShardedExpiringLruCacheBase<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShardedExpiringLruCache")
             .field("shards", &self.inner.shards.len())
-            .field("capacity", &self.inner.total_capacity)
+            .field(
+                "capacity",
+                &self.inner.total_capacity.load(Ordering::Relaxed),
+            )
             .field("evictions", &self.inner.evictions.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -166,7 +172,7 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
                 hasher: self.inner.hasher.clone(),
                 on_evict: self.inner.on_evict.clone(),
                 evictions: AtomicU64::new(self.inner.evictions.load(Ordering::Relaxed)),
-                total_capacity: self.inner.total_capacity,
+                total_capacity: AtomicUsize::new(self.inner.total_capacity.load(Ordering::Relaxed)),
             }),
         }
     }
@@ -278,7 +284,7 @@ where
             misses: Some(misses),
             evictions: Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed)),
             entry_count: Some(size),
-            capacity: Some(self.inner.total_capacity),
+            capacity: Some(self.inner.total_capacity.load(Ordering::Relaxed)),
         }
     }
 
@@ -364,7 +370,80 @@ where
     /// up with ceiling division.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.inner.total_capacity
+        // Acquire pairs with the Release swap in `set_max_size`: observing a new
+        // total implies every shard has already adopted its new per-shard cap.
+        self.inner.total_capacity.load(Ordering::Acquire)
+    }
+
+    /// Resize the cache to hold up to `max_size` entries in total, returning
+    /// the previous total capacity as `Some(prev)`. The return is always `Some`;
+    /// the `Option` wrapper mirrors the single-owner
+    /// [`ExpiringLruCache::set_max_size`](crate::ExpiringLruCache::set_max_size) signature.
+    ///
+    /// Takes `&self`: shards use interior mutability (per-shard write locks), so
+    /// the method is callable through `Arc` or any shared reference — no external
+    /// lock is needed, unlike the `&mut self` single-owner counterpart.
+    ///
+    /// The new per-shard capacity is recomputed using the same policy the builder
+    /// uses for [`max_size`](ShardedExpiringLruCacheBuilder::max_size): ceiling division
+    /// across shards with a minimum of 16 entries per shard when `shards > 1`.
+    /// After resizing, any configuration previously set via
+    /// [`per_shard_max_size`](ShardedExpiringLruCacheBuilder::per_shard_max_size) is replaced
+    /// by the total-based policy.
+    ///
+    /// On shrink, excess LRU entries are evicted per shard: `on_evict` fires for
+    /// each evicted entry and the eviction counter is incremented accordingly.
+    /// On grow, no pre-allocation occurs; the shards grow on demand.
+    ///
+    /// The resize is **not atomic** across shards: shards are locked one at a time
+    /// (write lock), so concurrent readers may briefly observe mixed capacities
+    /// across shards while the resize is in progress. The new total reported by
+    /// [`capacity`](Self::capacity) is published only after every shard has adopted
+    /// its new per-shard cap.
+    ///
+    /// When the 16-per-shard minimum floor applies (small `max_size` with multiple
+    /// shards), `capacity()` after the call reflects the clamped total, which may
+    /// exceed the requested `max_size` (e.g. `set_max_size(4)` on a 16-shard cache
+    /// yields `capacity() == 256`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0. Use
+    /// [`try_set_max_size`](ShardedExpiringLruCacheBase::try_set_max_size) to avoid the panic.
+    ///
+    /// # See also
+    ///
+    /// [`ShardedLruCacheBase::set_max_size`](crate::ShardedLruCacheBase::set_max_size) and
+    /// [`ShardedLruTtlCacheBase::set_max_size`](crate::ShardedLruTtlCacheBase::set_max_size)
+    /// are the parallel methods on the other sharded LRU-bounded stores.
+    pub fn set_max_size(&self, max_size: usize) -> Option<usize> {
+        assert!(max_size > 0, "max_size must be greater than zero");
+        let n_shards = self.inner.shards.len();
+        let (per_shard_cap, total_cap) = per_shard_cap_from_total(max_size, n_shards);
+        for shard in self.inner.shards.iter() {
+            shard.lock.write().set_max_size(per_shard_cap);
+        }
+        // Publish the new total only after every shard has adopted its new cap;
+        // Release pairs with the Acquire load in `capacity()`.
+        let prev = self.inner.total_capacity.swap(total_cap, Ordering::Release);
+        Some(prev)
+    }
+
+    /// Fallible counterpart of [`set_max_size`](ShardedExpiringLruCacheBase::set_max_size):
+    /// validates that `max_size` is non-zero and then delegates to `set_max_size`.
+    /// Returns the previous total capacity wrapped in `Some` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetMaxSizeError::ZeroSize`](crate::SetMaxSizeError) if `max_size` is 0.
+    pub fn try_set_max_size(
+        &self,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError> {
+        if max_size == 0 {
+            return Err(crate::SetMaxSizeError::ZeroSize);
+        }
+        Ok(self.set_max_size(max_size))
     }
 }
 
@@ -401,7 +480,8 @@ where
     }
 
     fn cache_capacity(&self) -> Option<usize> {
-        Some(self.inner.total_capacity)
+        // Acquire: see `capacity()`.
+        Some(self.inner.total_capacity.load(Ordering::Acquire))
     }
 
     fn cache_evictions(&self) -> Option<u64> {
@@ -921,7 +1001,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
                     .expect("hasher is always initialized via Default or .hasher()"),
                 on_evict: self.on_evict,
                 evictions: AtomicU64::new(0),
-                total_capacity: total_cap,
+                total_capacity: AtomicUsize::new(total_cap),
             }),
         })
     }

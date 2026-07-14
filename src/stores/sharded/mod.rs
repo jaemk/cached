@@ -64,6 +64,27 @@ pub(crate) fn default_shard_count() -> usize {
     count.clamp(8, 1024).next_power_of_two()
 }
 
+/// Compute the per-shard capacity for a given total and shard count, applying the
+/// same policy as the sharded LRU builders: ceiling division (`div_ceil`) with a
+/// minimum of 16 per shard when `n_shards > 1`.
+///
+/// Returns `(per_shard_cap, total_cap)`, where `total_cap = n_shards * per_shard_cap`.
+/// The `total_cap` may exceed `total` when the 16-per-shard floor is in effect.
+///
+/// Panics if `n_shards * per_shard_cap` overflows `usize`; in practice
+/// this can only happen with extremely large inputs and is never triggered from the
+/// `set_max_size` call path.
+pub(crate) fn per_shard_cap_from_total(total: usize, n_shards: usize) -> (usize, usize) {
+    let mut per_shard = total.div_ceil(n_shards);
+    if n_shards > 1 {
+        per_shard = per_shard.max(16);
+    }
+    let total_cap = n_shards
+        .checked_mul(per_shard)
+        .expect("per_shard_cap_from_total: n_shards * per_shard overflows usize");
+    (per_shard, total_cap)
+}
+
 pub(crate) fn checked_shard_count(shards: Option<usize>) -> Result<usize, BuildError> {
     if let Some(0) = shards {
         return Err(BuildError::InvalidValue {

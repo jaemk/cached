@@ -27,7 +27,7 @@ fn build(
     refresh: bool,
 ) -> Arc<RedbCache<u32, u32>> {
     let mut b = RedbCache::<u32, u32>::builder(name)
-        .disk_directory(dir.path())
+        .disk_dir(dir.path())
         // No fsync for speed; these are in-process races.
         .durable(false)
         .refresh_on_hit(refresh);
@@ -302,7 +302,7 @@ fn self_heal_does_not_delete_concurrent_write() {
         // to the same table, then dropping that handle to release the file lock.
         {
             let corrupt = RedbCache::<u32, String>::builder("self-heal-race")
-                .disk_directory(dir.path())
+                .disk_dir(dir.path())
                 .durable(true)
                 .build()
                 .expect("corrupt-injector build");
@@ -313,7 +313,7 @@ fn self_heal_does_not_delete_concurrent_write() {
         // driving cache_get down the non-strict self-heal path.
         let cache: Arc<RedbCache<u32, u32>> = Arc::new(
             RedbCache::<u32, u32>::builder("self-heal-race")
-                .disk_directory(dir.path())
+                .disk_dir(dir.path())
                 .durable(false)
                 .build()
                 .expect("reader build"),

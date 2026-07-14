@@ -492,10 +492,6 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         self.store.cache_size()
     }
 
-    fn cache_capacity(&self) -> Option<usize> {
-        None
-    }
-
     fn cache_hits(&self) -> Option<u64> {
         Some(self.hits.load(Ordering::Relaxed))
     }

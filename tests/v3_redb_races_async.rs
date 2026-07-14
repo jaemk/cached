@@ -26,7 +26,7 @@ fn build(
     refresh: bool,
 ) -> Arc<RedbCache<u32, u32>> {
     let mut b = RedbCache::<u32, u32>::builder(name)
-        .disk_directory(dir.path())
+        .disk_dir(dir.path())
         // No fsync for speed; these are in-process races.
         .durable(false)
         .refresh_on_hit(refresh);

@@ -14,7 +14,7 @@ use tempfile::TempDir;
 fn builder_positional_name_builds() {
     let dir = TempDir::new().unwrap();
     let cache: RedbCache<u32, u32> = RedbCache::builder("positional-name")
-        .disk_directory(dir.path())
+        .disk_dir(dir.path())
         .durable(false)
         .build()
         .expect("build with positional name");
@@ -29,7 +29,7 @@ fn builder_positional_name_can_be_overridden() {
     // A later `.name(...)` overrides the positional argument.
     let cache: RedbCache<u32, u32> = RedbCache::builder("initial")
         .name("overridden")
-        .disk_directory(dir.path())
+        .disk_dir(dir.path())
         .durable(false)
         .build()
         .expect("build with overridden name");

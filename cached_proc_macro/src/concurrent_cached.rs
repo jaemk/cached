@@ -1623,7 +1623,7 @@ fn get_disk_cache_type_and_create(
             let create = match &args.disk_dir {
                 None => create,
                 Some(disk_dir) => {
-                    quote! { (#create).disk_directory(#disk_dir) }
+                    quote! { (#create).disk_dir(#disk_dir) }
                 }
             };
             quote! { (#create).build().unwrap_or_else(|e| panic!("error constructing RedbCache in #[concurrent_cached] macro: {e}")) }

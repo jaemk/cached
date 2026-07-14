@@ -690,7 +690,7 @@ mod redb_serialize_cached {
 
     fn build_cache(dir: &TempDir, name: &str) -> RedbCache<u32, String> {
         RedbCache::<u32, String>::builder(name)
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .build()
             .expect("error building redb cache")
     }
@@ -742,7 +742,7 @@ mod redb_serialize_cached {
     fn cache_set_ref_ttl_expiry() {
         let dir = TempDir::new().unwrap();
         let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_ttl_expiry")
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .ttl(Duration::from_millis(100))
             .build()
             .expect("error building redb cache");
@@ -773,7 +773,7 @@ mod redb_serialize_cached_async {
     async fn async_cache_set_ref_round_trip() {
         let dir = TempDir::new().unwrap();
         let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_round_trip")
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .build()
             .expect("error building redb cache");
 
@@ -800,7 +800,7 @@ mod redb_serialize_cached_async {
     async fn async_cache_set_ref_overwrite() {
         let dir = TempDir::new().unwrap();
         let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_async_overwrite")
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .build()
             .expect("error building redb cache");
 
@@ -1200,7 +1200,7 @@ fn concurrent_redb_refresh_on_hit_getter_reflects_setter() {
 
     let dir = TempDir::new().unwrap();
     let cache: RedbCache<u32, u32> = RedbCache::builder("concurrent_redb_refresh_getter")
-        .disk_directory(dir.path())
+        .disk_dir(dir.path())
         .ttl(Duration::from_secs(60))
         .build()
         .expect("build RedbCache");
@@ -1719,7 +1719,7 @@ mod concurrent_trait_split_no_collision {
     fn redb_shared_helpers_resolve_without_fully_qualified_syntax() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let cache: RedbCache<String, u32> = RedbCache::builder("collision-probe")
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build RedbCache");
@@ -1769,7 +1769,7 @@ mod concurrent_trait_split_no_collision {
     fn concurrent_try_set_ttl_zero_is_rejected() {
         let redb_dir = tempfile::TempDir::new().expect("temp dir");
         let redb: RedbCache<String, u32> = RedbCache::builder("try-set-ttl-zero")
-            .disk_directory(redb_dir.path())
+            .disk_dir(redb_dir.path())
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build RedbCache");
@@ -1833,7 +1833,7 @@ mod concurrent_trait_split_no_collision {
     async fn redb_shared_helpers_resolve_unqualified_in_async_context() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let cache: RedbCache<String, u32> = RedbCache::builder("collision-probe-async")
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build RedbCache");
@@ -1886,7 +1886,7 @@ mod concurrent_base_unknown_size_defaults {
     fn redb_len_and_is_empty_default_to_unknown() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let cache: RedbCache<String, u32> = RedbCache::builder("unknown-size-defaults")
-            .disk_directory(dir.path())
+            .disk_dir(dir.path())
             .ttl(Duration::from_secs(60))
             .build()
             .expect("build RedbCache");

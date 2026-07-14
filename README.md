@@ -68,7 +68,9 @@ the short aliases come for free via the blanket extension trait impl.
 For `Cached` stores, `len`/`is_empty` are also on `CachedExt`. For `ConcurrentCached` stores,
 size introspection is `cache_size` and `cache_is_empty` on `ConcurrentCacheBase` (the shared base
 trait), not on `ConcurrentCachedExt`: bring `ConcurrentCacheBase` into scope to call them on a
-generic bound. (The sharded stores keep their inherent infallible `len`/`is_empty` too.)
+generic bound. Note that `ConcurrentCacheBase::cache_size` returns `Result<Option<usize>, _>`:
+fallible for IO-backed stores, and `None` when the backend cannot report an exact count. The sharded
+stores keep their inherent infallible `len`/`is_empty` too, which take priority at the call site.
 
 Both async traits use the `async_cache_*` spelling. `ConcurrentCachedAsync` mirrors the sync
 `ConcurrentCached` surface (`async_cache_get`, `async_cache_set`, `async_cache_remove`, ...) for
@@ -161,6 +163,7 @@ Any custom cache that implements `cached::ConcurrentCached`/`cached::ConcurrentC
 | Force-refresh via a dedicated flag (exclude it from the key) | `#[concurrent_cached(key = "u64", convert = { id }, force_refresh = { refresh })] fn fetch(id: u64, refresh: bool) -> Data { let _ = refresh; … }` — the generated guard reads `refresh` to decide whether to bypass the cache; the body still receives it as a normal parameter, so add `let _ = refresh;` (or `#[allow(unused_variables)]`) if your body does not otherwise use it |
 | Cache a method inside an `impl` block (one cache shared across all instances) | `#[concurrent_cached(in_impl = true)] fn load(&self, id: u64) -> Data` |
 | Persist results to disk (with `map_error`; or omit when `E: From<RedbCacheError>`) | `#[concurrent_cached(disk = true, map_error = \|e\| MyErr(e))] fn crunch(n: u64) -> Result<Data, MyErr>` |
+| Redis-backed async cache (shorthand; uses the default connection/builder) | `#[concurrent_cached(redis = true, ttl_secs = 30, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
 | Redis-backed async cache (quoted or unquoted `create`/`map_error`) | `#[concurrent_cached(ty = "AsyncRedisCache<u64, String>", create = { ... }, map_error = \|e\| MyErr(e))] async fn api(id: u64) -> Result<Resp, MyErr>` |
 
 On `#[cached]` and `#[concurrent_cached]`, the LRU bound is set with `max_size = N` (mirroring the `max_size` builder/constructor methods on the stores). The `size = N` spelling — a deprecated alias in 2.x — has been removed; only `max_size = N` is accepted.
@@ -294,7 +297,7 @@ It is also the idiomatic way to give entries a **dynamic, per-entry TTL** — a 
 
 When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `max_size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
 
-The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (`ignore`d as a doctest because it requires the default `proc_macro` feature; the same code runs in the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example):
+The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the same code runs in the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example):
 
 ```rust
 use cached::macros::cached;
@@ -309,7 +312,7 @@ impl Expires for Token {
 }
 
 // `ttl_secs` is a runtime argument — each user's token expires on its own schedule.
-#[cached(expires = true, key = "u64", convert = "{ user_id }")]
+#[cached(expires = true, key = "u64", convert = { user_id })]
 fn fetch_token(user_id: u64, ttl_secs: u64) -> Token {
     Token {
         value: format!("token-{user_id}"),
