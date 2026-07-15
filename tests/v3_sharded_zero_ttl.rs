@@ -16,8 +16,8 @@
 
 use cached::time::Duration;
 use cached::{
-    ConcurrentCacheEvict, ConcurrentCached, ConcurrentCloneCached, ShardedLruTtlCache,
-    ShardedTtlCache,
+    ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached, ConcurrentCloneCached,
+    ShardedLruTtlCache, ShardedTtlCache,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

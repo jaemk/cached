@@ -137,3 +137,69 @@ mod lru_ttl {
         }
     }
 }
+
+// ── per_shard_initial_capacity ───────────────────────────────────────────────
+//
+// The capacity hint has no observable getter (it is a preallocation hint, like
+// the single-owner builders' `initial_capacity`), so these tests pin the API:
+// the setter exists on the three unbounded sharded builders, survives the
+// type-changing `.hasher()` call, and the built cache functions normally.
+
+mod per_shard_initial_capacity {
+    use cached::{ConcurrentCached, DefaultShardHasher, ShardedUnboundCache};
+
+    #[test]
+    fn unbound_builder_accepts_hint_and_threads_through_hasher() {
+        let cache: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::builder()
+            .shards(4)
+            .per_shard_initial_capacity(128)
+            .hasher(DefaultShardHasher::new())
+            .build()
+            .expect("build must succeed");
+        for i in 0..100u32 {
+            ConcurrentCached::cache_set(&cache, i, i).expect("insert must succeed");
+        }
+        assert_eq!(cache.len(), 100);
+    }
+
+    #[cfg(feature = "time_stores")]
+    #[test]
+    fn ttl_builder_accepts_hint() {
+        use cached::ShardedTtlCache;
+        use cached::time::Duration;
+
+        let cache: ShardedTtlCache<u32, u32> = ShardedTtlCache::builder()
+            .ttl(Duration::from_secs(3600))
+            .shards(4)
+            .per_shard_initial_capacity(128)
+            .build()
+            .expect("build must succeed");
+        for i in 0..100u32 {
+            ConcurrentCached::cache_set(&cache, i, i).expect("insert must succeed");
+        }
+        assert_eq!(cache.len(), 100);
+    }
+
+    #[test]
+    fn expiring_builder_accepts_hint() {
+        use cached::{Expires, ShardedExpiringCache};
+
+        #[derive(Clone)]
+        struct V(#[allow(dead_code)] u32);
+        impl Expires for V {
+            fn is_expired(&self) -> bool {
+                false
+            }
+        }
+
+        let cache: ShardedExpiringCache<u32, V> = ShardedExpiringCache::builder()
+            .shards(4)
+            .per_shard_initial_capacity(128)
+            .build()
+            .expect("build must succeed");
+        for i in 0..100u32 {
+            ConcurrentCached::cache_set(&cache, i, V(i)).expect("insert must succeed");
+        }
+        assert_eq!(cache.len(), 100);
+    }
+}

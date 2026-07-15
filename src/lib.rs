@@ -2205,7 +2205,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// The `where Self: Sized` bound keeps this generic method out of the vtable so
     /// `ConcurrentCached` stays dyn-compatible. The associated `Error` lives on the
     /// [`ConcurrentCacheBase`] supertrait, so the usable trait-object type is
-    /// `dyn ConcurrentCached<K, V> + ConcurrentCacheBase<Error = E>`. Call this method
+    /// `dyn ConcurrentCached<K, V, Error = E>`. Call this method
     /// through a concrete type or the [`ConcurrentCachedExt`] alias.
     fn cache_get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
     where

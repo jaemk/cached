@@ -465,6 +465,7 @@ where
 /// Builder for [`ShardedUnboundCacheBase`].
 pub struct ShardedUnboundCacheBuilder<K, V, H = DefaultShardHasher> {
     shards: Option<usize>,
+    per_shard_initial_capacity: Option<usize>,
     hasher: Option<H>,
     on_evict: Option<OnEvict<K, V>>,
     _k: std::marker::PhantomData<K>,
@@ -475,6 +476,7 @@ impl<K, V> Default for ShardedUnboundCacheBuilder<K, V, DefaultShardHasher> {
     fn default() -> Self {
         Self {
             shards: None,
+            per_shard_initial_capacity: None,
             hasher: Some(DefaultShardHasher::default()),
             on_evict: None,
             _k: std::marker::PhantomData,
@@ -491,6 +493,18 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
         self
     }
 
+    /// Set the initial allocation capacity of **each shard** (optional, purely a hint).
+    ///
+    /// Every shard preallocates this many entry slots, so the total preallocation is
+    /// `shards × per_shard_initial_capacity`. This is the sharded counterpart of the
+    /// single-owner builder's `initial_capacity` (which is a total, since there is
+    /// only one map).
+    #[must_use]
+    pub fn per_shard_initial_capacity(mut self, capacity: usize) -> Self {
+        self.per_shard_initial_capacity = Some(capacity);
+        self
+    }
+
     /// Set a custom shard-selection hasher, changing the type parameter.
     ///
     /// The hasher decides only which shard a key maps to — it does **not** replace the
@@ -504,6 +518,7 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedUnboundCacheBuilder<K, V, H2> {
         ShardedUnboundCacheBuilder {
             shards: self.shards,
+            per_shard_initial_capacity: self.per_shard_initial_capacity,
             hasher: Some(hasher),
             on_evict: self.on_evict,
             _k: std::marker::PhantomData,
@@ -550,8 +565,14 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
     {
         let n = checked_shard_count(self.shards)?;
         let mask = n - 1;
+        let per_shard_capacity = self.per_shard_initial_capacity.unwrap_or(0);
         let shards = (0..n)
-            .map(|_| CachePadded(Shard::new(HashMap::with_hasher(RandomState::new()))))
+            .map(|_| {
+                CachePadded(Shard::new(HashMap::with_capacity_and_hasher(
+                    per_shard_capacity,
+                    RandomState::new(),
+                )))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Ok(ShardedUnboundCacheBase {

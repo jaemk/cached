@@ -6,9 +6,10 @@ redis, and redb stores. Distinct from the `&mut self` single-owner family in
 
 ## CTRAIT-1
 
-`ConcurrentCacheBase` is the shared supertrait: it owns the associated `type Error` and the
-`cache_size` / `cache_is_empty` accessors. Both `ConcurrentCached<K, V>` and
-`ConcurrentCachedAsync<K, V>` extend it, per
+`ConcurrentCacheBase` is the shared supertrait: it owns the associated `type Error`, the
+`cache_size` / `cache_is_empty` accessors, the metric accessors (`cache_hits` / `cache_misses` /
+`cache_capacity` / `cache_evictions`), and a provided `metrics()`. Both `ConcurrentCached<K, V>`
+and `ConcurrentCachedAsync<K, V>` extend it, per
 [design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
 
 ## CTRAIT-2
@@ -21,8 +22,9 @@ redis, and redb stores. Distinct from the `&mut self` single-owner family in
 ## CTRAIT-3
 
 `ConcurrentCacheTtl` provides `&self` TTL control (`ttl()` / `set_ttl()` / `unset_ttl()` /
-`try_set_ttl()` / `refresh_on_hit()`) on concurrent TTL stores. `ConcurrentCacheEvict` provides
-the concurrent `evict()`.
+`try_set_ttl()` / `refresh_on_hit()` / `set_refresh_on_hit()`) on concurrent TTL stores; the
+implementing stores expose these only through the trait, with no inherent duplicates.
+`ConcurrentCacheEvict` provides the concurrent `evict()`.
 
 ## CTRAIT-4
 

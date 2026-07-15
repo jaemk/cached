@@ -571,7 +571,13 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
 
     /// Removes entries for which `keep` returns `false`.
     /// Each removed entry fires the configured `on_evict` callback and is counted in `evictions`,
-    /// matching [`Cached::cache_remove`] semantics.
+    /// matching [`Cached::cache_remove`] semantics. The LRU recency order of the surviving
+    /// entries is unchanged.
+    ///
+    /// The expiry-aware LRU stores also have `retain`, with one difference: their expired
+    /// entries are removed regardless of the predicate. See
+    /// [`LruTtlCache::retain`](crate::LruTtlCache::retain) and
+    /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain).
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
         let remove_keys = {
             self.order

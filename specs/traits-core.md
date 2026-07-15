@@ -8,8 +8,9 @@ These take `&mut self` (exclusive ownership), distinguishing them from the concu
 
 `Cached<K, V>` is the core: `cache_get`, `cache_get_mut`, `cache_set`, `cache_get_or_set_with`
 (and `_mut` / `try_` variants), `cache_remove`, `cache_remove_entry`, `cache_delete`,
-`cache_clear`, `cache_reset`, `cache_size`, the metrics accessors, and `metrics()`. `CachedExt`
-is a blanket extension trait providing the deduplicated method names, per
+`cache_clear`, `cache_reset`, `cache_size`, and the metric accessors (`cache_hits` /
+`cache_misses` / `cache_capacity` / `cache_evictions`). `CachedExt` is a blanket extension trait
+providing the deduplicated method names and `metrics()`, per
 [design/0008-method-name-deduplication.md](design/0008-method-name-deduplication.md).
 
 ## TRAIT-2
@@ -23,8 +24,8 @@ Merging `CachedPeek` / `CachedRead` is an open direction
 
 `CachedIter<K, V>` iterates entries (filtering expired ones without removing them).
 `CloneCached<K, V>` returns owned values with expiry status (`cache_get_with_expiry_status`,
-`cache_peek_with_expiry_status`). `CacheTtl` provides `ttl()` / `set_ttl()` / `unset_ttl()` on
-single-owner timed stores.
+`cache_peek_with_expiry_status`). `CacheTtl` provides `ttl()` / `set_ttl()` / `unset_ttl()` /
+`try_set_ttl()` / `refresh_on_hit()` / `set_refresh_on_hit()` on single-owner timed stores.
 
 ## TRAIT-4
 

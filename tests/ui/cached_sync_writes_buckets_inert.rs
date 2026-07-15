@@ -13,4 +13,19 @@ fn default_mode(x: u32) -> u32 {
     x
 }
 
+#[cached(sync_writes = "default", sync_writes_buckets = 128)]
+fn default_string_mode(x: u32) -> u32 {
+    x
+}
+
+#[cached(sync_writes = false, sync_writes_buckets = 128)]
+fn disabled_mode(x: u32) -> u32 {
+    x
+}
+
+#[cached(sync_writes = "disabled", sync_writes_buckets = 128)]
+fn disabled_string_mode(x: u32) -> u32 {
+    x
+}
+
 fn main() {}

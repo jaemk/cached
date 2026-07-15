@@ -452,7 +452,11 @@ where
     ///
     /// On shrink, excess LRU entries are evicted per shard: `on_evict` fires for
     /// each evicted entry and the eviction counter (LRU capacity evictions) is
-    /// incremented accordingly.
+    /// incremented accordingly. The shrink evicts strictly by LRU recency and
+    /// ignores TTL state — a TTL-expired but recently-used entry survives while
+    /// a live but least-recently-used entry is evicted. Call
+    /// [`evict`](Self::evict) first to sweep expired entries if they should be
+    /// dropped preferentially.
     /// On grow, no pre-allocation occurs; the shards grow on demand.
     ///
     /// The resize is **not atomic** across shards: shards are locked one at a time
@@ -547,51 +551,6 @@ where
         }
         total
     }
-
-    // ---- Inherent `&self` TTL knobs ----
-
-    /// Return the current TTL.
-    #[must_use]
-    pub fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    /// Set the TTL applied to entries inserted after this call, returning the previous value.
-    ///
-    /// The new TTL only affects entries inserted after the change; existing entries keep their
-    /// original expiry. Note that entries read while `refresh_on_hit` is enabled re-anchor to
-    /// the TTL current at access time.
-    ///
-    /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
-    /// nanoseconds (~584 years). In practice this limit is never reached.
-    ///
-    /// A zero `ttl` disables expiry — it is exactly equivalent to
-    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
-    pub fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let prev = self
-            .inner
-            .ttl_nanos
-            .swap(encode_ttl(ttl), Ordering::Relaxed);
-        decode_ttl(prev)
-    }
-
-    /// Remove the TTL (entries never expire after this point).
-    pub fn unset_ttl(&self) -> Option<Duration> {
-        let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
-        decode_ttl(prev)
-    }
-
-    /// Set whether cache hits refresh the TTL of the accessed entry,
-    /// returning the previous value.
-    pub fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.inner.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    /// Return whether cache hits refresh the TTL.
-    #[must_use]
-    pub fn refresh_on_hit(&self) -> bool {
-        self.inner.refresh.load(Ordering::Relaxed)
-    }
 }
 
 impl<K, V, H> ConcurrentCacheEvict for ShardedLruTtlCacheBase<K, V, H>
@@ -664,11 +623,16 @@ where
     }
 
     fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        ShardedLruTtlCacheBase::set_ttl(self, ttl)
+        let prev = self
+            .inner
+            .ttl_nanos
+            .swap(encode_ttl(ttl), Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     fn unset_ttl(&self) -> Option<Duration> {
-        ShardedLruTtlCacheBase::unset_ttl(self)
+        let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     fn refresh_on_hit(&self) -> bool {

@@ -9,3 +9,21 @@ error: `sync_writes_buckets` only applies to `sync_writes = "by_key"` (it sets t
    |
 12 | fn default_mode(x: u32) -> u32 {
    |    ^^^^^^^^^^^^
+
+error: `sync_writes_buckets` only applies to `sync_writes = "by_key"` (it sets the number of per-key lock buckets); it has no effect with any other `sync_writes` mode. Add `sync_writes = "by_key"` or remove `sync_writes_buckets`.
+  --> tests/ui/cached_sync_writes_buckets_inert.rs:17:4
+   |
+17 | fn default_string_mode(x: u32) -> u32 {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+error: `sync_writes_buckets` only applies to `sync_writes = "by_key"` (it sets the number of per-key lock buckets); it has no effect with any other `sync_writes` mode. Add `sync_writes = "by_key"` or remove `sync_writes_buckets`.
+  --> tests/ui/cached_sync_writes_buckets_inert.rs:22:4
+   |
+22 | fn disabled_mode(x: u32) -> u32 {
+   |    ^^^^^^^^^^^^^
+
+error: `sync_writes_buckets` only applies to `sync_writes = "by_key"` (it sets the number of per-key lock buckets); it has no effect with any other `sync_writes` mode. Add `sync_writes = "by_key"` or remove `sync_writes_buckets`.
+  --> tests/ui/cached_sync_writes_buckets_inert.rs:27:4
+   |
+27 | fn disabled_string_mode(x: u32) -> u32 {
+   |    ^^^^^^^^^^^^^^^^^^^^

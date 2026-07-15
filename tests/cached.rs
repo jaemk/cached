@@ -2211,7 +2211,7 @@ mod sharded_ttl_tests {
     #[test]
     fn sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
-        use cached::{ShardedLruTtlCache, ShardedTtlCache};
+        use cached::{ConcurrentCacheTtl, ShardedLruTtlCache, ShardedTtlCache};
 
         let ttl = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
@@ -3061,6 +3061,7 @@ mod concurrent_cached_default_with_max_size {
 // `ttl = T` selects `ShardedTtlCache`.
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod concurrent_cached_default_with_ttl {
+    use cached::ConcurrentCacheTtl;
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3098,6 +3099,7 @@ mod concurrent_cached_default_with_ttl {
 // `max_size = N, ttl = T` selects `ShardedLruTtlCache`.
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod concurrent_cached_default_with_max_size_and_ttl {
+    use cached::ConcurrentCacheTtl;
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -6418,6 +6420,61 @@ fn test_lru_retain_fires_on_evict_and_increments_evictions() {
     assert!(cache.cache_get(&2u32).is_some());
     assert!(cache.cache_get(&3u32).is_none());
     assert!(cache.cache_get(&4u32).is_some());
+}
+
+#[test]
+fn test_expiring_lru_cache_retain() {
+    use cached::{Cached, CachedIter, Expires, ExpiringLruCache};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[derive(Clone)]
+    struct Val {
+        n: u32,
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+    let live = |n: u32| Val { n, expired: false };
+
+    let fired = Arc::new(AtomicU32::new(0));
+    let fired_clone = fired.clone();
+    let mut cache = ExpiringLruCache::<u32, Val>::builder()
+        .max_size(10)
+        .on_evict(move |_k, _v| {
+            fired_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .build()
+        .unwrap();
+
+    cache.cache_set(1, live(11)); // odd -> removed by predicate
+    cache.cache_set(2, live(20)); // even -> kept
+    cache.cache_set(
+        3,
+        Val {
+            n: 30,
+            expired: true,
+        },
+    ); // even but expired -> removed anyway
+    cache.cache_set(4, live(40)); // even -> kept
+
+    // Keep only even values; expired entries go regardless of the predicate.
+    cache.retain(|_, v| v.n % 2 == 0);
+
+    assert!(cache.cache_get(&1).is_none());
+    assert!(cache.cache_get(&2).is_some());
+    assert!(cache.cache_get(&3).is_none()); // expired: removed without consulting `keep`
+    assert!(cache.cache_get(&4).is_some());
+    assert_eq!(cache.cache_size(), 2);
+    assert_eq!(fired.load(Ordering::Relaxed), 2); // on_evict fired for keys 1 and 3
+    assert_eq!(cache.cache_evictions(), Some(2));
+
+    // LRU recency order of survivors is unchanged (most-recently-set first).
+    let keys: Vec<u32> = cache.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, vec![4, 2]);
 }
 
 #[cfg(feature = "time_stores")]

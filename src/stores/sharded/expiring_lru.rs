@@ -393,6 +393,10 @@ where
     ///
     /// On shrink, excess LRU entries are evicted per shard: `on_evict` fires for
     /// each evicted entry and the eviction counter is incremented accordingly.
+    /// The shrink evicts strictly by LRU recency and ignores expiry state — an
+    /// expired but recently-used entry survives while a live but
+    /// least-recently-used entry is evicted. Call [`evict`](Self::evict) first
+    /// to sweep expired entries if they should be dropped preferentially.
     /// On grow, no pre-allocation occurs; the shards grow on demand.
     ///
     /// The resize is **not atomic** across shards: shards are locked one at a time

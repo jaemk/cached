@@ -15,7 +15,9 @@
 #![cfg(feature = "time_stores")]
 
 use cached::time::Duration;
-use cached::{CacheTtl, Cached, ConcurrentCached, LruTtlCache, ShardedTtlCache, TtlCache};
+use cached::{
+    CacheTtl, Cached, ConcurrentCacheTtl, ConcurrentCached, LruTtlCache, ShardedTtlCache, TtlCache,
+};
 
 // Enough time to let a SHORT-ttl entry expire; chosen to be comfortably > SHORT.
 // Use a generously wide TTL so CI runners under load don't race the wall-clock.
