@@ -216,6 +216,10 @@ name = "kitchen_sink"
 required-features = ["time_stores", "proc_macro"]
 
 [[example]]
+name = "resilience"
+required-features = ["time_stores", "proc_macro"]
+
+[[example]]
 name = "disk"
 required-features = ["redb_store", "proc_macro"]
 

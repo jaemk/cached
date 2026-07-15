@@ -1,7 +1,9 @@
 # Disk (redb) backend
 
 `RedbCache` is a disk-backed concurrent store using `redb`, gated behind `redb_store`. It is
-self-synchronizing over a shared `&self` and builder-only (required path field).
+self-synchronizing over a shared `&self` and builder-only: `builder(name)` takes the required
+cache name positionally; the on-disk directory (`disk_dir`) is optional with a system-cache-dir
+fallback.
 
 ## REDB-1
 
@@ -24,7 +26,10 @@ Errors are `RedbCacheError` (build: `RedbCacheBuildError`) with named variants, 
 ## REDB-4
 
 Implements the concurrent trait family (`ConcurrentCacheBase`, `ConcurrentCached`,
-`ConcurrentCacheTtl`). `disk_path()` ships (returns the resolved database path after build).
+`ConcurrentCachedAsync`, `ConcurrentCacheTtl`, `SerializeCached`, `SerializeCachedAsync`).
+`ConcurrentCacheEvict` is intentionally not implemented; expired-entry sweeping is the fallible
+inherent `remove_expired_entries()`. `disk_path()` ships (returns the resolved database path
+after build).
 Builder-side resolved-path introspection and a configurable temp-dir fallback remain open
 ([design/0025-redb-disk-path-introspection.md](design/0025-redb-disk-path-introspection.md)). See
 [traits-concurrent.md](traits-concurrent.md).

@@ -357,6 +357,34 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
         removed
     }
 
+    /// Retain only entries that are unexpired and satisfy `keep`.
+    ///
+    /// Iterates the entries held in the underlying LRU store (most- to
+    /// least-recently-used) and removes every entry that is already expired
+    /// (per [`Expires::is_expired`]) **or** for which `keep` returns `false` —
+    /// expired entries are removed without consulting `keep`. `on_evict` is
+    /// called and the eviction counter incremented for each removed entry.
+    /// The LRU recency order of the surviving entries is unchanged.
+    ///
+    /// This matches [`LruTtlCache::retain`](crate::LruTtlCache::retain); the plain
+    /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
+    /// removes solely on the predicate.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+        let on_evict = &self.on_evict;
+        let evictions = &self.evictions;
+        self.store.retain_silent(|key, value| {
+            if value.is_expired() || !keep(key, value) {
+                if let Some(on_evict) = on_evict {
+                    on_evict(key, value);
+                }
+                evictions.fetch_add(1, Ordering::Relaxed);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
     /// evictions counter.
     ///

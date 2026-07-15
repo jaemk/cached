@@ -10,9 +10,10 @@ Bounded by `max_size`: inserting beyond capacity evicts the least-recently-used 
 
 ## LRU-2
 
-Constructors: infallible `LruCache::new(max_size)`, or `LruCache::builder().max_size(n)` for a
-custom hasher. `max_size` is the setter (renamed from `.size()` in 2.0). Building with a
-zero/invalid size is a `BuildError`. See [builders.md](builders.md).
+Constructors: `LruCache::new(max_size)` (returns the cache directly; panics on zero), or
+`LruCache::builder().max_size(n)` for a custom hasher. `max_size` is the setter (renamed from
+`.size()` in 2.0). Building with a zero/invalid size is a `BuildError`. See
+[builders.md](builders.md).
 
 ## LRU-3
 
@@ -23,3 +24,7 @@ See [metrics.md](metrics.md).
 
 Implements `Cached`, `CachedPeek`, and `CachedIter`. Size/iter/evict semantics follow
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md).
+Inherent `retain(keep)` removes entries failing the predicate (firing `on_evict` and counting
+evictions); the expiry-aware LRU stores (`LruTtlCache`, `ExpiringLruCache`) share the contract
+but also remove expired entries regardless of the predicate. `set_max_size` /
+`try_set_max_size` resize a live cache.

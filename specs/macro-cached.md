@@ -20,9 +20,10 @@ removed). `size = N` is a hard rename error directing to `max_size = N`, per
 
 ## CACHED-3
 
-Write-synchronization attributes: `sync_writes` (`false` default = no synchronization,
-`"by_key"` bucketed locks, `true`/`"default"` whole-cache lock), `sync_writes_buckets` (default
-64), `sync_lock` (`"rwlock"` default or `"mutex"`), `unsync_reads` (shared read lock for hits;
+Write-synchronization attributes: `sync_writes` (`false`/`"disabled"` default = no
+synchronization, `"by_key"` bucketed locks, `true`/`"default"` whole-cache lock),
+`sync_writes_buckets` (default 64; a compile error unless `sync_writes = "by_key"`),
+`sync_lock` (`"rwlock"` default or `"mutex"`), `unsync_reads` (shared read lock for hits;
 `CachedRead` stores only). The `false` default and the earlier revert are recorded in
 [design/0027-sync-writes-default-revert.md](design/0027-sync-writes-default-revert.md); the
 per-key lock buckets use a seeded hasher per

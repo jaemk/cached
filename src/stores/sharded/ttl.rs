@@ -421,51 +421,6 @@ where
         }
         total
     }
-
-    // ---- Inherent `&self` TTL knobs ----
-
-    /// Return the current TTL.
-    #[must_use]
-    pub fn ttl(&self) -> Option<Duration> {
-        self.ttl_duration()
-    }
-
-    /// Set the TTL applied to entries inserted after this call, returning the previous value.
-    ///
-    /// The new TTL only affects entries inserted after the change; existing entries keep their
-    /// original expiry. Note that entries read while `refresh_on_hit` is enabled re-anchor to
-    /// the TTL current at access time.
-    ///
-    /// TTL values longer than approximately 584 years are silently clamped to `u64::MAX`
-    /// nanoseconds (~584 years). In practice this limit is never reached.
-    ///
-    /// A zero `ttl` disables expiry — it is exactly equivalent to
-    /// [`unset_ttl`](Self::unset_ttl), and subsequently inserted entries never expire.
-    pub fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        let prev = self
-            .inner
-            .ttl_nanos
-            .swap(encode_ttl(ttl), Ordering::Relaxed);
-        decode_ttl(prev)
-    }
-
-    /// Remove the TTL (entries never expire after this point).
-    pub fn unset_ttl(&self) -> Option<Duration> {
-        let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
-        decode_ttl(prev)
-    }
-
-    /// Set whether cache hits refresh the TTL of the accessed entry,
-    /// returning the previous value.
-    pub fn set_refresh_on_hit(&self, refresh: bool) -> bool {
-        self.inner.refresh.swap(refresh, Ordering::Relaxed)
-    }
-
-    /// Return whether cache hits refresh the TTL.
-    #[must_use]
-    pub fn refresh_on_hit(&self) -> bool {
-        self.inner.refresh.load(Ordering::Relaxed)
-    }
 }
 
 impl<K, V, H> ConcurrentCacheEvict for ShardedTtlCacheBase<K, V, H>
@@ -526,11 +481,16 @@ where
     }
 
     fn set_ttl(&self, ttl: Duration) -> Option<Duration> {
-        ShardedTtlCacheBase::set_ttl(self, ttl)
+        let prev = self
+            .inner
+            .ttl_nanos
+            .swap(encode_ttl(ttl), Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     fn unset_ttl(&self) -> Option<Duration> {
-        ShardedTtlCacheBase::unset_ttl(self)
+        let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
+        decode_ttl(prev)
     }
 
     fn refresh_on_hit(&self) -> bool {
@@ -764,6 +724,7 @@ where
 /// because `ShardedTtlCache` is unbounded in size — entries expire by TTL, not by capacity.
 pub struct ShardedTtlCacheBuilder<K, V, H = DefaultShardHasher> {
     shards: Option<usize>,
+    per_shard_initial_capacity: Option<usize>,
     ttl: Option<Duration>,
     refresh: bool,
     hasher: Option<H>,
@@ -776,6 +737,7 @@ impl<K, V> Default for ShardedTtlCacheBuilder<K, V, DefaultShardHasher> {
     fn default() -> Self {
         Self {
             shards: None,
+            per_shard_initial_capacity: None,
             ttl: None,
             refresh: false,
             hasher: Some(DefaultShardHasher::default()),
@@ -821,6 +783,18 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         self
     }
 
+    /// Set the initial allocation capacity of **each shard** (optional, purely a hint).
+    ///
+    /// Every shard preallocates this many entry slots, so the total preallocation is
+    /// `shards × per_shard_initial_capacity`. This is the sharded counterpart of the
+    /// single-owner builder's `initial_capacity` (which is a total, since there is
+    /// only one map).
+    #[must_use]
+    pub fn per_shard_initial_capacity(mut self, capacity: usize) -> Self {
+        self.per_shard_initial_capacity = Some(capacity);
+        self
+    }
+
     /// Set whether cache hits refresh the TTL.
     #[must_use]
     pub fn refresh_on_hit(mut self, refresh: bool) -> Self {
@@ -841,6 +815,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedTtlCacheBuilder<K, V, H2> {
         ShardedTtlCacheBuilder {
             shards: self.shards,
+            per_shard_initial_capacity: self.per_shard_initial_capacity,
             ttl: self.ttl,
             refresh: self.refresh,
             hasher: Some(hasher),
@@ -889,8 +864,14 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
         crate::stores::validate_ttl(ttl)?;
         let n = checked_shard_count(self.shards)?;
         let mask = n - 1;
+        let per_shard_capacity = self.per_shard_initial_capacity.unwrap_or(0);
         let shards = (0..n)
-            .map(|_| CachePadded(Shard::new(HashMap::with_hasher(RandomState::new()))))
+            .map(|_| {
+                CachePadded(Shard::new(HashMap::with_capacity_and_hasher(
+                    per_shard_capacity,
+                    RandomState::new(),
+                )))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Ok(ShardedTtlCacheBase {

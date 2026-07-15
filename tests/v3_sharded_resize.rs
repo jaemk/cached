@@ -689,6 +689,60 @@ mod lru_ttl {
         c.set_max_size(32);
         assert_eq!(ConcurrentCacheBase::cache_capacity(&c), Some(32));
     }
+
+    #[test]
+    fn concurrent_ops_during_resize_no_deadlock_and_capacity_consistent() {
+        // Same stress contract as the ShardedLruCache test: workers hammer
+        // get/set while a resizer flips capacity; the TTL wrapper's eviction
+        // path (HasEvict/on_evict wiring) must not deadlock the per-shard
+        // write locks taken by the resize.
+        use std::thread;
+        let c = ShardedLruTtlCacheBase::<u64, u64>::builder()
+            .shards(8)
+            .max_size(1024)
+            .ttl(Duration::from_secs(60))
+            .on_evict(|_, _| {})
+            .build()
+            .unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for t in 0..4u64 {
+            let c = c.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut i = t;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = ConcurrentCached::cache_set(&c, i, i);
+                    let _ = ConcurrentCached::cache_get(&c, &(i.wrapping_sub(1)));
+                    i = i.wrapping_add(4);
+                }
+            }));
+        }
+        // 512/8=64 and 2048/8=256 divide evenly, so capacity() lands exactly
+        // on whichever total the final resize wrote.
+        let resizer = {
+            let c = c.clone();
+            thread::spawn(move || {
+                for r in 0..500 {
+                    let target = if r % 2 == 0 { 512 } else { 2048 };
+                    let prev = c.set_max_size(target);
+                    assert!(prev.is_some(), "set_max_size always returns Some(prev)");
+                }
+            })
+        };
+        resizer.join().expect("resizer thread must not panic");
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().expect("worker thread must not panic");
+        }
+        // Last write was set_max_size(2048) (r = 499 is odd).
+        assert_eq!(
+            c.capacity(),
+            2048,
+            "capacity must be eventually consistent with the final resize"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +980,57 @@ mod expiring_lru {
             c.len(),
             2,
             "expired key 3 survives the capacity shrink (it is LRU-recent); only evict() would sweep it"
+        );
+    }
+
+    #[test]
+    fn concurrent_ops_during_resize_no_deadlock_and_capacity_consistent() {
+        // Same stress contract as the ShardedLruCache test, through the
+        // expiring-LRU wrapper's on_evict wiring.
+        use std::thread;
+        let c = ShardedExpiringLruCacheBase::<u64, E>::builder()
+            .shards(8)
+            .max_size(1024)
+            .on_evict(|_, _| {})
+            .build()
+            .unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for t in 0..4u64 {
+            let c = c.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut i = t;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = ConcurrentCached::cache_set(&c, i, E { v: i as u32 });
+                    let _ = ConcurrentCached::cache_get(&c, &(i.wrapping_sub(1)));
+                    i = i.wrapping_add(4);
+                }
+            }));
+        }
+        // 512/8=64 and 2048/8=256 divide evenly, so capacity() lands exactly
+        // on whichever total the final resize wrote.
+        let resizer = {
+            let c = c.clone();
+            thread::spawn(move || {
+                for r in 0..500 {
+                    let target = if r % 2 == 0 { 512 } else { 2048 };
+                    let prev = c.set_max_size(target);
+                    assert!(prev.is_some(), "set_max_size always returns Some(prev)");
+                }
+            })
+        };
+        resizer.join().expect("resizer thread must not panic");
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().expect("worker thread must not panic");
+        }
+        // Last write was set_max_size(2048) (r = 499 is odd).
+        assert_eq!(
+            c.capacity(),
+            2048,
+            "capacity must be eventually consistent with the final resize"
         );
     }
 }

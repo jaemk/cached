@@ -14,7 +14,7 @@ Three 3.0 resilience attributes on `#[cached]` functions - in-memory, no externa
    a cache hit (expression false) and a forced recompute (expression true).
 
 Run:
-    cargo run --example resilience --all-features
+    cargo run --example resilience --features "proc_macro,time_stores"
 */
 
 use cached::macros::cached;

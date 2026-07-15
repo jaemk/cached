@@ -40,11 +40,11 @@ the item stays here for history.
 | [0019](0019-ahash-default-feature.md) | Drop `ahash` from default features | Needs research |
 | [0020](0020-argument-error-unification.md) | Unify single-variant argument errors | Needs research |
 | [0021](0021-redb-refresh-on-hit-cost.md) | Amortize redb refresh-on-hit write txns | Needs research |
-| [0022](0022-serialize-cached-set-ref-return.md) | `cache_set_ref` returning previous value | Needs research |
+| [0022](0022-serialize-cached-set-ref-return.md) | `cache_set_ref` returning previous value | Implemented |
 | [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Needs research |
 | [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Needs research |
 | [0025](0025-redb-disk-path-introspection.md) | redb resolved-path introspection + temp fallback | Needs research |
-| [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Needs research |
+| [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Implemented |
 | [0027](0027-sync-writes-default-revert.md) | `sync_writes` default flip and revert | Implemented |
 | [0028](0028-per-entry-expiry-and-set-ttl-zero.md) | Per-entry expiry model and `set_ttl(0)` semantics | Implemented |
 | [0029](0029-self-healing-deserialization-default.md) | Self-healing deserialization default | Implemented |

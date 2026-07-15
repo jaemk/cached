@@ -21,9 +21,13 @@ alias form the exported surface.
 
 ## SHARD-3
 
-Sharded stores implement the concurrent trait family (`ConcurrentCacheBase`,
-`ConcurrentCached`, and `ConcurrentCacheTtl` on TTL variants). Metrics are exposed through the
-trait per [design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
+Sharded stores implement the concurrent trait family: `ConcurrentCacheBase`,
+`ConcurrentCached`, and `ConcurrentCachedAsync` on all six variants; `ConcurrentCacheTtl` on the
+TTL variants; `ConcurrentCacheEvict` and `ConcurrentCloneCached` on the four expiry-capable
+variants (TTL and expiring). The runtime TTL controls (`ttl`/`set_ttl`/`unset_ttl`/
+`refresh_on_hit`/`set_refresh_on_hit`) exist only on `ConcurrentCacheTtl`, not as inherent
+methods. Metrics are exposed through the trait per
+[design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
 See [traits-concurrent.md](traits-concurrent.md).
 
 ## SHARD-4
@@ -34,3 +38,13 @@ directions: a read-optimized sharded LRU
 ([design/0010-read-optimized-sharded-lru.md](design/0010-read-optimized-sharded-lru.md)) and
 collapsing the `*Base` alias into a defaulted type param
 ([design/0015-sharded-base-alias-collapse.md](design/0015-sharded-base-alias-collapse.md)).
+
+## SHARD-5
+
+The LRU-bounded variants (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`)
+support runtime capacity resizing via `set_max_size(&self)` / `try_set_max_size(&self)`, using
+the builders' ceiling-division-plus-16-per-shard-floor policy. Shrinks evict per shard strictly
+by LRU recency (TTL/expiry state is ignored); resize is not atomic across shards. The unbounded
+variants' builders (`ShardedUnboundCacheBuilder`, `ShardedTtlCacheBuilder`,
+`ShardedExpiringCacheBuilder`) take a `per_shard_initial_capacity` preallocation hint, the
+sharded counterpart of the single-owner builders' `initial_capacity`.
