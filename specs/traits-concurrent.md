@@ -15,7 +15,8 @@ and `ConcurrentCachedAsync<K, V>` extend it, per
 ## CTRAIT-2
 
 `ConcurrentCached<K, V>` is the sync self-synchronizing API (`cache_get`, `cache_set`,
-`cache_remove`, `cache_get_or_set_with`, and the fallible variants, all returning
+`cache_remove`, `cache_remove_entry`, `cache_delete`, `cache_clear`, `cache_reset`,
+`cache_reset_metrics`, `cache_get_or_set_with`, all returning
 `Result<_, Self::Error>`). `ConcurrentCachedAsync<K, V>` is its async counterpart.
 `ConcurrentCachedExt` provides the deduplicated method names.
 

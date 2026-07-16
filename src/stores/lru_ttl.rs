@@ -511,13 +511,13 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
+    /// Returns [`SetMaxSizeError::ZeroMaxSize`](super::SetMaxSizeError) if `max_size` is 0.
     pub fn try_set_max_size(
         &mut self,
         max_size: usize,
     ) -> Result<Option<usize>, super::SetMaxSizeError> {
         if max_size == 0 {
-            return Err(super::SetMaxSizeError::ZeroSize);
+            return Err(super::SetMaxSizeError::ZeroMaxSize);
         }
         Ok(self.set_max_size(max_size))
     }
@@ -1618,7 +1618,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             cache.try_set_max_size(0),
-            Err(super::super::SetMaxSizeError::ZeroSize)
+            Err(super::super::SetMaxSizeError::ZeroMaxSize)
         );
         assert_eq!(cache.try_set_max_size(5).unwrap(), Some(3));
     }

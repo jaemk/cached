@@ -34,14 +34,14 @@ the item stays here for history.
 | [0013](0013-macro-store-attribute-placement.md) | Friendly rejection of store attrs on `#[cached]` | Implemented |
 | [0014](0014-infallible-builders.md) | Infallible builders return the cache directly | Needs research |
 | [0015](0015-sharded-base-alias-collapse.md) | Collapse `*Base` + alias into a defaulted type param | Needs research |
-| [0016](0016-async-core-internal-feature.md) | Make `async_core` internal | Needs research |
-| [0017](0017-redis-feature-axes.md) | Orthogonal redis runtime x TLS features | Needs research |
+| [0016](0016-async-core-internal-feature.md) | Make `async_core` internal | Declined |
+| [0017](0017-redis-feature-axes.md) | Orthogonal redis runtime x TLS features | Capability axis resolved; TLS orthogonality needs research |
 | [0018](0018-redis-key-escaping.md) | Escape redis namespace/prefix/key segments | Needs research |
-| [0019](0019-ahash-default-feature.md) | Drop `ahash` from default features | Needs research |
+| [0019](0019-ahash-default-feature.md) | Drop `ahash` from default features | Declined (kept in defaults) |
 | [0020](0020-argument-error-unification.md) | Unify single-variant argument errors | Needs research |
 | [0021](0021-redb-refresh-on-hit-cost.md) | Amortize redb refresh-on-hit write txns | Needs research |
 | [0022](0022-serialize-cached-set-ref-return.md) | `cache_set_ref` returning previous value | Implemented |
-| [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Needs research |
+| [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Declined |
 | [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Needs research |
 | [0025](0025-redb-disk-path-introspection.md) | redb resolved-path introspection + temp fallback | Needs research |
 | [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Implemented |

@@ -419,13 +419,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SetMaxSizeError::ZeroSize`](crate::SetMaxSizeError) if `max_size` is 0.
+    /// Returns [`SetMaxSizeError::ZeroMaxSize`](crate::SetMaxSizeError) if `max_size` is 0.
     pub fn try_set_max_size(
         &self,
         max_size: usize,
     ) -> Result<Option<usize>, crate::SetMaxSizeError> {
         if max_size == 0 {
-            return Err(crate::SetMaxSizeError::ZeroSize);
+            return Err(crate::SetMaxSizeError::ZeroMaxSize);
         }
         Ok(self.set_max_size(max_size))
     }

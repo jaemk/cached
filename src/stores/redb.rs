@@ -559,6 +559,14 @@ fn reject_if_symlink(path: &Path, what: &str) -> Result<(), std::io::Error> {
 /// opened at once), and/or set
 /// [`durable`](RedbCacheBuilder::durable)
 /// `false` so commits skip the fsync (trading durability for speed).
+///
+/// # Format stability
+///
+/// The on-disk format (the version embedded in the cache file name, the redb table
+/// name, and the MessagePack field layout of stored values) is stable for the 3.x
+/// series: files written by any 3.x release remain readable by every later 3.x
+/// release. A format change bumps the embedded version, which isolates old files
+/// rather than corrupting them, and is otherwise reserved for a major release.
 pub struct RedbCache<K, V> {
     pub(super) ttl: Mutex<Option<Duration>>,
     pub(super) refresh: AtomicBool,

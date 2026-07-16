@@ -196,13 +196,13 @@ impl std::error::Error for BuildError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetMaxSizeError {
     /// A max size of zero was supplied; max_size must be greater than zero.
-    ZeroSize,
+    ZeroMaxSize,
 }
 
 impl std::fmt::Display for SetMaxSizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SetMaxSizeError::ZeroSize => write!(f, "max_size must be greater than zero"),
+            SetMaxSizeError::ZeroMaxSize => write!(f, "max_size must be greater than zero"),
         }
     }
 }

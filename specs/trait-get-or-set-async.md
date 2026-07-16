@@ -2,7 +2,7 @@
 
 `CachedGetOrSetAsync<K, V>` provides `async_cache_get_or_set_with` and
 `async_cache_try_get_or_set_with` over a sync in-memory store, so an async initializer can
-populate a single-owner cache. Gated behind the async features.
+populate a single-owner cache. Gated behind `async_core`.
 
 ## ASYNC-1
 
@@ -19,5 +19,5 @@ cache. It is distinct from the concurrent async trait `ConcurrentCachedAsync`
 ## ASYNC-3
 
 Exposed in the prelude alongside `ConcurrentCachedAsync` and `SerializeCachedAsync`. Requires
-`async` (runtime-agnostic) or a redis async runtime feature; see
-[cargo-features.md](cargo-features.md).
+`async_core` (runtime-agnostic, no `async-lock` dependency; enabled transitively by `async`
+and the redis async runtime features); see [cargo-features.md](cargo-features.md).
