@@ -106,6 +106,26 @@ pub(crate) fn shard_index(hash: u64, mask: usize) -> usize {
     (hash >> 32) as usize & mask
 }
 
+/// Encode a TTL into a nanosecond atomic. A zero duration encodes as `0`
+/// (expiry disabled / no expiry).
+#[cfg(feature = "time_stores")]
+#[inline]
+pub(crate) fn encode_ttl(ttl: crate::time::Duration) -> u64 {
+    ttl.as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// Decode the nanosecond atomic into an optional TTL. `0` means expiry is
+/// disabled (entries never expire), so it decodes to `None`.
+#[cfg(feature = "time_stores")]
+#[inline]
+pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
+    if nanos == 0 {
+        None
+    } else {
+        Some(crate::time::Duration::from_nanos(nanos))
+    }
+}
+
 /// Trait for types that deterministically map a key to a `u64` shard hash.
 ///
 /// No `K: Hash` bound on the trait itself — custom impls can partition by
@@ -218,9 +238,11 @@ pub use lru::{ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder};
 pub use unbound::{ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder};
 
 #[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use ttl::{ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder};
 
 #[cfg(feature = "time_stores")]
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use lru_ttl::{ShardedLruTtlCache, ShardedLruTtlCacheBase, ShardedLruTtlCacheBuilder};
 
 #[cfg(test)]

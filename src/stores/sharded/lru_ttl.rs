@@ -3,24 +3,6 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-/// Encode a TTL into the `ttl_nanos` atomic. A zero duration encodes as `0`
-/// (expiry disabled / no expiry).
-#[inline]
-fn encode_ttl(ttl: Duration) -> u64 {
-    ttl.as_nanos().min(u64::MAX as u128) as u64
-}
-
-/// Decode the `ttl_nanos` atomic into an optional TTL. `0` means expiry is
-/// disabled (entries never expire), so it decodes to `None`.
-#[inline]
-fn decode_ttl(nanos: u64) -> Option<Duration> {
-    if nanos == 0 {
-        None
-    } else {
-        Some(Duration::from_nanos(nanos))
-    }
-}
-
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
@@ -28,10 +10,12 @@ use crate::{
     CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached,
     ConcurrentCloneCached,
 };
+#[cfg(feature = "async_core")]
+use core::future::Future;
 
 use super::{
-    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
-    per_shard_cap_from_total, shard_index,
+    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, decode_ttl,
+    encode_ttl, per_shard_cap_from_total, shard_index,
 };
 use crate::stores::{BuildError, HasEvict, LruCache, NoEvict, TimedEntry};
 use crate::{Cached, CachedIter, CachedPeek};
@@ -814,6 +798,21 @@ where
             .store(0, Ordering::Relaxed);
         Ok(())
     }
+
+    /// Efficient peek-based contains: acquires a read lock, does not clone the value, does not
+    /// update LRU recency, and does not record hit/miss metrics. Returns `true` only for live
+    /// (not expired) entries.
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        Self: Sized,
+        V: Clone,
+    {
+        let shard = self.shard_of(k);
+        let guard = shard.lock.read();
+        Ok(guard
+            .cache_peek(k)
+            .is_some_and(|entry| entry.expires_at.is_none_or(|t| Instant::now() < t)))
+    }
 }
 
 #[cfg(feature = "async_core")]
@@ -849,6 +848,18 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    /// Efficient peek-based contains: does not clone the value, does not update LRU recency,
+    /// does not record hit/miss metrics, and returns `true` only for live (not expired) entries.
+    fn async_cache_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sized + Sync,
+        K: Sync,
+        V: Clone + Send,
+    {
+        let result = ConcurrentCached::cache_contains(self, k);
+        async move { result }
     }
 }
 

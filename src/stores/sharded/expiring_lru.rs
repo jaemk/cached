@@ -8,6 +8,8 @@ use crate::{
     CacheMetrics, CachedIter, CachedPeek, ConcurrentCacheBase, ConcurrentCached,
     ConcurrentCloneCached, Expires,
 };
+#[cfg(feature = "async_core")]
+use core::future::Future;
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
@@ -663,6 +665,23 @@ where
         self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
+
+    /// Efficient peek-based contains: acquires a read lock, does not clone the value, does not
+    /// update LRU recency, and does not record hit/miss metrics. Returns `true` only for live
+    /// (not expired) entries.
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        Self: Sized,
+        V: Clone,
+    {
+        use crate::CachedPeek;
+        let shard = self.shard_of(k);
+        Ok(shard
+            .lock
+            .read()
+            .cache_peek(k)
+            .is_some_and(|v| !v.is_expired()))
+    }
 }
 
 #[cfg(feature = "async_core")]
@@ -698,6 +717,18 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    /// Efficient peek-based contains: does not clone the value, does not update LRU recency,
+    /// does not record hit/miss metrics, and returns `true` only for live (not expired) entries.
+    fn async_cache_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sized + Sync,
+        K: Sync,
+        V: Clone + Send,
+    {
+        let result = ConcurrentCached::cache_contains(self, k);
+        async move { result }
     }
 }
 

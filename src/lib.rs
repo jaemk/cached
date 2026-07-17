@@ -455,6 +455,7 @@ no longer compiles. Use [`cache_get_or_set_with_mut`](crate::Cached::cache_get_o
 when you need a mutable reference.
 
 ```compile_fail
+// This does NOT compile: cache_get_or_set_with returns &V, not &mut V.
 use cached::{Cached, UnboundCache};
 
 let mut cache: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();
@@ -825,8 +826,9 @@ impl<C, B> std::ops::Deref for KeyedCache<C, B> {
 /// especially handy for the `ConcurrentCached` family, whose methods (`cache_get`,
 /// `cache_set`, …) are trait methods and require the trait to be in scope to call.
 ///
-/// Only traits are re-exported here; concrete store types are intentionally omitted to
-/// avoid name clashes. Import those directly (e.g. `use cached::ShardedUnboundCache;`).
+/// Traits and the `CacheMetrics` snapshot struct are re-exported here; concrete store types
+/// are intentionally omitted to avoid name clashes. Import those directly
+/// (e.g. `use cached::ShardedUnboundCache;`).
 pub mod prelude {
     pub use crate::{
         CacheEvict, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek, CachedRead,
@@ -893,7 +895,12 @@ pub trait Cached<K, V> {
     /// Use [`std::convert::Infallible`] for stores where insertion can never fail.
     /// TTL-capable stores that may overflow `Instant` bounds use
     /// [`CacheSetError`].
-    type Error;
+    ///
+    /// The bound `std::error::Error + Send + Sync + 'static` lets generic code call
+    /// `.unwrap()` on `Result<_, Self::Error>`, propagate with `?` into
+    /// `Box<dyn std::error::Error>`, and send/share the error across threads without
+    /// additional where-clauses at every use site.
+    type Error: std::error::Error + Send + Sync + 'static;
 
     // ── Core required methods (stores implement these) ────────────────────
 
@@ -1220,6 +1227,10 @@ pub trait CachedExt<K, V>: Cached<K, V> {
     /// [`cache_clear`](Cached::cache_clear).
     fn clear(&mut self);
 
+    /// Remove all entries and reset metrics to zero. Delegates to
+    /// [`cache_reset`](Cached::cache_reset).
+    fn reset(&mut self);
+
     /// Return the number of entries currently in the cache. Delegates to
     /// [`cache_size`](Cached::cache_size).
     ///
@@ -1331,6 +1342,10 @@ impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
 
     fn clear(&mut self) {
         self.cache_clear()
+    }
+
+    fn reset(&mut self) {
+        self.cache_reset()
     }
 
     fn len(&self) -> usize {
@@ -1462,6 +1477,15 @@ pub trait CachedPeek<K, V> {
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized;
+
+    /// Ergonomic alias for [`cache_peek`](Self::cache_peek).
+    fn peek<Q>(&self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_peek(k)
+    }
 }
 
 /// Shared-reference cache lookup for stores that can preserve normal read semantics without an
@@ -1556,6 +1580,16 @@ pub trait CloneCached<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
         V: Clone;
+
+    /// Ergonomic alias for [`cache_peek_with_expiry_status`](Self::cache_peek_with_expiry_status).
+    fn peek_with_expiry_status<Q>(&self, key: &Q) -> (Option<V>, bool)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        self.cache_peek_with_expiry_status(key)
+    }
 }
 
 /// Concurrent analogue of [`CloneCached`] for the internally-synchronized sharded stores.
@@ -1631,6 +1665,11 @@ pub trait ConcurrentCloneCached<K, V> {
     /// This is used on the `force_refresh` bypass path of `#[concurrent_cached(result_fallback = true)]`
     /// to capture the stale fallback value without touching counters or recency.
     fn cache_peek_with_expiry_status(&self, key: &K) -> (Option<V>, bool);
+
+    /// Ergonomic alias for [`cache_peek_with_expiry_status`](Self::cache_peek_with_expiry_status).
+    fn peek_with_expiry_status(&self, key: &K) -> (Option<V>, bool) {
+        self.cache_peek_with_expiry_status(key)
+    }
 }
 
 /// TTL management for single-owner time-bounded cache stores.
@@ -1811,7 +1850,12 @@ pub trait CachedGetOrSetAsync<K, V> {
 /// `type Error` and any `cache_size`/metric overrides live.
 pub trait ConcurrentCacheBase {
     /// The error type returned by fallible cache operations.
-    type Error;
+    ///
+    /// The bound `std::error::Error + Send + Sync + 'static` lets generic code call
+    /// `.unwrap()` on `Result<_, Self::Error>`, propagate with `?` into
+    /// `Box<dyn std::error::Error>`, and send/share the error across threads without
+    /// additional where-clauses at every use site.
+    type Error: std::error::Error + Send + Sync + 'static;
 
     /// Report the number of entries currently held by the store, if the store can
     /// determine it cheaply.
@@ -2076,6 +2120,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails
+    #[must_use = "cache_remove returns the previous value; ignoring it discards the displaced entry"]
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached entry, returning the stored key and value whenever an entry
@@ -2131,6 +2176,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// // Returns None only when the key was never present.
     /// assert_eq!(cache.remove_entry(&"missing".to_string()), None);
     /// ```
+    #[must_use = "cache_remove_entry returns the previous entry; ignoring it discards the displaced key and value"]
     fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error>;
 
     /// Delete a cached value without returning or decoding the stored value.
@@ -2146,6 +2192,27 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// Should return `Self::Error` if the operation fails
     fn cache_delete(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_remove_entry(k).map(|removed| removed.is_some())
+    }
+
+    /// Return `true` if the cache contains a live value for the given key.
+    ///
+    /// The default implementation calls [`cache_get`](ConcurrentCached::cache_get), which
+    /// **counts a hit or miss, touches LRU recency on sharded LRU stores, and clones the value**.
+    /// The built-in sharded in-memory stores override this with an efficient peek-based
+    /// implementation that does not clone the value, update recency, or record hit/miss metrics.
+    /// External stores (`RedisCache`, `AsyncRedisCache`, `RedbCache`) use the default.
+    ///
+    /// The `where Self: Sized` bound keeps this generic method out of the vtable.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        Self: Sized,
+        V: Clone,
+    {
+        self.cache_get(k).map(|v| v.is_some())
     }
 
     /// Remove all cached entries while preserving capacity allocation and metrics.
@@ -2254,10 +2321,12 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
 
     /// Remove a cached value and return it. Delegates to
     /// [`cache_remove`](ConcurrentCached::cache_remove).
+    #[must_use = "remove returns the previous value; ignoring it discards the displaced entry"]
     fn remove(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached entry and return the stored key and value. Delegates to
     /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry).
+    #[must_use = "remove_entry returns the previous entry; ignoring it discards the displaced key and value"]
     fn remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error>;
 
     /// Delete a cached value without returning it. Delegates to
@@ -2271,6 +2340,12 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
     /// Remove all entries and reset the cache to its initial state. Delegates to
     /// [`cache_reset`](ConcurrentCached::cache_reset).
     fn reset(&self) -> Result<(), Self::Error>;
+
+    /// Return `true` if the cache contains a live value for the given key. Delegates to
+    /// [`cache_contains`](ConcurrentCached::cache_contains).
+    fn contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        V: Clone;
 
     /// Return the cached value for `k`, or compute and store `f()`. Delegates to
     /// [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with).
@@ -2306,6 +2381,13 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
 
     fn reset(&self) -> Result<(), Self::Error> {
         self.cache_reset()
+    }
+
+    fn contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        V: Clone,
+    {
+        self.cache_contains(k)
     }
 
     fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
@@ -2374,6 +2456,7 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
     ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
 
     /// Remove a cached value, returning it if it was both present and still live.
+    #[must_use = "async_cache_remove returns the previous value; ignoring it discards the displaced entry"]
     #[doc(alias = "async_remove")]
     #[doc(alias = "cache_remove")]
     fn async_cache_remove(
@@ -2383,6 +2466,7 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
 
     /// Remove a cached entry, returning the stored key and value whenever an entry
     /// was physically deleted — including entries that were present but already expired.
+    #[must_use = "async_cache_remove_entry returns the previous entry; ignoring it discards the displaced key and value"]
     #[doc(alias = "async_remove_entry")]
     #[doc(alias = "cache_remove_entry")]
     fn async_cache_remove_entry(
@@ -2401,6 +2485,28 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
         K: Sync,
     {
         async move { self.async_cache_remove_entry(k).await.map(|r| r.is_some()) }
+    }
+
+    /// Return `true` if the cache contains a live value for the given key.
+    ///
+    /// The default implementation calls
+    /// [`async_cache_get`](ConcurrentCachedAsync::async_cache_get), which
+    /// **counts a hit or miss, touches LRU recency on sharded LRU stores, and clones the value**.
+    /// The built-in sharded in-memory stores override this with an efficient peek-based
+    /// implementation that does not clone the value, update recency, or record hit/miss metrics.
+    /// External stores (`AsyncRedisCache`, `RedbCache`) use the default.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    #[doc(alias = "cache_contains")]
+    fn async_cache_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sized + Sync,
+        K: Sync,
+        V: Clone + Send,
+    {
+        async move { self.async_cache_get(k).await.map(|v| v.is_some()) }
     }
 
     /// Remove all cached entries while preserving capacity allocation and metrics.

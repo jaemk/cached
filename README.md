@@ -455,6 +455,7 @@ no longer compiles. Use [`cache_get_or_set_with_mut`](crate::Cached::cache_get_o
 when you need a mutable reference.
 
 ```rust
+// This does NOT compile: cache_get_or_set_with returns &V, not &mut V.
 use cached::{Cached, UnboundCache};
 
 let mut cache: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();

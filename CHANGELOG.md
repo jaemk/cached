@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `Cached::Error` and `ConcurrentCacheBase::Error` are now bounded by
+  `std::error::Error + Send + Sync + 'static`. Custom store implementations whose error
+  type does not implement `std::error::Error` (or is not `Send`/`Sync`/`'static`) must update
+  their `type Error`. All built-in stores (`Infallible`, `CacheSetError`, `RedisCacheError`,
+  `RedbCacheError`) already satisfy the bound. See the migration guide for detection and remediation.
+
+### Added
+
+- `CachedPeek::peek`: ergonomic alias for `cache_peek`.
+- `CloneCached::peek_with_expiry_status`: ergonomic alias for `cache_peek_with_expiry_status`.
+- `ConcurrentCloneCached::peek_with_expiry_status`: ergonomic alias for
+  `cache_peek_with_expiry_status` on the concurrent clone trait.
+- `CachedExt::reset`: ergonomic alias for `Cached::cache_reset`, mirroring the existing
+  `ConcurrentCachedExt::reset`.
+- `ConcurrentCached::cache_contains`: defaulted presence check returning `Result<bool, Self::Error>`.
+  The default calls `cache_get` (counts hits/misses, touches LRU recency, clones the value). The
+  built-in sharded stores override it with an efficient peek-based implementation (read lock, no
+  clone, no recency update, no hit/miss metrics). External stores use the default.
+- `ConcurrentCachedAsync::async_cache_contains`: async counterpart of `cache_contains`, same
+  default/override split.
+- `ConcurrentCachedExt::contains`: ergonomic alias for `cache_contains`.
+- `#[must_use]` on `ConcurrentCached::cache_remove` and `cache_remove_entry`, their
+  `ConcurrentCachedAsync` counterparts `async_cache_remove` / `async_cache_remove_entry`, and the
+  `ConcurrentCachedExt` aliases `remove` / `remove_entry`.
+- `#[must_use]` on `RedbCacheError::is_deserialization`, matching `RedisCacheError::is_deserialization`.
+- `#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]` on the `ShardedTtlCache*` and
+  `ShardedLruTtlCache*` re-exports in `src/stores/sharded/mod.rs`.
+
+### Changed
+
+- `encode_ttl`/`decode_ttl` deduplicated from `src/stores/sharded/ttl.rs` and
+  `src/stores/sharded/lru_ttl.rs` into a single `pub(crate)` copy in
+  `src/stores/sharded/mod.rs`; both files now import from there. No behavior change.
+
+### Documentation
+
+- Prelude doc corrected: it re-exports both traits and the `CacheMetrics` struct, not traits only.
+- The `compile_fail` snippet for `cache_get_or_set_with` includes a leading comment making its
+  non-compiling intent clear in the generated README (where `compile_fail` renders as plain Rust).
+- `docs/migrations/2.0-to-3.0-human.md`: added section on `Return<T>` field privatization
+  (`r.value` / `r.was_cached` -> deref / `into_inner()` / `was_cached()`).
+- `docs/migrations/2.0-to-3.0.md` and `2.0-to-3.0-human.md`: added the `Cached::Error` and
+  `ConcurrentCacheBase::Error` bound as a breaking change entry.
+- `specs/traits-core.md` and `specs/traits-concurrent.md`: updated to record `Error` bounds,
+  `peek` aliases, `reset`, `cache_contains`/`async_cache_contains`/`contains`.
+
 ## [3.0.0-rc.8 / cached_proc_macro 3.0.0-rc.8 / cached_proc_macro_types 3.0.0-rc.8] - 2026-07-17
 
 ### Breaking Changes

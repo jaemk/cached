@@ -12,6 +12,8 @@ use std::collections::HashMap;
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached};
+#[cfg(feature = "async_core")]
+use core::future::Future;
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
@@ -424,6 +426,17 @@ where
         }
         Ok(())
     }
+
+    /// Efficient peek-based contains: acquires a read lock, does not clone the value,
+    /// and does not record hit/miss metrics.
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        Self: Sized,
+        V: Clone,
+    {
+        let shard = self.shard_of(k);
+        Ok(shard.lock.read().contains_key(k))
+    }
 }
 
 #[cfg(feature = "async_core")]
@@ -459,6 +472,18 @@ where
 
     async fn async_cache_reset_metrics(&self) -> Result<(), Self::Error> {
         ConcurrentCached::cache_reset_metrics(self)
+    }
+
+    /// Efficient peek-based contains: does not clone the value and does not record
+    /// hit/miss metrics.
+    fn async_cache_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sized + Sync,
+        K: Sync,
+        V: Clone + Send,
+    {
+        let result = ConcurrentCached::cache_contains(self, k);
+        async move { result }
     }
 }
 

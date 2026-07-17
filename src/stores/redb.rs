@@ -767,6 +767,7 @@ impl RedbCacheError {
         }
     }
     /// Returns `true` if this error is a deserialization failure.
+    #[must_use]
     pub fn is_deserialization(&self) -> bool {
         matches!(self, Self::CacheDeserialization { .. })
     }

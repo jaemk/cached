@@ -6,21 +6,24 @@ redis, and redb stores. Distinct from the `&mut self` single-owner family in
 
 ## CTRAIT-1
 
-`ConcurrentCacheBase` is the shared supertrait: it owns the associated `type Error`, the
-`cache_size` / `cache_is_empty` accessors, the metric accessors (`cache_hits` / `cache_misses` /
-`cache_capacity` / `cache_evictions`), and a provided `metrics()`. Both `ConcurrentCached<K, V>`
-and `ConcurrentCachedAsync<K, V>` extend it, per
-[design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
+`ConcurrentCacheBase` is the shared supertrait: it owns the associated `type Error` (bounded by
+`std::error::Error + Send + Sync + 'static`), the `cache_size` / `cache_is_empty` accessors, the
+metric accessors (`cache_hits` / `cache_misses` / `cache_capacity` / `cache_evictions`), and a
+provided `metrics()`. Both `ConcurrentCached<K, V>` and `ConcurrentCachedAsync<K, V>` extend it,
+per [design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
 
 ## CTRAIT-2
 
 `ConcurrentCached<K, V>` is the sync self-synchronizing API (`cache_get`, `cache_set`,
-`cache_remove`, `cache_remove_entry`, `cache_delete`, `cache_clear`, `cache_reset`,
-`cache_reset_metrics`, `cache_get_or_set_with`, all returning
-`Result<_, Self::Error>`). `ConcurrentCachedAsync<K, V>` is its async counterpart.
-`ConcurrentCachedExt` provides deduplicated short-name methods (`get`, `set`, `remove`,
-`remove_entry`, `delete`, `clear`, `reset`, `get_or_set_with`); it does not forward
-`cache_reset_metrics`.
+`cache_remove`, `cache_remove_entry`, `cache_delete`, `cache_contains`, `cache_clear`,
+`cache_reset`, `cache_reset_metrics`, `cache_get_or_set_with`, all returning
+`Result<_, Self::Error>`). `cache_contains` has a default that calls `cache_get` (counts
+hits/misses, clones the value); the built-in sharded stores override it with a peek-based
+implementation (read lock, no clone, no metrics). `ConcurrentCachedAsync<K, V>` is its async
+counterpart, adding `async_cache_contains`. `ConcurrentCachedExt` provides deduplicated short-name
+methods (`get`, `set`, `remove`, `remove_entry`, `delete`, `contains`, `clear`, `reset`,
+`get_or_set_with`); it does not forward `cache_reset_metrics` or `cache_contains` directly
+(use `contains` via the ext trait).
 
 ## CTRAIT-3
 
