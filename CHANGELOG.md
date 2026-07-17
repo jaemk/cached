@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.8 / cached_proc_macro 3.0.0-rc.8 / cached_proc_macro_types 3.0.0-rc.8] - 2026-07-17
+
 ### Breaking Changes
 
 - `#[cached]` rejects an explicit `sync_writes_buckets` when `sync_writes` is not `"by_key"` with a pointed compile error. The value was previously accepted and silently ignored (buckets only exist on the `by_key` path); `#[once]` already rejected the same inert combination.
