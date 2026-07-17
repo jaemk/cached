@@ -33,13 +33,13 @@ failure path.
 **`is_deserialization()` classifies errors without downcast.** `RedisCacheError::is_deserialization()`
 and `RedbCacheError::is_deserialization()` let strict-mode callers distinguish a corrupt-value
 error from a network or IO error without reaching into the opaque `source` box
-(`src/stores/redis.rs:1214-1221`, `src/stores/redb.rs:702-area`).
+(`src/stores/redis.rs:1406`, `src/stores/redb.rs:770`).
 
 **The GET-then-DEL self-heal on redis is not atomic.** A concurrent `PSETEX` of a valid value
 between the GET and the DEL can be lost. This race is closed on the redis path with a Lua
 conditional-delete script (DEC-9(b); `src/stores/redis.rs:11-35`): the script deletes the key
 only if the stored bytes still match what was read, so a fresher valid write is preserved. The
-redb path re-reads under the write transaction before deleting (C5 fix; `src/stores/redb.rs:808-`),
+redb path re-reads under the write transaction before deleting (C5 fix; `src/stores/redb.rs:866-911`),
 so a concurrent `cache_set` that commits between the read and the self-heal is not silently lost.
 
 ## Notes

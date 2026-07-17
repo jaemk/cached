@@ -25,4 +25,4 @@ documented feature ("async trait definitions without the async-lock dependency")
 who want the async trait surface without pulling `async-lock`.
 
 5.4 refresh: `blocking` was moved from the `async` feature to `redb_store`; Redis-only and
-in-memory async builds no longer pay for it (`Cargo.toml:63-68`).
+in-memory async builds no longer pay for it (`Cargo.toml:75`).

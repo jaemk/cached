@@ -11,7 +11,7 @@ module namespace and accessible by the `{fn}_prime_cache` companion.
 When `in_impl = true` is set, the macro is applied to a method inside an `impl` block. In that
 case the cache static cannot be a module-level item because the generated code is emitted inside
 the impl, and `static` is not valid as an impl item. Instead, the static is emitted inside the
-generated function body (`cached_proc_macro/src/cached.rs:1223-1243`).
+generated function body (`cached_proc_macro/src/cached.rs:1237-1252`).
 
 A function-local static is valid Rust (item-in-fn), initialized once on first call (same
 semantics as a module static), and is only accessible from within that function body.
@@ -47,6 +47,6 @@ avoids surprises when a free function is renamed into a method.
 ## Notes
 
 - `cached_proc_macro/src/cached.rs:259-285` contains the receiver/`in_impl` validation.
-- `cached_proc_macro/src/cached.rs:1223-1243` contains the static placement branch.
-- `cached_proc_macro/src/cached.rs:1252-1253` contains the prime suppression under `in_impl`.
-- `cached_proc_macro/src/cached.rs:909-910` documents the visibility difference in a comment.
+- `cached_proc_macro/src/cached.rs:1237-1252` contains the static placement branch.
+- `cached_proc_macro/src/cached.rs:1261-1262` contains the prime suppression under `in_impl`.
+- `cached_proc_macro/src/cached.rs:918-921` documents the visibility difference in a comment.

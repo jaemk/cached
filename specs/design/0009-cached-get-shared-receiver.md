@@ -4,7 +4,7 @@ Status: Needs research
 
 ## Current state
 
-- `Cached::cache_get`/`get` take `&mut self` (`src/lib.rs:740,921`), as do `cache_get_mut`,
+- `Cached::cache_get`/`get` take `&mut self` (`src/lib.rs:913`), as do `cache_get_mut`,
   `contains`, and `CloneCached::cache_get_with_expiry_status`.
 - Justified by LRU recency updates, TTL refresh, and hit/miss metrics mutating on read.
 - `CachedPeek::cache_peek` (&self) and `CachedRead::cache_get_read` (&self) exist as

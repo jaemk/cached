@@ -46,6 +46,6 @@ as a supertrait.
 
 ## Notes
 
-- The trait is gated on `feature = "async_core"` (`src/lib.rs:1689`).
-- `src/lib.rs:1678-1688` documents the scope distinction between `CachedGetOrSetAsync` and
+- The trait is gated on `feature = "async_core"` (`src/lib.rs:1700-1702`).
+- `src/lib.rs:1688-1699` documents the scope distinction between `CachedGetOrSetAsync` and
   `ConcurrentCachedAsync` in the trait rustdoc.

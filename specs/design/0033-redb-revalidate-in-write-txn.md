@@ -13,11 +13,11 @@ thread may have written a valid value for the same key via `cache_set`.
 
 Two paths handle this:
 
-**Expiry/refresh mutation path (`src/stores/redb.rs:920-936`):** re-reads the entry under the
+**Expiry/refresh mutation path (`src/stores/redb.rs:942`):** re-reads the entry under the
 write transaction before acting. If the key is now absent or has a fresh value, the stale action
 is skipped. This was the original design.
 
-**Self-heal path (`src/stores/redb.rs:808-867`, C5 fix):** previously deleted the key blindly
+**Self-heal path (`src/stores/redb.rs:866-911`, C5 fix):** previously deleted the key blindly
 under the write transaction without re-reading. A valid `cache_set` that committed between the
 read and the write was silently deleted. The fix aligns the self-heal path with the expiry path:
 re-read the bytes under the write transaction; only delete if the bytes are still corrupt (same

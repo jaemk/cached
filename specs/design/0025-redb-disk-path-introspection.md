@@ -5,7 +5,7 @@ Status: Needs research
 ## Current state
 
 - redb's `name` is validated only at build() and the file is `<name>_v<DISK_FILE_VERSION>.redb`
-  under a default dir derived from the exe name (`src/stores/redb.rs:193,275`).
+  under a default dir derived from the exe name (`src/stores/redb.rs:203,275`).
 - The default-dir logic silently falls back from the system cache dir to the temp dir on
   PermissionDenied (`src/stores/redb.rs:214`), so a cache can land in /tmp without the caller
   knowing.

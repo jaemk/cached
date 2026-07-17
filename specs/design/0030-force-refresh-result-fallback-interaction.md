@@ -32,7 +32,7 @@ skip-read branch and the skip-store branch, so the expression is not evaluated t
 attributes conflict: `result_fallback` needs a peek before the call and a conditional store after,
 which is incompatible with the `by_key` lock structure. A compile error is emitted if both are
 set with a non-Disabled sync mode. When `sync_writes` is not set explicitly and `result_fallback`
-is set, `sync_writes` is forced to `Disabled` (`cached_proc_macro/src/cached.rs:781-794`).
+is set, `sync_writes` is forced to `Disabled` (`cached_proc_macro/src/cached.rs:800-807`).
 
 **`result_fallback` is also mutually exclusive with `cache_err` and `with_cached_flag`.** Both
 conflicts are compile errors. `cache_err` caches the error value directly, which is the opposite
@@ -46,6 +46,6 @@ available on TTL-capable and expiring stores.
 
 ## Notes
 
-- `cached_proc_macro/src/cached.rs:1104-1169` contains the full codegen for this interaction.
+- `cached_proc_macro/src/cached.rs:1112-1190` contains the full codegen for this interaction.
 - `force_refresh` alone (without `result_fallback`) uses a simpler guard pattern that short-circuits
   the lookup unconditionally when the predicate is true.

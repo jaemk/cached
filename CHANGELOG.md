@@ -24,6 +24,7 @@
 - `cached::prelude` re-exports `CacheTtl` unconditionally, matching `ConcurrentCacheTtl` (the trait was never feature-gated; only the built-in stores implementing it require `time_stores`).
 - `Return::set_was_cached` is `#[doc(hidden)]` (macro plumbing, not supported public API). The method remains `pub` and callable (no compile breakage); it is de-documented because only macro-generated code should set the flag -- use `Return::new` to construct a value and `was_cached()` to read the flag.
 - `#[must_use]` added to `CacheMetrics::hit_ratio` and the `iter_order` / `key_order` / `value_order` accessors on `LruCache` / `LruTtlCache`.
+- `metrics().capacity` on the sharded LRU stores (`ShardedLruCacheBase` / `ShardedLruTtlCacheBase` / `ShardedExpiringLruCacheBase`) loads the total with `Acquire` ordering, matching `capacity()`: after a same-thread `set_max_size`, `metrics().capacity` and `capacity()` now always agree.
 
 ### Documentation
 
@@ -37,6 +38,7 @@
 - The error-source downcast tests are labeled as pinning non-contract behavior (the concrete source types stay out of the semver contract).
 - The `#[concurrent_cached(redis = true)]` shorthand now appears in the macro quick-reference table.
 - `Cached::cache_capacity` / `ConcurrentCacheBase::cache_capacity` docs clarify that capacity means the eviction bound (`max_size`), not pre-allocated memory.
+- `set_max_size` on the sharded LRU stores documents concurrent-caller semantics: overlapping resizes interleave per-shard writes (no data race or lost entries, but the resulting bound blends the two targets and `capacity()` reports whichever total was published last); serialize resizes externally, or re-issue the resize, when a single consistent target matters.
 
 ## [3.0.0-rc.7 / cached_proc_macro 3.0.0-rc.7] - 2026-07-12
 

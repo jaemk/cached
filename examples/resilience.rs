@@ -47,7 +47,14 @@ fn slow_lookup(key: u32) -> String {
 fn demo_sync_writes_by_key() {
     println!("\n--- 1. sync_writes = \"by_key\" ---");
 
+    // Reset both the counter and the cache so the demo holds even if this
+    // function is invoked more than once in the same process (a warm key 42
+    // would otherwise skip the body and break the body_runs == 1 assertion).
     BY_KEY_CALL_COUNT.store(0, Ordering::SeqCst);
+    {
+        use cached::Cached;
+        SLOW_LOOKUP.write().cache_clear();
+    }
 
     // Spawn 5 threads all calling with the same key (42). Only one should
     // actually run the body; the other 4 wait and reuse the computed result.

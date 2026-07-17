@@ -32,7 +32,7 @@ See [traits-concurrent.md](traits-concurrent.md).
 
 ## SHARD-4
 
-`ShardedUnboundCache` does not track an evictions counter (it never evicts); see the declined
+`ShardedUnboundCache` does not track an evictions counter (it never evicts on its own); see the declined
 [design/0007-unbound-evictions-counter.md](design/0007-unbound-evictions-counter.md). Open
 directions: a read-optimized sharded LRU
 ([design/0010-read-optimized-sharded-lru.md](design/0010-read-optimized-sharded-lru.md)) and

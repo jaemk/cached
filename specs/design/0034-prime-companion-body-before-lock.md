@@ -9,7 +9,7 @@ Calling `{fn}_prime_cache(args)` unconditionally runs the body and stores the re
 the cache lookup. It is used to warm the cache before the first call or to force a refresh.
 
 The generated prime body runs the function call before acquiring the cache lock
-(`cached_proc_macro/src/cached.rs:1209-1221`):
+(`cached_proc_macro/src/cached.rs:1218-1230`):
 
 ```
 // run the function first (no lock held), then cache the result
@@ -44,7 +44,7 @@ the `in_impl` static placement decision.
 
 ## Notes
 
-- `cached_proc_macro/src/cached.rs:1209-1265` contains the prime body generation and the
+- `cached_proc_macro/src/cached.rs:1218-1277` contains the prime body generation and the
   `in_impl` suppression logic.
-- The comment at line 1209 ("Run the function BEFORE taking the lock") captures the rationale
+- The comment at line 1218 ("Run the function BEFORE taking the lock") captures the rationale
   inline.

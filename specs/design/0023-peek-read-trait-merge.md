@@ -5,8 +5,8 @@ Status: Declined (DEC-5=B)
 ## Current state
 
 - The public trait surface is ~16 traits.
-- `CachedRead` (`src/lib.rs:1414`) adds exactly one method that defaults to calling
-  `CachedPeek::cache_peek` (`src/lib.rs:1399`).
+- `CachedRead` (`src/lib.rs:1481`) adds exactly one method that defaults to calling
+  `CachedPeek::cache_peek` (`src/lib.rs:1459`).
 - Basic operations on a TTL store can require importing several traits (Cached + CacheTtl +
   CacheEvict + CloneCached). The prelude re-exports 14 traits.
 

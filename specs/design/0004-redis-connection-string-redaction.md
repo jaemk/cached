@@ -7,7 +7,7 @@ Status: Implemented
 - The internal `ConnectionString` wrapper redacts credentials in `Debug`/`Display`
   (`src/stores/redis.rs:319`).
 - The public `connection_string()` getter on `RedisCache` and `AsyncRedisCache` returns the raw
-  URL including any password (`src/stores/redis.rs:682`, `src/stores/redis.rs:1345`), with only
+  URL including any password (`src/stores/redis.rs:1308`), with only
   a doc-comment warning. This re-exposes exactly what the wrapper hides, and leaks credentials
   into logs via `println!("{}", cache.connection_string())`.
 

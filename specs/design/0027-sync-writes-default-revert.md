@@ -42,4 +42,4 @@ default. The CHANGELOG (`[3.0.0-rc.3]`) carries a dedicated note for this revert
 
 - The revert was made before 3.0.0 final; no stable release ever shipped the `"by_key"` default.
 - The seeded per-key lock bucket hasher is documented in spec 0035.
-- `cached_proc_macro/src/cached.rs:781-794` enforces the `result_fallback`/`sync_writes` conflict.
+- `cached_proc_macro/src/cached.rs:800-807` enforces the `result_fallback`/`sync_writes` conflict.

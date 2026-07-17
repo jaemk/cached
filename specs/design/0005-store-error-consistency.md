@@ -10,7 +10,7 @@ Status: Implemented
   (`src/stores/redb.rs:450`), so build-time and runtime disagree on the vocabulary.
 - Variant shapes are inconsistent across the two backends. Redis uses struct variants with named
   fields: `CacheDeserialization { cached_value: String, error: ... }` and
-  `CacheSerialization { error: ... }` (`src/stores/redis.rs:689`). redb uses tuple variants:
+  `CacheSerialization { error: ... }` (`src/stores/redis.rs:1325`). redb uses tuple variants:
   `CacheDeserialization(...)`, `CacheSerialization(...)`, `Storage(...)`
   (`src/stores/redb.rs:450`).
 

@@ -20,8 +20,10 @@ builder-only. Whether infallible builders should return the cache directly is an
 ## BUILD-3
 
 Builders accept `on_evict(|k, v| { ... })`, fired on every evicted entry (LRU capacity eviction,
-TTL/expiry sweeps via `evict()`). The `HasEvict` / `NoEvict` marker types track whether a
-callback is configured. See [metrics.md](metrics.md) for the eviction counter and
+TTL/expiry sweeps via `evict()`). `LruTtlCacheBuilder` and `ShardedLruTtlCacheBuilder` use
+`HasEvict` / `NoEvict` type-state markers to track whether a callback is configured (both
+re-exported at the crate root under the `time_stores` feature); other builders with `on_evict`
+store a plain `Option`. See [metrics.md](metrics.md) for the eviction counter and
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md) for the
 size/iter/evict semantics.
 

@@ -5,7 +5,7 @@ Status: Implemented
 ## Current state
 
 - The Redis store rounds any sub-second TTL up to one whole second and writes with `SETEX` /
-  `EXPIRE` (`src/stores/redis.rs:27`). Builders accept `.ttl_millis(...)` and `.ttl(Duration)`
+  `EXPIRE` (`src/stores/redis.rs:78`). Builders accept `.ttl_millis(...)` and `.ttl(Duration)`
   but the millisecond resolution is discarded at write time, so `ttl_millis(250)` becomes a
   1000ms Redis TTL.
 - `ttl_millis` is advertised as a feature in the macro and store docs, but it is inaccurate
@@ -17,7 +17,7 @@ Status: Implemented
   commands `PSETEX` / `PEXPIRE` (available since Redis 2.6) so the stored TTL matches the
   requested `Duration` to the millisecond.
 - Drop the round-up-to-1s path. Update the internal `ttl_seconds`/`ttl_seconds_i64` helpers and
-  their tests (`src/stores/redis.rs:168`) to millisecond variants. Keep the saturating clamp at
+  their tests (`src/stores/redis.rs:188`) to millisecond variants. Keep the saturating clamp at
   `i64::MAX` in milliseconds.
 - Update docs that describe whole-second Redis TTL granularity.
 

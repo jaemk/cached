@@ -17,11 +17,13 @@ refresh-on-hit is `refresh =`, not `time_refresh =`.
 `cache_err = true` / `cache_none = true` (the pre-2.0 `result` / `option` attributes were
 removed). `size = N` is a hard rename error directing to `max_size = N`, per
 [design/0013-macro-store-attribute-placement.md](design/0013-macro-store-attribute-placement.md).
+`unbound` is also a removed attribute: using it emits a compile error pointing to `#[cached]`
+without `max_size`/`ttl`/`expires`, which already selects `UnboundCache`.
 
 ## CACHED-3
 
-Write-synchronization attributes: `sync_writes` (`false`/`"disabled"` default = no
-synchronization, `"by_key"` bucketed locks, `true`/`"default"` whole-cache lock),
+Write-synchronization attributes: `sync_writes` (`false`/`"false"`/`"disabled"` default = no
+synchronization, `"by_key"` bucketed locks, `true`/`"true"`/`"default"` whole-cache lock),
 `sync_writes_buckets` (default 64; a compile error unless `sync_writes = "by_key"`),
 `sync_lock` (`"rwlock"` default or `"mutex"`), `unsync_reads` (shared read lock for hits;
 `CachedRead` stores only). The `false` default and the earlier revert are recorded in

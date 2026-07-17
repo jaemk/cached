@@ -13,10 +13,10 @@ struct CachedRedisValue<V> {
 }
 ```
 
-`REDIS_VALUE_VERSION` is `Some(1)` (`src/stores/redis.rs:1227`). Every write since 3.0 stamps
+`REDIS_VALUE_VERSION` is `Some(1)` (`src/stores/redis.rs:1420`). Every write since 3.0 stamps
 this version field.
 
-On read, `deserialize_cached_redis_value` (`src/stores/redis.rs:1275-1300`) tries MessagePack
+On read, `deserialize_cached_redis_value` (`src/stores/redis.rs:1468-1493`) tries MessagePack
 first. On failure it attempts a legacy JSON fallback: the bytes are parsed as a generic JSON
 value, and only if the result carries `"version": 1` (the exact constant value, not merely a
 `version` key) is a `serde_json` deserialization attempted. If neither path succeeds, the
@@ -50,7 +50,7 @@ the backward-read.
 - The legacy JSON gate is temporary scaffolding for the 2.x -> 3.0 migration window. Once all
   keys in a deployment have been rewritten by 3.0, the JSON path is never reached. There is no
   plan to remove it before 4.0; it is cheap (MessagePack succeeds on the fast path) and harmless.
-- Tests: `tests/v3_redis_backward_read.rs`; `src/stores/redis.rs:554-600` (unit tests for the
+- Tests: `tests/v3_redis_backward_read.rs`; `src/stores/redis.rs:664-717` (unit tests for the
   version gate logic).
 - Spec 0011 (redis serialization codec) covers the MessagePack migration itself; this spec covers
   only the backward-read version gate.

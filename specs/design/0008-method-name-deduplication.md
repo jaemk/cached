@@ -8,8 +8,8 @@ Status: Implemented
   `cache_`-prefixed form. `cache_get`/`get`, `cache_set`/`set`, `cache_remove`/`remove`,
   `cache_remove_entry`/`remove_entry`, `cache_clear`/`clear`, `cache_size`/`len`,
   `cache_delete`/`delete`, `cache_try_set`/`try_set`, the four `*get_or_set_with*` pairs,
-  `cache_hits`/`hits`, `cache_misses`/`misses` (`src/lib.rs:740` onward; aliases from
-  `src/lib.rs:921`). `ConcurrentCached` repeats the pattern (`src/lib.rs:1701`/`1798`).
+  `cache_hits`/`hits`, `cache_misses`/`misses` (`src/lib.rs:913` onward; aliases from
+  `src/lib.rs:1142`). `ConcurrentCached` repeats the pattern (`src/lib.rs:1812`).
 - `Cached` is roughly 40 public methods, over half pure delegations. This is the trait
   implementors read and the prelude pulls in.
 
