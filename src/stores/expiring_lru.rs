@@ -328,7 +328,7 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     ///
     /// # Errors
     ///
-    /// Returns [`SetMaxSizeError::ZeroSize`](super::SetMaxSizeError) if `max_size` is 0.
+    /// Returns [`SetMaxSizeError::ZeroMaxSize`](super::SetMaxSizeError) if `max_size` is 0.
     pub fn try_set_max_size(
         &mut self,
         max_size: usize,
@@ -1532,12 +1532,32 @@ mod tests {
     }
 
     #[test]
+    fn retain_increments_outer_evictions_not_inner() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        c.cache_set(1, 1); // live, kept by the predicate
+        c.cache_set(2, 4); // live, removed by the predicate
+        c.cache_set(3, 20); // expired, removed despite the predicate matching it
+
+        c.retain(|_, v| *v == 1 || *v == 20);
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(c.cache_get(&1), Some(&1));
+
+        // `retain` posts its removals to the outer `evictions` counter, not the
+        // inner LruCache capacity counter; `cache_reset_metrics` resets the two
+        // independently, so the bucket matters, not just the combined total.
+        assert_eq!(c.evictions.load(Ordering::Relaxed), 2);
+        assert_eq!(c.store.cache_evictions(), Some(0));
+        assert_eq!(c.cache_evictions(), Some(2));
+    }
+
+    #[test]
     fn try_set_max_size_rejects_zero() {
         let mut c: ExpiringLruCache<u8, ExpiredU8> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
         assert_eq!(
             c.try_set_max_size(0),
-            Err(super::super::SetMaxSizeError::ZeroSize)
+            Err(super::super::SetMaxSizeError::ZeroMaxSize)
         );
         assert_eq!(c.try_set_max_size(5).unwrap(), Some(3));
     }

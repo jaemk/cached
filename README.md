@@ -435,7 +435,7 @@ fn keyed(a: String) -> Option<usize> {
 
 ----
 
-```compile_fail
+```rust
 use cached::macros::cached;
 
 /// Cannot use sync_writes and result_fallback together
@@ -454,7 +454,7 @@ fn doesnt_compile() -> Result<String, ()> {
 no longer compiles. Use [`cache_get_or_set_with_mut`](crate::Cached::cache_get_or_set_with_mut)
 when you need a mutable reference.
 
-```compile_fail
+```rust
 use cached::{Cached, UnboundCache};
 
 let mut cache: UnboundCache<u32, u32> = UnboundCache::builder().build().unwrap();

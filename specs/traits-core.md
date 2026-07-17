@@ -1,6 +1,7 @@
 # Core cache traits
 
-The single-owner cache trait family, defined in `src/lib.rs` and re-exported at the crate root.
+The single-owner cache trait family, exported at the crate root (most are defined in
+`src/lib.rs`; `CacheEvict` and `Expires` are defined under `src/stores/` and re-exported).
 These take `&mut self` (exclusive ownership), distinguishing them from the concurrent family in
 [traits-concurrent.md](traits-concurrent.md).
 
@@ -17,8 +18,9 @@ providing the deduplicated method names and `metrics()`, per
 
 `CachedPeek<K, V>` provides `cache_peek` (non-mutating, skips recency/TTL refresh and metrics).
 `CachedRead<K, V>: CachedPeek` adds `cache_get_read` for shared-ref reads (backs `unsync_reads`).
-Merging `CachedPeek` / `CachedRead` is an open direction
-([design/0023-peek-read-trait-merge.md](design/0023-peek-read-trait-merge.md)).
+A `CachedPeek` / `CachedRead` merge was considered and declined; they stay distinct on purpose
+(`CachedRead` is a compile-time capability marker), per
+[design/0023-peek-read-trait-merge.md](design/0023-peek-read-trait-merge.md).
 
 ## TRAIT-3
 

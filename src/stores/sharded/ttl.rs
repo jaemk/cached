@@ -73,6 +73,11 @@ struct TtlInner<K, V, H> {
 /// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
 /// entries and obtain an accurate live count. Sharded stores do not implement `CachedIter`.
 ///
+/// The runtime TTL controls (`ttl` / `set_ttl` / `try_set_ttl` / `unset_ttl` /
+/// `refresh_on_hit` / `set_refresh_on_hit`) live on
+/// [`ConcurrentCacheTtl`](crate::ConcurrentCacheTtl); import it (or
+/// `cached::prelude::*`) to call them. Builder setters are unaffected.
+///
 /// This is a type alias for `ShardedTtlCacheBase<K, V, DefaultShardHasher>`.
 /// To use a custom shard hasher, call [`ShardedTtlCache::builder()`] and then
 /// [`hasher`](ShardedTtlCacheBuilder::hasher), which yields a `ShardedTtlCacheBase<K, V, H>`

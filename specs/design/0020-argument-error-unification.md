@@ -4,13 +4,13 @@ Status: Needs research
 
 ## Current state
 
-- Three single-variant error enums for bad setter arguments: `SetMaxSizeError::ZeroSize`,
+- Three single-variant error enums for bad setter arguments: `SetMaxSizeError::ZeroMaxSize`,
   `SetTtlError::ZeroTtl`, `CacheSetError::TimeBounds` (`src/stores/mod.rs`).
 - All are "you passed a bad argument at a setter".
 
 ## Desired work
 
-- Merge into one small enum (e.g. `ValueError` with `ZeroSize | ZeroTtl | TimeBounds`), reducing
+- Merge into one small enum (e.g. `ValueError` with `ZeroMaxSize | ZeroTtl | TimeBounds`), reducing
   the number of public error types.
 
 ## Notes

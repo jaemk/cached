@@ -68,6 +68,11 @@ struct LruTtlInner<K, V, H> {
 /// **Note**: `K` and `V` must implement `Clone` (`K` for LRU key tracking; `V` because reads
 /// return owned values cloned from under the shard lock).
 ///
+/// The runtime TTL controls (`ttl` / `set_ttl` / `try_set_ttl` / `unset_ttl` /
+/// `refresh_on_hit` / `set_refresh_on_hit`) live on
+/// [`ConcurrentCacheTtl`](crate::ConcurrentCacheTtl); import it (or
+/// `cached::prelude::*`) to call them. Builder setters are unaffected.
+///
 /// This is a type alias for `ShardedLruTtlCacheBase<K, V, DefaultShardHasher>`.
 /// To use a custom shard hasher, call [`ShardedLruTtlCache::builder()`] and then
 /// [`hasher`](ShardedLruTtlCacheBuilder::hasher), which yields a
@@ -499,13 +504,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`SetMaxSizeError::ZeroSize`](crate::SetMaxSizeError) if `max_size` is 0.
+    /// Returns [`SetMaxSizeError::ZeroMaxSize`](crate::SetMaxSizeError) if `max_size` is 0.
     pub fn try_set_max_size(
         &self,
         max_size: usize,
     ) -> Result<Option<usize>, crate::SetMaxSizeError> {
         if max_size == 0 {
-            return Err(crate::SetMaxSizeError::ZeroSize);
+            return Err(crate::SetMaxSizeError::ZeroMaxSize);
         }
         Ok(self.set_max_size(max_size))
     }

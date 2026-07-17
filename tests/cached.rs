@@ -7343,7 +7343,7 @@ fn test_ttl_sorted_cache_try_size_limit() {
 
     // Error: size of zero is invalid
     let err = cache.try_set_max_size(0);
-    assert_eq!(err, Err(cached::SetMaxSizeError::ZeroSize));
+    assert_eq!(err, Err(cached::SetMaxSizeError::ZeroMaxSize));
 }
 
 // ── result_fallback async ─────────────────────────────────────────────────────

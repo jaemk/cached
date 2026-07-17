@@ -6,8 +6,9 @@ Three 3.0 resilience attributes on `#[cached]` functions - in-memory, no externa
    Independent keys compute in parallel.
 
 2. `result_fallback = true`: a TTL-cached fallible function serves the last `Ok` value
-   when the function returns `Err` instead of propagating the error. Requires a TTL store
-   (`ttl_secs`, `ttl_millis`, or `ttl`).
+   when the function returns `Err` instead of propagating the error. Requires an
+   expiry-capable store: a TTL attribute (`ttl_secs`, `ttl_millis`, or `ttl`) or
+   `expires = true`. This example uses `ttl_secs`.
 
 3. `force_refresh = { expr }`: bypass the cache and recompute when a boolean expression
    over the function arguments is true. Uses a call counter to show the difference between
@@ -113,7 +114,7 @@ fn demo_sync_writes_by_key() {
 // A TTL-cached fallible function that succeeds once and is then made to fail.
 // Instead of propagating the Err, the cache serves the last Ok value.
 //
-// Requires: a TTL store (`ttl_secs`, `ttl_millis`, or `ttl`).
+// Requires: an expiry-capable store (`ttl_secs`, `ttl_millis`, `ttl`, or `expires = true`).
 // Not compatible with any explicitly-set `sync_writes` value (`"by_key"`, `true`,
 // or `"default"`); leave `sync_writes` unset (or `false`).
 // ============================================================================

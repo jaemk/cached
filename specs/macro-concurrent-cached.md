@@ -20,8 +20,10 @@ Shares the core attributes with `#[cached]` (`name`, `max_size`, `ttl_*`, `refre
 ## CONC-3
 
 For disk/redis stores, `map_error` (unquoted closure `|e| MyErr(e)` or quoted string) converts
-the store error into the function's error type. When omitted, `.map_err(Into::into)?` is
-generated, requiring `E: From<StoreError>`. Store errors are named per
+the store error into the function's error type. When omitted, a bare `?` is generated, which
+converts through `From` and so requires `E: From<StoreError>` (an explicit
+`.map_err(Into::into)` is deliberately not emitted: it is ambiguous when the target error has
+multiple `From` impls). Store errors are named per
 [design/0005-store-error-consistency.md](design/0005-store-error-consistency.md); unifying
 single-variant argument errors is an open direction
 ([design/0020-argument-error-unification.md](design/0020-argument-error-unification.md)).

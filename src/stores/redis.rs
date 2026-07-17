@@ -805,7 +805,7 @@ pub enum RedisCacheBuildError {
     /// [`VarError::NotUnicode`](std::env::VarError::NotUnicode) would otherwise
     /// carry the raw env-var value — the connection string itself, credentials
     /// included — and print it through `Display`/`Debug`. See
-    /// [`sanitize_var_error`].
+    /// `sanitize_var_error` in this module (private).
     #[error("Connection string not specified or invalid in env var {env_key:?}: {error}")]
     MissingConnectionString {
         env_key: String,
@@ -1204,6 +1204,15 @@ where
 /// The TTL is optional and enforced by redis itself: entries built with a TTL
 /// expire server-side; entries built without one persist until explicitly
 /// removed. Uses an r2d2 connection pool under the hood.
+///
+/// # Format stability
+///
+/// The on-wire value encoding (MessagePack with named `value`/`version` fields) is
+/// stable for the 3.x series: entries written by any 3.x release remain readable by
+/// every later 3.x release. A schema change bumps the embedded version, keeps a
+/// backward-read path within the same major version, and is otherwise reserved for
+/// a major release. [`AsyncRedisCache`](crate::stores::AsyncRedisCache) uses the
+/// same encoding.
 pub struct RedisCache<K, V> {
     pub(super) ttl: Mutex<Duration>,
     pub(super) refresh: AtomicBool,
@@ -2317,6 +2326,9 @@ mod async_redis {
     /// [`AsyncRedisCacheBuilder::connection_manager(true)`](AsyncRedisCacheBuilder::connection_manager)
     /// (requires the `redis_connection_manager` feature). Enabling that feature
     /// only makes the option available; it does not change the default.
+    ///
+    /// Values use the same on-wire encoding as [`RedisCache`](crate::stores::RedisCache);
+    /// see its "Format stability" section.
     ///
     /// **Feature:** requires an async runtime feature: one of `redis_tokio`,
     /// `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or

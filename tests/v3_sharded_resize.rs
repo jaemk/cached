@@ -136,8 +136,8 @@ mod lru {
             .unwrap();
         assert_eq!(
             c.try_set_max_size(0),
-            Err(SetMaxSizeError::ZeroSize),
-            "try_set_max_size(0) must return ZeroSize error"
+            Err(SetMaxSizeError::ZeroMaxSize),
+            "try_set_max_size(0) must return ZeroMaxSize error"
         );
         // Valid call still works after the failed attempt.
         let r = c.try_set_max_size(8);
@@ -567,7 +567,7 @@ mod lru_ttl {
             .ttl(Duration::from_secs(60))
             .build()
             .unwrap();
-        assert_eq!(c.try_set_max_size(0), Err(SetMaxSizeError::ZeroSize));
+        assert_eq!(c.try_set_max_size(0), Err(SetMaxSizeError::ZeroMaxSize));
         let r = c.try_set_max_size(8);
         assert_eq!(r, Ok(Some(4)));
         assert_eq!(c.capacity(), 8);
@@ -832,7 +832,7 @@ mod expiring_lru {
             .max_size(4)
             .build()
             .unwrap();
-        assert_eq!(c.try_set_max_size(0), Err(SetMaxSizeError::ZeroSize));
+        assert_eq!(c.try_set_max_size(0), Err(SetMaxSizeError::ZeroMaxSize));
         let r = c.try_set_max_size(8);
         assert_eq!(r, Ok(Some(4)));
         assert_eq!(c.capacity(), 8);
