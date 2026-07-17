@@ -4,16 +4,17 @@ Status: MessagePack switch implemented; pluggable codec needs research
 
 ## Current state
 
-- Redis serializes values with serde_json and stores a UTF-8 String
-  (`src/stores/redis.rs:824`).
-- redb uses rmp-serde (MessagePack) on bytes (`src/stores/redb.rs:776`).
+- Redis serializes values with rmp-serde (MessagePack) as a versioned `value`/`version`
+  envelope stored in bytes (`src/stores/redis.rs:1390`), matching redb; pre-3.0 serde_json
+  String entries are still readable via the exact-version JSON gate (see Notes).
+- redb uses rmp-serde (MessagePack) on bytes (`src/stores/redb.rs:866`).
 - The codec is a private per-store detail; the error enums bake in the concrete serde error
   type.
 
 ## Desired work
 
-- Target 3.0: switch the Redis store from serde_json-as-String to MessagePack (rmp-serde),
-  matching redb, storing bytes. This changes the wire format and the error types those variants
+- Done in 3.0: the Redis store switched from serde_json-as-String to MessagePack (rmp-serde),
+  matching redb, storing bytes. This changed the wire format and the error types those variants
   carry (see 0005).
 - Needs research: a `Codec` abstraction wired into the builders (builder-set, not a generic
   type param, to avoid signature leakage) defaulting to the per-store choice, so users can pick

@@ -13,18 +13,20 @@ removes it. `TtlCache` and `LruTtlCache` refresh the stored value's timestamp on
 
 ## TTL-2
 
-Constructors: infallible `TtlCache::new(ttl)` and `LruTtlCache::new(max_size, ttl)`, plus the
-`::builder()` form for each. TTL is set as a `Duration`; the macros accept `ttl_secs`,
-`ttl_millis`, or `ttl = "<Duration expr>"`. See [macro-cached.md](macro-cached.md).
+Constructors: infallible `TtlCache::new(ttl)`, `LruTtlCache::new(max_size, ttl)`, and
+`TtlSortedCache::new(ttl)` (all panic on zero TTL), plus the `::builder()` form for each.
+TTL is set as a `Duration`; the macros accept `ttl_secs`, `ttl_millis`, or
+`ttl = "<Duration expr>"`. See [macro-cached.md](macro-cached.md).
 
 ## TTL-3
 
-These stores implement `CacheTtl` (`ttl()` / `set_ttl()` / `unset_ttl()`). `set_ttl(0)` and the
-per-entry expiry model follow
+These stores implement `CacheTtl` (`ttl()` / `set_ttl()` / `unset_ttl()` / `try_set_ttl()` /
+`refresh_on_hit()` / `set_refresh_on_hit()`). `set_ttl(0)` and the per-entry expiry model follow
 [design/0028-per-entry-expiry-and-set-ttl-zero.md](design/0028-per-entry-expiry-and-set-ttl-zero.md).
 
 ## TTL-4
 
-`TtlSortedCache` implements `CachedRead` (shared-ref reads / `unsync_reads`); `TimedEntry<V>` is
-`pub(crate)` and not part of the public surface. Size/iter/evict semantics follow
+`TtlSortedCache` implements `CachedRead` (shared-ref reads / `unsync_reads`), `CacheTtl`,
+`CachedIter`, `CachedPeek`, and `CloneCached`; `TimedEntry<V>` is `pub(crate)` and not part of
+the public surface. Size/iter/evict semantics follow
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md).

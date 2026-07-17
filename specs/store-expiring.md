@@ -7,7 +7,8 @@ pre-1.0 `ExpiringValueCache` (for `ExpiringLruCache`). Available without `time_s
 ## EXPIRE-1
 
 Values implement `Expires` (`is_expired()`); the store consults the value, not a store-wide TTL.
-`ExpiringCache` is the default store for `#[cached(expires = true)]`.
+`ExpiringCache` is the default store for `#[cached(expires = true)]`; `ExpiringLruCache` is
+selected when `max_size` is also specified.
 
 ## EXPIRE-2
 

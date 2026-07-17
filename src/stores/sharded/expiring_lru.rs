@@ -284,7 +284,9 @@ where
             misses: Some(misses),
             evictions: Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed)),
             entry_count: Some(size),
-            capacity: Some(self.inner.total_capacity.load(Ordering::Relaxed)),
+            // Acquire, like `capacity()`: a caller that just resized on this thread sees
+            // the new total here too, not a stale value alongside a fresh `capacity()`.
+            capacity: Some(self.inner.total_capacity.load(Ordering::Acquire)),
         }
     }
 
@@ -404,6 +406,13 @@ where
     /// across shards while the resize is in progress. The new total reported by
     /// [`capacity`](Self::capacity) is published only after every shard has adopted
     /// its new per-shard cap.
+    ///
+    /// The same applies to **concurrent callers** of `set_max_size`: two overlapping
+    /// resizes interleave their per-shard writes, so individual shards can end up
+    /// with a mix of the two targets while `capacity()` reports whichever total was
+    /// published last. No entries are lost and there is no data race, but the
+    /// resulting bound is a blend of the two requests. Serialize resizes externally
+    /// (or re-issue the desired resize) if a single consistent target matters.
     ///
     /// When the 16-per-shard minimum floor applies (small `max_size` with multiple
     /// shards), `capacity()` after the call reflects the clamped total, which may

@@ -29,8 +29,8 @@ build otherwise). Orthogonal runtime x TLS axes are an open direction
 
 ## FEAT-4
 
-Disk: `redb_store` (disk-backed cache via `redb`; see [store-redb.md](store-redb.md)). redb 4.x
-raises the crate MSRV to 1.89.
+Disk: `redb_store` (disk-backed cache via `redb`; see [store-redb.md](store-redb.md)). The crate
+MSRV is 1.89 (set unconditionally in `Cargo.toml`; historically required by redb 4.x).
 
 ## FEAT-5
 

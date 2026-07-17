@@ -16,7 +16,7 @@ Status: Capability axis resolved; TLS orthogonality needs research
   opt-in rather than a global type swap); CI feature checks pair each capability with both
   runtimes.
 - `AsyncRedisCache` is gated on the 6 runtime features only; the 2 capability features are
-  deliberately excluded from the gate (`src/lib.rs:619-645`, `src/stores/mod.rs:340-362`).
+  deliberately excluded from the gate (`src/lib.rs:639-665`, `src/stores/mod.rs:340-362`).
 - TLS remains fused with the runtime: `redis_smol_native_tls`, `redis_smol_rustls`,
   `redis_tokio_native_tls`, `redis_tokio_rustls` each encode a runtime+TLS combination rather
   than composable axes.

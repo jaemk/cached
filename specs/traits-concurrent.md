@@ -18,7 +18,9 @@ and `ConcurrentCachedAsync<K, V>` extend it, per
 `cache_remove`, `cache_remove_entry`, `cache_delete`, `cache_clear`, `cache_reset`,
 `cache_reset_metrics`, `cache_get_or_set_with`, all returning
 `Result<_, Self::Error>`). `ConcurrentCachedAsync<K, V>` is its async counterpart.
-`ConcurrentCachedExt` provides the deduplicated method names.
+`ConcurrentCachedExt` provides deduplicated short-name methods (`get`, `set`, `remove`,
+`remove_entry`, `delete`, `clear`, `reset`, `get_or_set_with`); it does not forward
+`cache_reset_metrics`.
 
 ## CTRAIT-3
 

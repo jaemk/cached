@@ -21,7 +21,7 @@ reads (`unsync_reads` in the macros) and iteration. See [traits-core.md](traits-
 
 ## UNBOUND-4
 
-Metrics track `hits`/`misses`; `evictions` is `None` (the store never evicts). See
+Metrics track `hits`/`misses`; `evictions` is `None` (the store never evicts on its own). See
 [metrics.md](metrics.md). Iteration and size/evict semantics follow
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md); custom
 hasher support follows [design/0001-non-sharded-custom-hasher.md](design/0001-non-sharded-custom-hasher.md).

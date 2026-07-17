@@ -2,8 +2,8 @@
 
 `RedbCache` is a disk-backed concurrent store using `redb`, gated behind `redb_store`. It is
 self-synchronizing over a shared `&self` and builder-only: `builder(name)` takes the required
-cache name positionally; the on-disk directory (`disk_dir`) is optional with a system-cache-dir
-fallback.
+cache name positionally; the on-disk directory (`disk_dir`) is optional with a user cache dir fallback
+(`BaseDirs::cache_dir()`, e.g. `~/.cache`) and a further OS temp dir fallback.
 
 ## REDB-1
 

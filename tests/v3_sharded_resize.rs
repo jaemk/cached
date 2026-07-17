@@ -15,7 +15,6 @@ use cached::{ConcurrentCacheBase, ConcurrentCached, SetMaxSizeError};
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct E {
     v: u32,
 }
@@ -29,7 +28,6 @@ impl cached::Expires for E {
 /// A value whose expiry is controlled per-instance, for the expiring_lru
 /// "shrink evicts LRU-order regardless of expiry" contract test.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct ExpVal {
     v: u32,
     expired: bool,
@@ -472,6 +470,73 @@ mod lru {
             "capacity must be eventually consistent with the final resize"
         );
     }
+
+    #[test]
+    fn concurrent_resizers_no_data_race_and_next_resize_restores_consistency() {
+        // Two threads resize concurrently. The documented contract: per-shard
+        // writes interleave (shards may briefly hold a mix of the two targets),
+        // there is no data race or lost entry, capacity() reports whichever
+        // total was published last, and a subsequent single-threaded resize
+        // restores one consistent target. The same resize code is shared by
+        // ShardedLruTtlCacheBase and ShardedExpiringLruCacheBase.
+        use std::thread;
+        let c = ShardedLruCacheBase::<u32, u32>::builder()
+            .shards(8)
+            .max_size(1024)
+            .build()
+            .unwrap();
+        for i in 0..64u32 {
+            ConcurrentCached::cache_set(&c, i, i).unwrap();
+        }
+
+        // Both targets are floor-free at 8 shards (512/8=64, 2048/8=256), so
+        // capacity() must land exactly on one of them.
+        let mut resizers = Vec::new();
+        for target in [512usize, 2048] {
+            let c = c.clone();
+            resizers.push(thread::spawn(move || {
+                for _ in 0..500 {
+                    let prev = c.set_max_size(target);
+                    assert!(prev.is_some(), "set_max_size always returns Some(prev)");
+                }
+            }));
+        }
+        for h in resizers {
+            h.join().expect("resizer thread must not panic");
+        }
+
+        let settled = c.capacity();
+        assert!(
+            settled == 512 || settled == 2048,
+            "capacity() must report one of the two published totals, got {settled}"
+        );
+        assert_eq!(
+            c.metrics().capacity,
+            Some(settled),
+            "metrics().capacity must agree with capacity() once resizers are done"
+        );
+        // No lost entries beyond LRU eviction: everything still readable or evicted,
+        // and the store keeps working.
+        ConcurrentCached::cache_set(&c, 1_000_000, 1).unwrap();
+        assert_eq!(
+            ConcurrentCached::cache_get(&c, &1_000_000).unwrap(),
+            Some(1)
+        );
+
+        // One more single-threaded resize resolves any mixed per-shard state.
+        let prev = c.set_max_size(1024);
+        assert_eq!(prev, Some(settled));
+        assert_eq!(c.capacity(), 1024);
+        // The bound holds after normalization: over-filling cannot exceed the total.
+        for i in 0..8192u32 {
+            ConcurrentCached::cache_set(&c, i, i).unwrap();
+        }
+        assert!(
+            c.len() <= 1024,
+            "entry count must respect the normalized capacity, got {}",
+            c.len()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -766,8 +831,15 @@ mod expiring_lru {
         let prev = c.set_max_size(8);
         assert_eq!(prev, Some(4));
         assert_eq!(c.capacity(), 8);
-        assert!(ConcurrentCached::cache_get(&c, &1).unwrap().is_some());
-        assert!(ConcurrentCached::cache_get(&c, &2).unwrap().is_some());
+        // Round-trip the payload, not just presence.
+        assert_eq!(
+            ConcurrentCached::cache_get(&c, &1).unwrap().map(|e| e.v),
+            Some(10)
+        );
+        assert_eq!(
+            ConcurrentCached::cache_get(&c, &2).unwrap().map(|e| e.v),
+            Some(20)
+        );
     }
 
     #[test]
@@ -972,9 +1044,10 @@ mod expiring_lru {
         );
         // Survivors: key 3 (expired but LRU-recent) and key 4 (live). A cache_get on
         // key 3 is a miss because it is expired, but it was NOT dropped by the shrink.
-        assert!(
-            ConcurrentCached::cache_get(&c, &4).unwrap().is_some(),
-            "live MRU key 4 survives"
+        assert_eq!(
+            ConcurrentCached::cache_get(&c, &4).unwrap().map(|e| e.v),
+            Some(4),
+            "live MRU key 4 survives with its payload intact"
         );
         assert_eq!(
             c.len(),

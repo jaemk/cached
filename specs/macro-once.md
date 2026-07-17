@@ -11,8 +11,9 @@ the `key` + `convert` pinning that `#[cached]` requires. See [macro-cached.md](m
 ## ONCE-2
 
 Attributes: `name`, `ttl_secs` / `ttl_millis` / `ttl`, `cache_err`, `cache_none`,
-`with_cached_flag`. `sync_writes` defaults to `false`. There is no `refresh =` attribute (a
-single-value cache has no per-key refresh-on-hit).
+`with_cached_flag`, `expires`, `force_refresh`, `in_impl`, `companions_vis`. `sync_writes`
+defaults to `false`. There is no `refresh =` attribute (a single-value cache has no per-key
+refresh-on-hit).
 
 ## ONCE-3
 
