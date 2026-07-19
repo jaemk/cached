@@ -4453,6 +4453,12 @@ mod concurrent_cached_return_named_error {
         fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
             Ok(self.0.lock().unwrap().remove_entry(k))
         }
+        fn cache_contains(&self, k: &String) -> Result<bool, Self::Error>
+        where
+            Self: Sized,
+        {
+            Ok(self.cache_get(k)?.is_some())
+        }
         fn cache_clear(&self) -> Result<(), Self::Error> {
             self.0.lock().unwrap().clear();
             Ok(())
@@ -7214,6 +7220,12 @@ mod generic_where_tests {
         fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, String)>, Self::Error> {
             Ok(self.inner.lock().unwrap().remove_entry(k))
         }
+        fn cache_contains(&self, k: &String) -> Result<bool, Self::Error>
+        where
+            Self: Sized,
+        {
+            Ok(self.cache_get(k)?.is_some())
+        }
         fn cache_clear(&self) -> Result<(), Self::Error> {
             self.inner.lock().unwrap().clear();
             Ok(())
@@ -8216,24 +8228,6 @@ mod len_iter_evict_contract_sharded_expiring {
 
 // ── Item 1: Cached::Error bound ──────────────────────────────────────────────
 
-/// A generic function over Cached that ?-propagates Cached::Error.
-/// Compiles only if Error: std::error::Error + Send + Sync + 'static.
-#[allow(dead_code)]
-fn cached_error_propagate<K, V, C>(
-    cache: &mut C,
-    k: K,
-    v: V,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    K: std::hash::Hash + Eq,
-    C: cached::Cached<K, V>,
-{
-    // ? works only if Self::Error: Into<Box<dyn std::error::Error>>,
-    // which requires std::error::Error + Send + Sync + 'static.
-    cache.cache_try_set(k, v)?;
-    Ok(())
-}
-
 /// A generic function that ?-propagates Cached::Error into Box<dyn std::error::Error>.
 /// Compiles only if Error: std::error::Error + Send + Sync + 'static.
 #[allow(dead_code)]
@@ -8411,7 +8405,6 @@ fn concurrent_contains_returns_false_for_absent_key() {
 }
 
 /// Generic trait usage: contains() on any ConcurrentCached without extra where-clauses.
-#[allow(dead_code)]
 fn generic_concurrent_contains<K, V, C>(cache: &C, k: &K) -> bool
 where
     K: std::hash::Hash + Eq + Clone,
@@ -8863,5 +8856,780 @@ fn concurrent_contains_ext_alias_expiry_aware_on_expiring_store() {
     assert!(
         !ConcurrentCachedExt::contains(&cache, &2).unwrap(),
         "expired entry not contained via ext alias"
+    );
+}
+
+// ── Task 2: single-owner peek-based cache_contains semantics ──────────────────
+
+/// LruCache: cache_contains is peek-based -- no hit/miss increment, no recency promotion.
+#[test]
+fn lru_cache_contains_no_metrics_and_no_recency_promotion() {
+    use cached::{Cached, CachedExt, LruCache};
+
+    let mut cache = LruCache::<u32, u32>::builder().max_size(3).build().unwrap();
+
+    cache.cache_set(1, 10);
+    cache.cache_set(2, 20);
+
+    // Promote key 1 to MRU via a real get so order is [1, 2].
+    cache.cache_get(&1);
+
+    // Snapshot metrics and key order after the promoting get.
+    let hits_before = cache.cache_hits().unwrap_or(0);
+    let misses_before = cache.cache_misses().unwrap_or(0);
+    let order_before = cache.key_order();
+
+    // contains on a present key must return true without altering metrics or order.
+    assert!(
+        cache.cache_contains(&1),
+        "present key must be reported contained"
+    );
+    assert!(
+        cache.cache_contains(&2),
+        "present key 2 must be reported contained"
+    );
+    // contains on an absent key must return false.
+    assert!(
+        !cache.cache_contains(&99),
+        "absent key must not be reported contained"
+    );
+
+    // Metrics unchanged.
+    assert_eq!(
+        cache.cache_hits().unwrap_or(0),
+        hits_before,
+        "cache_contains must not increment hit counter"
+    );
+    assert_eq!(
+        cache.cache_misses().unwrap_or(0),
+        misses_before,
+        "cache_contains must not increment miss counter"
+    );
+
+    // Recency order unchanged -- contains must not promote key 2 to MRU.
+    assert_eq!(
+        cache.key_order(),
+        order_before,
+        "cache_contains must not change key recency order"
+    );
+
+    // Also verify the CachedExt alias delegates correctly.
+    assert!(
+        CachedExt::contains(&mut cache, &1),
+        "CachedExt::contains must agree for present key"
+    );
+    assert!(
+        !CachedExt::contains(&mut cache, &99),
+        "CachedExt::contains must agree for absent key"
+    );
+}
+
+/// TtlCache with refresh_on_hit: cache_contains must NOT refresh the TTL.
+/// After the TTL elapses, contains returns false.  An expired-but-unswept
+/// entry still counts in len() but reports contains == false.
+#[cfg(feature = "time_stores")]
+#[test]
+fn ttl_cache_contains_does_not_refresh_ttl() {
+    use cached::time::Duration;
+    use cached::{Cached, TtlCache};
+
+    let mut cache = TtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_millis(40))
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+
+    cache.cache_set(1, 10);
+
+    // Immediately after set: live, so contains == true.
+    assert!(
+        cache.cache_contains(&1),
+        "freshly-set TTL entry must be contained"
+    );
+
+    // Sleep past the TTL.  If cache_contains had refreshed the TTL, the entry
+    // would still be live; it must not, so the entry must be expired.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    // Expired-but-unswept entry: len still counts it, but contains == false.
+    assert_eq!(
+        cache.cache_size(),
+        1,
+        "expired-but-unswept entry must still count in len"
+    );
+    assert!(
+        !cache.cache_contains(&1),
+        "expired TTL entry must NOT be reported contained (no TTL refresh via contains)"
+    );
+}
+
+/// Default (get-based) cache_contains path: a store that does NOT override
+/// cache_contains uses the trait default, which delegates to cache_get.
+/// This means a hit count increase is expected -- that is the documented
+/// side-effect of the default path.
+#[test]
+fn cached_trait_default_cache_contains_delegates_to_cache_get() {
+    use cached::Cached;
+    use std::collections::HashMap;
+
+    // Minimal custom `Cached` store with no cache_contains override.
+    struct MapCache {
+        map: HashMap<u32, u32>,
+        hits: u64,
+        misses: u64,
+    }
+
+    impl MapCache {
+        fn new() -> Self {
+            Self {
+                map: HashMap::new(),
+                hits: 0,
+                misses: 0,
+            }
+        }
+    }
+
+    impl Cached<u32, u32> for MapCache {
+        type Error = std::convert::Infallible;
+
+        fn cache_get<Q>(&mut self, k: &Q) -> Option<&u32>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            match self.map.get(k) {
+                Some(v) => {
+                    self.hits += 1;
+                    Some(v)
+                }
+                None => {
+                    self.misses += 1;
+                    None
+                }
+            }
+        }
+
+        fn cache_get_mut<Q>(&mut self, k: &Q) -> Option<&mut u32>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            self.map.get_mut(k)
+        }
+
+        fn cache_set(&mut self, k: u32, v: u32) -> Option<u32> {
+            self.map.insert(k, v)
+        }
+
+        fn cache_remove<Q>(&mut self, k: &Q) -> Option<u32>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            self.map.remove(k)
+        }
+
+        fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(u32, u32)>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            self.map.remove_entry(k)
+        }
+
+        fn cache_get_or_set_with_mut<F: FnOnce() -> u32>(&mut self, key: u32, f: F) -> &mut u32 {
+            self.map.entry(key).or_insert_with(f)
+        }
+
+        fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<u32, E>, E>(
+            &mut self,
+            key: u32,
+            f: F,
+        ) -> Result<&mut u32, E> {
+            use std::collections::hash_map::Entry;
+            match self.map.entry(key) {
+                Entry::Occupied(o) => Ok(o.into_mut()),
+                Entry::Vacant(v) => Ok(v.insert(f()?)),
+            }
+        }
+
+        fn cache_clear(&mut self) {
+            self.map.clear();
+        }
+
+        fn cache_reset(&mut self) {
+            self.map.clear();
+            self.hits = 0;
+            self.misses = 0;
+        }
+
+        fn cache_size(&self) -> usize {
+            self.map.len()
+        }
+
+        fn cache_hits(&self) -> Option<u64> {
+            Some(self.hits)
+        }
+
+        fn cache_misses(&self) -> Option<u64> {
+            Some(self.misses)
+        }
+    }
+
+    let mut cache = MapCache::new();
+    cache.cache_set(42, 100);
+
+    let hits_before = cache.cache_hits().unwrap();
+
+    // The default cache_contains delegates to cache_get, so it increases hits.
+    assert!(
+        cache.cache_contains(&42),
+        "present key must be reported contained via default path"
+    );
+    assert!(
+        !cache.cache_contains(&99),
+        "absent key must not be reported contained via default path"
+    );
+
+    // Default path goes through cache_get, so hit count increased for the hit.
+    assert_eq!(
+        cache.cache_hits().unwrap(),
+        hits_before + 1,
+        "default cache_contains delegates to cache_get, incrementing hit count"
+    );
+}
+
+// ── Task 3: async_cache_contains for ShardedLruTtlCache and ShardedExpiringLruCache ──
+
+#[cfg(all(feature = "async", feature = "time_stores"))]
+#[tokio::test]
+async fn async_contains_sharded_lru_ttl_cache_is_expiry_aware() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCachedAsync, ShardedLruTtlCache};
+
+    let cache = ShardedLruTtlCache::<u32, u32>::builder()
+        .max_size(10)
+        .ttl(Duration::from_millis(30))
+        .build()
+        .unwrap();
+
+    ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
+        .await
+        .unwrap();
+
+    // Live entry -> true, absent key -> false.
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "live LRU+TTL entry must be reported contained"
+    );
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &99)
+            .await
+            .unwrap(),
+        "absent key must not be reported contained"
+    );
+
+    // Sleep past the TTL -- expired entry must report false.
+    std::thread::sleep(std::time::Duration::from_millis(70));
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "expired LRU+TTL entry must NOT be reported contained"
+    );
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_contains_sharded_expiring_lru_cache_is_expiry_aware() {
+    use cached::{ConcurrentCachedAsync, Expires, ShardedExpiringLruCache};
+
+    #[derive(Clone)]
+    struct ExpItem {
+        expired: bool,
+    }
+    impl Expires for ExpItem {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    let cache = ShardedExpiringLruCache::<u32, ExpItem>::builder()
+        .max_size(10)
+        .build()
+        .unwrap();
+
+    ConcurrentCachedAsync::async_cache_set(&cache, 1, ExpItem { expired: false })
+        .await
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 2, ExpItem { expired: true })
+        .await
+        .unwrap();
+
+    // Live per-value entry -> true.
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "live per-value LRU entry must be reported contained"
+    );
+    // Expired per-value entry -> false.
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &2)
+            .await
+            .unwrap(),
+        "expired per-value LRU entry must NOT be reported contained"
+    );
+    // Absent key -> false.
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &99)
+            .await
+            .unwrap(),
+        "absent key must not be reported contained"
+    );
+    // async_cache_contains must not evict the expired entry.
+    assert_eq!(
+        cache.len(),
+        2,
+        "async_cache_contains must not evict entries"
+    );
+}
+
+// ── Certification gap-fills: single-owner stores not yet directly covered ─────
+
+/// UnboundCache: cache_contains is peek-based -- no hit/miss increment, no expiry.
+/// Also exercises the Borrow pattern: K=String, Q=str.
+#[test]
+fn unbound_cache_contains_no_metrics_and_borrow_key() {
+    use cached::{Cached, CachedExt, UnboundCache};
+
+    let mut cache = UnboundCache::<String, u32>::new();
+    cache.cache_set("hello".to_string(), 1);
+    cache.cache_set("world".to_string(), 2);
+
+    let hits_before = cache.cache_hits().unwrap_or(0);
+    let misses_before = cache.cache_misses().unwrap_or(0);
+
+    // Borrowed-key lookup: Q=str, K=String -- exercises the Borrow<Q> path.
+    assert!(
+        cache.cache_contains("hello"),
+        "present key must be reported contained via borrowed &str"
+    );
+    assert!(
+        cache.cache_contains("world"),
+        "present key 'world' must be reported contained"
+    );
+    // Absent key must return false.
+    assert!(
+        !cache.cache_contains("absent"),
+        "absent key must not be reported contained"
+    );
+
+    // Peek-based: no hit or miss increments.
+    assert_eq!(
+        cache.cache_hits().unwrap_or(0),
+        hits_before,
+        "cache_contains must not increment hit counter on UnboundCache"
+    );
+    assert_eq!(
+        cache.cache_misses().unwrap_or(0),
+        misses_before,
+        "cache_contains must not increment miss counter on UnboundCache"
+    );
+
+    // CachedExt::contains delegates to cache_contains.
+    assert!(
+        CachedExt::contains(&mut cache, "hello"),
+        "CachedExt::contains must agree for present key on UnboundCache"
+    );
+    assert!(
+        !CachedExt::contains(&mut cache, "absent"),
+        "CachedExt::contains must agree for absent key on UnboundCache"
+    );
+}
+
+/// LruTtlCache: cache_contains is peek-based -- expired entries report false, no TTL
+/// refresh, no hit/miss increment, no recency promotion.
+#[cfg(feature = "time_stores")]
+#[test]
+fn lru_ttl_cache_contains_is_expiry_aware_and_metric_neutral() {
+    use cached::time::Duration;
+    use cached::{Cached, LruTtlCache};
+
+    let mut cache = LruTtlCache::<u32, u32>::builder()
+        .max_size(4)
+        .ttl(Duration::from_millis(40))
+        .build()
+        .unwrap();
+
+    cache.cache_set(1, 10);
+    cache.cache_set(2, 20);
+
+    let hits_before = cache.cache_hits().unwrap_or(0);
+    let misses_before = cache.cache_misses().unwrap_or(0);
+
+    // Live entries.
+    assert!(
+        cache.cache_contains(&1),
+        "live LruTtl entry must be reported contained"
+    );
+    assert!(
+        cache.cache_contains(&2),
+        "live LruTtl entry 2 must be reported contained"
+    );
+    // Absent key.
+    assert!(
+        !cache.cache_contains(&99),
+        "absent key must not be reported contained"
+    );
+
+    // Metrics unchanged.
+    assert_eq!(
+        cache.cache_hits().unwrap_or(0),
+        hits_before,
+        "cache_contains must not increment hit counter on LruTtlCache"
+    );
+    assert_eq!(
+        cache.cache_misses().unwrap_or(0),
+        misses_before,
+        "cache_contains must not increment miss counter on LruTtlCache"
+    );
+
+    // Sleep past TTL -- expired entry must report false.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert!(
+        !cache.cache_contains(&1),
+        "expired LruTtl entry must NOT be reported contained"
+    );
+    assert!(
+        !cache.cache_contains(&2),
+        "expired LruTtl entry 2 must NOT be reported contained"
+    );
+}
+
+/// TtlSortedCache: cache_contains is peek-based -- expired entries report false, no
+/// hit/miss increment.
+#[cfg(feature = "time_stores")]
+#[test]
+fn ttl_sorted_cache_contains_is_expiry_aware_and_metric_neutral() {
+    use cached::time::Duration;
+    use cached::{Cached, TtlSortedCache};
+
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
+        .ttl(Duration::from_millis(40))
+        .build()
+        .unwrap();
+
+    cache.cache_set(7, 70);
+
+    let hits_before = cache.cache_hits().unwrap_or(0);
+    let misses_before = cache.cache_misses().unwrap_or(0);
+
+    // Live entry.
+    assert!(
+        cache.cache_contains(&7),
+        "live TtlSorted entry must be reported contained"
+    );
+    // Absent key.
+    assert!(
+        !cache.cache_contains(&99),
+        "absent key must not be reported contained by TtlSortedCache"
+    );
+
+    // Metrics unchanged.
+    assert_eq!(
+        cache.cache_hits().unwrap_or(0),
+        hits_before,
+        "cache_contains must not increment hit counter on TtlSortedCache"
+    );
+    assert_eq!(
+        cache.cache_misses().unwrap_or(0),
+        misses_before,
+        "cache_contains must not increment miss counter on TtlSortedCache"
+    );
+
+    // Sleep past TTL -- expired entry must report false.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert!(
+        !cache.cache_contains(&7),
+        "expired TtlSorted entry must NOT be reported contained"
+    );
+}
+
+/// ExpiringCache: cache_contains is peek-based -- expired (per-value) entries report
+/// false, no hit/miss increment.
+#[test]
+fn expiring_cache_contains_is_expiry_aware_and_metric_neutral() {
+    use cached::{Cached, Expires, ExpiringCache};
+
+    #[derive(Clone)]
+    struct Val {
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    let mut cache = ExpiringCache::<u32, Val>::new();
+    cache.cache_set(1, Val { expired: false });
+    cache.cache_set(2, Val { expired: true });
+
+    let hits_before = cache.cache_hits().unwrap_or(0);
+    let misses_before = cache.cache_misses().unwrap_or(0);
+
+    // Live entry.
+    assert!(
+        cache.cache_contains(&1),
+        "live ExpiringCache entry must be reported contained"
+    );
+    // Per-value expired entry: must report false without evicting.
+    assert!(
+        !cache.cache_contains(&2),
+        "expired ExpiringCache entry must NOT be reported contained"
+    );
+    // Absent key.
+    assert!(
+        !cache.cache_contains(&99),
+        "absent key must not be reported contained by ExpiringCache"
+    );
+
+    // Metrics unchanged (peek-based).
+    assert_eq!(
+        cache.cache_hits().unwrap_or(0),
+        hits_before,
+        "cache_contains must not increment hit counter on ExpiringCache"
+    );
+    assert_eq!(
+        cache.cache_misses().unwrap_or(0),
+        misses_before,
+        "cache_contains must not increment miss counter on ExpiringCache"
+    );
+
+    // Both entries still physically present -- no eviction from contains.
+    assert_eq!(
+        cache.cache_size(),
+        2,
+        "cache_contains must not evict entries from ExpiringCache"
+    );
+}
+
+/// ExpiringLruCache: cache_contains is peek-based -- expired entries report false, no
+/// hit/miss increment, no recency promotion.
+#[test]
+fn expiring_lru_cache_contains_is_expiry_aware_metric_neutral_and_no_recency() {
+    use cached::{Cached, CachedExt, Expires, ExpiringLruCache};
+
+    #[derive(Clone)]
+    struct Val {
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    // max_size=3 so we can test recency: insert 1, 2 (live), 3 (expired).
+    let mut cache = ExpiringLruCache::<u32, Val>::new(3);
+    cache.cache_set(1, Val { expired: false });
+    cache.cache_set(2, Val { expired: false });
+    // Promote key 1 to MRU so order is [1, 2] (1 most recent).
+    cache.cache_get(&1);
+
+    let hits_before = cache.cache_hits().unwrap_or(0);
+    let misses_before = cache.cache_misses().unwrap_or(0);
+    let size_before = cache.cache_size();
+
+    // Live entry: true.
+    assert!(
+        cache.cache_contains(&1),
+        "live ExpiringLru entry must be reported contained"
+    );
+    // Also live.
+    assert!(
+        cache.cache_contains(&2),
+        "live ExpiringLru entry 2 must be reported contained"
+    );
+    // Absent key: false.
+    assert!(
+        !cache.cache_contains(&99),
+        "absent key must not be reported contained by ExpiringLruCache"
+    );
+
+    // Metrics unchanged (peek-based).
+    assert_eq!(
+        cache.cache_hits().unwrap_or(0),
+        hits_before,
+        "cache_contains must not increment hit counter on ExpiringLruCache"
+    );
+    assert_eq!(
+        cache.cache_misses().unwrap_or(0),
+        misses_before,
+        "cache_contains must not increment miss counter on ExpiringLruCache"
+    );
+
+    // No entry evicted (cache_size unchanged).
+    assert_eq!(
+        cache.cache_size(),
+        size_before,
+        "cache_contains must not evict entries from ExpiringLruCache"
+    );
+
+    // Recency check: if cache_contains(&2) had promoted key 2 to MRU, inserting a new
+    // key would evict key 1 (which was MRU). Since contains must not change recency,
+    // key 2 must be evicted instead (it was LRU at time of contains).
+    cache.cache_set(3, Val { expired: false });
+    // After one promoting get (key 1) and no recency change from contains, the LRU
+    // order is: key 2 is least recent, key 1 is most recent.
+    // Inserting key 3 evicts key 2.
+    assert!(
+        cache.cache_contains(&1),
+        "key 1 must still be present (was MRU, must not have been evicted)"
+    );
+    assert!(
+        cache.cache_contains(&3),
+        "newly inserted key 3 must be present"
+    );
+
+    // CachedExt alias check.
+    assert!(
+        CachedExt::contains(&mut cache, &1),
+        "CachedExt::contains must agree for present key on ExpiringLruCache"
+    );
+}
+
+/// Default cache_contains path counts a miss for absent keys (via cache_get).
+/// The implementor's test verifies hits increase but does not check miss count.
+#[test]
+fn cached_trait_default_cache_contains_absent_key_counts_miss() {
+    use cached::Cached;
+    use std::collections::HashMap;
+
+    // Same minimal MapCache as above -- copy kept local to this test.
+    struct MapCache2 {
+        map: HashMap<u32, u32>,
+        hits: u64,
+        misses: u64,
+    }
+    impl MapCache2 {
+        fn new() -> Self {
+            Self {
+                map: HashMap::new(),
+                hits: 0,
+                misses: 0,
+            }
+        }
+    }
+    impl Cached<u32, u32> for MapCache2 {
+        type Error = std::convert::Infallible;
+
+        fn cache_get<Q>(&mut self, k: &Q) -> Option<&u32>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            match self.map.get(k) {
+                Some(v) => {
+                    self.hits += 1;
+                    Some(v)
+                }
+                None => {
+                    self.misses += 1;
+                    None
+                }
+            }
+        }
+
+        fn cache_get_mut<Q>(&mut self, k: &Q) -> Option<&mut u32>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            self.map.get_mut(k)
+        }
+
+        fn cache_set(&mut self, k: u32, v: u32) -> Option<u32> {
+            self.map.insert(k, v)
+        }
+
+        fn cache_remove<Q>(&mut self, k: &Q) -> Option<u32>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            self.map.remove(k)
+        }
+
+        fn cache_remove_entry<Q>(&mut self, k: &Q) -> Option<(u32, u32)>
+        where
+            u32: std::borrow::Borrow<Q>,
+            Q: std::hash::Hash + Eq + ?Sized,
+        {
+            self.map.remove_entry(k)
+        }
+
+        fn cache_get_or_set_with_mut<F: FnOnce() -> u32>(&mut self, key: u32, f: F) -> &mut u32 {
+            self.map.entry(key).or_insert_with(f)
+        }
+
+        fn cache_try_get_or_set_with_mut<F: FnOnce() -> Result<u32, E>, E>(
+            &mut self,
+            key: u32,
+            f: F,
+        ) -> Result<&mut u32, E> {
+            use std::collections::hash_map::Entry;
+            match self.map.entry(key) {
+                Entry::Occupied(o) => Ok(o.into_mut()),
+                Entry::Vacant(v) => Ok(v.insert(f()?)),
+            }
+        }
+
+        fn cache_clear(&mut self) {
+            self.map.clear();
+        }
+
+        fn cache_reset(&mut self) {
+            self.map.clear();
+            self.hits = 0;
+            self.misses = 0;
+        }
+
+        fn cache_size(&self) -> usize {
+            self.map.len()
+        }
+
+        fn cache_hits(&self) -> Option<u64> {
+            Some(self.hits)
+        }
+
+        fn cache_misses(&self) -> Option<u64> {
+            Some(self.misses)
+        }
+    }
+
+    let mut cache = MapCache2::new();
+    cache.cache_set(1, 10);
+
+    let misses_before = cache.cache_misses().unwrap();
+
+    // Hit path: cache_contains on a present key -- must NOT count a miss.
+    assert!(cache.cache_contains(&1));
+    assert_eq!(
+        cache.cache_misses().unwrap(),
+        misses_before,
+        "default cache_contains on a present key must not count a miss"
+    );
+
+    // Miss path: cache_contains on an absent key -- default delegates to cache_get
+    // which counts a miss in this store.
+    assert!(!cache.cache_contains(&99));
+    assert_eq!(
+        cache.cache_misses().unwrap(),
+        misses_before + 1,
+        "default cache_contains on an absent key delegates to cache_get, counting a miss"
     );
 }

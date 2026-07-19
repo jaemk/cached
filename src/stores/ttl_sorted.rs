@@ -538,19 +538,6 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         self.map.reserve(more);
     }
 
-    /// Set the default ttl and return the previous value.
-    ///
-    /// Returns the previous TTL, or `None` if expiry was already disabled (the previous
-    /// TTL was zero). This matches [`CacheTtl::set_ttl`](crate::CacheTtl::set_ttl) and the
-    /// `set_ttl` of every other timed store (`TtlCache`, `LruTtlCache`), so a zero
-    /// previous value is reported uniformly as `None` regardless of which store a generic
-    /// caller is using.
-    pub fn set_ttl(&mut self, ttl: Duration) -> Option<Duration> {
-        let old = self.ttl;
-        self.ttl = ttl;
-        if old.is_zero() { None } else { Some(old) }
-    }
-
     /// Evict values that have expired.
     /// Returns number of dropped items.
     #[must_use]
@@ -1061,6 +1048,18 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     fn cache_capacity(&self) -> Option<usize> {
         self.size_limit
     }
+
+    /// Returns `true` if the key is present and its entry has not expired.
+    ///
+    /// Uses `cache_peek` internally: no hit/miss counters are updated and no
+    /// recency or TTL refresh occurs. Expired entries report `false`.
+    fn cache_contains<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        crate::CachedPeek::cache_peek(self, k).is_some()
+    }
 }
 
 impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedIter<K, V> for TtlSortedCache<K, V, S> {
@@ -1274,7 +1273,7 @@ impl<K: std::hash::Hash + Eq + Ord + Clone, V, S: BuildHasher> CacheEvict
 mod test {
     use crate::stores::TtlSortedCache;
     use crate::time::Duration;
-    use crate::{Cached, CachedExt, CachedRead};
+    use crate::{CacheTtl, Cached, CachedExt, CachedRead};
     use std::cmp::Ordering as CmpOrdering;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;

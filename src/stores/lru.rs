@@ -878,6 +878,19 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruCache<K, V, S>
     fn cache_capacity(&self) -> Option<usize> {
         Some(self.capacity)
     }
+
+    /// Check whether the cache contains a live entry for `k`.
+    ///
+    /// Delegates to [`CachedPeek::cache_peek`], so it records no hit/miss
+    /// metrics, performs no recency promotion, and reports absent/expired
+    /// entries as `false`.
+    fn cache_contains<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        crate::CachedPeek::cache_peek(self, k).is_some()
+    }
 }
 
 impl<K: Hash + Eq + Clone, V, S: BuildHasher> CachedIter<K, V> for LruCache<K, V, S> {

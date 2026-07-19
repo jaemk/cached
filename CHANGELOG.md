@@ -9,6 +9,20 @@
   type does not implement `std::error::Error` (or is not `Send`/`Sync`/`'static`) must update
   their `type Error`. All built-in stores (`Infallible`, `CacheSetError`, `RedisCacheError`,
   `RedbCacheError`) already satisfy the bound. See the migration guide for detection and remediation.
+- `ConcurrentCached::cache_contains` and `ConcurrentCachedAsync::async_cache_contains` are now
+  required methods, no longer defaulted, and no longer carry a `V: Clone` (async: `V: Clone + Send`)
+  bound. External implementors of `ConcurrentCached` / `ConcurrentCachedAsync` must add these
+  methods; the previous defaulted version only ever shipped in 3.0.0 rcs. Rationale: the `V: Clone`
+  bound blocked `contains` for non-Clone value types and could not be relaxed after 3.0.0 without
+  another breaking change. `ConcurrentCachedExt::contains` also drops its `V: Clone` bound.
+- `TtlSortedCache::set_ttl` inherent method removed. Runtime TTL controls are now only on the
+  traits: `CacheTtl` for single-owner stores, `ConcurrentCacheTtl` for concurrent stores. Migration:
+  `use cached::CacheTtl;` and the same `cache.set_ttl(d)` call compiles with identical semantics.
+- `CachedExt::contains` now delegates to `Cached::cache_contains` (new, defaulted; built-ins
+  override with a peek-based implementation) instead of `cache_get`. As a result `contains` no
+  longer counts a hit/miss, promotes LRU recency, or refreshes TTL on refresh-on-hit stores, and
+  reports expired entries as absent. This only affects the rc surface; the trait-level default of
+  `Cached::cache_contains` remains get-based for third-party stores that do not override it.
 
 ### Added
 
@@ -18,13 +32,23 @@
   `cache_peek_with_expiry_status` on the concurrent clone trait.
 - `CachedExt::reset`: ergonomic alias for `Cached::cache_reset`, mirroring the existing
   `ConcurrentCachedExt::reset`.
-- `ConcurrentCached::cache_contains`: defaulted presence check returning `Result<bool, Self::Error>`.
-  The default calls `cache_get` (counts hits/misses, touches LRU recency, clones the value). The
-  built-in sharded stores override it with an efficient peek-based implementation (read lock, no
-  clone, no recency update, no hit/miss metrics). External stores use the default.
-- `ConcurrentCachedAsync::async_cache_contains`: async counterpart of `cache_contains`, same
-  default/override split.
-- `ConcurrentCachedExt::contains`: ergonomic alias for `cache_contains`.
+- `Cached::cache_contains<Q>(&mut self, k: &Q) -> bool`: defaulted presence check on the core
+  single-owner trait (default get-based; built-in stores override with a peek-based implementation).
+  `CachedExt::contains` delegates to it, giving `contains` both spellings on both trait families.
+- `ConcurrentCached::cache_contains`: required presence check returning `Result<bool, Self::Error>`,
+  no `V: Clone` bound. The built-in sharded stores use a peek-based implementation (read lock, no
+  clone, no recency update, no hit/miss metrics); `RedisCache` / `AsyncRedisCache` / `RedbCache`
+  use a get-based implementation. External implementors of `ConcurrentCached` must add this method.
+- `ConcurrentCachedAsync::async_cache_contains`: required async counterpart of `cache_contains`,
+  no `V: Clone + Send` bound; same impl split as the sync method. External implementors of
+  `ConcurrentCachedAsync` must add this method.
+- `ConcurrentCachedExt::contains`: ergonomic alias for `cache_contains`, no `V: Clone` bound.
+- Inherent `contains(&self, &K) -> bool` on all six sharded stores: peek-based, infallible,
+  takes call-site priority over `ConcurrentCachedExt::contains` (consistent with the other
+  inherent shims like `get`/`set`/`reset`).
+- `ExpiringLruCache::iter_order` / `key_order` / `value_order`: recency-order introspection
+  matching `LruCache` (plain `(K, V)` / `K` / `V` shapes; expired entries excluded), completing
+  the LRU-family parity started with `retain`.
 - `#[must_use]` on `ConcurrentCached::cache_remove` and `cache_remove_entry`, their
   `ConcurrentCachedAsync` counterparts `async_cache_remove` / `async_cache_remove_entry`, and the
   `ConcurrentCachedExt` aliases `remove` / `remove_entry`.
@@ -49,6 +73,14 @@
   `ConcurrentCacheBase::Error` bound as a breaking change entry.
 - `specs/traits-core.md` and `specs/traits-concurrent.md`: updated to record `Error` bounds,
   `peek` aliases, `reset`, `cache_contains`/`async_cache_contains`/`contains`.
+- `docs/migrations/2.0-to-3.0.md` and `2.0-to-3.0-human.md`: added entries for required
+  `cache_contains`/`async_cache_contains`, `TtlSortedCache::set_ttl` inherent removal, and the
+  single-owner `contains` semantic change.
+- `specs/traits-core.md`: added `Cached::cache_contains` defaulted method and updated
+  `CachedExt::contains` delegation.
+- `specs/traits-concurrent.md`: updated `cache_contains`/`async_cache_contains` to required,
+  unbounded; updated ext alias and IO store impls.
+- `specs/store-sharded.md`: added inherent `contains` to the sharded store inherent-shim list.
 
 ## [3.0.0-rc.8 / cached_proc_macro 3.0.0-rc.8 / cached_proc_macro_types 3.0.0-rc.8] - 2026-07-17
 

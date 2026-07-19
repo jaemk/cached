@@ -1410,6 +1410,17 @@ where
     fn cache_reset(&self) -> Result<(), RedbCacheError> {
         disk_cache_clear(&self.connection, self.durable)
     }
+
+    /// Returns `true` if the cache contains a non-expired entry for `key`.
+    ///
+    /// Delegates to [`cache_get`](ConcurrentCached::cache_get): the value is
+    /// fetched and deserialized to determine presence.
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        Self: Sized,
+    {
+        self.cache_get(k).map(|v| v.is_some())
+    }
 }
 
 impl<K, V> crate::SerializeCached<K, V> for RedbCache<K, V>
@@ -1516,6 +1527,18 @@ where
         let connection = self.connection.clone();
         let durable = self.durable;
         blocking::unblock(move || disk_cache_clear(&connection, durable)).await
+    }
+
+    /// Returns `true` if the cache contains a non-expired entry for `key`.
+    ///
+    /// Delegates to [`async_cache_get`](crate::ConcurrentCachedAsync::async_cache_get)
+    /// via a background thread (same pattern as all other async methods here).
+    async fn async_cache_contains(&self, k: &K) -> Result<bool, RedbCacheError>
+    where
+        Self: Sized + Sync,
+        K: Sync,
+    {
+        self.async_cache_get(k).await.map(|v| v.is_some())
     }
 }
 
