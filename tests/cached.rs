@@ -8814,7 +8814,10 @@ fn clone_cached_peek_with_expiry_status_alias_reports_expired() {
     // Expired entry: alias must report the stale value AND expired == true.
     let (val, expired) = cache.peek_with_expiry_status(&"k".to_string());
     assert_eq!(val, Some(5u32), "peek must return the stale value");
-    assert!(expired, "peek_with_expiry_status must flag the entry expired");
+    assert!(
+        expired,
+        "peek_with_expiry_status must flag the entry expired"
+    );
 }
 
 #[cfg(feature = "time_stores")]
@@ -8834,7 +8837,10 @@ fn concurrent_clone_cached_peek_with_expiry_status_alias_reports_expired() {
 
     let (val, expired) = cache.peek_with_expiry_status(&"k".to_string());
     assert_eq!(val, Some(5u32), "peek must return the stale value");
-    assert!(expired, "peek_with_expiry_status must flag the entry expired");
+    assert!(
+        expired,
+        "peek_with_expiry_status must flag the entry expired"
+    );
 }
 
 // ── Certification gap-fill: ConcurrentCachedExt::contains alias on an expiring ─
