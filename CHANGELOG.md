@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.9] - 2026-07-19
+
 ### Breaking Changes
 
 - `Cached::Error` and `ConcurrentCacheBase::Error` are now bounded by
