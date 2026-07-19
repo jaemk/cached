@@ -8213,3 +8213,655 @@ mod len_iter_evict_contract_sharded_expiring {
         );
     }
 }
+
+// ── Item 1: Cached::Error bound ──────────────────────────────────────────────
+
+/// A generic function over Cached that ?-propagates Cached::Error.
+/// Compiles only if Error: std::error::Error + Send + Sync + 'static.
+#[allow(dead_code)]
+fn cached_error_propagate<K, V, C>(
+    cache: &mut C,
+    k: K,
+    v: V,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    K: std::hash::Hash + Eq,
+    C: cached::Cached<K, V>,
+{
+    // ? works only if Self::Error: Into<Box<dyn std::error::Error>>,
+    // which requires std::error::Error + Send + Sync + 'static.
+    cache.cache_try_set(k, v)?;
+    Ok(())
+}
+
+/// A generic function that ?-propagates Cached::Error into Box<dyn std::error::Error>.
+/// Compiles only if Error: std::error::Error + Send + Sync + 'static.
+#[allow(dead_code)]
+fn cached_error_question_mark<K, V, C>(
+    cache: &mut C,
+    k: K,
+    v: V,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    K: std::hash::Hash + Eq,
+    C: cached::Cached<K, V>,
+{
+    cache.cache_try_set(k, v)?;
+    Ok(())
+}
+
+/// A generic function over ConcurrentCached that calls .unwrap() and ?-propagates errors.
+/// Compiles only if ConcurrentCacheBase::Error satisfies the bound.
+#[allow(dead_code)]
+fn concurrent_error_question_mark<K, V, C>(
+    cache: &C,
+    k: K,
+    v: V,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    K: std::hash::Hash + Eq + Clone,
+    V: Clone,
+    C: cached::ConcurrentCached<K, V>,
+{
+    cache.cache_set(k, v)?;
+    Ok(())
+}
+
+#[test]
+fn cached_error_bound_allows_unwrap_and_question_mark() {
+    // Calls the generic functions with a concrete store; proves the bound is satisfied at runtime.
+    let mut cache = UnboundCache::<String, u32>::builder().build().unwrap();
+    cached_error_question_mark(&mut cache, "k".to_string(), 1).unwrap();
+
+    let sharded = cached::ShardedUnboundCache::<String, u32>::builder()
+        .build()
+        .unwrap();
+    concurrent_error_question_mark(&sharded, "k".to_string(), 1).unwrap();
+}
+
+// ── Item 2: peek short aliases ────────────────────────────────────────────────
+
+#[test]
+fn cached_peek_alias_works_via_prelude() {
+    use cached::UnboundCache;
+    use cached::prelude::*;
+    let mut cache = UnboundCache::<String, u32>::builder().build().unwrap();
+    cache.set("key".to_string(), 42u32);
+    // peek alias delegates to cache_peek; does not require mutable access.
+    assert_eq!(cache.peek("key"), Some(&42u32));
+    assert_eq!(cache.peek("missing"), None);
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn clone_cached_peek_with_expiry_status_alias_works() {
+    use cached::TtlCache;
+    use cached::prelude::*;
+    use cached::time::Duration;
+    let mut cache = TtlCache::<String, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    cache.set("k".to_string(), 1u32);
+    // peek_with_expiry_status alias delegates to cache_peek_with_expiry_status.
+    let (val, expired) = cache.peek_with_expiry_status(&"k".to_string());
+    assert_eq!(val, Some(1u32));
+    assert!(!expired);
+    let (val2, expired2) = cache.peek_with_expiry_status(&"missing".to_string());
+    assert_eq!(val2, None);
+    assert!(!expired2);
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn concurrent_clone_cached_peek_with_expiry_status_alias_works() {
+    use cached::ShardedTtlCache;
+    use cached::prelude::*;
+    use cached::time::Duration;
+    let cache = ShardedTtlCache::<String, u32>::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    cache.set("k".to_string(), 1u32);
+    // peek_with_expiry_status alias on ConcurrentCloneCached.
+    let (val, expired) = cache.peek_with_expiry_status(&"k".to_string());
+    assert_eq!(val, Some(1u32));
+    assert!(!expired);
+}
+
+// ── Item 3a: CachedExt::reset alias ──────────────────────────────────────────
+
+#[test]
+fn cached_ext_reset_clears_entries_and_metrics() {
+    use cached::UnboundCache;
+    use cached::prelude::*;
+    let mut cache = UnboundCache::<String, u32>::builder().build().unwrap();
+    cache.set("k".to_string(), 1u32);
+    cache.get("k");
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.hits(), Some(1));
+
+    cache.reset();
+
+    assert_eq!(cache.len(), 0, "reset() must clear entries");
+    assert_eq!(cache.hits(), Some(0), "reset() must zero metrics");
+}
+
+// ── Item 3b: ConcurrentCachedExt::contains + recency / hit-count contracts ───
+
+#[test]
+fn concurrent_contains_sharded_lru_no_recency_change() {
+    use cached::{ConcurrentCacheBase, ConcurrentCachedExt, ShardedLruCache};
+    // Build a 3-slot LRU: insert A, B, C in order so A is LRU.
+    let cache = ShardedLruCache::<u32, u32>::builder()
+        .max_size(3)
+        .shards(1) // single shard for deterministic eviction order
+        .build()
+        .unwrap();
+    cache.set(1u32, 10u32);
+    cache.set(2u32, 20u32);
+    cache.set(3u32, 30u32);
+
+    // Before contains: 1 is LRU (inserted first). Snapshot hits.
+    let hits_before = ConcurrentCacheBase::cache_hits(&cache).unwrap_or(0);
+    let misses_before = ConcurrentCacheBase::cache_misses(&cache).unwrap_or(0);
+
+    // contains() must not change recency of key 1.
+    let present = ConcurrentCachedExt::contains(&cache, &1u32).unwrap();
+    assert!(present, "key 1 is present");
+
+    let hits_after = ConcurrentCacheBase::cache_hits(&cache).unwrap_or(0);
+    let misses_after = ConcurrentCacheBase::cache_misses(&cache).unwrap_or(0);
+
+    assert_eq!(
+        hits_after, hits_before,
+        "contains() must not increment hit counter"
+    );
+    assert_eq!(
+        misses_after, misses_before,
+        "contains() must not increment miss counter"
+    );
+
+    // Insert a 4th key; if contains() had promoted key 1 to MRU, key 2 would be evicted.
+    // Without promotion, key 1 (LRU) is evicted.
+    cache.set(4u32, 40u32);
+
+    // Key 1 should have been evicted (it was LRU and contains() must not have changed that).
+    let k1_present = ConcurrentCachedExt::contains(&cache, &1u32).unwrap();
+    assert!(
+        !k1_present,
+        "key 1 must be evicted (LRU) -- contains() must not update recency"
+    );
+
+    // Keys 2, 3, 4 must still be present.
+    assert!(ConcurrentCachedExt::contains(&cache, &2u32).unwrap());
+    assert!(ConcurrentCachedExt::contains(&cache, &3u32).unwrap());
+    assert!(ConcurrentCachedExt::contains(&cache, &4u32).unwrap());
+}
+
+#[test]
+fn concurrent_contains_returns_false_for_absent_key() {
+    use cached::{ConcurrentCachedExt, ShardedUnboundCache};
+    let cache = ShardedUnboundCache::<String, u32>::builder()
+        .build()
+        .unwrap();
+    cache.set("present".to_string(), 1u32);
+    assert!(ConcurrentCachedExt::contains(&cache, &"present".to_string()).unwrap());
+    assert!(!ConcurrentCachedExt::contains(&cache, &"absent".to_string()).unwrap());
+}
+
+/// Generic trait usage: contains() on any ConcurrentCached without extra where-clauses.
+#[allow(dead_code)]
+fn generic_concurrent_contains<K, V, C>(cache: &C, k: &K) -> bool
+where
+    K: std::hash::Hash + Eq + Clone,
+    V: Clone,
+    C: cached::ConcurrentCached<K, V>,
+{
+    cache.cache_contains(k).unwrap_or(false)
+}
+
+#[test]
+fn concurrent_contains_generic_usage_compiles_and_works() {
+    use cached::ShardedUnboundCache;
+    let cache = ShardedUnboundCache::<String, u32>::builder()
+        .build()
+        .unwrap();
+    cache.set("x".to_string(), 99u32);
+    assert!(generic_concurrent_contains(&cache, &"x".to_string()));
+    assert!(!generic_concurrent_contains(&cache, &"y".to_string()));
+}
+
+// ── Certification gap-fills: sync cache_contains expiry-awareness on the ─────
+//    TTL-family and per-value-expiry sharded overrides. The overrides in
+//    ttl.rs / lru_ttl.rs / expiring.rs / expiring_lru.rs must return `false`
+//    for a present-but-expired entry (peek-based, not cache_get-based), and
+//    must not touch hit/miss metrics on any of the six stores.
+
+/// A per-value `Expires` value with a settable flag, for the expiring sharded stores.
+#[derive(Clone)]
+struct ContainsExpirable {
+    expired: bool,
+}
+
+impl cached::Expires for ContainsExpirable {
+    fn is_expired(&self) -> bool {
+        self.expired
+    }
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn sharded_ttl_cache_contains_is_expiry_aware_and_metric_neutral() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCacheBase, ConcurrentCached, ShardedTtlCache};
+
+    let cache = ShardedTtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    cache.set(1, 10);
+
+    // Live entry: contains == true, no hit/miss recorded.
+    let hits_before = ConcurrentCacheBase::cache_hits(&cache).unwrap_or(0);
+    let misses_before = ConcurrentCacheBase::cache_misses(&cache).unwrap_or(0);
+    assert!(
+        ConcurrentCached::cache_contains(&cache, &1).unwrap(),
+        "live TTL entry must be contained"
+    );
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &99).unwrap(),
+        "absent key must not be contained"
+    );
+    assert_eq!(
+        ConcurrentCacheBase::cache_hits(&cache).unwrap_or(0),
+        hits_before,
+        "cache_contains must not record a hit"
+    );
+    assert_eq!(
+        ConcurrentCacheBase::cache_misses(&cache).unwrap_or(0),
+        misses_before,
+        "cache_contains must not record a miss"
+    );
+
+    // Expired entry (still physically present, unswept): contains == false.
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    assert_eq!(cache.len(), 1, "expired entry is still stored (unswept)");
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &1).unwrap(),
+        "expired TTL entry must NOT be contained"
+    );
+    // The false result came from the peek override, not cache_get eviction.
+    assert_eq!(
+        cache.len(),
+        1,
+        "cache_contains must not evict the expired entry"
+    );
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn sharded_lru_ttl_cache_contains_is_expiry_aware() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCached, ShardedLruTtlCache};
+
+    let cache = ShardedLruTtlCache::<u32, u32>::builder()
+        .max_size(10)
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    cache.set(1, 10);
+    assert!(ConcurrentCached::cache_contains(&cache, &1).unwrap());
+    assert!(!ConcurrentCached::cache_contains(&cache, &99).unwrap());
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &1).unwrap(),
+        "expired LRU+TTL entry must NOT be contained"
+    );
+}
+
+#[test]
+fn sharded_expiring_cache_contains_is_expiry_aware() {
+    use cached::{ConcurrentCached, ShardedExpiringCache};
+
+    let cache = ShardedExpiringCache::<u32, ContainsExpirable>::builder()
+        .build()
+        .unwrap();
+    cache.set(1, ContainsExpirable { expired: false });
+    cache.set(2, ContainsExpirable { expired: true });
+
+    assert!(
+        ConcurrentCached::cache_contains(&cache, &1).unwrap(),
+        "live per-value entry must be contained"
+    );
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &2).unwrap(),
+        "expired per-value entry must NOT be contained"
+    );
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &99).unwrap(),
+        "absent key must not be contained"
+    );
+    // Neither call should have evicted the expired entry.
+    assert_eq!(cache.len(), 2, "cache_contains must not evict entries");
+}
+
+#[test]
+fn sharded_expiring_lru_cache_contains_is_expiry_aware() {
+    use cached::{ConcurrentCached, ShardedExpiringLruCache};
+
+    let cache = ShardedExpiringLruCache::<u32, ContainsExpirable>::builder()
+        .max_size(10)
+        .build()
+        .unwrap();
+    cache.set(1, ContainsExpirable { expired: false });
+    cache.set(2, ContainsExpirable { expired: true });
+
+    assert!(ConcurrentCached::cache_contains(&cache, &1).unwrap());
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &2).unwrap(),
+        "expired per-value LRU entry must NOT be contained"
+    );
+    assert!(!ConcurrentCached::cache_contains(&cache, &99).unwrap());
+    assert_eq!(cache.len(), 2, "cache_contains must not evict entries");
+}
+
+// ── Certification gap-fills: async_cache_contains overrides. The implementor ─
+//    only tested the sync path. These exercise the async overrides on a
+//    non-TTL LRU store and TTL/expiring stores: absent -> false, live -> true,
+//    expired -> false, and no hit/miss metric or recency change.
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_contains_sharded_lru_no_recency_or_metric_change() {
+    use cached::{ConcurrentCacheBase, ConcurrentCachedAsync, ShardedLruCache};
+
+    // Single shard, 3 slots: 1 is LRU after inserting 1,2,3.
+    let cache = ShardedLruCache::<u32, u32>::builder()
+        .max_size(3)
+        .shards(1)
+        .build()
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
+        .await
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 2, 20)
+        .await
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 3, 30)
+        .await
+        .unwrap();
+
+    let hits_before = ConcurrentCacheBase::cache_hits(&cache).unwrap_or(0);
+    let misses_before = ConcurrentCacheBase::cache_misses(&cache).unwrap_or(0);
+
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "live key present"
+    );
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &99)
+            .await
+            .unwrap(),
+        "absent key -> false"
+    );
+
+    assert_eq!(
+        ConcurrentCacheBase::cache_hits(&cache).unwrap_or(0),
+        hits_before,
+        "async_cache_contains must not record a hit"
+    );
+    assert_eq!(
+        ConcurrentCacheBase::cache_misses(&cache).unwrap_or(0),
+        misses_before,
+        "async_cache_contains must not record a miss"
+    );
+
+    // If contains() had promoted key 1 to MRU, inserting a 4th key would evict
+    // key 2 instead of key 1. Without promotion, key 1 (LRU) is evicted.
+    ConcurrentCachedAsync::async_cache_set(&cache, 4, 40)
+        .await
+        .unwrap();
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "key 1 must be evicted (LRU): async_cache_contains must not update recency"
+    );
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &3)
+            .await
+            .unwrap()
+    );
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &4)
+            .await
+            .unwrap()
+    );
+}
+
+#[cfg(all(feature = "async", feature = "time_stores"))]
+#[tokio::test]
+async fn async_contains_sharded_ttl_is_expiry_aware() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCachedAsync, ShardedTtlCache};
+
+    let cache = ShardedTtlCache::<u32, u32>::builder()
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 1, 10)
+        .await
+        .unwrap();
+
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "live TTL entry -> true"
+    );
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &99)
+            .await
+            .unwrap(),
+        "absent key -> false"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "expired TTL entry -> false"
+    );
+    assert_eq!(
+        cache.len(),
+        1,
+        "async_cache_contains must not evict the expired entry"
+    );
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_contains_sharded_expiring_is_expiry_aware() {
+    use cached::{ConcurrentCachedAsync, ShardedExpiringCache};
+
+    let cache = ShardedExpiringCache::<u32, ContainsExpirable>::builder()
+        .build()
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 1, ContainsExpirable { expired: false })
+        .await
+        .unwrap();
+    ConcurrentCachedAsync::async_cache_set(&cache, 2, ContainsExpirable { expired: true })
+        .await
+        .unwrap();
+
+    assert!(
+        ConcurrentCachedAsync::async_cache_contains(&cache, &1)
+            .await
+            .unwrap(),
+        "live per-value entry -> true"
+    );
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &2)
+            .await
+            .unwrap(),
+        "expired per-value entry -> false"
+    );
+    assert!(
+        !ConcurrentCachedAsync::async_cache_contains(&cache, &99)
+            .await
+            .unwrap(),
+        "absent key -> false"
+    );
+}
+
+// ── Certification gap-fill: the DEFAULT cache_contains path (via cache_get) on ─
+//    a store WITHOUT an override. RedbCache uses the trait default, so this
+//    exercises `cache_get(k).map(|v| v.is_some())`. Documented side effects
+//    (hit counting) are acceptable here; we assert only the correct result and
+//    the documented expiry behavior (cache_get skips expired -> contains false).
+
+#[cfg(feature = "redb_store")]
+#[test]
+fn redb_default_cache_contains_returns_correct_results() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCached, RedbCache};
+
+    let cache = RedbCache::<String, u32>::builder("redb_default_contains_correctness")
+        .ttl(Duration::from_secs(30))
+        .build()
+        .expect("build redb cache");
+    // Start clean so a prior run's on-disk state cannot skew results.
+    ConcurrentCached::cache_clear(&cache).expect("clear");
+
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &"k".to_string()).expect("contains absent"),
+        "absent key must not be contained (default path)"
+    );
+
+    ConcurrentCached::cache_set(&cache, "k".to_string(), 7).expect("set");
+    assert!(
+        ConcurrentCached::cache_contains(&cache, &"k".to_string()).expect("contains present"),
+        "present key must be contained via the default cache_get-based path"
+    );
+
+    // Also reachable through the ext-trait alias.
+    use cached::ConcurrentCachedExt;
+    assert!(ConcurrentCachedExt::contains(&cache, &"k".to_string()).expect("ext contains"));
+    assert!(!ConcurrentCachedExt::contains(&cache, &"missing".to_string()).expect("ext contains"));
+
+    ConcurrentCached::cache_clear(&cache).expect("clean up");
+}
+
+#[cfg(feature = "redb_store")]
+#[test]
+fn redb_default_cache_contains_is_expiry_aware() {
+    use cached::time::Duration;
+    use cached::{ConcurrentCached, RedbCache};
+
+    // Very short TTL: after it lapses, cache_get returns None for the entry,
+    // so the default cache_contains must report false.
+    let cache = RedbCache::<String, u32>::builder("redb_default_contains_expiry")
+        .ttl(Duration::from_millis(50))
+        .build()
+        .expect("build redb cache");
+    ConcurrentCached::cache_clear(&cache).expect("clear");
+
+    ConcurrentCached::cache_set(&cache, "k".to_string(), 1).expect("set");
+    assert!(
+        ConcurrentCached::cache_contains(&cache, &"k".to_string()).expect("live contains"),
+        "freshly-set redb entry must be contained"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert!(
+        !ConcurrentCached::cache_contains(&cache, &"k".to_string()).expect("expired contains"),
+        "expired redb entry must NOT be contained (default path follows cache_get)"
+    );
+
+    ConcurrentCached::cache_clear(&cache).expect("clean up");
+}
+
+// ── Certification gap-fill: peek_with_expiry_status aliases on EXPIRED entries. ─
+//    The dev tests only cover the live path. On an expired-but-present entry the
+//    alias must forward the (Some(stale_value), true) tuple from the underlying
+//    cache_peek_with_expiry_status without refreshing or mutating.
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn clone_cached_peek_with_expiry_status_alias_reports_expired() {
+    use cached::TtlCache;
+    use cached::prelude::*;
+    use cached::time::Duration;
+
+    let mut cache = TtlCache::<String, u32>::builder()
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    cache.set("k".to_string(), 5u32);
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    // Expired entry: alias must report the stale value AND expired == true.
+    let (val, expired) = cache.peek_with_expiry_status(&"k".to_string());
+    assert_eq!(val, Some(5u32), "peek must return the stale value");
+    assert!(
+        expired,
+        "peek_with_expiry_status must flag the entry expired"
+    );
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn concurrent_clone_cached_peek_with_expiry_status_alias_reports_expired() {
+    use cached::ShardedTtlCache;
+    use cached::prelude::*;
+    use cached::time::Duration;
+
+    let cache = ShardedTtlCache::<String, u32>::builder()
+        .ttl(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    cache.set("k".to_string(), 5u32);
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let (val, expired) = cache.peek_with_expiry_status(&"k".to_string());
+    assert_eq!(val, Some(5u32), "peek must return the stale value");
+    assert!(
+        expired,
+        "peek_with_expiry_status must flag the entry expired"
+    );
+}
+
+// ── Certification gap-fill: ConcurrentCachedExt::contains alias on an expiring ─
+//    store must be expiry-aware too (delegates to the peek-based override).
+
+#[test]
+fn concurrent_contains_ext_alias_expiry_aware_on_expiring_store() {
+    use cached::{ConcurrentCachedExt, ShardedExpiringCache};
+
+    let cache = ShardedExpiringCache::<u32, ContainsExpirable>::builder()
+        .build()
+        .unwrap();
+    cache.set(1, ContainsExpirable { expired: false });
+    cache.set(2, ContainsExpirable { expired: true });
+
+    assert!(
+        ConcurrentCachedExt::contains(&cache, &1).unwrap(),
+        "live entry contained via ext alias"
+    );
+    assert!(
+        !ConcurrentCachedExt::contains(&cache, &2).unwrap(),
+        "expired entry not contained via ext alias"
+    );
+}
