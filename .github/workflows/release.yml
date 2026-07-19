@@ -4,8 +4,12 @@ on:
     branches:
       - master
       - main
+  workflow_dispatch:
 jobs:
   publish:
+    # Only request release-environment approval for actual release commits
+    # (or a manual dispatch); other merges to master skip the job entirely.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release:')
     runs-on: ubuntu-latest
     environment: release  # Optional: for enhanced security
     permissions:
