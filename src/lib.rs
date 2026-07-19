@@ -1072,6 +1072,21 @@ pub trait Cached<K, V> {
     /// Reset hit/miss counters.
     fn cache_reset_metrics(&mut self) {}
 
+    /// Return `true` if the key is present (and unexpired), `false` otherwise.
+    ///
+    /// The default delegates to [`cache_get`](Cached::cache_get) and therefore counts a hit or
+    /// miss and may update recency/expiry state. All built-in single-owner stores override it
+    /// peek-based: no hit/miss metrics, no LRU promotion, no TTL refresh, and expired entries
+    /// report `false`. For a non-mutating borrow-returning lookup, use
+    /// [`CachedPeek::cache_peek`].
+    fn cache_contains<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.cache_get(k).is_some()
+    }
+
     /// Return the number of times a cached value was successfully retrieved.
     #[must_use]
     fn cache_hits(&self) -> Option<u64> {
@@ -1214,10 +1229,13 @@ pub trait CachedExt<K, V>: Cached<K, V> {
         Q: std::hash::Hash + Eq + ?Sized;
 
     /// Return `true` if the cache contains a value for the given key.
+    /// Delegates to [`cache_contains`](Cached::cache_contains).
     ///
-    /// Requires `&mut self` because some stores update recency, expiration
-    /// timestamps, or metrics during reads. For a non-mutating presence check
-    /// use [`CachedPeek::cache_peek`] if the store implements it.
+    /// The receiver stays `&mut self` because a third-party store's implementation
+    /// may mutate, but the built-in stores' overrides are peek-based and do not
+    /// mutate observable state (no hit/miss count, no recency update, no TTL
+    /// refresh). For a non-mutating borrow-returning lookup use
+    /// [`CachedPeek::cache_peek`] if the store implements it.
     fn contains<Q>(&mut self, k: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
@@ -1337,7 +1355,7 @@ impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.cache_get(k).is_some()
+        self.cache_contains(k)
     }
 
     fn clear(&mut self) {
@@ -2064,6 +2082,9 @@ pub trait ConcurrentCacheTtl {
 ///         self.0.lock().unwrap().clear();
 ///         Ok(())
 ///     }
+///     fn cache_contains(&self, k: &String) -> Result<bool, Self::Error> {
+///         Ok(self.0.lock().unwrap().contains_key(k))
+///     }
 /// }
 ///
 /// let store = MyStore(Mutex::new(HashMap::new()));
@@ -2196,11 +2217,10 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
 
     /// Return `true` if the cache contains a live value for the given key.
     ///
-    /// The default implementation calls [`cache_get`](ConcurrentCached::cache_get), which
-    /// **counts a hit or miss, touches LRU recency on sharded LRU stores, and clones the value**.
-    /// The built-in sharded in-memory stores override this with an efficient peek-based
-    /// implementation that does not clone the value, update recency, or record hit/miss metrics.
-    /// External stores (`RedisCache`, `AsyncRedisCache`, `RedbCache`) use the default.
+    /// The built-in sharded in-memory stores implement this peek-based: they take a read lock
+    /// and check for presence without cloning the value, updating LRU recency, or recording
+    /// hit/miss metrics. The IO stores (`RedisCache`, `AsyncRedisCache`, `RedbCache`) implement
+    /// it get-based: they fetch the entry and check whether it is present.
     ///
     /// The `where Self: Sized` bound keeps this generic method out of the vtable.
     ///
@@ -2209,11 +2229,7 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// Should return `Self::Error` if the operation fails.
     fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
     where
-        Self: Sized,
-        V: Clone,
-    {
-        self.cache_get(k).map(|v| v.is_some())
-    }
+        Self: Sized;
 
     /// Remove all cached entries while preserving capacity allocation and metrics.
     ///
@@ -2343,9 +2359,7 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
 
     /// Return `true` if the cache contains a live value for the given key. Delegates to
     /// [`cache_contains`](ConcurrentCached::cache_contains).
-    fn contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        V: Clone;
+    fn contains(&self, k: &K) -> Result<bool, Self::Error>;
 
     /// Return the cached value for `k`, or compute and store `f()`. Delegates to
     /// [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with).
@@ -2383,10 +2397,7 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
         self.cache_reset()
     }
 
-    fn contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        V: Clone,
-    {
+    fn contains(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_contains(k)
     }
 
@@ -2489,12 +2500,10 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
 
     /// Return `true` if the cache contains a live value for the given key.
     ///
-    /// The default implementation calls
-    /// [`async_cache_get`](ConcurrentCachedAsync::async_cache_get), which
-    /// **counts a hit or miss, touches LRU recency on sharded LRU stores, and clones the value**.
-    /// The built-in sharded in-memory stores override this with an efficient peek-based
-    /// implementation that does not clone the value, update recency, or record hit/miss metrics.
-    /// External stores (`AsyncRedisCache`, `RedbCache`) use the default.
+    /// The built-in sharded in-memory stores implement this peek-based: they take a read lock
+    /// and check for presence without cloning the value, updating LRU recency, or recording
+    /// hit/miss metrics. The IO stores (`AsyncRedisCache`, `RedbCache`) implement it get-based:
+    /// they fetch the entry and check whether it is present.
     ///
     /// # Errors
     ///
@@ -2503,11 +2512,7 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
     fn async_cache_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
     where
         Self: Sized + Sync,
-        K: Sync,
-        V: Clone + Send,
-    {
-        async move { self.async_cache_get(k).await.map(|v| v.is_some()) }
-    }
+        K: Sync;
 
     /// Remove all cached entries while preserving capacity allocation and metrics.
     ///

@@ -154,6 +154,21 @@ impl ConcurrentCachedAsync<u32, NotSyncVal> for NotSyncStore {
         self.map.lock().unwrap().clear();
         async move { Ok(()) }
     }
+
+    fn async_cache_contains(
+        &self,
+        k: &u32,
+    ) -> impl std::future::Future<Output = Result<bool, Infallible>> + Send
+    where
+        Self: Sized + Sync,
+        u32: Sync,
+    {
+        let result = {
+            let map = self.map.lock().unwrap();
+            map.get(k).is_some()
+        };
+        async move { Ok(result) }
+    }
 }
 
 impl SerializeCachedAsync<u32, NotSyncVal> for NotSyncStore {

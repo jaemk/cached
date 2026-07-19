@@ -17,13 +17,17 @@ per [design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-tra
 `ConcurrentCached<K, V>` is the sync self-synchronizing API (`cache_get`, `cache_set`,
 `cache_remove`, `cache_remove_entry`, `cache_delete`, `cache_contains`, `cache_clear`,
 `cache_reset`, `cache_reset_metrics`, `cache_get_or_set_with`, all returning
-`Result<_, Self::Error>`). `cache_contains` has a default that calls `cache_get` (counts
-hits/misses, clones the value); the built-in sharded stores override it with a peek-based
-implementation (read lock, no clone, no metrics). `ConcurrentCachedAsync<K, V>` is its async
-counterpart, adding `async_cache_contains`. `ConcurrentCachedExt` provides deduplicated short-name
-methods (`get`, `set`, `remove`, `remove_entry`, `delete`, `contains`, `clear`, `reset`,
-`get_or_set_with`); it does not forward `cache_reset_metrics` or `cache_contains` directly
-(use `contains` via the ext trait).
+`Result<_, Self::Error>`). `cache_contains` is a required method with no `V: Clone` bound; the
+built-in sharded stores implement it with a peek-based read (read lock, no clone, no metrics);
+`RedisCache`, `AsyncRedisCache`, and `RedbCache` use a get-based implementation. External
+implementors of `ConcurrentCached` must provide `cache_contains`. `ConcurrentCachedAsync<K, V>`
+is its async counterpart; `async_cache_contains` is likewise required with no `V: Clone + Send`
+bound. `ConcurrentCachedExt` provides deduplicated short-name methods (`get`, `set`, `remove`,
+`remove_entry`, `delete`, `contains` (no `V: Clone` bound), `clear`, `reset`, `get_or_set_with`);
+it does not forward `cache_reset_metrics` directly (use `contains` via the ext trait). The six
+sharded concrete types also expose an inherent `contains(&self, &K) -> bool` that takes call-site
+priority over the ext-trait alias, consistent with the other inherent shims (`get`, `set`,
+`reset`).
 
 ## CTRAIT-3
 

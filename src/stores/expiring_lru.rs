@@ -413,6 +413,61 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
             }
         }
     }
+
+    /// Return all live entries in current LRU order (most-recently-used first)
+    /// as a `Vec` of `(K, V)` pairs. Expired entries are excluded.
+    #[must_use]
+    pub fn iter_order(&self) -> Vec<(K, V)>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        self.store
+            .iter_order()
+            .into_iter()
+            .filter(|(_, v)| !v.is_expired())
+            .collect()
+    }
+
+    /// Return a `Vec` of keys in the current order from most to least recently
+    /// used. Expired entries are excluded.
+    #[must_use]
+    pub fn key_order(&self) -> Vec<K>
+    where
+        K: Clone,
+    {
+        self.store
+            .order
+            .iter()
+            .filter_map(|(k, v)| {
+                if v.is_expired() {
+                    None
+                } else {
+                    Some(k.clone())
+                }
+            })
+            .collect()
+    }
+
+    /// Return a `Vec` of values in the current order from most to least recently
+    /// used. Expired entries are excluded.
+    #[must_use]
+    pub fn value_order(&self) -> Vec<V>
+    where
+        V: Clone,
+    {
+        self.store
+            .order
+            .iter()
+            .filter_map(|(_, v)| {
+                if v.is_expired() {
+                    None
+                } else {
+                    Some(v.clone())
+                }
+            })
+            .collect()
+    }
 }
 
 // https://docs.rs/cached/latest/cached/trait.Cached.html
@@ -616,6 +671,19 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         self.misses.store(0, Ordering::Relaxed);
         self.evictions.store(0, Ordering::Relaxed);
         self.store.cache_reset_metrics();
+    }
+
+    /// Check whether the cache contains a live (non-expired) entry for `k`.
+    ///
+    /// Delegates to [`CachedPeek::cache_peek`], so it records no hit/miss
+    /// metrics, performs no recency promotion, and reports absent/expired
+    /// entries as `false`.
+    fn cache_contains<Q>(&mut self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        crate::CachedPeek::cache_peek(self, k).is_some()
     }
 }
 

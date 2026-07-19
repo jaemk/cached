@@ -92,6 +92,13 @@ mod stores {
         fn cache_reset(&self) -> Result<(), Infallible> {
             self.cache_clear()
         }
+
+        fn cache_contains(&self, k: &u32) -> Result<bool, Infallible>
+        where
+            Self: Sized,
+        {
+            self.cache_get(k).map(|v| v.is_some())
+        }
     }
 
     impl SerializeCached<u32, Counted> for SerStore {
@@ -157,6 +164,13 @@ mod stores {
 
         fn cache_reset(&self) -> Result<(), Infallible> {
             self.cache_clear()
+        }
+
+        fn cache_contains(&self, k: &u32) -> Result<bool, Infallible>
+        where
+            Self: Sized,
+        {
+            self.cache_get(k).map(|v| v.is_some())
         }
     }
 
@@ -391,6 +405,21 @@ mod async_serialize_store {
             self.map.lock().unwrap().clear();
             async move { Ok(()) }
         }
+
+        fn async_cache_contains(
+            &self,
+            k: &u32,
+        ) -> impl std::future::Future<Output = Result<bool, Infallible>> + Send
+        where
+            Self: Sized + Sync,
+            u32: Sync,
+        {
+            let result = {
+                let map = self.map.lock().unwrap();
+                map.get(k).is_some()
+            };
+            async move { Ok(result) }
+        }
     }
 
     impl SerializeCachedAsync<u32, AsyncVal> for AsyncSerStore {
@@ -496,6 +525,21 @@ mod async_serialize_store {
         {
             self.map.lock().unwrap().clear();
             async move { Ok(()) }
+        }
+
+        fn async_cache_contains(
+            &self,
+            k: &u32,
+        ) -> impl std::future::Future<Output = Result<bool, Infallible>> + Send
+        where
+            Self: Sized + Sync,
+            u32: Sync,
+        {
+            let result = {
+                let map = self.map.lock().unwrap();
+                map.get(k).is_some()
+            };
+            async move { Ok(result) }
         }
     }
 

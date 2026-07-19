@@ -241,6 +241,11 @@ where
     pub fn reset(&self) {
         ConcurrentCached::cache_reset(self).unwrap()
     }
+
+    /// Return true if a live (not expired) value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
+    pub fn contains(&self, k: &K) -> bool {
+        ConcurrentCached::cache_contains(self, k).unwrap()
+    }
 }
 
 impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
@@ -558,7 +563,6 @@ where
     fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
     where
         Self: Sized,
-        V: Clone,
     {
         let shard = self.shard_of(k);
         Ok(shard.lock.read().get(k).is_some_and(|v| !v.is_expired()))
@@ -606,7 +610,6 @@ where
     where
         Self: Sized + Sync,
         K: Sync,
-        V: Clone + Send,
     {
         let result = ConcurrentCached::cache_contains(self, k);
         async move { result }

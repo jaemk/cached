@@ -662,59 +662,42 @@ fn ttl_sorted_cache_set_overflow_stores_never_expiring_value() {
     );
 }
 
-// Gap A: `TtlSortedCache` has BOTH an inherent `set_ttl` (method-call syntax resolves to
-// it, shadowing the trait) and the `CacheTtl::set_ttl` trait method. They are two separate
-// implementations that must not diverge. In particular, the "previous ttl was zero"
-// contract (return `None`, not `Some(Duration::ZERO)`) must hold identically on both. The
-// existing suite only exercises the trait method via UFCS; nothing pins the inherent method
-// against the trait method, so a regression to only one of them would go unnoticed.
+// Gap A: `CacheTtl::set_ttl` on `TtlSortedCache` must honour the "previous ttl was zero"
+// contract: return `None` (not `Some(Duration::ZERO)`) when expiry was disabled, and
+// return `Some(prev)` when the previous ttl was a real non-zero duration. The new ttl
+// must take effect for subsequent inserts. Runtime TTL control is via the `CacheTtl`
+// trait; there is no separate inherent `set_ttl`.
 #[test]
-fn ttl_sorted_cache_inherent_and_trait_set_ttl_agree() {
+fn ttl_sorted_cache_trait_set_ttl_semantics() {
     use cached::TtlSortedCache;
 
-    // ── previous-was-NONZERO: both must return Some(prev) ──
-    let mut a = TtlSortedCache::<u32, u32>::builder()
+    // ── previous-was-NONZERO: set_ttl must return Some(prev) ──
+    let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
-        .expect("build a");
-    let mut b = TtlSortedCache::<u32, u32>::builder()
-        .ttl(Duration::from_secs(60))
-        .build()
-        .expect("build b");
+        .expect("build cache");
 
-    // `a.set_ttl(..)` binds the inherent method; UFCS pins the trait method on `b`.
-    let inherent_nonzero = a.set_ttl(Duration::ZERO);
-    let trait_nonzero = CacheTtl::set_ttl(&mut b, Duration::ZERO);
+    // Disable expiry via the trait method; previous ttl was 60s so Some(60s) is expected.
+    let prev = CacheTtl::set_ttl(&mut cache, Duration::ZERO);
     assert_eq!(
-        inherent_nonzero, trait_nonzero,
-        "inherent and trait set_ttl must agree when the previous ttl was non-zero"
-    );
-    assert_eq!(
-        inherent_nonzero,
+        prev,
         Some(Duration::from_secs(60)),
         "previous non-zero ttl must be reported as Some(prev)"
     );
 
-    // Both stores are now disabled (ttl == zero); ttl() must resolve to None on each.
-    assert_eq!(CacheTtl::ttl(&a), None);
-    assert_eq!(CacheTtl::ttl(&b), None);
+    // Cache is now disabled (ttl == zero); ttl() must resolve to None.
+    assert_eq!(CacheTtl::ttl(&cache), None);
 
-    // ── previous-was-ZERO: both must return None (NOT Some(Duration::ZERO)) ──
-    // `a` and `b` currently have a zero (disabled) ttl, so the next set observes prev==zero.
-    let inherent_prev_zero = a.set_ttl(Duration::from_secs(5));
-    let trait_prev_zero = CacheTtl::set_ttl(&mut b, Duration::from_secs(5));
+    // ── previous-was-ZERO: set_ttl must return None (NOT Some(Duration::ZERO)) ──
+    // The cache currently has a zero (disabled) ttl, so the next set observes prev==zero.
+    let prev_zero = CacheTtl::set_ttl(&mut cache, Duration::from_secs(5));
     assert_eq!(
-        inherent_prev_zero, trait_prev_zero,
-        "inherent and trait set_ttl must agree when the previous ttl was zero"
-    );
-    assert_eq!(
-        inherent_prev_zero, None,
-        "a zero previous ttl must be reported as None by BOTH the inherent and trait set_ttl"
+        prev_zero, None,
+        "a zero previous ttl must be reported as None by CacheTtl::set_ttl"
     );
 
-    // Post-state must also agree: both re-armed to 5s.
-    assert_eq!(CacheTtl::ttl(&a), Some(Duration::from_secs(5)));
-    assert_eq!(CacheTtl::ttl(&b), CacheTtl::ttl(&a));
+    // Cache is now re-armed to 5s; ttl() must reflect the new value.
+    assert_eq!(CacheTtl::ttl(&cache), Some(Duration::from_secs(5)));
 }
 
 // Gap B: `try_set_ttl` (the `CacheTtl` default) on `TtlSortedCache` after the `ttl()`

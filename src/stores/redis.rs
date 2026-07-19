@@ -1712,6 +1712,18 @@ where
     fn cache_reset(&self) -> Result<(), RedisCacheError> {
         self.cache_clear()
     }
+
+    /// Returns `true` if the cache contains a non-expired entry for `key`.
+    ///
+    /// This delegates to [`cache_get`](ConcurrentCached::cache_get): the value is
+    /// fetched and deserialized to determine presence. There is no separate Redis
+    /// EXISTS round-trip in this implementation.
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+    where
+        Self: Sized,
+    {
+        self.cache_get(k).map(|v| v.is_some())
+    }
 }
 
 impl<K, V> crate::SerializeCached<K, V> for RedisCache<K, V>
@@ -2675,6 +2687,19 @@ mod async_redis {
         /// the entries (matching `RedbCache`, which also overrides both).
         async fn async_cache_reset(&self) -> Result<(), Self::Error> {
             self.async_cache_clear().await
+        }
+
+        /// Returns `true` if the cache contains a non-expired entry for `key`.
+        ///
+        /// Delegates to [`async_cache_get`](ConcurrentCachedAsync::async_cache_get):
+        /// the value is fetched and deserialized to determine presence. There is no
+        /// separate Redis EXISTS round-trip in this implementation.
+        async fn async_cache_contains(&self, k: &K) -> Result<bool, Self::Error>
+        where
+            Self: Sized + Sync,
+            K: Sync,
+        {
+            self.async_cache_get(k).await.map(|v| v.is_some())
         }
     }
 
