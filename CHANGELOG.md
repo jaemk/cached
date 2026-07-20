@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `CacheSetError` is removed. A TTL that would overflow `Instant` bounds (hundreds of years)
+  now stores the entry with no expiry (never expires) on every set path, matching the sharded
+  TTL stores; `cache_set` already behaved this way. `TtlCache`, `LruTtlCache`, and
+  `TtlSortedCache` set `Cached::Error = std::convert::Infallible`, so every built-in in-memory
+  store is now infallible. Call sites binding `CacheSetError` or matching `TimeBounds` must
+  drop the error handling.
+- `TtlSortedCache` `insert` / `insert_ttl` / `insert_evict` / `insert_ttl_evict` are renamed to
+  `set` / `set_with_ttl` / `set_evict` / `set_with_ttl_evict` and return `Option<V>` (the
+  displaced unexpired value) instead of `Result<Option<V>, CacheSetError>`.
+- `iter_order` / `value_order` on `LruCache`, `LruTtlCache`, and `ExpiringLruCache` return
+  `CacheValue`-wrapped values: `iter_order() -> Vec<(K, CacheValue<V, M>)>` and
+  `value_order() -> Vec<CacheValue<V, M>>`, one shape across the LRU family. `M` is per-entry
+  metadata: `()` for `LruCache` / `ExpiringLruCache`, `Option<Instant>` for `LruTtlCache`
+  (exposed via `CacheValue::expires_at`; `None` means never expires). `LruTtlCache` no longer
+  leaks bare `(Option<Instant>, V)` tuples. `key_order` is unchanged.
+
+### Added
+
+- `CacheValue<V, M = ()>`: value-plus-metadata wrapper returned by the LRU-family order
+  methods, re-exported from the crate root. `Deref<Target = V>`, `PartialEq<V>` against bare
+  values, `value()` / `into_value()`, and `expires_at()` when `M = Option<Instant>`.
+
 ## [3.0.0-rc.9] - 2026-07-19
 
 ### Breaking Changes

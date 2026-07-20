@@ -415,17 +415,21 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     }
 
     /// Return all live entries in current LRU order (most-recently-used first)
-    /// as a `Vec` of `(K, V)` pairs. Expired entries are excluded.
+    /// as `(K, `[`CacheValue<V>`](super::CacheValue)`)` pairs. `ExpiringLruCache`
+    /// carries no per-entry metadata beyond what `V: Expires` itself exposes, so
+    /// the wrapper's metadata type is `()`; the wrapper `Deref`s to `V`.
+    /// Expired entries are excluded.
     #[must_use]
-    pub fn iter_order(&self) -> Vec<(K, V)>
+    pub fn iter_order(&self) -> Vec<(K, super::CacheValue<V>)>
     where
         K: Clone,
         V: Clone,
     {
         self.store
-            .iter_order()
+            .iter_order_raw()
             .into_iter()
             .filter(|(_, v)| !v.is_expired())
+            .map(|(k, v)| (k, super::CacheValue::new(v, ())))
             .collect()
     }
 
@@ -449,10 +453,10 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
             .collect()
     }
 
-    /// Return a `Vec` of values in the current order from most to least recently
-    /// used. Expired entries are excluded.
+    /// Return a `Vec` of [`CacheValue`](super::CacheValue)-wrapped values in the
+    /// current order from most to least recently used. Expired entries are excluded.
     #[must_use]
-    pub fn value_order(&self) -> Vec<V>
+    pub fn value_order(&self) -> Vec<super::CacheValue<V>>
     where
         V: Clone,
     {
@@ -463,7 +467,7 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
                 if v.is_expired() {
                     None
                 } else {
-                    Some(v.clone())
+                    Some(super::CacheValue::new(v.clone(), ()))
                 }
             })
             .collect()

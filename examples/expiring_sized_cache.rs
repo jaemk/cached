@@ -27,9 +27,7 @@ async fn main() {
         for _ in 0..10 {
             {
                 let mut cache = write_cache.write().await;
-                cache
-                    .insert("A".to_string(), "A".to_string())
-                    .expect("write failure");
+                cache.set("A".to_string(), "A".to_string());
                 println!("[expiring_sized] wrote to cache");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;

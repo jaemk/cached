@@ -329,7 +329,15 @@ fn lru_ttl_cache_post_zero_entry_live_on_iter_peek_status_and_orders() {
 
     // iter_order / key_order / value_order all filter by entry_live and must
     // include the never-expiring entries.
-    assert_eq!(c.iter_order().len(), 2, "iter_order must keep live entries");
+    let ordered = c.iter_order();
+    assert_eq!(ordered.len(), 2, "iter_order must keep live entries");
+    for (_k, v) in &ordered {
+        assert_eq!(
+            v.expires_at(),
+            None,
+            "entries inserted under zero ttl carry no expiry"
+        );
+    }
     assert_eq!(c.key_order().len(), 2, "key_order must keep live entries");
     assert_eq!(
         c.value_order().len(),
@@ -598,11 +606,11 @@ fn ttl_sorted_cache_zero_disables_expiry() {
     );
 }
 
-// Fix 2: the infallible `cache_set` must NOT drop the value when the computed expiry
+// The infallible `cache_set` must NOT drop the value when the computed expiry
 // `Instant` overflows. Siblings (`TtlCache` / `LruTtlCache`) store the value with no
 // expiry (never expires) on overflow rather than silently discarding it, and
-// `TtlSortedCache` must match. `cache_try_set` keeps surfacing the overflow as
-// `Err(CacheSetError::TimeBounds)` (the fallible path is unchanged).
+// `TtlSortedCache` must match. `cache_try_set` behaves identically (the store's
+// `Cached::Error` is `Infallible`).
 //
 // The overflow is triggered portably with a near-`Duration::MAX` default ttl: it is
 // non-zero (so `build()` succeeds and it is NOT treated as "expiry disabled"), yet
@@ -610,7 +618,7 @@ fn ttl_sorted_cache_zero_disables_expiry() {
 // anywhere near `Duration::MAX` from its epoch.
 #[test]
 fn ttl_sorted_cache_set_overflow_stores_never_expiring_value() {
-    use cached::{CacheSetError, TtlSortedCache};
+    use cached::TtlSortedCache;
 
     let mut c = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::MAX)
@@ -648,17 +656,13 @@ fn ttl_sorted_cache_set_overflow_stores_never_expiring_value() {
         "overwriting the never-expiring entry returns the prior value"
     );
 
-    // The fallible cache_try_set path is unchanged: the same overflow still errors.
-    let result: Result<Option<u32>, CacheSetError> = c.cache_try_set(2, 7);
-    assert_eq!(
-        result,
-        Err(CacheSetError::TimeBounds),
-        "cache_try_set must still surface TimeBounds on overflow"
-    );
+    // cache_try_set matches: the same overflow stores a never-expiring entry.
+    let result: Result<Option<u32>, std::convert::Infallible> = c.cache_try_set(2, 7);
+    assert_eq!(result.unwrap(), None);
     assert_eq!(
         c.cache_get(&2),
-        None,
-        "the erroring cache_try_set must not insert anything"
+        Some(&7),
+        "cache_try_set on TTL overflow must store the value (never expires)"
     );
 }
 

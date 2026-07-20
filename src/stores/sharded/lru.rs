@@ -861,7 +861,7 @@ impl<K, V, H> ShardedLruCacheBuilder<K, V, H> {
             // so that the MRU entries are pushed in last and land at the head.
             let entries: Vec<(K, V)> = {
                 let guard = shard.lock.read();
-                guard.iter_order()
+                guard.iter_order_raw()
             };
             for (k, v) in entries.into_iter().rev() {
                 let _ = ConcurrentCached::cache_set(&new_cache, k, v);

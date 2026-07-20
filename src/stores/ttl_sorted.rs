@@ -158,19 +158,6 @@ impl<K, V: Clone> Clone for Entry<K, V> {
     }
 }
 
-/// Policy for [`TtlSortedCache::insert_inner`] when `now + ttl` overflows `Instant`.
-#[derive(Clone, Copy)]
-enum TtlOverflow {
-    /// Return [`super::CacheSetError::TimeBounds`] without mutating the cache.
-    Error,
-    /// Saturate the expiry to "now" (immediately stale) and still store the entry.
-    SaturateNow,
-    /// Store the entry with `expiry = None` (never expires) instead of failing. Matches
-    /// the infallible `cache_set` of `TtlCache` / `LruTtlCache`, which treat an
-    /// unrepresentable expiry as "no expiry" rather than dropping the value.
-    NeverExpire,
-}
-
 /// A cache enforcing time expiration and an optional maximum size.
 /// When a maximum size is specified, the values are dropped in the
 /// order of expiration date, e.g. the next value to expire is dropped.
@@ -617,93 +604,69 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         count
     }
 
-    /// Insert k/v pair without running eviction logic. See `.insert_ttl_evict`
-    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, super::CacheSetError> {
-        self.insert_ttl_evict(key, value, None, false)
+    /// Set k/v pair without running eviction logic. See `.set_with_ttl_evict`
+    pub fn set(&mut self, key: K, value: V) -> Option<V> {
+        self.set_with_ttl_evict(key, value, None, false)
     }
 
-    /// Insert k/v pair with explicit ttl. See `.insert_ttl_evict`
-    pub fn insert_ttl(
-        &mut self,
-        key: K,
-        value: V,
-        ttl: Duration,
-    ) -> Result<Option<V>, super::CacheSetError> {
-        self.insert_ttl_evict(key, value, Some(ttl), false)
+    /// Set k/v pair with explicit ttl. See `.set_with_ttl_evict`
+    pub fn set_with_ttl(&mut self, key: K, value: V, ttl: Duration) -> Option<V> {
+        self.set_with_ttl_evict(key, value, Some(ttl), false)
     }
 
-    /// Insert k/v pair and run eviction logic. See `.insert_ttl_evict`
-    pub fn insert_evict(
-        &mut self,
-        key: K,
-        value: V,
-        evict: bool,
-    ) -> Result<Option<V>, super::CacheSetError> {
-        self.insert_ttl_evict(key, value, None, evict)
+    /// Set k/v pair and run eviction logic. See `.set_with_ttl_evict`
+    pub fn set_evict(&mut self, key: K, value: V, evict: bool) -> Option<V> {
+        self.set_with_ttl_evict(key, value, None, evict)
     }
 
-    /// Insert a k/v pair with an optional explicit TTL, then optionally run eviction logic.
+    /// Set a k/v pair with an optional explicit TTL, then optionally run eviction logic.
     /// The entry is inserted first. If a `size_limit` was specified and capacity is exceeded,
     /// the next-to-expire entry is dropped after insertion. The eviction callback fires after
     /// insertion, not before. Returns any existing unexpired value that was replaced.
-    pub fn insert_ttl_evict(
+    ///
+    /// If computing the expiry instant overflows (a TTL on the order of hundreds of
+    /// years), the entry is stored with no expiry (never expires), matching
+    /// [`cache_set`](crate::Cached::cache_set) on the other TTL stores.
+    pub fn set_with_ttl_evict(
         &mut self,
         key: K,
         value: V,
         ttl: Option<Duration>,
         evict: bool,
-    ) -> Result<Option<V>, super::CacheSetError> {
-        self.insert_inner(key, value, ttl, evict, TtlOverflow::Error, false)
+    ) -> Option<V> {
+        self.set_inner(key, value, ttl, evict, false)
     }
 
-    /// Shared insertion routine for [`insert_ttl_evict`](Self::insert_ttl_evict) and the
-    /// infallible `cache_get_or_set_with_mut` paths.
-    ///
-    /// `on_overflow` selects what happens in the (practically unreachable) case where
-    /// `now + ttl` exceeds `Instant`'s representable range — a TTL on the order of
-    /// hundreds of years:
-    /// - [`TtlOverflow::Error`]: return [`super::CacheSetError::TimeBounds`] before any mutation
-    ///   (used by the fallible public API).
-    /// - [`TtlOverflow::SaturateNow`]: store the entry with an already-elapsed expiry
-    ///   so the value is still retained (and returnable by reference) but is treated as
-    ///   immediately stale. Size-limit enforcement is skipped in this branch so the
-    ///   just-inserted entry cannot be the one evicted, which lets the infallible
-    ///   `get_or_set` paths return `&mut V` without a fallible re-lookup.
-    /// - [`TtlOverflow::NeverExpire`]: store the entry with `expiry = None` (never
-    ///   expires) so the value is retained and stays live, rather than being dropped or
-    ///   made immediately stale. Used by the infallible `cache_set` to match the
-    ///   never-expires-on-overflow behavior of `TtlCache` / `LruTtlCache`. Like the
-    ///   zero-TTL case, `overflowed` stays `false`, so normal size-limit eviction runs.
+    /// Shared insertion routine for [`set_with_ttl_evict`](Self::set_with_ttl_evict) and the
+    /// `cache_get_or_set_with_mut` paths.
     ///
     /// When the effective TTL (explicit `ttl` arg or `self.ttl`) is zero, the entry is
     /// stored with `expiry = None` (never expires) rather than being given an immediate
     /// expiry. Zero TTL means "disable expiry" for new inserts, consistent with the other
-    /// TTL stores. In this case `overflowed` is always `false`.
-    fn insert_inner(
+    /// TTL stores. In the (practically unreachable) case where `now + ttl` exceeds
+    /// `Instant`'s representable range — a TTL on the order of hundreds of years — the
+    /// entry is likewise stored with `expiry = None`, matching the never-expires-on-overflow
+    /// behavior of `TtlCache` / `LruTtlCache` and the sharded TTL stores.
+    ///
+    /// `skip_size_eviction` defers size-limit enforcement to the caller
+    /// (`set_and_get_mut` must protect the just-inserted entry before evicting).
+    fn set_inner(
         &mut self,
         key: K,
         value: V,
         ttl: Option<Duration>,
         evict: bool,
-        on_overflow: TtlOverflow,
         skip_size_eviction: bool,
-    ) -> Result<Option<V>, super::CacheSetError> {
+    ) -> Option<V> {
         let arc_key = CacheArc::new(key.clone());
         let effective_ttl = ttl.unwrap_or(self.ttl);
 
-        // A zero TTL means "never expires": store expiry = None.
-        let (expiry, overflowed) = if effective_ttl.is_zero() {
-            (None, false)
+        // A zero TTL means "never expires": store expiry = None. `checked_add`
+        // returning `None` on overflow lands on the same never-expires representation.
+        let expiry = if effective_ttl.is_zero() {
+            None
         } else {
-            let now = Instant::now();
-            match now.checked_add(effective_ttl) {
-                Some(t) => (Some(t), false),
-                None => match on_overflow {
-                    TtlOverflow::Error => return Err(super::CacheSetError::TimeBounds),
-                    TtlOverflow::SaturateNow => (Some(now), true),
-                    TtlOverflow::NeverExpire => (None, false),
-                },
-            }
+            Instant::now().checked_add(effective_ttl)
         };
 
         let new_stamped = Stamped {
@@ -740,13 +703,10 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             None => None,
         };
 
-        // Skip size-limit eviction in two cases:
-        // 1. The TTL overflowed and was saturated to `now` — the new entry has the earliest
-        //    possible expiry and would be the first thing `retain_latest` drops.
-        // 2. The caller explicitly requests it (`skip_size_eviction`) — e.g. `set_and_get_mut`
-        //    must guarantee the just-inserted entry is still present to return `&mut V` safely,
-        //    regardless of the entry's TTL.
-        if !overflowed && !skip_size_eviction {
+        // Size-limit eviction is skipped only when the caller explicitly requests it
+        // (`skip_size_eviction`) — e.g. `set_and_get_mut` must guarantee the just-inserted
+        // entry is still present to return `&mut V` safely, regardless of the entry's TTL.
+        if !skip_size_eviction {
             if let Some(size_limit) = self.size_limit {
                 if self.map.len() > size_limit {
                     self.retain_latest(size_limit, evict);
@@ -756,28 +716,18 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             }
         }
 
-        Ok(old_value)
+        old_value
     }
 
     /// Insert `key`/`value` and return a mutable reference to the stored value.
     ///
-    /// Unlike [`insert`](Self::insert) this never fails and never drops the value:
-    /// an unrepresentable TTL saturates to an immediately-stale entry rather than
-    /// erroring. When a `size_limit` is configured the just-inserted entry is
+    /// When a `size_limit` is configured the just-inserted entry is
     /// protected from eviction: other entries are evicted in TTL order to restore
-    /// capacity. Used by the infallible `cache_get_or_set_with_mut` family.
+    /// capacity. Used by the `cache_get_or_set_with_mut` family.
     fn set_and_get_mut(&mut self, key: K, value: V) -> &mut V {
-        // `Ok` is guaranteed: `TtlOverflow::SaturateNow` never returns `Err`.
         // `skip_size_eviction = true` defers size enforcement to the block below,
         // where we can protect the just-inserted entry.
-        let _ = self.insert_inner(
-            key.clone(),
-            value,
-            None,
-            false,
-            TtlOverflow::SaturateNow,
-            true,
-        );
+        let _ = self.set_inner(key.clone(), value, None, false, true);
 
         if let Some(size_limit) = self.size_limit
             && self.map.len() > size_limit
@@ -789,18 +739,13 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             let protected = self.map[&key].as_stamped();
             self.keys.remove(&protected);
             self.retain_latest(size_limit, false);
-            // If the TTL overflowed (SaturateNow), protected.expiry == now —
-            // the entry is immediately stale but the caller holds a live &mut V.
             self.keys.insert(protected);
         }
 
         &mut self
             .map
             .get_mut(&key)
-            .expect(
-                "set_and_get_mut: SaturateNow never errors and the protected eviction \
-                 path guarantees the entry is present",
-            )
+            .expect("set_and_get_mut: the protected eviction path guarantees the entry is present")
             .value
     }
 
@@ -844,7 +789,7 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
 }
 
 impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCache<K, V, S> {
-    type Error = super::CacheSetError;
+    type Error = std::convert::Infallible;
 
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
@@ -898,17 +843,7 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     }
 
     fn cache_set(&mut self, key: K, value: V) -> Option<V> {
-        // On an (practically unreachable) Instant overflow, store the value with
-        // `expiry = None` (never expires) rather than dropping it, matching the
-        // infallible `cache_set` of TtlCache / LruTtlCache. Callers that need the
-        // overflow surfaced as an error should use cache_try_set instead, which stays
-        // on the `TtlOverflow::Error` path.
-        self.insert_inner(key, value, None, false, TtlOverflow::NeverExpire, false)
-            .unwrap_or(None)
-    }
-
-    fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, super::CacheSetError> {
-        self.insert(k, v)
+        self.set_inner(key, value, None, false, false)
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
@@ -1338,26 +1273,22 @@ mod test {
     }
 
     #[test]
-    fn ttl_sorted_cache_set_error_is_clone_eq() {
-        // TtlSortedCache now uses CacheSetError (unified with TtlCache / LruTtlCache).
-        use crate::stores::CacheSetError;
-        assert_eq!(CacheSetError::TimeBounds, CacheSetError::TimeBounds.clone());
-    }
-
-    #[test]
-    fn ttl_sorted_cache_try_set_returns_cache_set_error_on_overflow() {
-        // insert_ttl with a Duration that would overflow Instant bounds must return
-        // CacheSetError::TimeBounds (no longer TtlSortedCacheError).
-        use crate::stores::CacheSetError;
+    fn set_with_ttl_overflow_stores_never_expiring_entry() {
+        // set_with_ttl with a Duration that would overflow Instant bounds stores the
+        // entry with no expiry (never expires), matching cache_set on the other TTL
+        // stores. No error surface: TtlSortedCache's Cached::Error is Infallible.
         let mut cache = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
             .build()
             .unwrap();
-        // Duration::MAX overflows Instant::now().checked_add -> None -> Error branch.
-        let result = cache.insert_ttl(1u32, 42u32, Duration::MAX);
-        assert_eq!(result, Err(CacheSetError::TimeBounds));
-        // The cache must not be mutated on error.
-        assert_eq!(cache.cache_size(), 0);
+        // Duration::MAX overflows Instant::now().checked_add -> None -> never expires.
+        let prev = cache.set_with_ttl(1u32, 42u32, Duration::MAX);
+        assert_eq!(prev, None);
+        assert_eq!(cache.cache_size(), 1);
+        assert_eq!(cache.cache_get(&1u32), Some(&42u32));
+        // The entry survives an explicit eviction sweep (it never expires).
+        assert_eq!(cache.evict(), 0);
+        assert_eq!(cache.cache_get(&1u32), Some(&42u32));
     }
 
     #[derive(Clone, Debug)]
@@ -1459,7 +1390,7 @@ mod test {
             .initial_capacity(100)
             .build()
             .unwrap();
-        cache.insert(String::from("a"), "a").unwrap();
+        cache.set(String::from("a"), "a");
         assert_eq!(cache.get("a").unwrap(), &"a");
 
         let mut cache = TtlSortedCache::builder()
@@ -1467,7 +1398,7 @@ mod test {
             .initial_capacity(100)
             .build()
             .unwrap();
-        cache.insert(vec![0], "a").unwrap();
+        cache.set(vec![0], "a");
         assert_eq!(cache.get([0].as_slice()).unwrap(), &"a");
     }
 
@@ -1479,7 +1410,7 @@ mod test {
             .initial_capacity(1)
             .build()
             .unwrap();
-        cache.insert(key.clone(), 10).unwrap();
+        cache.set(key.clone(), 10);
 
         assert_eq!(cache.cache_get(&key), Some(&10));
         assert_eq!(cache.cache_hits(), Some(1));
@@ -1496,7 +1427,7 @@ mod test {
             .initial_capacity(1)
             .build()
             .unwrap();
-        cache.insert(key.clone(), 10).unwrap();
+        cache.set(key.clone(), 10);
 
         let value = cache.cache_get_mut(&key).expect("entry should be live");
         *value = 11;
@@ -1521,9 +1452,7 @@ mod test {
             .expect("cache should build");
 
         // Use a very short but non-zero TTL (zero now means "never expires").
-        cache
-            .insert_ttl("expired", 10, Duration::from_millis(1))
-            .unwrap();
+        cache.set_with_ttl("expired", 10, Duration::from_millis(1));
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.keys.len(), 1);
 
@@ -1555,9 +1484,7 @@ mod test {
             .expect("cache should build");
 
         // Use a very short but non-zero TTL (zero now means "never expires").
-        cache
-            .insert_ttl("expired-mut", 20, Duration::from_millis(1))
-            .unwrap();
+        cache.set_with_ttl("expired-mut", 20, Duration::from_millis(1));
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.keys.len(), 1);
 
@@ -1585,7 +1512,7 @@ mod test {
         assert_eq!(0, cache.retain_latest(100, true));
         assert!(cache.get("a").is_none());
 
-        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        cache.set("a".to_string(), "A".to_string());
         assert_eq!(cache.get("a"), Some("A".to_string()).as_ref());
         assert_eq!(cache.len(), 1);
         std::thread::sleep(Duration::from_millis(200));
@@ -1593,7 +1520,7 @@ mod test {
         assert!(cache.get("a").is_none());
         assert_eq!(cache.len(), 0);
 
-        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        cache.set("a".to_string(), "A".to_string());
         assert_eq!(cache.get("a"), Some("A".to_string()).as_ref());
         assert_eq!(cache.len(), 1);
         std::thread::sleep(Duration::from_millis(200));
@@ -1607,11 +1534,11 @@ mod test {
         assert!(cache.get("a").is_none());
         assert_eq!(cache.len(), 0);
 
-        cache.insert("a".to_string(), "a".to_string()).unwrap();
-        cache.insert("b".to_string(), "b".to_string()).unwrap();
-        cache.insert("c".to_string(), "c".to_string()).unwrap();
-        cache.insert("d".to_string(), "d".to_string()).unwrap();
-        cache.insert("e".to_string(), "e".to_string()).unwrap();
+        cache.set("a".to_string(), "a".to_string());
+        cache.set("b".to_string(), "b".to_string());
+        cache.set("c".to_string(), "c".to_string());
+        cache.set("d".to_string(), "d".to_string());
+        cache.set("e".to_string(), "e".to_string());
         assert_eq!(3, cache.retain_latest(2, false));
         assert_eq!(2, cache.len());
         assert_eq!(cache.get("a"), None);
@@ -1620,10 +1547,10 @@ mod test {
         assert_eq!(cache.get("d"), Some("d".to_string()).as_ref());
         assert_eq!(cache.get("e"), Some("e".to_string()).as_ref());
 
-        cache.insert("a".to_string(), "a".to_string()).unwrap();
-        cache.insert("a".to_string(), "a".to_string()).unwrap();
-        cache.insert("b".to_string(), "b".to_string()).unwrap();
-        cache.insert("b".to_string(), "b".to_string()).unwrap();
+        cache.set("a".to_string(), "a".to_string());
+        cache.set("a".to_string(), "a".to_string());
+        cache.set("b".to_string(), "b".to_string());
+        cache.set("b".to_string(), "b".to_string());
         assert_eq!(4, cache.len());
 
         assert_eq!(2, cache.retain_latest(2, false));
@@ -1638,7 +1565,7 @@ mod test {
         // trying to get something expired will expire values
         assert_eq!(1, cache.len());
 
-        cache.insert("a".to_string(), "a".to_string()).unwrap();
+        cache.set("a".to_string(), "a".to_string());
         assert_eq!(cache.remove("a"), Some("a".to_string()));
         // we haven't done anything to evict "b" so there's still one entry
         assert_eq!(1, cache.len());
@@ -1647,22 +1574,18 @@ mod test {
         assert_eq!(0, cache.len());
 
         // default ttl is 100ms
-        cache
-            .insert_ttl("a".to_string(), "a".to_string(), Duration::from_millis(300))
-            .unwrap();
+        cache.set_with_ttl("a".to_string(), "a".to_string(), Duration::from_millis(300));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(cache.get("a"), Some("a".to_string()).as_ref());
         assert_eq!(1, cache.len());
 
         std::thread::sleep(Duration::from_millis(200));
-        cache
-            .insert_ttl_evict(
-                "b".to_string(),
-                "b".to_string(),
-                Some(Duration::from_millis(300)),
-                true,
-            )
-            .unwrap();
+        cache.set_with_ttl_evict(
+            "b".to_string(),
+            "b".to_string(),
+            Some(Duration::from_millis(300)),
+            true,
+        );
         // a should now be evicted
         assert_eq!(1, cache.len());
         assert_eq!(cache.get("a"), None);
@@ -1680,13 +1603,13 @@ mod test {
         assert_eq!(0, cache.retain_latest(100, true));
         assert!(cache.get("a").is_none());
 
-        cache.insert("a".to_string(), "A".to_string()).unwrap();
+        cache.set("a".to_string(), "A".to_string());
         assert_eq!(cache.get("a"), Some("A".to_string()).as_ref());
         assert_eq!(cache.len(), 1);
-        cache.insert("b".to_string(), "B".to_string()).unwrap();
+        cache.set("b".to_string(), "B".to_string());
         assert_eq!(cache.get("b"), Some("B".to_string()).as_ref());
         assert_eq!(cache.len(), 2);
-        cache.insert("c".to_string(), "C".to_string()).unwrap();
+        cache.set("c".to_string(), "C".to_string());
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.get("b"), Some("B".to_string()).as_ref());
         assert_eq!(cache.get("c"), Some("C".to_string()).as_ref());
@@ -1702,12 +1625,12 @@ mod test {
             .unwrap();
         cache.set_max_size(2);
 
-        cache.insert("a".to_string(), "A".to_string()).unwrap();
-        cache.insert("b".to_string(), "B".to_string()).unwrap();
+        cache.set("a".to_string(), "A".to_string());
+        cache.set("b".to_string(), "B".to_string());
         assert_eq!(cache.len(), 2);
 
         assert_eq!(
-            cache.insert("a".to_string(), "A2".to_string()).unwrap(),
+            cache.set("a".to_string(), "A2".to_string()),
             Some("A".to_string())
         );
         assert_eq!(cache.len(), 2);
@@ -1837,9 +1760,7 @@ mod test {
             .build()
             .unwrap();
         cache.set_max_size(1);
-        cache
-            .insert_ttl("long", 1u32, Duration::from_secs(60))
-            .unwrap();
+        cache.set_with_ttl("long", 1u32, Duration::from_secs(60));
         // Must not panic; "long" should be evicted to make room for "short".
         let v = cache.cache_get_or_set_with("short", || 2u32);
         assert_eq!(*v, 2);
@@ -1859,9 +1780,7 @@ mod test {
             .build()
             .unwrap();
         cache.set_max_size(1);
-        cache
-            .insert_ttl("long", 1u32, Duration::from_secs(60))
-            .unwrap();
+        cache.set_with_ttl("long", 1u32, Duration::from_secs(60));
         let v: &mut u32 = cache
             .cache_try_get_or_set_with_mut("short", || Ok::<u32, ()>(2))
             .unwrap();
@@ -1903,9 +1822,7 @@ mod test {
             .build()
             .unwrap();
         cache.set_max_size(1);
-        cache
-            .insert_ttl("long", 1u32, Duration::from_secs(60))
-            .unwrap();
+        cache.set_with_ttl("long", 1u32, Duration::from_secs(60));
         let v = cache
             .async_cache_get_or_set_with("short", || async { 2u32 })
             .await;
@@ -2303,17 +2220,17 @@ mod test {
         assert_eq!(cache.cache_get(&2u32), Some(&20u32));
     }
 
-    /// `insert_ttl` called with an EXPLICIT `Duration::ZERO` (not the cache-level
+    /// `set_with_ttl` called with an EXPLICIT `Duration::ZERO` (not the cache-level
     /// `set_ttl`) must store `expiry = None` (never expires), not `Some(now)`
     /// (immediate). The cache's default TTL stays finite the whole time.
     #[test]
-    fn insert_ttl_explicit_zero_never_expires() {
+    fn set_with_ttl_explicit_zero_never_expires() {
         let mut cache = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(20))
             .build()
             .unwrap();
         // Explicit zero TTL on this one entry — default ttl remains 20ms.
-        cache.insert_ttl(1u32, 10u32, Duration::ZERO).unwrap();
+        cache.set_with_ttl(1u32, 10u32, Duration::ZERO);
         // The entry's internal expiry must be None (never), not Some(now).
         assert!(
             cache
@@ -2342,10 +2259,10 @@ mod test {
         assert_eq!(cache.cache_get(&1u32), Some(&10u32));
     }
 
-    /// `insert_ttl_evict` with explicit `Duration::ZERO` also stores `None`,
+    /// `set_with_ttl_evict` with explicit `Duration::ZERO` also stores `None`,
     /// and the never-expiring entry is not swept by the eviction pass it triggers.
     #[test]
-    fn insert_ttl_evict_explicit_zero_never_expires_and_survives_evict() {
+    fn set_with_ttl_evict_explicit_zero_never_expires_and_survives_evict() {
         let mut cache = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(10))
             .build()
@@ -2354,9 +2271,7 @@ mod test {
         cache.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(40));
         // Insert a never-expiring entry AND run the eviction pass in the same call.
-        cache
-            .insert_ttl_evict(2u32, 20u32, Some(Duration::ZERO), true)
-            .unwrap();
+        cache.set_with_ttl_evict(2u32, 20u32, Some(Duration::ZERO), true);
         assert!(
             cache
                 .map

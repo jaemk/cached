@@ -227,34 +227,62 @@ impl std::fmt::Display for SetTtlError {
 
 impl std::error::Error for SetTtlError {}
 
-/// Error returned by [`TtlCache`], [`LruTtlCache`], and
-/// [`TtlSortedCache`] via [`Cached::cache_try_set`] when
-/// an entry cannot be stored - currently only when computing the entry's expiry
-/// `Instant` overflows.
+/// A cached value plus store-specific per-entry metadata, returned by the
+/// LRU-family order methods ([`LruCache::iter_order`], [`LruCache::value_order`],
+/// and their `LruTtlCache` / `ExpiringLruCache` counterparts).
 ///
-/// The separate `TtlSortedCacheError` type was removed in favor of this unified type; the
-/// following must not compile (guards against the old error type being reintroduced):
-///
-/// ```compile_fail
-/// use cached::stores::TtlSortedCacheError;
-/// ```
-/// ```compile_fail
-/// let _ = cached::TtlSortedCacheError::TimeBounds;
-/// ```
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CacheSetError {
-    /// Computing the entry's expiry `Instant` overflowed `Instant`'s representable range.
-    TimeBounds,
+/// `M` is the metadata carried alongside the value: `()` (the default) for stores
+/// with no per-entry metadata (`LruCache`, `ExpiringLruCache`) and
+/// `Option<Instant>` (the entry's expiry) for `LruTtlCache`. The wrapper
+/// [`Deref`](std::ops::Deref)s to `V`, so read access is transparent; metadata is
+/// exposed through typed accessors (e.g.
+/// [`expires_at`](CacheValue::expires_at)) that exist only for the carrying `M`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CacheValue<V, M = ()> {
+    value: V,
+    meta: M,
 }
-impl std::fmt::Display for CacheSetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CacheSetError::TimeBounds => f.write_str("ttl is outside Instant bounds"),
-        }
+
+impl<V, M> CacheValue<V, M> {
+    pub(crate) fn new(value: V, meta: M) -> Self {
+        Self { value, meta }
+    }
+
+    /// Shared reference to the wrapped value.
+    #[must_use]
+    pub fn value(&self) -> &V {
+        &self.value
+    }
+
+    /// Consume the wrapper and return the wrapped value.
+    #[must_use]
+    pub fn into_value(self) -> V {
+        self.value
     }
 }
-impl std::error::Error for CacheSetError {}
+
+impl<V> CacheValue<V, Option<crate::time::Instant>> {
+    /// The entry's expiry instant. `None` means the entry never expires.
+    #[must_use]
+    pub fn expires_at(&self) -> Option<crate::time::Instant> {
+        self.meta
+    }
+}
+
+impl<V, M> std::ops::Deref for CacheValue<V, M> {
+    type Target = V;
+    fn deref(&self) -> &V {
+        &self.value
+    }
+}
+
+/// Compare directly against a bare value, ignoring metadata:
+/// `CacheValue::new(1, meta) == 1`.
+impl<V: PartialEq, M> PartialEq<V> for CacheValue<V, M> {
+    fn eq(&self, other: &V) -> bool {
+        self.value == *other
+    }
+}
 
 /// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
 #[cfg(any(
@@ -593,12 +621,6 @@ mod tests {
             err2.to_string(),
             "invalid value for field `max_size`: must be greater than zero"
         );
-    }
-
-    #[test]
-    fn cache_set_error_is_clone_eq() {
-        // Parity with `SetMaxSizeError`/`SetTtlError`, which already derive these.
-        assert_eq!(CacheSetError::TimeBounds, CacheSetError::TimeBounds.clone());
     }
 
     // Compile-time assertion: BuildError must implement Clone + PartialEq + Eq.
