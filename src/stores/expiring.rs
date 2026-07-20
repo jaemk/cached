@@ -132,6 +132,14 @@ impl<K, V> Default for ExpiringCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
+impl<K, V> ExpiringCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`ExpiringCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<K, V, S> ExpiringCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional).
     #[must_use]
@@ -289,6 +297,32 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
                 on_evict(k, v);
             }
         }
+    }
+
+    /// Retain only entries that are unexpired and satisfy `keep`.
+    ///
+    /// Removes every entry whose value reports [`is_expired`](Expires::is_expired)
+    /// **or** for which `keep` returns `false` — expired entries are removed without
+    /// consulting `keep`. `on_evict` is called and the eviction counter incremented
+    /// for each removed entry. This matches
+    /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain) and
+    /// [`LruTtlCache::retain`](crate::LruTtlCache::retain); the plain
+    /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
+    /// removes solely on the predicate.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+        let on_evict = &self.on_evict;
+        let evictions = &self.evictions;
+        self.store.store.retain(|key, value| {
+            if value.is_expired() || !keep(key, value) {
+                if let Some(on_evict) = on_evict {
+                    on_evict(key, value);
+                }
+                evictions.fetch_add(1, Ordering::Relaxed);
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

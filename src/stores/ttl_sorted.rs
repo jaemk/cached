@@ -274,12 +274,21 @@ impl<K, V> Default for TtlSortedCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
+impl<K, V> TtlSortedCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`TtlSortedCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<K, V, S> TtlSortedCacheBuilder<K, V, S> {
     /// Set the maximum number of entries (eviction bound). When the cache exceeds this
     /// limit, the next-to-expire entries are evicted until it is within bounds. Unlike
     /// [`initial_capacity`](Self::initial_capacity), this is a hard cap on entry count, not a
     /// preallocation hint.
     #[doc(alias = "size")]
+    #[doc(alias = "capacity")]
     #[must_use]
     pub fn max_size(mut self, max_size: usize) -> Self {
         self.size = Some(max_size);
@@ -518,6 +527,21 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             return Err(super::SetMaxSizeError::ZeroMaxSize);
         }
         Ok(self.set_max_size(max_size))
+    }
+
+    /// Returns the maximum number of entries this cache will hold before evicting,
+    /// or `None` if no size bound is configured.
+    ///
+    /// This is the bound set via [`TtlSortedCacheBuilder::max_size`] /
+    /// [`set_max_size`](Self::set_max_size), not the current number of entries — use
+    /// [`cache_size`](crate::Cached::cache_size) for that. Unlike
+    /// [`LruCache::capacity`](crate::LruCache::capacity) (which returns `usize`),
+    /// this returns `Option<usize>` because the bound is optional for this store.
+    #[doc(alias = "size")]
+    #[doc(alias = "max_size")]
+    #[must_use]
+    pub fn capacity(&self) -> Option<usize> {
+        self.size_limit
     }
 
     /// Increase backing stores with enough capacity to store `more`

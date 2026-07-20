@@ -246,6 +246,19 @@ where
     pub fn contains(&self, k: &K) -> bool {
         ConcurrentCached::cache_contains(self, k).unwrap()
     }
+
+    /// Return a clone of the live (not expired) value stored for `k` without
+    /// observable side effects: no hit/miss metrics, no lazy removal of an expired
+    /// entry. The single-owner counterpart is
+    /// [`CachedPeek::cache_peek`](crate::CachedPeek::cache_peek); the sharded stores
+    /// return a clone rather than a reference because the value lives behind a
+    /// per-shard lock.
+    #[must_use]
+    pub fn peek(&self, k: &K) -> Option<V> {
+        let shard = self.shard_of(k);
+        let guard = shard.lock.read();
+        guard.get(k).filter(|v| !v.is_expired()).cloned()
+    }
 }
 
 impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
@@ -654,6 +667,14 @@ impl<K, V> Default for ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
             _k: std::marker::PhantomData,
             _v: std::marker::PhantomData,
         }
+    }
+}
+
+impl<K, V> ShardedExpiringCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`ShardedExpiringCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

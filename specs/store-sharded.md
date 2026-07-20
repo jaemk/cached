@@ -28,7 +28,9 @@ variants (TTL and expiring). The runtime TTL controls (`ttl`/`set_ttl`/`unset_tt
 `refresh_on_hit`/`set_refresh_on_hit`) exist only on `ConcurrentCacheTtl`, not as inherent
 methods. Each of the six concrete sharded types also exposes inherent shims that return unwrapped
 values and take call-site priority over the `ConcurrentCachedExt` aliases: `get`, `set`, `remove`,
-`remove_entry`, `delete`, `reset`, and `contains` (`contains` is peek-based, infallible, `&self`).
+`remove_entry`, `delete`, `reset`, `contains`, and `peek` (`contains` and `peek` are peek-based,
+infallible, `&self`; `peek` returns a clone of the live value with no recency/TTL/metrics
+effects).
 Metrics are exposed through the trait per
 [design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
 See [traits-concurrent.md](traits-concurrent.md).

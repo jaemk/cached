@@ -1274,6 +1274,16 @@ pub trait CachedExt<K, V>: Cached<K, V> {
     #[must_use]
     fn misses(&self) -> Option<u64>;
 
+    /// Return the cache's capacity bound, if it has one. Delegates to
+    /// [`cache_capacity`](Cached::cache_capacity).
+    #[must_use]
+    fn capacity(&self) -> Option<usize>;
+
+    /// Return the number of evictions, if tracked. Delegates to
+    /// [`cache_evictions`](Cached::cache_evictions).
+    #[must_use]
+    fn evictions(&self) -> Option<u64>;
+
     /// Return a snapshot of cache metrics.
     #[must_use]
     fn metrics(&self) -> CacheMetrics;
@@ -1378,6 +1388,14 @@ impl<K, V, T: Cached<K, V>> CachedExt<K, V> for T {
 
     fn misses(&self) -> Option<u64> {
         self.cache_misses()
+    }
+
+    fn capacity(&self) -> Option<usize> {
+        self.cache_capacity()
+    }
+
+    fn evictions(&self) -> Option<u64> {
+        self.cache_evictions()
     }
 
     fn metrics(&self) -> CacheMetrics {
@@ -2300,6 +2318,42 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
         self.cache_set(k, v.clone())?;
         Ok(v)
     }
+
+    /// Return the cached value for `k`, or compute `f()`, store it on success, and
+    /// return it. Fallible-init counterpart of
+    /// [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with): if `f()`
+    /// returns `Err`, nothing is stored and the error is returned in the inner
+    /// `Result`.
+    ///
+    /// The two error sources stay separate: the outer `Result` carries the store's
+    /// `Self::Error` (from `cache_get` / `cache_set`), the inner `Result` carries the
+    /// closure's `E`. For the in-memory sharded stores the outer error is
+    /// [`Infallible`](std::convert::Infallible), so `.unwrap()` on the outer layer is
+    /// safe, matching the other core methods.
+    ///
+    /// Same non-atomic get-then-set caveat as
+    /// [`cache_get_or_set_with`](ConcurrentCached::cache_get_or_set_with); the
+    /// `where Self: Sized` bound likewise keeps this generic method out of the vtable.
+    fn cache_try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &self,
+        k: K,
+        f: F,
+    ) -> Result<Result<V, E>, Self::Error>
+    where
+        Self: Sized,
+        V: Clone,
+    {
+        if let Some(v) = self.cache_get(&k)? {
+            return Ok(Ok(v));
+        }
+        match f() {
+            Ok(v) => {
+                self.cache_set(k, v.clone())?;
+                Ok(Ok(v))
+            }
+            Err(e) => Ok(Err(e)),
+        }
+    }
 }
 
 /// Short-alias extension for [`ConcurrentCached`] stores.
@@ -2364,6 +2418,37 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
     fn get_or_set_with<F: FnOnce() -> V>(&self, k: K, f: F) -> Result<V, Self::Error>
     where
         V: Clone;
+
+    /// Return the number of entries currently in the cache, if cheaply available.
+    /// Delegates to [`cache_size`](ConcurrentCacheBase::cache_size).
+    ///
+    /// Note: the concrete sharded stores also expose inherent `len`/`is_empty`
+    /// returning plain values, which take call-site priority over these aliases.
+    fn len(&self) -> Result<Option<usize>, Self::Error>;
+
+    /// Return `true` if the cache contains no entries, if cheaply available.
+    /// Delegates to [`cache_is_empty`](ConcurrentCacheBase::cache_is_empty).
+    fn is_empty(&self) -> Result<Option<bool>, Self::Error>;
+
+    /// Return the number of cache hits, if tracked. Delegates to
+    /// [`cache_hits`](ConcurrentCacheBase::cache_hits).
+    #[must_use]
+    fn hits(&self) -> Option<u64>;
+
+    /// Return the number of cache misses, if tracked. Delegates to
+    /// [`cache_misses`](ConcurrentCacheBase::cache_misses).
+    #[must_use]
+    fn misses(&self) -> Option<u64>;
+
+    /// Return the cache's capacity bound, if it has one. Delegates to
+    /// [`cache_capacity`](ConcurrentCacheBase::cache_capacity).
+    #[must_use]
+    fn capacity(&self) -> Option<usize>;
+
+    /// Return the number of evictions, if tracked. Delegates to
+    /// [`cache_evictions`](ConcurrentCacheBase::cache_evictions).
+    #[must_use]
+    fn evictions(&self) -> Option<u64>;
 }
 
 impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
@@ -2404,6 +2489,30 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
         V: Clone,
     {
         self.cache_get_or_set_with(k, f)
+    }
+
+    fn len(&self) -> Result<Option<usize>, Self::Error> {
+        self.cache_size()
+    }
+
+    fn is_empty(&self) -> Result<Option<bool>, Self::Error> {
+        self.cache_is_empty()
+    }
+
+    fn hits(&self) -> Option<u64> {
+        self.cache_hits()
+    }
+
+    fn misses(&self) -> Option<u64> {
+        self.cache_misses()
+    }
+
+    fn capacity(&self) -> Option<usize> {
+        self.cache_capacity()
+    }
+
+    fn evictions(&self) -> Option<u64> {
+        self.cache_evictions()
     }
 }
 
@@ -2590,6 +2699,46 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
             let v = f().await;
             self.async_cache_set(k, v.clone()).await?;
             Ok(v)
+        }
+    }
+
+    /// Return the cached value for `k`, or compute `f()`, store it on success, and
+    /// return it. Fallible-init counterpart of
+    /// [`async_cache_get_or_set_with`](ConcurrentCachedAsync::async_cache_get_or_set_with):
+    /// if `f()` resolves to `Err`, nothing is stored and the error is returned in the
+    /// inner `Result`.
+    ///
+    /// The two error sources stay separate: the outer `Result` carries the store's
+    /// `Self::Error` (from `async_cache_get` / `async_cache_set`), the inner `Result`
+    /// carries the closure's `E`, mirroring
+    /// [`ConcurrentCached::cache_try_get_or_set_with`].
+    ///
+    /// Same non-atomic get-then-set caveat as
+    /// [`async_cache_get_or_set_with`](ConcurrentCachedAsync::async_cache_get_or_set_with).
+    fn async_cache_try_get_or_set_with<F, Fut, E>(
+        &self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<Result<V, E>, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Send + Sync,
+        V: Clone + Send,
+        E: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
+    {
+        async move {
+            if let Some(v) = self.async_cache_get(&k).await? {
+                return Ok(Ok(v));
+            }
+            match f().await {
+                Ok(v) => {
+                    self.async_cache_set(k, v.clone()).await?;
+                    Ok(Ok(v))
+                }
+                Err(e) => Ok(Err(e)),
+            }
         }
     }
 }
