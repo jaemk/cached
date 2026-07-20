@@ -2010,6 +2010,7 @@ mod async_redis {
 
         /// Enable client-side caching using RESP3 protocol
         #[cfg(feature = "redis_async_cache")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "redis_async_cache")))]
         #[must_use]
         pub fn client_side_caching(mut self, enable: bool) -> Self {
             self.client_side_caching = enable;

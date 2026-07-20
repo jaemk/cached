@@ -599,7 +599,9 @@ Due to the requirements of storing arguments and return values in a global cache
     produce a hashable key. For example `key = "String", convert = r#"{ format!("{:.6}", x) }"#`, or
     wrap the value with a crate such as `ordered-float`.
 - Arguments and return values will be `cloned` in the process of insertion and retrieval. For Redis and
-  disk stores, keys are additionally formatted into `String`s and values are de/serialized.
+  disk stores, keys are additionally formatted into `String`s and values are de/serialized. When the
+  return value is expensive to clone, return `Arc<T>` from the cached function: the cache stores the
+  `Arc` and every hit clones only the pointer, not `T`.
 - Macro-defined functions should not be used to produce side-effectual results!
 - Macro-defined functions live at module scope by default (the macro expands to a static plus
   one or more functions). To cache a method inside an `impl` block, set `in_impl = true`, which

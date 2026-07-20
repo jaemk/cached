@@ -599,7 +599,9 @@ Due to the requirements of storing arguments and return values in a global cache
     produce a hashable key. For example `key = "String", convert = r#"{ format!("{:.6}", x) }"#`, or
     wrap the value with a crate such as `ordered-float`.
 - Arguments and return values will be `cloned` in the process of insertion and retrieval. For Redis and
-  disk stores, keys are additionally formatted into `String`s and values are de/serialized.
+  disk stores, keys are additionally formatted into `String`s and values are de/serialized. When the
+  return value is expensive to clone, return `Arc<T>` from the cached function: the cache stores the
+  `Arc` and every hit clones only the pointer, not `T`.
 - Macro-defined functions should not be used to produce side-effectual results!
 - Macro-defined functions live at module scope by default (the macro expands to a static plus
   one or more functions). To cache a method inside an `impl` block, set `in_impl = true`, which
@@ -2235,10 +2237,14 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     ///
     /// The built-in sharded in-memory stores implement this peek-based: they take a read lock
     /// and check for presence without cloning the value, updating LRU recency, or recording
-    /// hit/miss metrics. The IO stores (`RedisCache`, `AsyncRedisCache`, `RedbCache`) implement
-    /// it get-based: they fetch the entry and check whether it is present.
+    /// hit/miss metrics. The IO stores implementing this trait (`RedisCache`, `RedbCache`)
+    /// implement it get-based: they fetch the entry and check whether it is present.
+    /// (`AsyncRedisCache` implements the async counterpart,
+    /// [`async_cache_contains`](ConcurrentCachedAsync::async_cache_contains).)
     ///
-    /// The `where Self: Sized` bound keeps this generic method out of the vtable.
+    /// The `where Self: Sized` bound keeps this generic method out of the vtable, so it is
+    /// not callable through `dyn ConcurrentCached`; use the concrete type, the inherent
+    /// `contains` on the sharded stores, or a generic bound instead.
     ///
     /// # Errors
     ///

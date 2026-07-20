@@ -8286,6 +8286,27 @@ fn cached_peek_alias_works_via_prelude() {
     assert_eq!(cache.peek("missing"), None);
 }
 
+#[test]
+fn cached_peek_alias_does_not_promote_lru_recency_or_count_metrics() {
+    use cached::LruCache;
+    use cached::prelude::*;
+    let mut cache: LruCache<u32, u32> = LruCache::new(2);
+    cache.set(1, 10);
+    cache.set(2, 20);
+    // peek(1) must not promote key 1 or count a hit/miss.
+    assert_eq!(cache.peek(&1), Some(&10));
+    assert_eq!(cache.hits(), Some(0));
+    assert_eq!(cache.misses(), Some(0));
+    // Inserting key 3 evicts key 1: still the LRU despite the peek.
+    cache.set(3, 30);
+    assert_eq!(
+        cache.peek(&1),
+        None,
+        "peeked key must still be evicted first"
+    );
+    assert_eq!(cache.peek(&2), Some(&20));
+}
+
 #[cfg(feature = "time_stores")]
 #[test]
 fn clone_cached_peek_with_expiry_status_alias_works() {
