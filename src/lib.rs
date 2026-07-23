@@ -938,6 +938,10 @@ pub trait Cached<K, V> {
     /// The default implementation is infallible and delegates to [`Self::cache_set`]; it
     /// always returns `Ok`. Every built-in in-memory store keeps that default
     /// (`type Error = std::convert::Infallible`).
+    ///
+    /// Generic code that must support fallible custom stores should call this method
+    /// instead of [`cache_set`](Self::cache_set) and propagate [`Self::Error`](Cached::Error);
+    /// for infallible stores the two are equivalent.
     fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         Ok(self.cache_set(k, v))
     }
