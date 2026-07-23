@@ -6242,20 +6242,20 @@ fn test_lru_ttl_cache_zero_ttl() {
 fn test_ttl_sorted_cache_try_set_time_bounds() {
     use cached::Cached;
     use cached::stores::TtlSortedCache;
-    // A near-maximum TTL triggers TimeBounds overflow on some platforms.
-    // cache_set silently no-ops; cache_try_set returns Err.
+    // A near-maximum TTL triggers Instant overflow on some platforms; the entry
+    // is stored with no expiry (never expires) on both set paths.
     let ttl = Duration::from_secs(u64::MAX / 2);
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(ttl)
         .build()
         .unwrap();
-    // cache_set must not panic
+    // cache_set must not panic and must store the entry.
     cache.cache_set(1, 42);
-    // cache_try_set must surface the error
-    let result = cache.cache_try_set(2, 99);
-    // The result is either Ok (if no overflow) or Err (if overflow occurred).
-    // Either is valid — the important thing is it does not panic.
-    let _ = result;
+    assert_eq!(cache.cache_get(&1), Some(&42));
+    // cache_try_set is infallible and behaves identically.
+    let result: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(2, 99);
+    assert_eq!(result.unwrap(), None);
+    assert_eq!(cache.cache_get(&2), Some(&99));
 }
 
 #[test]
@@ -7123,8 +7123,8 @@ fn test_ttl_sorted_cache_generic_get_str_key() {
         .ttl(Duration::from_secs(60))
         .build()
         .unwrap();
-    cache.insert(String::from("hello"), 1).unwrap();
-    cache.insert(String::from("world"), 2).unwrap();
+    cache.set(String::from("hello"), 1);
+    cache.set(String::from("world"), 2);
 
     // &str lookup works via Borrow<str>
     assert_eq!(cache.get("hello"), Some(&1));
@@ -7140,7 +7140,7 @@ fn test_ttl_sorted_cache_generic_get_slice_key() {
         .ttl(Duration::from_secs(60))
         .build()
         .unwrap();
-    cache.insert(vec![1, 2, 3], "abc").unwrap();
+    cache.set(vec![1, 2, 3], "abc");
 
     // &[T] lookup works via Borrow<[T]>
     assert_eq!(cache.get([1u32, 2, 3].as_slice()), Some(&"abc"));

@@ -327,9 +327,24 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         Ok(self.set_max_size(max_size))
     }
 
-    /// Return all entries in current LRU order (most-recently-used first) as a `Vec` of `(K, V)` pairs.
+    /// Return all entries in current LRU order (most-recently-used first) as a `Vec` of
+    /// `(K, `[`CacheValue<V>`](super::CacheValue)`)` pairs. `LruCache` carries no per-entry
+    /// metadata, so the wrapper's metadata type is `()`; the wrapper `Deref`s to `V`.
     #[must_use]
-    pub fn iter_order(&self) -> Vec<(K, V)>
+    pub fn iter_order(&self) -> Vec<(K, super::CacheValue<V>)>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        self.order
+            .iter()
+            .map(|(k, v)| (k.clone(), super::CacheValue::new(v.clone(), ())))
+            .collect()
+    }
+
+    /// Internal tuple-form of [`iter_order`](Self::iter_order) for the wrapping
+    /// stores and the sharded deep-clone paths.
+    pub(crate) fn iter_order_raw(&self) -> Vec<(K, V)>
     where
         K: Clone,
         V: Clone,
@@ -347,14 +362,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         self.order.iter().map(|(k, _v)| k.clone()).collect()
     }
 
-    /// Return a `Vec` of values in the current order from most
-    /// to least recently used.
+    /// Return a `Vec` of [`CacheValue`](super::CacheValue)-wrapped values in the
+    /// current order from most to least recently used.
     #[must_use]
-    pub fn value_order(&self) -> Vec<V>
+    pub fn value_order(&self) -> Vec<super::CacheValue<V>>
     where
         V: Clone,
     {
-        self.order.iter().map(|(_k, v)| v.clone()).collect()
+        self.order
+            .iter()
+            .map(|(_k, v)| super::CacheValue::new(v.clone(), ()))
+            .collect()
     }
 
     pub(super) fn pop_raw<Q>(&mut self, k: &Q) -> Option<(K, V)>

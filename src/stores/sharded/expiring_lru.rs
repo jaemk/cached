@@ -998,7 +998,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
             // that MRU entries land at the head of the new cache.
             let entries: Vec<(K, V)> = {
                 let guard = shard.lock.read();
-                guard.iter_order()
+                guard.iter_order_raw()
             };
             for (k, v) in entries.into_iter().rev() {
                 if !v.is_expired() {

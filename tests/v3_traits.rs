@@ -1,7 +1,7 @@
 //! Integration tests for the 3.0 trait additions and audit-fix batch:
 //! - `*_mut` get-or-set variants (#179)
 //! - `SerializeCached`/`SerializeCachedAsync` borrowed set (#196)
-//! - `CacheSetError` concrete error type for `cache_try_set`
+//! - infallible `cache_try_set` via the `Cached::Error` associated type
 //! - `ConcurrentCached::refresh_on_hit` getter default and override
 //! - `ConcurrentCached::cache_get_or_set_with` / `async_cache_get_or_set_with`
 //! - `store()` getter removal verified via public API
@@ -826,29 +826,7 @@ mod redb_serialize_cached_async {
     }
 }
 
-// ── Item 1: CacheSetError ─────────────────────────────────────────────────────
-
-/// `CacheSetError` is a well-formed concrete `std::error::Error` type:
-/// it is `Debug`, has a `Display` impl, and can be boxed as a trait object.
-#[test]
-fn cache_set_error_is_std_error() {
-    use cached::CacheSetError;
-    use std::error::Error;
-
-    let err = CacheSetError::TimeBounds;
-
-    // Debug and Display both work.
-    assert!(format!("{err:?}").contains("TimeBounds"));
-    assert_eq!(err.to_string(), "ttl is outside Instant bounds");
-
-    // It is a leaf error: no source.
-    assert!(err.source().is_none());
-
-    // Can be boxed as a trait object.
-    let boxed: Box<dyn Error> = Box::new(CacheSetError::TimeBounds);
-    assert_eq!(boxed.to_string(), "ttl is outside Instant bounds");
-    assert!(boxed.source().is_none());
-}
+// ── Infallible in-memory `cache_try_set` ─────────────────────────────────────
 
 /// The default `cache_try_set` on stores that do not override it is infallible:
 /// it always returns `Ok(prev)`. The associated `Error` type is `Infallible`
@@ -869,14 +847,14 @@ fn cache_try_set_default_is_infallible() {
     assert_eq!(result.unwrap(), Some(10));
 }
 
-/// `TtlSortedCache::cache_try_set` returns `Err(CacheSetError::TimeBounds)` when
-/// the computed expiry `Instant` would overflow. With a normally-representable TTL
-/// it succeeds and returns the previous value.
+/// `TtlSortedCache::cache_try_set` is infallible (`type Error = Infallible`),
+/// matching every other in-memory store. With a normally-representable TTL it
+/// succeeds and returns the previous value.
 #[cfg(feature = "time_stores")]
 #[test]
 fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, TtlSortedCache};
+    use cached::{Cached, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -884,74 +862,61 @@ fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
         .expect("build TtlSortedCache");
 
     // A normal insert via cache_try_set must succeed and return the previous value.
-    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 42);
+    let result: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(1, 42);
     assert_eq!(result.unwrap(), None);
 
     // A second insert returns the previous value.
-    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 99);
+    let result: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(1, 99);
     assert_eq!(result.unwrap(), Some(42));
 }
 
-/// `TtlSortedCache::cache_try_set` returns `Err(CacheSetError::TimeBounds)` when
-/// the configured ttl makes the computed expiry `Instant` overflow.
+/// A TTL that overflows `Instant` bounds stores a never-expiring entry instead of
+/// erroring, on every set path.
 ///
-/// The overflow is triggered deterministically and portably: the public default ttl
-/// drives the expiry (`insert` -> `insert_inner` computes `Instant::now() + self.ttl`),
-/// and the builder's `validate_ttl` only rejects a *zero* ttl, so a near-`Duration::MAX`
-/// ttl passes `build()` and then overflows `Instant::checked_add` on every platform
-/// (no real `Instant` is anywhere near `Duration::MAX` from the epoch). The fallible
-/// `cache_try_set` path uses `TtlOverflow::Error`, so it must report the overflow rather
-/// than silently saturating or panicking, and the cache must be left unmutated.
-/// The associated `type Error = CacheSetError` surfaces it directly without mapping
-/// (TtlSortedCache now shares the unified error type with TtlCache / LruTtlCache).
+/// The overflow is triggered deterministically and portably: the default ttl drives
+/// the expiry (`cache_set` computes `Instant::now() + self.ttl`), and the builder's
+/// `validate_ttl` only rejects a *zero* ttl, so a near-`Duration::MAX` ttl passes
+/// `build()` and then overflows `Instant::checked_add` on every platform (no real
+/// `Instant` is anywhere near `Duration::MAX` from the epoch). The entry must be
+/// stored with no expiry, matching the sharded TTL stores.
 #[cfg(feature = "time_stores")]
 #[test]
-fn ttl_sorted_cache_try_set_overflow_returns_time_bounds() {
+fn ttl_sorted_cache_try_set_overflow_stores_never_expiring_entry() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, CachedExt, TtlSortedCache};
+    use cached::{Cached, CachedExt, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::MAX)
         .build()
         .expect("Duration::MAX is non-zero so build() must succeed");
 
-    let result: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 42);
-    assert!(
-        matches!(result, Err(CacheSetError::TimeBounds)),
-        "near-MAX ttl must overflow Instant and surface TimeBounds, got {result:?}"
-    );
+    let result: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(1, 42);
+    assert_eq!(result.unwrap(), None);
 
-    // The failed try_set must not have stored anything (Error path mutates nothing).
-    assert_eq!(cache.cache_size(), 0, "overflowing try_set must not insert");
-    assert_eq!(
-        cache.cache_get(&1),
-        None,
-        "overflowing try_set must not insert"
-    );
+    // The entry is stored and readable: overflow means never-expires, not an error.
+    assert_eq!(cache.cache_size(), 1);
+    assert_eq!(cache.cache_get(&1), Some(&42));
 
-    // The ergonomic alias surfaces the same error.
-    let via_alias: Result<Option<u32>, CacheSetError> = cache.try_set(2, 7);
-    assert!(
-        matches!(via_alias, Err(CacheSetError::TimeBounds)),
-        "try_set alias must also surface TimeBounds, got {via_alias:?}"
-    );
-    assert_eq!(cache.cache_size(), 0);
+    // The ergonomic alias behaves the same.
+    let via_alias: Result<Option<u32>, std::convert::Infallible> = cache.try_set(2, 7);
+    assert_eq!(via_alias.unwrap(), None);
+    assert_eq!(cache.cache_size(), 2);
 }
 
 /// `try_set` (the ergonomic alias) delegates to `cache_try_set` and returns the
 /// same `Result<Option<V>, Self::Error>` type.
 #[cfg(feature = "time_stores")]
 #[test]
-fn try_set_alias_returns_cache_set_error_for_ttl_sorted_cache() {
+fn try_set_alias_is_infallible_for_ttl_sorted_cache() {
     use cached::time::Duration;
-    use cached::{CacheSetError, CachedExt, TtlSortedCache};
+    use cached::{CachedExt, TtlSortedCache};
 
     let mut cache = TtlSortedCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .expect("build TtlSortedCache");
 
-    let result: Result<Option<u32>, CacheSetError> = cache.try_set(1, 7);
+    let result: Result<Option<u32>, std::convert::Infallible> = cache.try_set(1, 7);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), None);
 }
@@ -968,7 +933,6 @@ fn cached_error_associated_type_infallible_for_unbound_cache() {
         UnboundCache::builder().build().expect("build UnboundCache");
 
     // The type annotation pins the associated type to Infallible at compile time.
-    // This test fails to compile on the old signature (Result<_, CacheSetError>).
     let r1: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(10, 100);
     assert_eq!(r1.unwrap(), None);
 
@@ -994,29 +958,29 @@ fn cached_error_associated_type_infallible_for_lru_cache() {
     assert_eq!(r.unwrap(), None);
 }
 
-/// `TtlCache` sets `type Error = CacheSetError`; `cache_try_set` surfaces the concrete
-/// error type through the associated type without any extra mapping at the call site.
+/// `TtlCache` sets `type Error = Infallible`: a TTL overflow stores a
+/// never-expiring entry rather than erroring, so `cache_try_set` cannot fail.
 #[cfg(feature = "time_stores")]
 #[test]
-fn cached_error_associated_type_cache_set_error_for_ttl_cache() {
+fn cached_error_associated_type_infallible_for_ttl_cache() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, TtlCache};
+    use cached::{Cached, TtlCache};
 
     let mut cache: TtlCache<u32, u32> = TtlCache::builder()
         .ttl(Duration::from_secs(60))
         .build()
         .expect("build TtlCache");
 
-    let r: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 99);
+    let r: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(1, 99);
     assert_eq!(r.unwrap(), None);
 }
 
-/// `LruTtlCache` sets `type Error = CacheSetError` too.
+/// `LruTtlCache` sets `type Error = Infallible` too.
 #[cfg(feature = "time_stores")]
 #[test]
-fn cached_error_associated_type_cache_set_error_for_lru_ttl_cache() {
+fn cached_error_associated_type_infallible_for_lru_ttl_cache() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, LruTtlCache};
+    use cached::{Cached, LruTtlCache};
 
     let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
         .max_size(4)
@@ -1024,17 +988,17 @@ fn cached_error_associated_type_cache_set_error_for_lru_ttl_cache() {
         .build()
         .expect("build LruTtlCache");
 
-    let r: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 7);
+    let r: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(1, 7);
     assert_eq!(r.unwrap(), None);
 }
 
-/// `TtlSortedCache` sets `type Error = CacheSetError` (unified with `TtlCache` /
-/// `LruTtlCache`), surfacing a shared error type from `cache_try_set`.
+/// `TtlSortedCache` sets `type Error = Infallible` (unified with `TtlCache` /
+/// `LruTtlCache`); an overflowing TTL stores a never-expiring entry.
 #[cfg(feature = "time_stores")]
 #[test]
-fn cached_error_associated_type_cache_set_error_for_ttl_sorted_cache() {
+fn cached_error_associated_type_infallible_for_ttl_sorted_cache() {
     use cached::time::Duration;
-    use cached::{CacheSetError, Cached, TtlSortedCache};
+    use cached::{Cached, TtlSortedCache};
 
     // Normal TTL: succeeds.
     let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
@@ -1042,21 +1006,19 @@ fn cached_error_associated_type_cache_set_error_for_ttl_sorted_cache() {
         .build()
         .expect("build TtlSortedCache");
 
-    let r: Result<Option<u32>, CacheSetError> = cache.cache_try_set(1, 55);
+    let r: Result<Option<u32>, std::convert::Infallible> = cache.cache_try_set(1, 55);
     assert_eq!(r.unwrap(), None);
 
-    // Near-MAX TTL: returns Err(CacheSetError::TimeBounds) directly.
+    // Near-MAX TTL: the entry is stored with no expiry (never expires).
     let mut overflow: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
         .ttl(Duration::MAX)
         .build()
         .expect("Duration::MAX is non-zero");
 
-    let r2: Result<Option<u32>, CacheSetError> = overflow.cache_try_set(1, 55);
-    assert!(
-        matches!(r2, Err(CacheSetError::TimeBounds)),
-        "expected TimeBounds, got {r2:?}"
-    );
-    assert_eq!(overflow.cache_size(), 0, "failed try_set must not insert");
+    let r2: Result<Option<u32>, std::convert::Infallible> = overflow.cache_try_set(1, 55);
+    assert_eq!(r2.unwrap(), None);
+    assert_eq!(overflow.cache_size(), 1, "overflowing set stores the entry");
+    assert_eq!(overflow.cache_get(&1), Some(&55));
 }
 
 // ── Item 5: refresh_on_hit getter on ConcurrentCacheTtl ──────────────────────

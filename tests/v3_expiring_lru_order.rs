@@ -76,8 +76,12 @@ fn iter_order_key_order_value_order_most_to_least_recent() {
         .zip(expected_vals.iter().cloned())
         .collect();
 
-    // ── iter_order returns Vec<(K, V)> ──────────────────────────────────────
-    let pairs: Vec<(u32, Val)> = cache.iter_order();
+    // ── iter_order returns Vec<(K, CacheValue<V>)> ──────────────────────────
+    let pairs: Vec<(u32, Val)> = cache
+        .iter_order()
+        .into_iter()
+        .map(|(k, v)| (k, v.into_value()))
+        .collect();
     assert_eq!(
         pairs, expected_pairs,
         "iter_order must return (key, value) pairs in MRU order"
@@ -90,12 +94,13 @@ fn iter_order_key_order_value_order_most_to_least_recent() {
         "key_order must return keys in MRU order"
     );
 
-    // ── value_order returns Vec<V> ───────────────────────────────────────────
-    let vals: Vec<Val> = cache.value_order();
+    // ── value_order returns Vec<CacheValue<V>>; comparable against bare V ───
+    let wrapped_vals = cache.value_order();
     assert_eq!(
-        vals, expected_vals,
+        wrapped_vals, expected_vals,
         "value_order must return values in MRU order"
     );
+    let vals: Vec<Val> = wrapped_vals.into_iter().map(|v| v.into_value()).collect();
 
     // ── all three methods agree with each other ──────────────────────────────
     let keys_from_pairs: Vec<u32> = pairs.iter().map(|(k, _)| *k).collect();
@@ -135,7 +140,7 @@ fn expired_entries_excluded_from_order_methods() {
     );
 
     // iter_order must exclude the expired entry.
-    let pairs: Vec<(u32, Val)> = cache.iter_order();
+    let pairs = cache.iter_order();
     let keys_in_pairs: Vec<u32> = pairs.iter().map(|(k, _)| *k).collect();
     assert!(
         !keys_in_pairs.contains(&2),
@@ -157,8 +162,8 @@ fn expired_entries_excluded_from_order_methods() {
         "key_order must include live entries (keys 1 and 3)"
     );
 
-    // value_order must exclude the expired entry.
-    let vals: Vec<Val> = cache.value_order();
+    // value_order must exclude the expired entry (the wrapper Derefs to Val).
+    let vals = cache.value_order();
     let val_ids: Vec<u32> = vals.iter().map(|v| v.id).collect();
     assert!(
         !val_ids.contains(&2),
@@ -196,7 +201,7 @@ fn all_expired_returns_empty_vecs() {
     cache.cache_set(1, Val::dead(1));
     cache.cache_set(2, Val::dead(2));
 
-    assert_eq!(cache.iter_order(), Vec::<(u32, Val)>::new());
+    assert!(cache.iter_order().is_empty());
     assert_eq!(cache.key_order(), Vec::<u32>::new());
     assert_eq!(cache.value_order(), Vec::<Val>::new());
 }
@@ -212,14 +217,18 @@ fn single_live_entry_appears_in_all_order_methods() {
 
     cache.cache_set(7, Val::live(7));
 
-    let pairs: Vec<(u32, Val)> = cache.iter_order();
+    let pairs: Vec<(u32, Val)> = cache
+        .iter_order()
+        .into_iter()
+        .map(|(k, v)| (k, v.into_value()))
+        .collect();
     assert_eq!(pairs, vec![(7, Val::live(7))]);
 
     let keys: Vec<u32> = cache.key_order();
     assert_eq!(keys, vec![7]);
 
-    let vals: Vec<Val> = cache.value_order();
-    assert_eq!(vals, vec![Val::live(7)]);
+    // CacheValue compares directly against the bare value.
+    assert_eq!(cache.value_order(), vec![Val::live(7)]);
 }
 
 // ── Empty cache ───────────────────────────────────────────────────────────────
@@ -231,7 +240,7 @@ fn empty_cache_returns_empty_vecs() {
         .build()
         .expect("build ExpiringLruCache");
 
-    assert_eq!(cache.iter_order(), Vec::<(u32, Val)>::new());
+    assert!(cache.iter_order().is_empty());
     assert_eq!(cache.key_order(), Vec::<u32>::new());
     assert_eq!(cache.value_order(), Vec::<Val>::new());
 }
@@ -285,8 +294,8 @@ fn order_methods_after_lru_eviction() {
     );
 
     // iter_order, key_order, value_order must agree.
-    let pairs: Vec<(u32, Val)> = cache.iter_order();
-    let vals: Vec<Val> = cache.value_order();
+    let pairs = cache.iter_order();
+    let vals = cache.value_order();
 
     assert_eq!(
         pairs.iter().map(|(k, _)| *k).collect::<Vec<_>>(),

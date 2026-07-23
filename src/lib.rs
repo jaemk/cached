@@ -672,7 +672,7 @@ pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 // preempt it. The requirement is documented on each capability feature in Cargo.toml: pair it
 // with a `redis_tokio*` or `redis_smol*` runtime feature.
 pub use stores::{
-    BuildError, CacheEvict, CacheSetError, ConcurrentCacheEvict, DefaultHashBuilder,
+    BuildError, CacheEvict, CacheValue, ConcurrentCacheEvict, DefaultHashBuilder,
     DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
     ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, SetMaxSizeError, SetTtlError, ShardHasher,
     ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
@@ -893,8 +893,9 @@ pub trait Cached<K, V> {
     /// The error type returned by [`cache_try_set`](Cached::cache_try_set).
     ///
     /// Use [`std::convert::Infallible`] for stores where insertion can never fail.
-    /// TTL-capable stores that may overflow `Instant` bounds use
-    /// [`CacheSetError`].
+    /// Every built-in in-memory store (including the TTL stores, which treat an
+    /// `Instant`-overflowing expiry as never-expires) is infallible; the type exists
+    /// for custom stores whose insertion can fail.
     ///
     /// The bound `std::error::Error + Send + Sync + 'static` lets generic code call
     /// `.unwrap()` on `Result<_, Self::Error>`, propagate with `?` into
@@ -931,13 +932,10 @@ pub trait Cached<K, V> {
     /// Insert a key-value pair and return the previous value.
     fn cache_set(&mut self, k: K, v: V) -> Option<V>;
 
-    /// Fallible variant of [`Self::cache_set`]. Returns `Err` if the store cannot accept the entry
-    /// (e.g. the TTL duration overflows `Instant` bounds). The default implementation is
-    /// infallible and delegates to [`Self::cache_set`]; it always returns `Ok`.
-    ///
-    /// The error type is the associated [`Self::Error`]. Infallible stores set
-    /// `type Error = std::convert::Infallible`, while TTL-capable stores set it to
-    /// [`CacheSetError`].
+    /// Fallible variant of [`Self::cache_set`] for custom stores whose insertion can fail.
+    /// The default implementation is infallible and delegates to [`Self::cache_set`]; it
+    /// always returns `Ok`. Every built-in in-memory store keeps that default
+    /// (`type Error = std::convert::Infallible`).
     fn cache_try_set(&mut self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         Ok(self.cache_set(k, v))
     }

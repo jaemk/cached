@@ -364,18 +364,15 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
 
     /// Compute the expiry instant for a new or refreshed entry given the current TTL.
     /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
-    /// Returns `Err(CacheSetError::TimeBounds)` on overflow.
+    /// On overflow (`now + ttl` exceeds `Instant`'s representable range, a TTL on the
+    /// order of hundreds of years) returns `None`: the entry never expires, matching
+    /// the sharded TTL stores.
     #[inline]
-    pub(super) fn compute_expires_at(
-        ttl: Duration,
-        now: Instant,
-    ) -> Result<Option<Instant>, super::CacheSetError> {
+    pub(super) fn compute_expires_at(ttl: Duration, now: Instant) -> Option<Instant> {
         if ttl.is_zero() {
-            Ok(None)
+            None
         } else {
             now.checked_add(ttl)
-                .map(Some)
-                .ok_or(super::CacheSetError::TimeBounds)
         }
     }
 
@@ -399,22 +396,27 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
         })
     }
 
-    /// Return an iterator of key-value pairs with their expiry instants
-    /// in the current order from most to least recently used.
+    /// Return all live entries in the current order from most to least recently
+    /// used, as `(K, `[`CacheValue`](super::CacheValue)`)` pairs. The wrapper
+    /// `Deref`s to `V` and exposes the entry's expiry via
+    /// [`expires_at`](super::CacheValue::expires_at).
     /// Items past their expiry will be excluded.
     #[must_use]
-    pub fn iter_order(&self) -> Vec<(K, (Option<Instant>, V))>
+    pub fn iter_order(&self) -> Vec<(K, super::CacheValue<V, Option<Instant>>)>
     where
         K: Clone,
         V: Clone,
     {
         self.store
-            .iter_order()
-            .into_iter()
+            .order
+            .iter()
             .filter_map(|(k, entry)| {
                 let expires_at = entry.expires_at;
                 if Self::entry_live(expires_at) {
-                    Some((k.clone(), (expires_at, entry.value.clone())))
+                    Some((
+                        k.clone(),
+                        super::CacheValue::new(entry.value.clone(), expires_at),
+                    ))
                 } else {
                     None
                 }
@@ -443,11 +445,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
             .collect()
     }
 
-    /// Return a `Vec` of (expiry, value) pairs in the current order
-    /// from most to least recently used.
+    /// Return a `Vec` of [`CacheValue`](super::CacheValue)-wrapped values (each
+    /// carrying its expiry) in the current order from most to least recently used.
     /// Items past their expiry will be excluded.
     #[must_use]
-    pub fn value_order(&self) -> Vec<(Option<Instant>, V)>
+    pub fn value_order(&self) -> Vec<super::CacheValue<V, Option<Instant>>>
     where
         V: Clone,
     {
@@ -457,7 +459,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
             .filter_map(|(_k, entry)| {
                 let expires_at = entry.expires_at;
                 if Self::entry_live(expires_at) {
-                    Some((expires_at, entry.value.clone()))
+                    Some(super::CacheValue::new(entry.value.clone(), expires_at))
                 } else {
                     None
                 }
@@ -605,7 +607,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
 }
 
 impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V, S> {
-    type Error = super::CacheSetError;
+    type Error = std::convert::Infallible;
 
     fn cache_get<Q>(&mut self, key: &Q) -> Option<&V>
     where
@@ -620,10 +622,12 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
                     let now = Instant::now();
-                    let new_exp = Self::compute_expires_at(self.ttl, now)
-                        .ok()
-                        .flatten()
-                        .or(self.store.order.get(index).1.expires_at);
+                    let new_exp = Self::compute_expires_at(self.ttl, now).or(self
+                        .store
+                        .order
+                        .get(index)
+                        .1
+                        .expires_at);
                     self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 Some(&self.store.order.get(index).1.value)
@@ -656,10 +660,12 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
                     let now = Instant::now();
-                    let new_exp = Self::compute_expires_at(self.ttl, now)
-                        .ok()
-                        .flatten()
-                        .or(self.store.order.get(index).1.expires_at);
+                    let new_exp = Self::compute_expires_at(self.ttl, now).or(self
+                        .store
+                        .order
+                        .get(index)
+                        .1
+                        .expires_at);
                     self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 Some(&mut self.store.order.get_mut(index).1.value)
@@ -686,7 +692,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
             // not eat into the fresh entry's TTL (CORE-3).
             let value = f();
             let now = Instant::now();
-            let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
+            let expires_at = Self::compute_expires_at(ttl, now);
             TimedEntry { expires_at, value }
         };
         // On replacement the store returns the STORED key/entry of the displaced value, so the
@@ -698,10 +704,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         if was_present && was_valid {
             if self.refresh {
                 let now = Instant::now();
-                let new_exp = Self::compute_expires_at(self.ttl, now)
-                    .ok()
-                    .flatten()
-                    .or(entry.expires_at);
+                let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                 entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -727,7 +730,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
             // Anchor the expiry after the factory succeeds (CORE-3).
             let value = f()?;
             let now = Instant::now();
-            let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
+            let expires_at = Self::compute_expires_at(ttl, now);
             Ok(TimedEntry { expires_at, value })
         };
         // On replacement the store returns the STORED key/entry of the displaced value (C1/C8).
@@ -737,10 +740,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         if was_present && was_valid {
             if self.refresh {
                 let now = Instant::now();
-                let new_exp = Self::compute_expires_at(self.ttl, now)
-                    .ok()
-                    .flatten()
-                    .or(entry.expires_at);
+                let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                 entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -765,7 +765,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
     /// from the current TTL). Read with `cache_get` first if you need to promote it.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let now = Instant::now();
-        let expires_at = Self::compute_expires_at(self.ttl, now).unwrap_or(None);
+        let expires_at = Self::compute_expires_at(self.ttl, now);
         self.set_entry(
             key,
             TimedEntry {
@@ -773,18 +773,6 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 value: val,
             },
         )
-    }
-
-    fn cache_try_set(&mut self, key: K, val: V) -> Result<Option<V>, super::CacheSetError> {
-        let now = Instant::now();
-        let expires_at = Self::compute_expires_at(self.ttl, now)?;
-        Ok(self.set_entry(
-            key,
-            TimedEntry {
-                expires_at,
-                value: val,
-            },
-        ))
     }
 
     fn cache_remove<Q>(&mut self, k: &Q) -> Option<V>
@@ -955,10 +943,12 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
                     let now = Instant::now();
-                    let new_exp = Self::compute_expires_at(self.ttl, now)
-                        .ok()
-                        .flatten()
-                        .or(self.store.order.get(index).1.expires_at);
+                    let new_exp = Self::compute_expires_at(self.ttl, now).or(self
+                        .store
+                        .order
+                        .get(index)
+                        .1
+                        .expires_at);
                     self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 (Some(self.store.order.get(index).1.value.clone()), false)
@@ -1013,7 +1003,7 @@ where
                 // Anchor the expiry after the factory resolves (CORE-3).
                 let value = f().await;
                 let now = Instant::now();
-                let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
+                let expires_at = Self::compute_expires_at(ttl, now);
                 TimedEntry { expires_at, value }
             };
             // On replacement the store returns the STORED key/entry of the displaced value (C1/C8).
@@ -1024,10 +1014,7 @@ where
             if was_present && was_valid {
                 if self.refresh {
                     let now = Instant::now();
-                    let new_exp = Self::compute_expires_at(self.ttl, now)
-                        .ok()
-                        .flatten()
-                        .or(entry.expires_at);
+                    let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                     entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -1061,7 +1048,7 @@ where
             let setter = || async move {
                 let new_val = f().await?;
                 let now = Instant::now();
-                let expires_at = Self::compute_expires_at(ttl, now).unwrap_or(None);
+                let expires_at = Self::compute_expires_at(ttl, now);
                 Ok(TimedEntry {
                     expires_at,
                     value: new_val,
@@ -1077,10 +1064,7 @@ where
             if was_present && was_valid {
                 if self.refresh {
                     let now = Instant::now();
-                    let new_exp = Self::compute_expires_at(self.ttl, now)
-                        .ok()
-                        .flatten()
-                        .or(entry.expires_at);
+                    let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                     entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -1109,6 +1093,36 @@ mod tests {
     use super::*;
     use crate::{Cached, CachedExt};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn iter_order_and_value_order_expose_expiry_via_cache_value() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let before = Instant::now();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+
+        // MRU-first order; the wrapper Derefs to V and compares against bare values.
+        let ordered = c.iter_order();
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].0, 2);
+        assert_eq!(*ordered[0].1, 20);
+        assert_eq!(ordered[1].1, 10);
+        // Finite ttl: every entry carries a future expiry.
+        for (_k, v) in &ordered {
+            let exp = v.expires_at().expect("finite ttl entries carry an expiry");
+            assert!(exp > before);
+        }
+
+        let vals = c.value_order();
+        assert_eq!(vals, vec![20, 10]);
+        assert!(vals[0].expires_at().is_some());
+        assert_eq!(vals[0].value(), &20);
+        assert_eq!(vals.into_iter().map(|v| v.into_value()).sum::<u32>(), 30);
+    }
 
     #[test]
     fn cache_set_over_expired_returns_none_fires_on_evict_and_counts() {

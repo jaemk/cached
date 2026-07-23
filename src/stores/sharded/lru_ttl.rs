@@ -1292,7 +1292,7 @@ where
     for shard in existing.inner.shards.iter() {
         let entries: Vec<(K, TimedEntry<V>)> = {
             let guard = shard.lock.read();
-            guard.iter_order()
+            guard.iter_order_raw()
         };
         for (k, entry) in entries.into_iter().rev() {
             // Skip entries already expired per their per-entry expires_at.
