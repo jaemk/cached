@@ -93,6 +93,14 @@ impl<K, V> Default for UnboundCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
+impl<K, V> UnboundCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`UnboundCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<K, V, S> UnboundCacheBuilder<K, V, S> {
     /// Set the initial allocation capacity (optional, purely a hint).
     #[must_use]
@@ -210,6 +218,32 @@ impl<K: Hash + Eq, V, S: BuildHasher> UnboundCache<K, V, S> {
                 on_evict(k, v);
             }
         }
+    }
+
+    /// Removes entries for which `keep` returns `false`.
+    ///
+    /// Each removed entry fires the configured `on_evict` callback, matching
+    /// [`cache_remove`](crate::Cached::cache_remove) semantics. `UnboundCache`
+    /// has no eviction policy and tracks no eviction counter, so `retain` is a
+    /// plain predicate filter over the stored entries: an entry survives exactly
+    /// when `keep` returns `true`.
+    ///
+    /// The expiry-aware stores also have `retain`, with one difference: their
+    /// expired entries are removed regardless of the predicate. See
+    /// [`TtlCache::retain`](crate::TtlCache::retain) and
+    /// [`ExpiringCache::retain`](crate::ExpiringCache::retain).
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+        let on_evict = &self.on_evict;
+        self.store.retain(|key, value| {
+            if keep(key, value) {
+                true
+            } else {
+                if let Some(on_evict) = on_evict {
+                    on_evict(key, value);
+                }
+                false
+            }
+        });
     }
 }
 

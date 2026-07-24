@@ -25,6 +25,26 @@
 - `CacheValue<V, M = ()>`: value-plus-metadata wrapper returned by the LRU-family order
   methods, re-exported from the crate root. `Deref<Target = V>`, `PartialEq<V>` against bare
   values, `value()` / `into_value()`, and `expires_at()` when `M = Option<Instant>`.
+- Inherent `peek(&self, &K) -> Option<V>` on all six sharded stores: returns a clone of the
+  live value with no recency update, no TTL refresh, no hit/miss metrics, and no lazy removal
+  of expired entries. Takes call-site priority like the other inherent shims.
+- `Builder::new()` on the in-memory and sharded builders (all 13), equivalent to the store's
+  `::builder()`, matching the IO builders' public constructors.
+- `CachedExt::capacity` / `CachedExt::evictions`: ergonomic aliases for `cache_capacity` /
+  `cache_evictions`, completing the metric-alias set alongside `hits` / `misses`.
+- `ConcurrentCachedExt::len` / `is_empty` / `hits` / `misses` / `capacity` / `evictions`:
+  ergonomic aliases for the `ConcurrentCacheBase` accessors, mirroring `CachedExt`. The
+  sharded stores' inherent `len` / `is_empty` keep call-site priority.
+- `ConcurrentCached::cache_try_get_or_set_with` and
+  `ConcurrentCachedAsync::async_cache_try_get_or_set_with` (both provided): fallible-init
+  get-or-set returning `Result<Result<V, E>, Self::Error>`, store error outer, closure error
+  inner. On a closure `Err` nothing is stored.
+- `retain(keep)` on `TtlCache` and `ExpiringCache`, completing `retain` across the
+  expiry-aware stores. Expired entries are removed regardless of the predicate; each
+  removed entry fires `on_evict` and counts an eviction. `UnboundCache` intentionally
+  has no `retain`: it has no eviction dimension backing the operation.
+- `TtlSortedCache::capacity() -> Option<usize>`: the configured size bound (`None` when
+  unbounded), plus the missing `doc(alias = "capacity")` on `TtlSortedCacheBuilder::max_size`.
 
 ## [3.0.0-rc.9] - 2026-07-19
 

@@ -17,7 +17,8 @@ generic callers can `?`-propagate or `.unwrap()` without extra where-clauses. `C
 blanket extension trait providing deduplicated short-name methods (`get`, `get_mut`, `set`,
 `try_set`, `get_or_set_with`, `get_or_set_with_mut`, `try_get_or_set_with`,
 `try_get_or_set_with_mut`, `remove`, `remove_entry`, `delete`, `contains` (delegates to
-`cache_contains`), `clear`, `reset`, `len`, `is_empty`, `hits`, `misses`, `metrics()`), per
+`cache_contains`), `clear`, `reset`, `len`, `is_empty`, `hits`, `misses`, `capacity`,
+`evictions`, `metrics()`), per
 [design/0008-method-name-deduplication.md](design/0008-method-name-deduplication.md).
 
 ## TRAIT-2

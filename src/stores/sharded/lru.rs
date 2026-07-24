@@ -233,6 +233,17 @@ where
     pub fn contains(&self, k: &K) -> bool {
         ConcurrentCached::cache_contains(self, k).unwrap()
     }
+
+    /// Return a clone of the value stored for `k` without observable side effects:
+    /// no LRU recency update, no hit/miss metrics. The single-owner counterpart is
+    /// [`CachedPeek::cache_peek`](crate::CachedPeek::cache_peek); the sharded stores
+    /// return a clone rather than a reference because the value lives behind a
+    /// per-shard lock.
+    #[must_use]
+    pub fn peek(&self, k: &K) -> Option<V> {
+        use crate::CachedPeek;
+        self.shard_of(k).lock.read().cache_peek(k).cloned()
+    }
 }
 
 impl<K, V, H: ShardHasher<K>> ShardedLruCacheBase<K, V, H>
@@ -648,6 +659,14 @@ impl<K, V> Default for ShardedLruCacheBuilder<K, V, DefaultShardHasher> {
             _k: std::marker::PhantomData,
             _v: std::marker::PhantomData,
         }
+    }
+}
+
+impl<K, V> ShardedLruCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`ShardedLruCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

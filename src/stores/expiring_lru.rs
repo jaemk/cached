@@ -161,6 +161,14 @@ impl<K, V> Default for ExpiringLruCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
+impl<K, V> ExpiringLruCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`ExpiringLruCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<K, V, S> ExpiringLruCacheBuilder<K, V, S> {
     /// Set the maximum number of entries.
     #[doc(alias = "size")]

@@ -125,6 +125,14 @@ impl<K, V> Default for LruCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
+impl<K, V> LruCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`LruCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<K, V, S> LruCacheBuilder<K, V, S> {
     /// Set the maximum number of entries. Required -- `build` returns `Err` if not set.
     #[doc(alias = "size")]

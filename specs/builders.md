@@ -1,7 +1,9 @@
 # Store builders and eviction callbacks
 
 Every store is constructed through a `::builder()` returning a typed builder; in-memory and
-sharded stores also provide infallible `::new(...)` conveniences.
+sharded stores also provide infallible `::new(...)` conveniences. The in-memory and sharded
+builders are additionally constructible directly via `Builder::new()` (equivalent to the
+store's `::builder()`), matching the IO builders' public constructors.
 
 ## BUILD-1
 

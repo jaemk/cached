@@ -118,6 +118,27 @@ pub struct LruTtlCacheBuilder<K, V, E = NoEvict, S = DefaultHashBuilder> {
     _evict: PhantomData<E>,
 }
 
+impl<K, V> Default for LruTtlCacheBuilder<K, V> {
+    fn default() -> Self {
+        Self {
+            size: None,
+            ttl: None,
+            refresh: false,
+            on_evict: None,
+            hasher: super::new_default_hash_builder(),
+            _evict: PhantomData,
+        }
+    }
+}
+
+impl<K, V> LruTtlCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`LruTtlCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 // size / ttl / refresh work regardless of eviction state or hasher
 impl<K, V, E, S> LruTtlCacheBuilder<K, V, E, S> {
     /// Set the maximum number of entries. Required.

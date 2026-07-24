@@ -97,6 +97,14 @@ impl<K, V> Default for TtlCacheBuilder<K, V, DefaultHashBuilder> {
     }
 }
 
+impl<K, V> TtlCacheBuilder<K, V> {
+    /// Create a builder with default settings. Equivalent to [`TtlCache::builder`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<K, V, S> TtlCacheBuilder<K, V, S> {
     /// Set the TTL for cache entries. Required -- `build()` returns
     /// `Err(BuildError::MissingRequired("ttl"))` if not set.
@@ -343,6 +351,32 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
             }
         });
         removed
+    }
+
+    /// Retain only entries that are unexpired and satisfy `keep`.
+    ///
+    /// Removes every entry that is already TTL-expired **or** for which `keep`
+    /// returns `false` — expired entries are removed without consulting `keep`.
+    /// `on_evict` is called and the eviction counter incremented for each removed
+    /// entry. This matches [`LruTtlCache::retain`](crate::LruTtlCache::retain) and
+    /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain); the plain
+    /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
+    /// removes solely on the predicate.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+        let on_evict = &self.on_evict;
+        let evictions = &self.evictions;
+        self.store.retain(|key, entry| {
+            let expired = !Self::entry_live(entry.expires_at);
+            if expired || !keep(key, &entry.value) {
+                if let Some(on_evict) = on_evict {
+                    on_evict(key, &entry.value);
+                }
+                evictions.fetch_add(1, Ordering::Relaxed);
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
