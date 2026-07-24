@@ -46,6 +46,19 @@
 - `TtlSortedCache::capacity() -> Option<usize>`: the configured size bound (`None` when
   unbounded), plus the missing `doc(alias = "capacity")` on `TtlSortedCacheBuilder::max_size`.
 
+### Fixed
+
+- docs.rs feature annotation (`doc(cfg)`) on `AsyncRedisCacheBuilder::client_side_caching`,
+  which previously rendered as unconditionally available.
+- `ConcurrentCached::cache_contains` docs no longer list `AsyncRedisCache` as an implementor
+  (it implements the async counterpart) and note the `dyn` limitation of the
+  `where Self: Sized` bound; the rc.9 changelog entry and `specs/traits-concurrent.md` are
+  corrected to match.
+- Macro docs note the `Arc<T>` return pattern for expensive-to-clone values ([#64]): the
+  cache stores the `Arc`, hits clone only the pointer.
+
+[#64]: https://github.com/jaemk/cached/issues/64
+
 ## [3.0.0-rc.9] - 2026-07-19
 
 ### Breaking Changes
@@ -83,7 +96,7 @@
   `CachedExt::contains` delegates to it, giving `contains` both spellings on both trait families.
 - `ConcurrentCached::cache_contains`: required presence check returning `Result<bool, Self::Error>`,
   no `V: Clone` bound. The built-in sharded stores use a peek-based implementation (read lock, no
-  clone, no recency update, no hit/miss metrics); `RedisCache` / `AsyncRedisCache` / `RedbCache`
+  clone, no recency update, no hit/miss metrics); `RedisCache` / `RedbCache`
   use a get-based implementation. External implementors of `ConcurrentCached` must add this method.
 - `ConcurrentCachedAsync::async_cache_contains`: required async counterpart of `cache_contains`,
   no `V: Clone + Send` bound; same impl split as the sync method. External implementors of
