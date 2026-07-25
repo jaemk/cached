@@ -349,7 +349,7 @@ pub use lru_ttl::{HasEvict, LruTtlCache, LruTtlCacheBuilder, NoEvict};
 pub use ttl::{TtlCache, TtlCacheBuilder};
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder};
+pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder, TtlSortedSetBuilder};
 pub use unbound::{UnboundCache, UnboundCacheBuilder};
 
 pub use sharded::{

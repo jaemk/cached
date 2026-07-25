@@ -283,8 +283,11 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
-  Sharded stores also do not implement `CachedIter` or `CachedPeek`. Code that is generic over
-  `CachedIter<K, V>` or uses `.iter()` / `cache_peek` must use non-sharded stores instead.
+  Sharded stores do not implement the single-owner `CachedIter` or `CachedPeek` traits; code that
+  is generic over `CachedIter<K, V>` or uses `.iter()` must use a non-sharded store. They do,
+  however, provide a side-effect-free read via the [`ConcurrentCachePeek`] trait (`cache_peek`,
+  returning an owned `Option<V>`), with the inherent `peek` shim taking call-site priority on the
+  concrete sharded types.
   The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and

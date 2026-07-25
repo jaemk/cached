@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, CachedIter, ConcurrentCacheBase, ConcurrentCached};
+use crate::{CacheMetrics, CachedIter, ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCached};
 #[cfg(feature = "async_core")]
 use core::future::Future;
 
@@ -587,6 +587,17 @@ where
         use crate::CachedPeek;
         let shard = self.shard_of(k);
         Ok(shard.lock.read().cache_peek(k).is_some())
+    }
+}
+
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedLruCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+    H: ShardHasher<K>,
+{
+    fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        Ok(self.peek(k))
     }
 }
 

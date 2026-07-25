@@ -29,7 +29,10 @@ These stores implement `CacheTtl` (`ttl()` / `set_ttl()` / `unset_ttl()` / `try_
 `TtlSortedCache` implements `CachedRead` (shared-ref reads / `unsync_reads`), `CacheTtl`,
 `CachedIter`, `CachedPeek`, and `CloneCached`; `TimedEntry<V>` is `pub(crate)` and not part of
 the public surface. Size/iter/evict semantics follow
-[design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md).
+[design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md). Insertion
+is `set(k, v)` for the plain path, or the `set_with(k, v) -> TtlSortedSetBuilder` entry-setter
+for a per-entry TTL override (`.ttl(Duration)`) and/or opt-in post-insertion eviction
+(`.evict()`); the terminal `.set() -> Option<V>` returns the displaced unexpired value.
 
 ## TTL-5
 

@@ -30,7 +30,9 @@ methods. Each of the six concrete sharded types also exposes inherent shims that
 values and take call-site priority over the `ConcurrentCachedExt` aliases: `get`, `set`, `remove`,
 `remove_entry`, `delete`, `reset`, `contains`, and `peek` (`contains` and `peek` are peek-based,
 infallible, `&self`; `peek` returns a clone of the live value with no recency/TTL/metrics
-effects).
+effects). The same `peek` contract is also reachable generically through the `ConcurrentCachePeek`
+trait (`cache_peek` plus a defaulted `peek` alias, `Result<Option<V>, Infallible>` on these six
+stores); the inherent shim keeps call-site priority on the concrete types.
 Metrics are exposed through the trait per
 [design/0012-concurrent-metrics-trait.md](design/0012-concurrent-metrics-trait.md).
 See [traits-concurrent.md](traits-concurrent.md).

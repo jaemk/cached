@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
 use crate::{
-    CacheMetrics, CachedIter, CachedPeek, ConcurrentCacheBase, ConcurrentCached,
-    ConcurrentCloneCached, Expires,
+    CacheMetrics, CachedIter, CachedPeek, ConcurrentCacheBase, ConcurrentCachePeek,
+    ConcurrentCached, ConcurrentCloneCached, Expires,
 };
 #[cfg(feature = "async_core")]
 use core::future::Future;
@@ -699,6 +699,17 @@ where
             .read()
             .cache_peek(k)
             .is_some_and(|v| !v.is_expired()))
+    }
+}
+
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedExpiringLruCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone,
+    V: Clone + Expires,
+    H: ShardHasher<K>,
+{
+    fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        Ok(self.peek(k))
     }
 }
 

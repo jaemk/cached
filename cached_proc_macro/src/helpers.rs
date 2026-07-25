@@ -405,7 +405,6 @@ pub(super) fn find_value_type(
 /// return type rather than macro-internal call-site code.
 pub(super) fn clone_return_assertion(value_ty: &TokenStream2, span: Span) -> TokenStream2 {
     quote_spanned! {span=>
-        #[allow(non_snake_case)]
         fn __cached_assert_return_type_implements_clone<__CachedAssertClone: ::std::clone::Clone>() {}
         __cached_assert_return_type_implements_clone::<#value_ty>();
     }

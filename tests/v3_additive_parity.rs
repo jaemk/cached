@@ -292,6 +292,352 @@ async fn concurrent_async_try_get_or_set_with_ok_err_and_hit() {
     assert_eq!(r, Ok(10), "hit returns the cached value");
 }
 
+// ── ConcurrentCachePeek trait ────────────────────────────────────────────────
+
+// Generic over the trait: only compiles/works for stores that implement
+// `ConcurrentCachePeek`, exercising the trait method (not an inherent shim).
+fn peek_via_trait<S: cached::ConcurrentCachePeek<u32, String>>(s: &S, k: u32) -> Option<String> {
+    s.cache_peek(&k).expect("sharded peek is infallible")
+}
+
+// Value-generic version of the above so expiring stores (whose values impl
+// `Expires`) can be peeked through the trait rather than an inherent shim.
+fn peek_trait_val<V, S>(s: &S, k: u32) -> Option<V>
+where
+    S: cached::ConcurrentCachePeek<u32, V>,
+    S::Error: std::fmt::Debug,
+{
+    s.cache_peek(&k).expect("sharded peek is infallible")
+}
+
+#[test]
+fn concurrent_peek_trait_returns_value_and_ignores_metrics() {
+    let c: ShardedUnboundCache<u32, String> = ShardedUnboundCache::new();
+    c.set(1, "ten".to_string());
+    let hits_before = c.metrics().hits;
+    let misses_before = c.metrics().misses;
+
+    assert_eq!(peek_via_trait(&c, 1), Some("ten".to_string()));
+    assert_eq!(peek_via_trait(&c, 2), None, "missing key peeks as None");
+
+    let m = c.metrics();
+    assert_eq!(m.hits, hits_before, "trait peek must not count a hit");
+    assert_eq!(m.misses, misses_before, "trait peek must not count a miss");
+}
+
+#[test]
+fn concurrent_peek_trait_does_not_promote_lru_recency() {
+    use cached::ShardedLruCache;
+    // shards = 1 so all keys share one LRU order.
+    let c: ShardedLruCache<u32, String> = ShardedLruCache::builder()
+        .max_size(2)
+        .shards(1)
+        .build()
+        .unwrap();
+    c.set(1, "ten".to_string());
+    c.set(2, "twenty".to_string());
+    // A trait peek of key 1 must NOT promote it; inserting key 3 evicts key 1.
+    assert_eq!(peek_via_trait(&c, 1), Some("ten".to_string()));
+    c.set(3, "thirty".to_string());
+    assert_eq!(
+        peek_via_trait(&c, 1),
+        None,
+        "peeked key must still be evicted first"
+    );
+    assert_eq!(peek_via_trait(&c, 2), Some("twenty".to_string()));
+    assert_eq!(peek_via_trait(&c, 3), Some("thirty".to_string()));
+}
+
+#[test]
+fn concurrent_peek_trait_alias_matches_cache_peek() {
+    use cached::ConcurrentCachePeek;
+    let c: ShardedUnboundCache<u32, String> = ShardedUnboundCache::new();
+    c.set(1, "ten".to_string());
+    // Fully-qualified so the defaulted trait alias is reached rather than the
+    // inherent `peek` shim, which wins on method-call syntax.
+    let via_alias = ConcurrentCachePeek::peek(&c, &1).unwrap();
+    let via_core = ConcurrentCachePeek::cache_peek(&c, &1).unwrap();
+    assert_eq!(via_alias, via_core);
+    assert_eq!(via_alias, Some("ten".to_string()));
+    assert_eq!(ConcurrentCachePeek::peek(&c, &2).unwrap(), None);
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn concurrent_peek_trait_expired_reads_none() {
+    use cached::ShardedTtlCache;
+    let c: ShardedTtlCache<u32, String> = ShardedTtlCache::new(Duration::from_millis(20));
+    c.set(1, "ten".to_string());
+    assert_eq!(peek_via_trait(&c, 1), Some("ten".to_string()));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(
+        peek_via_trait(&c, 1),
+        None,
+        "expired entry must peek as None through the trait"
+    );
+}
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn concurrent_peek_trait_lru_ttl_expired_and_no_refresh() {
+    use cached::{ConcurrentCachePeek, ShardedLruTtlCache};
+
+    // (1) Expired-by-TTL reads None through the trait (ShardedLruTtlCache was
+    // uncovered at the trait level; only ShardedTtlCache was exercised before).
+    let c: ShardedLruTtlCache<u32, String> = ShardedLruTtlCache::new(8, Duration::from_millis(20));
+    c.set(1, "ten".to_string());
+    assert_eq!(peek_trait_val::<String, _>(&c, 1), Some("ten".to_string()));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(
+        peek_trait_val::<String, _>(&c, 1),
+        None,
+        "expired LruTtl entry must peek None through the trait"
+    );
+
+    // (2) With refresh_on_hit enabled, the trait `cache_peek` must NOT renew the
+    // TTL. Peek repeatedly across a span well beyond the TTL; a correct peek never
+    // extends expiry, so the entry dies despite the peeks. A buggy peek that
+    // refreshed would keep it alive indefinitely.
+    let c: ShardedLruTtlCache<u32, String> = ShardedLruTtlCache::builder()
+        .refresh_on_hit(true)
+        .max_size(64)
+        .ttl(Duration::from_millis(40))
+        .shards(1)
+        .build()
+        .unwrap();
+    c.set(1, "live".to_string());
+    assert_eq!(
+        ConcurrentCachePeek::cache_peek(&c, &1).unwrap(),
+        Some("live".to_string()),
+        "live entry must peek through the trait"
+    );
+    for _ in 0..6 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Each peek would renew a buggy refresh_on_hit impl; a correct one never does.
+        let _ = ConcurrentCachePeek::cache_peek(&c, &1).unwrap();
+    }
+    assert_eq!(
+        ConcurrentCachePeek::cache_peek(&c, &1).unwrap(),
+        None,
+        "trait peek must not renew TTL under refresh_on_hit; entry must expire"
+    );
+}
+
+#[test]
+fn concurrent_peek_trait_expiring_reads_none_when_expired() {
+    use cached::{Expires, ShardedExpiringCache, ShardedExpiringLruCache};
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct Val {
+        id: u32,
+        expired: bool,
+    }
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            self.expired
+        }
+    }
+
+    // ShardedExpiringCache: an `is_expired()` value must read None through the trait.
+    let c: ShardedExpiringCache<u32, Val> = ShardedExpiringCache::new();
+    c.set(
+        1,
+        Val {
+            id: 1,
+            expired: false,
+        },
+    );
+    c.set(
+        2,
+        Val {
+            id: 2,
+            expired: true,
+        },
+    );
+    assert_eq!(peek_trait_val::<Val, _>(&c, 1).map(|v| v.id), Some(1));
+    assert_eq!(
+        peek_trait_val::<Val, _>(&c, 2),
+        None,
+        "expired value must peek None through the trait"
+    );
+
+    // ShardedExpiringLruCache: same expiry guarantee through the trait.
+    let c: ShardedExpiringLruCache<u32, Val> = ShardedExpiringLruCache::new(8);
+    c.set(
+        1,
+        Val {
+            id: 1,
+            expired: false,
+        },
+    );
+    c.set(
+        2,
+        Val {
+            id: 2,
+            expired: true,
+        },
+    );
+    assert_eq!(peek_trait_val::<Val, _>(&c, 1).map(|v| v.id), Some(1));
+    assert_eq!(
+        peek_trait_val::<Val, _>(&c, 2),
+        None,
+        "expired value must peek None through the trait"
+    );
+}
+
+#[test]
+fn concurrent_peek_trait_expiring_lru_does_not_promote_recency() {
+    use cached::{ConcurrentCachePeek, Expires, ShardedExpiringLruCache};
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct Val(u32);
+    impl Expires for Val {
+        fn is_expired(&self) -> bool {
+            false
+        }
+    }
+
+    // shards = 1 so all keys share one LRU order; a trait peek must not promote.
+    let c: ShardedExpiringLruCache<u32, Val> = ShardedExpiringLruCache::builder()
+        .max_size(2)
+        .shards(1)
+        .build()
+        .unwrap();
+    c.set(1, Val(10));
+    c.set(2, Val(20));
+    // Peek key 1 through the trait; it must NOT be promoted, so inserting key 3
+    // evicts key 1.
+    assert_eq!(
+        ConcurrentCachePeek::cache_peek(&c, &1)
+            .unwrap()
+            .map(|v| v.0),
+        Some(10)
+    );
+    c.set(3, Val(30));
+    assert_eq!(
+        ConcurrentCachePeek::cache_peek(&c, &1).unwrap(),
+        None,
+        "peeked key must still be evicted first"
+    );
+    assert_eq!(
+        ConcurrentCachePeek::cache_peek(&c, &2)
+            .unwrap()
+            .map(|v| v.0),
+        Some(20)
+    );
+    assert_eq!(
+        ConcurrentCachePeek::cache_peek(&c, &3)
+            .unwrap()
+            .map(|v| v.0),
+        Some(30)
+    );
+}
+
+#[test]
+fn prelude_exports_concurrent_cache_peek() {
+    // Proves `ConcurrentCachePeek` is reachable via the prelude glob: the generic
+    // bound below names the trait imported only through `cached::prelude::*`.
+    use cached::ShardedUnboundCache;
+    use cached::prelude::*;
+
+    fn peek_generic<S>(s: &S, k: u32) -> Option<u32>
+    where
+        S: ConcurrentCachePeek<u32, u32>,
+        S::Error: std::fmt::Debug,
+    {
+        s.cache_peek(&k).expect("infallible")
+    }
+
+    let c: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::new();
+    c.set(1, 10);
+    assert_eq!(peek_generic(&c, 1), Some(10));
+    assert_eq!(peek_generic(&c, 2), None);
+}
+
+// ── ConcurrentCachedExt::try_get_or_set_with ─────────────────────────────────
+
+// Generic over the ext trait so the alias (not the inherent shim) is exercised.
+fn ext_try_get_or_set_with<S, F>(s: &S, k: u32, f: F) -> Result<u32, &'static str>
+where
+    S: cached::ConcurrentCachedExt<u32, u32>,
+    F: FnOnce() -> Result<u32, &'static str>,
+{
+    s.try_get_or_set_with(k, f)
+        .expect("sharded store is infallible")
+}
+
+#[test]
+fn concurrent_ext_try_get_or_set_with_alias() {
+    let c: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::new();
+
+    // Miss + Err: nothing stored, inner Err returned.
+    assert_eq!(ext_try_get_or_set_with(&c, 1, || Err("nope")), Err("nope"));
+    assert_eq!(c.get(&1), None, "failed init must not store");
+
+    // Miss + Ok: stored and returned.
+    assert_eq!(ext_try_get_or_set_with(&c, 1, || Ok(10)), Ok(10));
+    assert_eq!(c.get(&1), Some(10));
+
+    // Hit: closure must not run.
+    let ran = Arc::new(AtomicUsize::new(0));
+    let ran2 = ran.clone();
+    let r = ext_try_get_or_set_with(&c, 1, move || {
+        ran2.fetch_add(1, Ordering::Relaxed);
+        Ok(99)
+    });
+    assert_eq!(r, Ok(10), "hit returns the cached value");
+    assert_eq!(
+        ran.load(Ordering::Relaxed),
+        0,
+        "hit must not run the closure"
+    );
+}
+
+#[test]
+fn concurrent_ext_try_get_or_set_with_on_bounded_lru() {
+    // Probe the alias on a bounded (LRU) store, not just the unbounded one. The
+    // hit path clones the stored value (V: Clone) and must not run the closure;
+    // the miss+Err path must store nothing; a stored value participates in the
+    // LRU bound.
+    use cached::ConcurrentCachedExt;
+
+    let c: ShardedLruCache<u32, u32> = ShardedLruCache::builder()
+        .max_size(2)
+        .shards(1)
+        .build()
+        .unwrap();
+
+    // Miss + Err: nothing stored.
+    assert_eq!(ext_try_get_or_set_with(&c, 1, || Err("nope")), Err("nope"));
+    assert_eq!(c.get(&1), None, "failed init must not store");
+
+    // Miss + Ok on a bounded store: stored and returned.
+    assert_eq!(ext_try_get_or_set_with(&c, 1, || Ok(10)), Ok(10));
+    assert_eq!(ext_try_get_or_set_with(&c, 2, || Ok(20)), Ok(20));
+
+    // Hit: closure must not run; cached value returned.
+    let ran = Arc::new(AtomicUsize::new(0));
+    let ran2 = ran.clone();
+    let r = ext_try_get_or_set_with(&c, 1, move || {
+        ran2.fetch_add(1, Ordering::Relaxed);
+        Ok(99)
+    });
+    assert_eq!(r, Ok(10), "hit returns the cached value");
+    assert_eq!(
+        ran.load(Ordering::Relaxed),
+        0,
+        "hit must not run the closure"
+    );
+
+    // A third distinct key stays within the size-2 bound (eviction happened).
+    assert_eq!(ext_try_get_or_set_with(&c, 3, || Ok(30)), Ok(30));
+    assert_eq!(
+        ConcurrentCachedExt::len(&c).unwrap(),
+        Some(2),
+        "bounded LRU store keeps at most max_size entries"
+    );
+}
+
 // ── retain on the map-backed stores ──────────────────────────────────────────
 
 #[test]

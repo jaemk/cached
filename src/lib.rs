@@ -282,8 +282,11 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
-  Sharded stores also do not implement `CachedIter` or `CachedPeek`. Code that is generic over
-  `CachedIter<K, V>` or uses `.iter()` / `cache_peek` must use non-sharded stores instead.
+  Sharded stores do not implement the single-owner `CachedIter` or `CachedPeek` traits; code that
+  is generic over `CachedIter<K, V>` or uses `.iter()` must use a non-sharded store. They do,
+  however, provide a side-effect-free read via the [`ConcurrentCachePeek`] trait (`cache_peek`,
+  returning an owned `Option<V>`), with the inherent `peek` shim taking call-site priority on the
+  concrete sharded types.
   The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
@@ -699,7 +702,7 @@ pub use stores::{HasEvict, NoEvict};
 pub use stores::{
     LruTtlCache, LruTtlCacheBuilder, ShardedLruTtlCache, ShardedLruTtlCacheBase,
     ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder,
-    TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder,
+    TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder, TtlSortedSetBuilder,
 };
 #[cfg(feature = "redb_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
@@ -838,8 +841,9 @@ impl<C, B> std::ops::Deref for KeyedCache<C, B> {
 pub mod prelude {
     pub use crate::{
         CacheEvict, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek, CachedRead,
-        CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl,
-        ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires, SerializeCached,
+        CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
+        ConcurrentCacheTtl, ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires,
+        SerializeCached,
     };
 
     // Unconditional, like `ConcurrentCacheTtl` above: the trait itself is not
@@ -2067,6 +2071,58 @@ pub trait ConcurrentCacheTtl {
     fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 }
 
+/// Side-effect-free cache lookup for concurrent stores that can expose a value cheaply.
+///
+/// This is the concurrent analogue of the single-owner [`CachedPeek`] trait: a genuinely
+/// side-effect-free read through a shared (`&self`) reference. A peek does **not** update
+/// recency / LRU promotion, does **not** refresh any TTL, does **not** increment hit/miss
+/// metrics, and does **not** lazily remove expired entries. An entry whose TTL or per-value
+/// expiry has elapsed reads as `None` (it is left in place for a later `cache_get`, an
+/// explicit removal, or an `evict()` to reap).
+///
+/// Unlike [`CachedPeek`], which returns a borrowed `&V`, this trait returns an owned
+/// `Option<V>`: on the sharded stores the value lives behind a per-shard lock, so a peek
+/// clones it out rather than lending a reference across the lock boundary.
+///
+/// Only stores that can satisfy these guarantees cheaply implement it: the six in-memory
+/// sharded stores (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`,
+/// `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`). The IO stores
+/// (`RedisCache` / `RedbCache` / `AsyncRedisCache`) deliberately do **not** implement it — a
+/// server-side or on-disk read cannot promise the no-metrics / no-expiry-sweep semantics
+/// without an extra round trip, so peeking is not offered for them.
+///
+/// This trait is **not** feature-gated (like [`ConcurrentCacheEvict`] and
+/// [`ConcurrentCacheTtl`]); only the built-in stores implementing it for expiry-capable
+/// variants require `time_stores`.
+pub trait ConcurrentCachePeek<K, V>: ConcurrentCacheBase {
+    /// Retrieve a clone of the cached value for `k` without any observable side effect.
+    ///
+    /// No recency/LRU promotion, no TTL refresh, no hit/miss metrics, and no lazy removal of
+    /// expired entries; an expired entry reads as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails. The sharded implementors are
+    /// infallible (`Self::Error = Infallible`), so the outer `Result` is always `Ok`.
+    fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error>;
+
+    /// Ergonomic alias for [`cache_peek`](Self::cache_peek), mirroring
+    /// [`CachedPeek::peek`].
+    ///
+    /// On the concrete sharded types the inherent `peek(&self, &K) -> Option<V>` takes
+    /// call-site priority (like the other inherent shims such as `get`/`set`), so this trait
+    /// spelling is intended for generic code over a `ConcurrentCachePeek` bound; use
+    /// fully-qualified syntax (`ConcurrentCachePeek::peek(&store, &k)`) to reach it on a
+    /// concrete store.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    fn peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        self.cache_peek(k)
+    }
+}
+
 /// Cache operations on a store that manages its own synchronization (a shared,
 /// `&self` API with owned return values and a fallible `Error`). Implemented by the
 /// six in-memory sharded stores (`ShardedUnboundCache`, `ShardedLruCache`,
@@ -2433,6 +2489,19 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
     where
         V: Clone;
 
+    /// Return the cached value for `k`, or compute and store `f()`, propagating a closure
+    /// failure. Delegates to
+    /// [`cache_try_get_or_set_with`](ConcurrentCached::cache_try_get_or_set_with). The outer
+    /// `Result` carries the store's `Self::Error`; the inner `Result` carries the closure's
+    /// `E` (on `Err` nothing is stored).
+    fn try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &self,
+        k: K,
+        f: F,
+    ) -> Result<Result<V, E>, Self::Error>
+    where
+        V: Clone;
+
     /// Return the number of entries currently in the cache, if cheaply available.
     /// Delegates to [`cache_size`](ConcurrentCacheBase::cache_size).
     ///
@@ -2503,6 +2572,17 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
         V: Clone,
     {
         self.cache_get_or_set_with(k, f)
+    }
+
+    fn try_get_or_set_with<F: FnOnce() -> Result<V, E>, E>(
+        &self,
+        k: K,
+        f: F,
+    ) -> Result<Result<V, E>, Self::Error>
+    where
+        V: Clone,
+    {
+        self.cache_try_get_or_set_with(k, f)
     }
 
     fn len(&self) -> Result<Option<usize>, Self::Error> {
