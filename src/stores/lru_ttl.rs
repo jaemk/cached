@@ -1002,6 +1002,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
 }
 
 #[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, S> CachedGetOrSetAsync<K, V> for LruTtlCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,

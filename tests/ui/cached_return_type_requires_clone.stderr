@@ -1,0 +1,40 @@
+error[E0277]: the trait bound `NotClone: Clone` is not satisfied
+  --> tests/ui/cached_return_type_requires_clone.rs:13:26
+   |
+13 | fn not_clone_return() -> NotClone {
+   |                          ^^^^^^^^ the trait `Clone` is not implemented for `NotClone`
+   |
+note: required by a bound in `__cached_assert_return_type_implements_clone`
+  --> tests/ui/cached_return_type_requires_clone.rs:13:26
+   |
+13 | fn not_clone_return() -> NotClone {
+   |                          ^^^^^^^^ required by this bound in `__cached_assert_return_type_implements_clone`
+help: consider annotating `NotClone` with `#[derive(Clone)]`
+   |
+ 8 + #[derive(Clone)]
+ 9 | struct NotClone {
+   |
+
+error[E0308]: mismatched types
+  --> tests/ui/cached_return_type_requires_clone.rs:12:1
+   |
+12 | #[cached]
+   | ^^^^^^^^^ expected `NotClone`, found `&NotClone`
+13 | fn not_clone_return() -> NotClone {
+   |                          -------- expected `NotClone` because of return type
+   |
+   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `clone` found for struct `NotClone` in the current scope
+  --> tests/ui/cached_return_type_requires_clone.rs:12:1
+   |
+ 8 | struct NotClone {
+   | --------------- method `clone` not found for this struct
+...
+12 | #[cached]
+   | ^^^^^^^^^ method not found in `NotClone`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`
+   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)

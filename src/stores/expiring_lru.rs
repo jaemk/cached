@@ -732,6 +732,7 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> CachedPeek<K, V>
 }
 
 #[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, S> CachedGetOrSetAsync<K, V> for ExpiringLruCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,

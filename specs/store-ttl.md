@@ -30,3 +30,9 @@ These stores implement `CacheTtl` (`ttl()` / `set_ttl()` / `unset_ttl()` / `try_
 `CachedIter`, `CachedPeek`, and `CloneCached`; `TimedEntry<V>` is `pub(crate)` and not part of
 the public surface. Size/iter/evict semantics follow
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md).
+
+## TTL-5
+
+`LruTtlCache` has the LRU-family order accessors (`iter_order` / `key_order` / `value_order`)
+with `CacheValue<V, Option<Instant>>` values carrying the entry expiry via `expires_at()`. See
+[store-lru.md](store-lru.md) LRU-5.

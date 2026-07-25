@@ -1,0 +1,53 @@
+error[E0277]: the trait bound `NotClone: Clone` is not satisfied
+  --> tests/ui/cached_with_cached_flag_return_type_requires_clone.rs:15:31
+   |
+15 | fn not_clone_flag_return() -> cached::Return<NotClone> {
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `NotClone`
+   |
+   = note: required for `Return<NotClone>` to implement `Clone`
+note: required by a bound in `__cached_assert_return_type_implements_clone`
+  --> tests/ui/cached_with_cached_flag_return_type_requires_clone.rs:15:31
+   |
+15 | fn not_clone_flag_return() -> cached::Return<NotClone> {
+   |                               ^^^^^^ required by this bound in `__cached_assert_return_type_implements_clone`
+help: consider annotating `NotClone` with `#[derive(Clone)]`
+   |
+10 + #[derive(Clone)]
+11 | struct NotClone {
+   |
+
+error[E0308]: mismatched types
+  --> tests/ui/cached_with_cached_flag_return_type_requires_clone.rs:14:1
+   |
+14 | #[cached(with_cached_flag = true)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Return<NotClone>`, found `&Return<NotClone>`
+15 | fn not_clone_flag_return() -> cached::Return<NotClone> {
+   |                               ------------------------ expected `Return<NotClone>` because of return type
+   |
+   = note: expected struct `Return<NotClone>`
+           found reference `&Return<NotClone>`
+   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `clone` exists for struct `Return<NotClone>`, but its trait bounds were not satisfied
+  --> tests/ui/cached_with_cached_flag_return_type_requires_clone.rs:14:1
+   |
+10 | struct NotClone {
+   | --------------- doesn't satisfy `NotClone: Clone`
+...
+14 | #[cached(with_cached_flag = true)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `Return<NotClone>` due to unsatisfied trait bounds
+   |
+  ::: cached_proc_macro_types/src/lib.rs
+   |
+   | pub struct Return<T> {
+   | -------------------- doesn't satisfy `Return<NotClone>: Clone`
+   |
+   = note: the following trait bounds were not satisfied:
+           `NotClone: Clone`
+           which is required by `Return<NotClone>: Clone`
+   = note: this error originates in the attribute macro `cached` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `NotClone` with `#[derive(Clone)]`
+   |
+10 + #[derive(Clone)]
+11 | struct NotClone {
+   |

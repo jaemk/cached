@@ -64,6 +64,33 @@ fn compile_fail_sharded_constructor() {
     t.compile_fail("tests/ui/sharded_base_custom_hasher_constructor.rs");
 }
 
+// `#[cached]` clones the cached value on every insert and cache hit, so the
+// return type must implement `Clone`. This is a real `E0277` from rustc (like
+// `compile_fail_sharded_constructor` above), not a macro-defined `syn::Error`,
+// so its golden is pinned to the toolchain in `rust-toolchain.toml` the same
+// way. Asserts the diagnostic is spanned at the function's return type rather
+// than at macro-generated internals (the `.clone()`/`.to_owned()` calls deep
+// in the expansion).
+#[test]
+#[cfg(feature = "proc_macro")]
+fn compile_fail_cached_return_type_requires_clone() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/cached_return_type_requires_clone.rs");
+}
+
+// Companion to the above for `with_cached_flag = true`: the cached value type
+// is then the `cached::Return<T>` wrapper, so the return-type `Clone`
+// assertion is spliced with `Return<T>` (not bare `T`) as its argument. This
+// pins that a non-`Clone` inner type still yields a clear `E0277` spanned at
+// the function's return type through the assertion, covering the distinct
+// wrapper-typed value path rather than only the bare-value path above.
+#[test]
+#[cfg(feature = "proc_macro")]
+fn compile_fail_cached_with_cached_flag_return_type_requires_clone() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/cached_with_cached_flag_return_type_requires_clone.rs");
+}
+
 // One negative trybuild case per *semantic* compile error the macros raise
 // (i.e. errors we define for invalid attribute/signature states). Pure
 // syn-parser pass-through messages for malformed user strings (bad `ty` /
@@ -7186,6 +7213,56 @@ mod generic_where_tests {
         assert_eq!(generic_cached_where(7u32), "7");
         assert_eq!(generic_cached_where(7u32), "7");
         assert_eq!(generic_cached_where(8u64), "8");
+    }
+
+    // Regression guard for the return-type `Clone` assertion inside a *generic*
+    // function body. The assertion splices a nested
+    // `fn __cached_assert_return_type_implements_clone<..: Clone>() {}` item plus
+    // a call `::<#value_ty>()` into the generated body; a naive splice that named
+    // an outer generic parameter in the nested item's signature would trip E0401
+    // ("can't use generic parameters from outer item"). Here the enclosing fn is
+    // generic over `T` while the cached value type is the concrete user-defined
+    // `Clone` struct `Wrapped`, so the assertion names `Wrapped` (not `T`) and
+    // must compile. (A bare generic-parameter return such as `-> T` is not
+    // expressible under `#[cached]` at all: the cache lives in a `static`, which
+    // cannot capture an outer generic parameter - so `value_ty` is always a
+    // concrete type in compiling code, and this exercises that reachable shape.)
+    #[derive(Clone, PartialEq, Debug)]
+    struct Wrapped {
+        inner: String,
+    }
+
+    #[cached(key = "String", convert = r#"{ x.to_string() }"#)]
+    fn generic_cached_concrete_clone_value<T>(x: T) -> Wrapped
+    where
+        T: std::string::ToString + Clone,
+    {
+        Wrapped {
+            inner: x.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_generic_cached_concrete_clone_value() {
+        let a = generic_cached_concrete_clone_value(7u32);
+        assert_eq!(
+            a,
+            Wrapped {
+                inner: "7".to_string()
+            }
+        );
+        // second call for the same key hits the cache and returns a clone
+        let b = generic_cached_concrete_clone_value(7u32);
+        assert_eq!(a, b);
+        // a different monomorphization (u64) still shares the same String-keyed
+        // store and computes a distinct value
+        let c = generic_cached_concrete_clone_value(8u64);
+        assert_eq!(
+            c,
+            Wrapped {
+                inner: "8".to_string()
+            }
+        );
     }
 
     // Minimal in-test `ConcurrentCached` store. Exercises the

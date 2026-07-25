@@ -4,7 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use std::ops::Deref;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -369,6 +369,45 @@ pub(super) fn find_value_type(
                 }
             }
         },
+    }
+}
+
+/// Emits a compile-time assertion that `value_ty` (the type actually stored/
+/// returned by the generated cache - the unwrapped `T` of a `Result<T, E>`/
+/// `Option<T>` return, or the `cached::Return<T>` wrapper under
+/// `with_cached_flag`) implements `Clone`.
+///
+/// Without this, a non-`Clone` return type only fails deep inside the
+/// generated cache internals (the `.clone()` call in the `cache_set` block, or
+/// the `.to_owned()` call on a cache hit), producing a trait-bound error that
+/// points at macro-generated code rather than at the user's return type -
+/// confusing and hard to act on.
+///
+/// The assertion is a local, non-generic-over-`value_ty` helper fn plus a
+/// call that names `value_ty` as its turbofish argument, e.g.
+/// `fn __cached_assert_return_type_implements_clone<T: Clone>() {}` followed
+/// by `__cached_assert_return_type_implements_clone::<#value_ty>();`. This
+/// works even when `value_ty` names a generic parameter of the enclosing
+/// function (or, for `in_impl` methods, of the enclosing `impl` block):
+/// naming an in-scope generic parameter as a type argument to another
+/// generic call is ordinary code, not a new item definition, so it does not
+/// hit E0401 ("can't use generic parameters from outer item"). Rust checks
+/// the `Clone` bound against the enclosing generic's own declared bounds at
+/// definition time, so a generic function whose signature already requires
+/// `T: Clone` continues to compile, while one that does not gets a precise
+/// diagnostic.
+///
+/// `value_ty`'s tokens carry their original source spans (they are threaded
+/// through unmodified from the parsed return type), so the turbofish
+/// argument alone is enough to underline the user's return type in the
+/// resulting error; `span` (the return type's span) additionally covers the
+/// surrounding generated syntax so the whole assertion is attributed to the
+/// return type rather than macro-internal call-site code.
+pub(super) fn clone_return_assertion(value_ty: &TokenStream2, span: Span) -> TokenStream2 {
+    quote_spanned! {span=>
+        #[allow(non_snake_case)]
+        fn __cached_assert_return_type_implements_clone<__CachedAssertClone: ::std::clone::Clone>() {}
+        __cached_assert_return_type_implements_clone::<#value_ty>();
     }
 }
 

@@ -227,7 +227,11 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   fallible) and `ConcurrentCached::cache_set` returns a `#[must_use] Result<Option<V>, Error>`.
   The concurrent family returns owned values because its implementors include IO stores that
   serialize entries and cannot hand out a borrow into the store, and it is fallible because those
-  stores can fail; the single-owner family stays infallible and borrow-returning. A prelude glob
+  stores can fail; the single-owner family stays infallible and borrow-returning. Lookup keys
+  differ the same way: single-owner `cache_get` accepts any borrowed form of the key
+  (`&Q where K: Borrow<Q>`, so `cache.get("a")` works on an `LruCache<String, _>`), while the
+  concurrent family takes `&K` exactly (`store.get(&"a".to_string())` on a sharded store) because
+  its IO-store implementors serialize the full key. A prelude glob
   can bring both families into scope without collision.
 - **The inherent-method asymmetry between the two families is deliberate.** On a sharded store the
   short `set`/`get`/`len` calls resolve to *inherent* methods (infallible, `&self`), so

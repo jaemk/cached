@@ -38,7 +38,7 @@ the item stays here for history.
 | [0017](0017-redis-feature-axes.md) | Orthogonal redis runtime x TLS features | Capability axis resolved; TLS orthogonality needs research |
 | [0018](0018-redis-key-escaping.md) | Escape redis namespace/prefix/key segments | Needs research |
 | [0019](0019-ahash-default-feature.md) | Drop `ahash` from default features | Declined (kept in defaults) |
-| [0020](0020-argument-error-unification.md) | Unify single-variant argument errors | Needs research |
+| [0020](0020-argument-error-unification.md) | Unify single-variant argument errors | Declined (split kept; `CacheSetError` removed instead) |
 | [0021](0021-redb-refresh-on-hit-cost.md) | Amortize redb refresh-on-hit write txns | Needs research |
 | [0022](0022-serialize-cached-set-ref-return.md) | `cache_set_ref` returning previous value | Implemented |
 | [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Declined |
