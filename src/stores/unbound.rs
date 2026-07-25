@@ -408,6 +408,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> CachedRead<K, V> for UnboundCache<K, V, S>
 }
 
 #[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, S> CachedGetOrSetAsync<K, V> for UnboundCache<K, V, S>
 where
     K: Hash + Eq + Clone + Send,

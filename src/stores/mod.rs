@@ -495,6 +495,7 @@ where
 }
 
 #[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, S> CachedGetOrSetAsync<K, V> for HashMap<K, V, S>
 where
     K: Hash + Eq + Clone + Send,

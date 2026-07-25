@@ -25,10 +25,21 @@ See [metrics.md](metrics.md).
 Implements `Cached`, `CachedPeek`, and `CachedIter`. Size/iter/evict semantics follow
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md).
 Inherent `retain(keep)` removes entries failing the predicate (firing `on_evict` and counting
-evictions); it exists on every unsync store with an eviction dimension. The expiry-aware stores
+evictions); it exists on every unsync map store. The expiry-aware stores
 (`TtlCache`, `LruTtlCache`, `ExpiringCache`, `ExpiringLruCache`) share the contract but also
 remove expired entries regardless of the predicate; `TtlSortedCache` has the differently-purposed
-`retain_latest`; `UnboundCache` has no `retain` (no eviction dimension).
+`retain_latest`; on `UnboundCache` (no eviction dimension) `retain` is a plain predicate filter
+that fires `on_evict` per removed entry but counts no evictions.
 `set_max_size(n) -> Option<usize>`
 resizes a live cache (returns the previous capacity, panics on zero). `try_set_max_size(n) ->
 Result<Option<usize>, SetMaxSizeError>` is the non-panicking variant.
+
+## LRU-5
+
+Order accessors, shared across the LRU family (`LruCache`, `LruTtlCache`, `ExpiringLruCache`):
+`iter_order() -> Vec<(K, CacheValue<V, M>)>`, `key_order() -> Vec<K>`, and
+`value_order() -> Vec<CacheValue<V, M>>`, all most-recently-used first. `CacheValue<V, M = ()>`
+(exported at the crate root) wraps the value with per-entry metadata: `M = ()` for `LruCache`
+and `ExpiringLruCache`, `M = Option<Instant>` for `LruTtlCache`, read via `expires_at()`. The
+wrapper `Deref`s to `V`, exposes `value()` / `into_value()`, and compares equal against bare
+values (`PartialEq<V>`).

@@ -33,3 +33,9 @@ check expiry themselves. See [design/0030-force-refresh-result-fallback-interact
 `CachedIter::iter()` filters expired entries but does not remove them; call `evict()`
 (`CacheEvict`) periodically for high-cardinality workloads. See
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md).
+
+## EXPIRE-6
+
+`ExpiringLruCache` has the LRU-family order accessors (`iter_order` / `key_order` /
+`value_order`) with `CacheValue<V>` values (no per-entry metadata; expiry lives on the value
+itself via `Expires`). See [store-lru.md](store-lru.md) LRU-5.

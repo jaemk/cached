@@ -601,6 +601,13 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // The generated cache internals `.clone()` the value on `cache_set` and
+    // `.to_owned()` it on a cache hit; without a `Clone` bound on the cached
+    // value type those calls fail deep inside macro-generated code with an
+    // opaque trait-bound error. Emit a clear, precisely-spanned assertion
+    // instead (see `clone_return_assertion`).
+    let clone_type_assertion = clone_return_assertion(&cache_value_ty, output_span);
+
     // make the cache identifier
     let cache_ident = match args.name {
         Some(ref name) => {
@@ -1333,6 +1340,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #body_static
             use #krate::Cached;
             #clone_cached_import
+            #clone_type_assertion
             let __cached_key = #key_convert_block;
             #do_set_return_block
         }

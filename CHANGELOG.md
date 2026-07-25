@@ -39,10 +39,11 @@
   `ConcurrentCachedAsync::async_cache_try_get_or_set_with` (both provided): fallible-init
   get-or-set returning `Result<Result<V, E>, Self::Error>`, store error outer, closure error
   inner. On a closure `Err` nothing is stored.
-- `retain(keep)` on `TtlCache` and `ExpiringCache`, completing `retain` across the
-  expiry-aware stores. Expired entries are removed regardless of the predicate; each
-  removed entry fires `on_evict` and counts an eviction. `UnboundCache` intentionally
-  has no `retain`: it has no eviction dimension backing the operation.
+- `retain(keep)` on `UnboundCache`, `TtlCache`, and `ExpiringCache`, completing `retain`
+  across the map stores. Each removed entry fires `on_evict`. On the expiry-aware stores
+  expired entries are removed regardless of the predicate and every removal counts an
+  eviction; on `UnboundCache` (no expiry dimension, no eviction counter) an entry
+  survives exactly when `keep` returns `true`.
 - `TtlSortedCache::capacity() -> Option<usize>`: the configured size bound (`None` when
   unbounded), plus the missing `doc(alias = "capacity")` on `TtlSortedCacheBuilder::max_size`.
 
@@ -56,6 +57,12 @@
   corrected to match.
 - Macro docs note the `Arc<T>` return pattern for expensive-to-clone values ([#64]): the
   cache stores the `Arc`, hits clone only the pointer.
+- docs.rs feature badges on the `async_core`-gated `CachedGetOrSetAsync` and
+  `ConcurrentCachedAsync` impls for the in-memory and sharded stores (and `HashMap`), which
+  previously rendered as unconditionally available.
+- `#[cached]` on a function whose return type does not implement `Clone` now emits a clear
+  `Clone`-bound error spanned at the return type, ahead of the opaque errors from the
+  generated internals.
 
 [#64]: https://github.com/jaemk/cached/issues/64
 

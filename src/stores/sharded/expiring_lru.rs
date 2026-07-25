@@ -703,6 +703,7 @@ where
 }
 
 #[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedExpiringLruCacheBase<K, V, H>
 where
     K: Hash + Eq + Clone + Send + Sync,
