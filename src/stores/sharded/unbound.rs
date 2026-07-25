@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached};
+use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCached};
 #[cfg(feature = "async_core")]
 use core::future::Future;
 
@@ -450,6 +450,17 @@ where
     {
         let shard = self.shard_of(k);
         Ok(shard.lock.read().contains_key(k))
+    }
+}
+
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedUnboundCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
+    fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        Ok(self.peek(k))
     }
 }
 

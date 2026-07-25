@@ -10,9 +10,12 @@
   `TtlSortedCache` set `Cached::Error = std::convert::Infallible`, so every built-in in-memory
   store is now infallible. Call sites binding `CacheSetError` or matching `TimeBounds` must
   drop the error handling.
-- `TtlSortedCache` `insert` / `insert_ttl` / `insert_evict` / `insert_ttl_evict` are renamed to
-  `set` / `set_with_ttl` / `set_evict` / `set_with_ttl_evict` and return `Option<V>` (the
-  displaced unexpired value) instead of `Result<Option<V>, CacheSetError>`.
+- `TtlSortedCache` `insert` / `insert_ttl` / `insert_evict` / `insert_ttl_evict` are replaced by
+  `set(k, v)` plus the `set_with(k, v)` entry-setter builder: chain `.ttl(Duration)` for a
+  per-entry TTL override and `.evict()` to opt into the post-insertion eviction sweep, then call
+  the terminal `.set() -> Option<V>` to insert and get back the displaced unexpired value.
+  `TtlSortedSetBuilder` is re-exported from the crate root. `Option<V>` replaces
+  `Result<Option<V>, CacheSetError>` on every one of these paths.
 - `iter_order` / `value_order` on `LruCache`, `LruTtlCache`, and `ExpiringLruCache` return
   `CacheValue`-wrapped values: `iter_order() -> Vec<(K, CacheValue<V, M>)>` and
   `value_order() -> Vec<CacheValue<V, M>>`, one shape across the LRU family. `M` is per-entry
@@ -27,7 +30,8 @@
   values, `value()` / `into_value()`, and `expires_at()` when `M = Option<Instant>`.
 - Inherent `peek(&self, &K) -> Option<V>` on all six sharded stores: returns a clone of the
   live value with no recency update, no TTL refresh, no hit/miss metrics, and no lazy removal
-  of expired entries. Takes call-site priority like the other inherent shims.
+  of expired entries. Takes call-site priority like the other inherent shims; the same contract
+  is also reachable generically through the new `ConcurrentCachePeek` trait below.
 - `Builder::new()` on the in-memory and sharded builders (all 13), equivalent to the store's
   `::builder()`, matching the IO builders' public constructors.
 - `CachedExt::capacity` / `CachedExt::evictions`: ergonomic aliases for `cache_capacity` /
@@ -38,7 +42,14 @@
 - `ConcurrentCached::cache_try_get_or_set_with` and
   `ConcurrentCachedAsync::async_cache_try_get_or_set_with` (both provided): fallible-init
   get-or-set returning `Result<Result<V, E>, Self::Error>`, store error outer, closure error
-  inner. On a closure `Err` nothing is stored.
+  inner. On a closure `Err` nothing is stored. `ConcurrentCachedExt::try_get_or_set_with` is the
+  short-alias form, delegating to `ConcurrentCached::cache_try_get_or_set_with`.
+- `ConcurrentCachePeek`: a side-effect-free `cache_peek(&self, &K) -> Result<Option<V>,
+  Self::Error>` (plus a defaulted `peek` alias) for concurrent stores. No recency/LRU promotion,
+  no TTL refresh, no hit/miss metrics, and no lazy removal of expired entries; an expired entry
+  reads as `None`. Implemented by the six sharded stores (`Self::Error = Infallible`);
+  `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately do not implement it. In
+  `cached::prelude`.
 - `retain(keep)` on `UnboundCache`, `TtlCache`, and `ExpiringCache`, completing `retain`
   across the map stores. Each removed entry fires `on_evict`. On the expiry-aware stores
   expired entries are removed regardless of the predicate and every removal counts an

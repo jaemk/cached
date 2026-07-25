@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
 use crate::{
-    CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheTtl, ConcurrentCached,
-    ConcurrentCloneCached,
+    CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
+    ConcurrentCacheTtl, ConcurrentCached, ConcurrentCloneCached,
 };
 #[cfg(feature = "async_core")]
 use core::future::Future;
@@ -833,6 +833,17 @@ where
         Ok(guard
             .cache_peek(k)
             .is_some_and(|entry| entry.expires_at.is_none_or(|t| Instant::now() < t)))
+    }
+}
+
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedLruTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+    H: ShardHasher<K>,
+{
+    fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        Ok(self.peek(k))
     }
 }
 

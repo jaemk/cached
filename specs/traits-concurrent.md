@@ -28,18 +28,24 @@ required with no `V: Clone + Send` bound (its get-based implementors are `AsyncR
 `RedbCache`), and `async_cache_try_get_or_set_with` mirrors the sync default.
 `ConcurrentCachedExt` provides deduplicated short-name methods (`get`, `set`, `remove`,
 `remove_entry`, `delete`, `contains` (no `V: Clone` bound), `clear`, `reset`, `get_or_set_with`,
-`len`, `is_empty`, `hits`, `misses`, `capacity`, `evictions`); it does not forward
-`cache_reset_metrics` directly. The six sharded concrete types also expose inherent
-`contains(&self, &K) -> bool` and `peek(&self, &K) -> Option<V>` (both peek-based: no recency,
-TTL, or metrics effects; `peek` clones the live value) that take call-site priority over the
-ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `reset`).
+`try_get_or_set_with`, `len`, `is_empty`, `hits`, `misses`, `capacity`, `evictions`); it does not
+forward `cache_reset_metrics` directly. `try_get_or_set_with` delegates to
+`ConcurrentCached::cache_try_get_or_set_with`. The six sharded concrete types also expose
+inherent `contains(&self, &K) -> bool` and `peek(&self, &K) -> Option<V>` (both peek-based: no
+recency, TTL, or metrics effects; `peek` clones the live value) that take call-site priority over
+the ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `reset`).
 
 ## CTRAIT-3
 
 `ConcurrentCacheTtl` provides `&self` TTL control (`ttl()` / `set_ttl()` / `unset_ttl()` /
 `try_set_ttl()` / `refresh_on_hit()` / `set_refresh_on_hit()`) on concurrent TTL stores; the
 implementing stores expose these only through the trait, with no inherent duplicates.
-`ConcurrentCacheEvict` provides the concurrent `evict()`.
+`ConcurrentCacheEvict` provides the concurrent `evict()`. `ConcurrentCachePeek` provides
+`cache_peek(&self, &K) -> Result<Option<V>, Self::Error>` (plus a defaulted `peek` alias): a
+genuinely side-effect-free read (no recency, TTL refresh, hit/miss metrics, or lazy expiry
+removal). It is implemented only by the six sharded stores (`Self::Error = Infallible`);
+`RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately do not implement it. It is in
+`cached::prelude`.
 
 ## CTRAIT-4
 

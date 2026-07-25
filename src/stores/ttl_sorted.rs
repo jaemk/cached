@@ -628,40 +628,43 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         count
     }
 
-    /// Set k/v pair without running eviction logic. See `.set_with_ttl_evict`
-    pub fn set(&mut self, key: K, value: V) -> Option<V> {
-        self.set_with_ttl_evict(key, value, None, false)
-    }
-
-    /// Set k/v pair with explicit ttl. See `.set_with_ttl_evict`
-    pub fn set_with_ttl(&mut self, key: K, value: V, ttl: Duration) -> Option<V> {
-        self.set_with_ttl_evict(key, value, Some(ttl), false)
-    }
-
-    /// Set k/v pair and run eviction logic. See `.set_with_ttl_evict`
-    pub fn set_evict(&mut self, key: K, value: V, evict: bool) -> Option<V> {
-        self.set_with_ttl_evict(key, value, None, evict)
-    }
-
-    /// Set a k/v pair with an optional explicit TTL, then optionally run eviction logic.
+    /// Set k/v pair without running eviction logic, using the cache's default TTL.
+    ///
     /// The entry is inserted first. If a `size_limit` was specified and capacity is exceeded,
-    /// the next-to-expire entry is dropped after insertion. The eviction callback fires after
-    /// insertion, not before. Returns any existing unexpired value that was replaced.
+    /// the next-to-expire entry is dropped after insertion, but only if `.set_with(..).evict()`
+    /// was used — plain `set` never runs eviction logic itself; see
+    /// [`set_with`](Self::set_with) for per-entry TTL overrides and opt-in eviction.
     ///
     /// If computing the expiry instant overflows (a TTL on the order of hundreds of
     /// years), the entry is stored with no expiry (never expires), matching
     /// [`cache_set`](crate::Cached::cache_set) on the other TTL stores.
-    pub fn set_with_ttl_evict(
-        &mut self,
-        key: K,
-        value: V,
-        ttl: Option<Duration>,
-        evict: bool,
-    ) -> Option<V> {
-        self.set_inner(key, value, ttl, evict, false)
+    pub fn set(&mut self, key: K, value: V) -> Option<V> {
+        self.set_inner(key, value, None, false, false)
     }
 
-    /// Shared insertion routine for [`set_with_ttl_evict`](Self::set_with_ttl_evict) and the
+    /// Start building a `set` call with an optional per-entry TTL override and/or
+    /// opt-in eviction, e.g. `cache.set_with(k, v).ttl(Duration::from_secs(5)).evict().set()`.
+    ///
+    /// The entry is inserted first. If a `size_limit` was specified and capacity is exceeded,
+    /// the next-to-expire entry is dropped after insertion. The eviction callback fires after
+    /// insertion, not before. The terminal [`.set()`](TtlSortedSetBuilder::set) returns any
+    /// existing unexpired value that was replaced.
+    ///
+    /// If computing the expiry instant overflows (a TTL on the order of hundreds of
+    /// years), the entry is stored with no expiry (never expires), matching
+    /// [`cache_set`](crate::Cached::cache_set) on the other TTL stores.
+    #[must_use = "set_with does nothing until .set() is called"]
+    pub fn set_with(&mut self, key: K, value: V) -> TtlSortedSetBuilder<'_, K, V, S> {
+        TtlSortedSetBuilder {
+            cache: self,
+            key,
+            value,
+            ttl: None,
+            evict: false,
+        }
+    }
+
+    /// Shared insertion routine for [`set_with`](Self::set_with) / [`set`](Self::set) and the
     /// `cache_get_or_set_with_mut` paths.
     ///
     /// When the effective TTL (explicit `ttl` arg or `self.ttl`) is zero, the entry is
@@ -809,6 +812,52 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
                 on_evict(entry.key.0.as_ref(), &entry.value);
             }
         }
+    }
+}
+
+/// Builder returned by [`TtlSortedCache::set_with`] for chaining a per-entry TTL override
+/// and/or opt-in eviction before performing the insertion.
+///
+/// Nothing is inserted until the terminal [`.set()`](Self::set) is called — the `#[must_use]`
+/// attribute flags a builder that is constructed and dropped without ever calling it.
+#[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+#[must_use = "set_with does nothing until .set() is called"]
+pub struct TtlSortedSetBuilder<'a, K, V, S = DefaultHashBuilder> {
+    cache: &'a mut TtlSortedCache<K, V, S>,
+    key: K,
+    value: V,
+    ttl: Option<Duration>,
+    evict: bool,
+}
+
+impl<'a, K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedSetBuilder<'a, K, V, S> {
+    /// Override the store's default TTL for this entry only.
+    ///
+    /// If computing the expiry instant overflows (a TTL on the order of hundreds of
+    /// years), the entry is stored with no expiry (never expires), matching
+    /// [`cache_set`](crate::Cached::cache_set) on the other TTL stores. A `Duration::ZERO`
+    /// TTL also means "never expires" for this entry, matching the store's zero-TTL
+    /// convention.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Opt into running eviction logic after this insertion.
+    ///
+    /// The entry is inserted first. If a `size_limit` was specified and capacity is
+    /// exceeded, the next-to-expire entry is dropped after insertion, firing `on_evict`
+    /// and counting an eviction.
+    pub fn evict(mut self) -> Self {
+        self.evict = true;
+        self
+    }
+
+    /// Perform the insertion. Returns any existing unexpired value that was replaced,
+    /// or `None` if the key was absent or the replaced entry had already expired.
+    pub fn set(self) -> Option<V> {
+        self.cache
+            .set_inner(self.key, self.value, self.ttl, self.evict, false)
     }
 }
 
@@ -1299,15 +1348,15 @@ mod test {
 
     #[test]
     fn set_with_ttl_overflow_stores_never_expiring_entry() {
-        // set_with_ttl with a Duration that would overflow Instant bounds stores the
-        // entry with no expiry (never expires), matching cache_set on the other TTL
+        // set_with(..).ttl(..) with a Duration that would overflow Instant bounds stores
+        // the entry with no expiry (never expires), matching cache_set on the other TTL
         // stores. No error surface: TtlSortedCache's Cached::Error is Infallible.
         let mut cache = TtlSortedCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
             .build()
             .unwrap();
         // Duration::MAX overflows Instant::now().checked_add -> None -> never expires.
-        let prev = cache.set_with_ttl(1u32, 42u32, Duration::MAX);
+        let prev = cache.set_with(1u32, 42u32).ttl(Duration::MAX).set();
         assert_eq!(prev, None);
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.cache_get(&1u32), Some(&42u32));
@@ -1477,7 +1526,10 @@ mod test {
             .expect("cache should build");
 
         // Use a very short but non-zero TTL (zero now means "never expires").
-        cache.set_with_ttl("expired", 10, Duration::from_millis(1));
+        cache
+            .set_with("expired", 10)
+            .ttl(Duration::from_millis(1))
+            .set();
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.keys.len(), 1);
 
@@ -1509,7 +1561,10 @@ mod test {
             .expect("cache should build");
 
         // Use a very short but non-zero TTL (zero now means "never expires").
-        cache.set_with_ttl("expired-mut", 20, Duration::from_millis(1));
+        cache
+            .set_with("expired-mut", 20)
+            .ttl(Duration::from_millis(1))
+            .set();
         assert_eq!(cache.cache_size(), 1);
         assert_eq!(cache.keys.len(), 1);
 
@@ -1599,18 +1654,20 @@ mod test {
         assert_eq!(0, cache.len());
 
         // default ttl is 100ms
-        cache.set_with_ttl("a".to_string(), "a".to_string(), Duration::from_millis(300));
+        cache
+            .set_with("a".to_string(), "a".to_string())
+            .ttl(Duration::from_millis(300))
+            .set();
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(cache.get("a"), Some("a".to_string()).as_ref());
         assert_eq!(1, cache.len());
 
         std::thread::sleep(Duration::from_millis(200));
-        cache.set_with_ttl_evict(
-            "b".to_string(),
-            "b".to_string(),
-            Some(Duration::from_millis(300)),
-            true,
-        );
+        cache
+            .set_with("b".to_string(), "b".to_string())
+            .ttl(Duration::from_millis(300))
+            .evict()
+            .set();
         // a should now be evicted
         assert_eq!(1, cache.len());
         assert_eq!(cache.get("a"), None);
@@ -1785,7 +1842,10 @@ mod test {
             .build()
             .unwrap();
         cache.set_max_size(1);
-        cache.set_with_ttl("long", 1u32, Duration::from_secs(60));
+        cache
+            .set_with("long", 1u32)
+            .ttl(Duration::from_secs(60))
+            .set();
         // Must not panic; "long" should be evicted to make room for "short".
         let v = cache.cache_get_or_set_with("short", || 2u32);
         assert_eq!(*v, 2);
@@ -1805,7 +1865,10 @@ mod test {
             .build()
             .unwrap();
         cache.set_max_size(1);
-        cache.set_with_ttl("long", 1u32, Duration::from_secs(60));
+        cache
+            .set_with("long", 1u32)
+            .ttl(Duration::from_secs(60))
+            .set();
         let v: &mut u32 = cache
             .cache_try_get_or_set_with_mut("short", || Ok::<u32, ()>(2))
             .unwrap();
@@ -1847,7 +1910,10 @@ mod test {
             .build()
             .unwrap();
         cache.set_max_size(1);
-        cache.set_with_ttl("long", 1u32, Duration::from_secs(60));
+        cache
+            .set_with("long", 1u32)
+            .ttl(Duration::from_secs(60))
+            .set();
         let v = cache
             .async_cache_get_or_set_with("short", || async { 2u32 })
             .await;
@@ -2245,7 +2311,7 @@ mod test {
         assert_eq!(cache.cache_get(&2u32), Some(&20u32));
     }
 
-    /// `set_with_ttl` called with an EXPLICIT `Duration::ZERO` (not the cache-level
+    /// `set_with(..).ttl(..)` called with an EXPLICIT `Duration::ZERO` (not the cache-level
     /// `set_ttl`) must store `expiry = None` (never expires), not `Some(now)`
     /// (immediate). The cache's default TTL stays finite the whole time.
     #[test]
@@ -2255,7 +2321,7 @@ mod test {
             .build()
             .unwrap();
         // Explicit zero TTL on this one entry — default ttl remains 20ms.
-        cache.set_with_ttl(1u32, 10u32, Duration::ZERO);
+        cache.set_with(1u32, 10u32).ttl(Duration::ZERO).set();
         // The entry's internal expiry must be None (never), not Some(now).
         assert!(
             cache
@@ -2284,7 +2350,7 @@ mod test {
         assert_eq!(cache.cache_get(&1u32), Some(&10u32));
     }
 
-    /// `set_with_ttl_evict` with explicit `Duration::ZERO` also stores `None`,
+    /// `set_with(..).ttl(..).evict()` with explicit `Duration::ZERO` also stores `None`,
     /// and the never-expiring entry is not swept by the eviction pass it triggers.
     #[test]
     fn set_with_ttl_evict_explicit_zero_never_expires_and_survives_evict() {
@@ -2296,7 +2362,11 @@ mod test {
         cache.cache_set(1u32, 10u32);
         std::thread::sleep(std::time::Duration::from_millis(40));
         // Insert a never-expiring entry AND run the eviction pass in the same call.
-        cache.set_with_ttl_evict(2u32, 20u32, Some(Duration::ZERO), true);
+        cache
+            .set_with(2u32, 20u32)
+            .ttl(Duration::ZERO)
+            .evict()
+            .set();
         assert!(
             cache
                 .map
@@ -2313,6 +2383,145 @@ mod test {
             Some(&20u32),
             "never-expiring entry must survive its own evict pass"
         );
+    }
+
+    /// `set_with(k, v).set()` with no `.ttl()`/`.evict()` calls must behave exactly like
+    /// plain `set`: same default TTL, same displaced-value return, no eviction sweep.
+    #[test]
+    fn set_with_default_matches_plain_set() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(200))
+            .build()
+            .unwrap();
+
+        // First insert via the builder with no overrides: no previous value.
+        assert_eq!(cache.set_with(1u32, 10u32).set(), None);
+        assert_eq!(cache.cache_get(&1u32), Some(&10u32));
+
+        // Overwriting the still-live entry returns the displaced value, matching `set`.
+        assert_eq!(cache.set_with(1u32, 11u32).set(), Some(10u32));
+        assert_eq!(cache.cache_get(&1u32), Some(&11u32));
+
+        // The entry uses the cache's default TTL (no override was applied): it expires
+        // after the configured 200ms, exactly like a plain `set`.
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        assert_eq!(
+            cache.cache_get(&1u32),
+            None,
+            "set_with with no .ttl() override must use the cache's default TTL"
+        );
+    }
+
+    /// `.ttl(d)` overrides the store's default TTL for that single entry: a shorter
+    /// override expires before the cache default would, and a longer override survives
+    /// past the point a default-TTL sibling has already expired.
+    #[test]
+    fn set_with_ttl_overrides_default_ttl() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(500))
+            .build()
+            .unwrap();
+
+        // Shorter override: expires well before the 500ms default would.
+        cache
+            .set_with(1u32, 10u32)
+            .ttl(Duration::from_millis(20))
+            .set();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(
+            cache.cache_get(&1u32),
+            None,
+            "a shorter .ttl() override must expire before the cache default TTL"
+        );
+
+        // Longer override: still live after the cache's own default would have expired
+        // a plain entry (proving the per-entry override, not the default, is in effect).
+        cache
+            .set_with(2u32, 20u32)
+            .ttl(Duration::from_secs(60))
+            .set();
+        cache.cache_set(3u32, 30u32); // default-TTL sibling, 500ms
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert_eq!(
+            cache.cache_get(&3u32),
+            None,
+            "default-TTL sibling must have expired by now"
+        );
+        assert_eq!(
+            cache.cache_get(&2u32),
+            Some(&20u32),
+            "a longer .ttl() override must survive past the default TTL window"
+        );
+    }
+
+    /// `.evict()` opts into running the size-limit eviction pass after insertion: once the
+    /// bound is exceeded, the next-to-expire entry is dropped as part of the `.set()` call
+    /// that requested it. Without `.evict()`, `set_with` still enforces `size_limit`
+    /// (size-limit enforcement is unconditional in `set_inner`; `.evict()` only affects the
+    /// TTL-sweep-when-no-size-limit path), so this test also checks the no-size-limit case
+    /// via `evict()` triggering a plain expiry sweep.
+    #[test]
+    fn set_with_evict_triggers_eviction() {
+        // Case 1: no size_limit configured — `.evict()` runs a TTL sweep as part of `.set()`.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(10))
+            .build()
+            .unwrap();
+        cache.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert_eq!(cache.cache_evictions(), Some(0));
+        // Insert a second entry and opt into eviction: the expired entry (key 1) must be
+        // swept as part of this call.
+        cache.set_with(2u32, 20u32).evict().set();
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(1),
+            ".evict() must run the TTL sweep as part of set_with(..).set()"
+        );
+
+        // Case 2: with a size_limit configured, exceeding it evicts the next-to-expire
+        // entry regardless of `.evict()`; migrated from the historical `set_evict` coverage
+        // (kitchen_sink's "a"/"b" scenario), isolated here for the builder specifically.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(1)
+            .build()
+            .unwrap();
+        cache.set_with(1u32, 10u32).set();
+        assert_eq!(cache.cache_size(), 1);
+        cache.set_with(2u32, 20u32).evict().set();
+        assert_eq!(
+            cache.cache_size(),
+            1,
+            "size_limit must still cap entries when inserting via set_with(..).evict()"
+        );
+        assert_eq!(cache.cache_get(&1u32), None, "next-to-expire entry evicted");
+        assert_eq!(cache.cache_get(&2u32), Some(&20u32));
+    }
+
+    /// The terminal `.set()` returns the displaced unexpired value on overwrite (`Some`),
+    /// and `None` when the previous entry was absent or had already expired.
+    #[test]
+    fn set_with_set_returns_displaced_value() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        // Absent key: None.
+        assert_eq!(cache.set_with(1u32, 10u32).set(), None);
+
+        // Overwrite of a live entry: Some(previous value).
+        assert_eq!(cache.set_with(1u32, 11u32).set(), Some(10u32));
+
+        // Let the entry expire, then overwrite: the expired value is filtered to None.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            cache.set_with(1u32, 12u32).set(),
+            None,
+            "overwriting an expired entry must return None, not the stale value"
+        );
+        assert_eq!(cache.cache_get(&1u32), Some(&12u32));
     }
 
     /// `retain_latest` over a MIX of never-expires (`None`) and finite (`Some`) entries:
@@ -2534,5 +2743,205 @@ mod test {
             .unwrap();
         // The backing map must have at least the requested capacity.
         assert!(cache.map.capacity() >= 32);
+    }
+
+    // ── Adversarial coverage for the `set_with` builder (outside-in review) ─────
+
+    /// `.ttl()` combined with a size cap: a shorter per-entry override moves an entry
+    /// to the FRONT of the eviction order even though it was inserted after entries using
+    /// the (longer) cache default TTL. This proves eviction ordering is driven by the
+    /// effective (overridden) expiry, not by the cache-level default or insertion order.
+    #[test]
+    fn set_with_ttl_override_shorter_than_existing_evicts_first_under_size_cap() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(2)
+            .build()
+            .unwrap();
+
+        // key 1: very short override, inserted FIRST.
+        cache
+            .set_with(1u32, 10u32)
+            .ttl(Duration::from_millis(5))
+            .set();
+        // key 2: cache default (60s), inserted SECOND.
+        cache.set_with(2u32, 20u32).set();
+        assert_eq!(cache.cache_size(), 2, "at cap, no eviction yet");
+
+        // key 3: also cache default. Exceeding the cap must evict the entry with the
+        // soonest effective expiry — key 1 (short override) — not key 2, even though
+        // key 1 was inserted earlier and key 2 uses the (longer) cache default.
+        cache.set_with(3u32, 30u32).evict().set();
+        assert_eq!(cache.cache_size(), 2, "size cap must still be enforced");
+        assert_eq!(
+            cache.cache_get(&1u32),
+            None,
+            "shorter .ttl() override must be evicted first despite earlier insertion"
+        );
+        assert_eq!(cache.cache_get(&2u32), Some(&20u32));
+        assert_eq!(cache.cache_get(&3u32), Some(&30u32));
+    }
+
+    /// `.ttl(Duration::ZERO)` (never-expires) interacts with size-cap eviction ordering
+    /// through the BUILDER path specifically (not `set_ttl` + plain `set`): a never-expiring
+    /// entry set via `.ttl(Duration::ZERO)` must be evicted LAST, after finite entries —
+    /// even a finite entry using a *shorter-than-default* override inserted later.
+    #[test]
+    fn set_with_ttl_zero_vs_dated_entries_eviction_order_under_size_cap() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(2)
+            .build()
+            .unwrap();
+
+        // key 1: never-expires, via the builder's `.ttl(Duration::ZERO)`.
+        cache.set_with(1u32, 10u32).ttl(Duration::ZERO).set();
+        // key 2: finite, shorter than the cache default.
+        cache
+            .set_with(2u32, 20u32)
+            .ttl(Duration::from_secs(30))
+            .set();
+        // key 3: finite, cache default (60s) — plain `set_with` with no `.ttl()` override.
+        // This unconditionally trims to the cap (size-limit enforcement is unconditional
+        // in `set_inner`), evicting the soonest-to-expire live entry: key 2.
+        cache.set_with(3u32, 30u32).set();
+
+        assert_eq!(cache.cache_size(), 2, "size cap must be enforced");
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&10u32),
+            "never-expiring entry set via the builder must survive size eviction"
+        );
+        assert_eq!(
+            cache.cache_get(&2u32),
+            None,
+            "the shorter finite entry must be evicted before the never-expiring one"
+        );
+        assert_eq!(cache.cache_get(&3u32), Some(&30u32));
+    }
+
+    /// Displaced-value semantics of the terminal `.set()` across every entry state
+    /// (absent, live, expired), each exercised WITH `.evict()` chained. The eviction
+    /// pass must not change what `.set()` returns for the just-overwritten key — that
+    /// return value reflects only the entry displaced at THIS key, computed before the
+    /// (possibly unrelated) eviction sweep runs.
+    #[test]
+    fn set_with_evict_returns_displaced_value_in_all_states() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        // Absent key, `.evict()` chained: None, and the (no-op) eviction pass does not error.
+        assert_eq!(cache.set_with(1u32, 10u32).evict().set(), None);
+
+        // Live key, `.evict()` chained: displaced value returned regardless of the sweep.
+        assert_eq!(cache.set_with(1u32, 11u32).evict().set(), Some(10u32));
+        assert_eq!(cache.cache_get(&1u32), Some(&11u32));
+
+        // Let it expire, then overwrite with `.evict()` chained: displaced value is
+        // filtered to None (matching the non-evict path), not the stale value.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            cache.set_with(1u32, 12u32).evict().set(),
+            None,
+            "overwriting an expired entry must return None even with .evict() chained"
+        );
+        assert_eq!(cache.cache_get(&1u32), Some(&12u32));
+    }
+
+    /// A just-inserted entry can itself be selected for size-limit eviction if it is the
+    /// soonest-to-expire entry once the cap is exceeded — proving eviction runs strictly
+    /// AFTER insertion (the code checks `map.len() > size_limit` post-insert), not before.
+    /// If eviction ran before insertion, the cap would be violated (2 entries with a
+    /// cap of 1). `.set()`'s displaced-value return (`None`, a new key) does not reflect
+    /// this immediate self-eviction — a real gotcha for callers relying on the return value
+    /// alone to know whether their write "stuck".
+    #[test]
+    fn set_with_evict_may_evict_the_entry_just_inserted() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<(u32, u32)>::new()));
+        let events2 = events.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(1)
+            .on_evict(move |k: &u32, v: &u32| {
+                events2.lock().unwrap().push((*k, *v));
+            })
+            .build()
+            .unwrap();
+
+        // Long-lived entry occupies the sole capacity slot.
+        cache.set_with(1u32, 100u32).set();
+        assert_eq!(cache.cache_size(), 1);
+        assert_eq!(cache.cache_evictions(), Some(0));
+
+        // Insert a NEW key with a much shorter TTL than the existing entry. Post-insert the
+        // map has 2 entries against a cap of 1; the soonest-to-expire (the entry just
+        // inserted) is evicted immediately — its own insertion is what triggered the check.
+        let displaced = cache
+            .set_with(2u32, 200u32)
+            .ttl(Duration::from_millis(1))
+            .evict()
+            .set();
+        assert_eq!(
+            displaced, None,
+            "the terminal .set() return reflects only same-key displacement, not self-eviction"
+        );
+
+        assert_eq!(cache.cache_size(), 1, "size cap must still be enforced");
+        assert_eq!(
+            cache.cache_get(&1u32),
+            Some(&100u32),
+            "the long-lived entry must survive"
+        );
+        assert_eq!(
+            cache.cache_get(&2u32),
+            None,
+            "the just-inserted, soonest-to-expire entry must have been evicted"
+        );
+
+        // on_evict fired exactly once, for the evicted key/value — proving the callback
+        // observes the entry as already inserted-and-then-removed, not skipped pre-insert.
+        let fired = events.lock().unwrap().clone();
+        assert_eq!(
+            fired,
+            vec![(2u32, 200u32)],
+            "on_evict must fire exactly once, for the just-inserted key that was evicted"
+        );
+        assert_eq!(cache.cache_evictions(), Some(1));
+    }
+
+    /// `on_evict` fires via the builder path for a size-limit eviction with the correct
+    /// (k, v) of the evicted (displaced-by-cap) entry, and the eviction counter reflects
+    /// exactly one eviction — isolating the callback-content assertion (as distinct from
+    /// `set_with_evict_triggers_eviction`, which only checks the counter/survivorship).
+    #[test]
+    fn set_with_evict_on_evict_fires_with_correct_kv_for_size_eviction() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<(u32, u32)>::new()));
+        let events2 = events.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(1)
+            .on_evict(move |k: &u32, v: &u32| {
+                events2.lock().unwrap().push((*k, *v));
+            })
+            .build()
+            .unwrap();
+
+        cache.set_with(1u32, 111u32).set();
+        assert!(events.lock().unwrap().is_empty());
+
+        // key 2 uses the default (longer-lived by construction order) TTL; key 1 is the
+        // sole occupant and thus the only candidate to evict when the cap is exceeded.
+        cache.set_with(2u32, 222u32).evict().set();
+
+        let fired = events.lock().unwrap().clone();
+        assert_eq!(
+            fired,
+            vec![(1u32, 111u32)],
+            "on_evict must report the evicted entry's own key/value, not the new one"
+        );
+        assert_eq!(cache.cache_evictions(), Some(1));
+        assert_eq!(cache.cache_get(&2u32), Some(&222u32));
     }
 }

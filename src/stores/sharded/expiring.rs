@@ -11,7 +11,10 @@ use std::collections::HashMap;
 
 #[cfg(feature = "async_core")]
 use crate::ConcurrentCachedAsync;
-use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCached, ConcurrentCloneCached, Expires};
+use crate::{
+    CacheMetrics, ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCached,
+    ConcurrentCloneCached, Expires,
+};
 #[cfg(feature = "async_core")]
 use core::future::Future;
 
@@ -579,6 +582,17 @@ where
     {
         let shard = self.shard_of(k);
         Ok(shard.lock.read().get(k).is_some_and(|v| !v.is_expired()))
+    }
+}
+
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedExpiringCacheBase<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone + Expires,
+    H: ShardHasher<K>,
+{
+    fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        Ok(self.peek(k))
     }
 }
 
