@@ -389,6 +389,49 @@ where
         }
         total
     }
+
+    /// Retain only entries that are unexpired and satisfy `keep`.
+    ///
+    /// Removes every entry whose value reports [`is_expired`](Expires::is_expired) **or** for
+    /// which `keep` returns `false` — expired entries are removed without consulting `keep`.
+    /// `on_evict` is called and the eviction counter (`metrics().evictions`) incremented for
+    /// each removed entry. The single-owner counterpart is
+    /// [`ExpiringCache::retain`](crate::ExpiringCache::retain). This matches
+    /// [`ShardedTtlCache::retain`](crate::ShardedTtlCache::retain); the plain
+    /// [`ShardedUnboundCache::retain`](crate::ShardedUnboundCache::retain) has no expiry
+    /// dimension and removes solely on the predicate.
+    ///
+    /// **Not atomic across shards**: shards are locked and swept **one at a time**, never all
+    /// at once (matching [`evict`](Self::evict) and
+    /// [`cache_clear_with_on_evict`](Self::cache_clear_with_on_evict)). A concurrent writer
+    /// can insert into a shard this call has already visited, and that entry is not filtered.
+    ///
+    /// `keep` runs while the shard's write lock is held, so it must not re-enter this cache —
+    /// the same rule the builder states for `on_evict` — or it will deadlock. `on_evict` fires
+    /// **after** the shard lock is released, once per removed entry, in shard order. Because
+    /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
+    /// not yet visited will have that entry filtered by the same in-flight `retain`.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+        for shard in self.inner.shards.iter() {
+            // Collect under the write lock, fire callbacks after releasing it.
+            let removed: Vec<(K, V)> = {
+                let mut guard = shard.lock.write();
+                guard
+                    .extract_if(|k, v| v.is_expired() || !keep(k, v))
+                    .collect()
+            };
+            if !removed.is_empty() {
+                self.inner
+                    .evictions
+                    .fetch_add(removed.len() as u64, Ordering::Relaxed);
+                if let Some(on_evict) = &self.inner.on_evict {
+                    for (k, v) in &removed {
+                        on_evict(k, v);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<K, V, H> ConcurrentCacheBase for ShardedExpiringCacheBase<K, V, H>
@@ -1028,6 +1071,86 @@ mod tests {
         )
         .unwrap();
         assert!(SyncConcurrentCachedExt::get(&c, &2).unwrap().is_none());
+    }
+
+    #[test]
+    fn retain_fires_on_evict_after_the_shard_lock_is_released() {
+        // The callback must observe every shard lock as free: `retain` collects the
+        // removed pairs under the shard write guard, drops it, and only then fires
+        // `on_evict`. `try_write` returning `None` for any shard would mean the guard
+        // was still held while the callback ran.
+        use std::sync::OnceLock;
+        use std::sync::atomic::{AtomicU64, Ordering as AOrd};
+
+        let handle: Arc<OnceLock<ShardedExpiringCache<u32, Val>>> = Arc::new(OnceLock::new());
+        let handle2 = handle.clone();
+        let fired = Arc::new(AtomicU64::new(0));
+        let fired2 = fired.clone();
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .on_evict(move |_, _| {
+                let cache = handle2.get().expect("handle is set before retain runs");
+                assert!(
+                    cache
+                        .inner
+                        .shards
+                        .iter()
+                        .all(|s| s.lock.try_write().is_some()),
+                    "on_evict must fire after the shard write lock is released"
+                );
+                fired2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        handle.set(c.clone()).expect("handle set once");
+        for i in 0..32u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        c.retain(|_k, _v| false);
+        assert_eq!(c.len(), 0, "a keep-nothing predicate empties every shard");
+        assert_eq!(
+            fired.load(AOrd::Relaxed),
+            32,
+            "on_evict fires exactly once per removed entry"
+        );
+    }
+
+    #[test]
+    fn retain_sweeps_every_shard_one_at_a_time() {
+        // Per-shard bookkeeping: the predicate is applied to each shard's own map, so the
+        // post-retain per-shard counts equal the surviving keys routed to that shard.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .build()
+            .unwrap();
+        for i in 0..64u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let expected: Vec<usize> = c
+            .inner
+            .shards
+            .iter()
+            .map(|s| s.lock.read().keys().filter(|k| *k % 2 == 0).count())
+            .collect();
+        c.retain(|k, _v| k % 2 == 0);
+        assert_eq!(c.shard_sizes(), expected);
+        assert_eq!(expected.iter().sum::<usize>(), 32);
     }
 
     #[test]

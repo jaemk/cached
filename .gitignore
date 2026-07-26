@@ -8,4 +8,5 @@ local/
 !local/.gitkeep
 .antigravitycli/
 .claude/worktrees/
+.claude/settings.json
 scripts/probe.sh

@@ -386,6 +386,56 @@ where
         }
     }
 
+    /// Remove every entry that is expired (per [`Expires::is_expired`]) **or** for which `keep`
+    /// returns `false` — expired entries are removed regardless of `keep`, matching
+    /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain) semantics. `on_evict` fires
+    /// (if configured) and `metrics().evictions` increments once per removed entry (via the outer
+    /// eviction counter, the same one used by [`evict`](Self::evict)). The LRU recency order of
+    /// the surviving entries in each shard is unchanged.
+    ///
+    /// Shards are processed one at a time under their own write lock, so this is **not atomic**
+    /// across shards: a concurrent reader may observe some shards already filtered and others not
+    /// yet touched. `keep` runs while the affected shard's write lock is held — do not call
+    /// methods on this same cache from inside `keep`, as re-entering the locked shard can
+    /// deadlock. `on_evict` fires after the shard's write lock has been released, once per removed
+    /// entry, in shard order (and in each shard's iteration order for that shard's removals).
+    /// Because callbacks run between shard sweeps, an `on_evict` that inserts into a shard this
+    /// call has not yet visited will have that entry filtered by the same in-flight `retain`.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+        for shard in self.inner.shards.iter() {
+            let removed: Vec<(K, V)> = {
+                let mut guard = shard.lock.write();
+                let doomed: Vec<K> = guard
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        if v.is_expired() || !keep(k, v) {
+                            Some(k.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let mut removed = Vec::with_capacity(doomed.len());
+                for k in doomed {
+                    if let Some(pair) = guard.pop_raw(&k) {
+                        removed.push(pair);
+                    }
+                }
+                removed
+            };
+            if !removed.is_empty() {
+                self.inner
+                    .evictions
+                    .fetch_add(removed.len() as u64, Ordering::Relaxed);
+                if let Some(on_evict) = &self.inner.on_evict {
+                    for (k, v) in &removed {
+                        on_evict(k, v);
+                    }
+                }
+            }
+        }
+    }
+
     /// Effective total capacity across all shards.
     ///
     /// When constructed with [`max_size`](ShardedExpiringLruCacheBuilder::max_size), this may
@@ -2192,5 +2242,100 @@ mod tests {
             "deep_clone must capture the miss counter"
         );
         assert_eq!(clone.len(), 1, "deep_clone must capture the entry snapshot");
+    }
+
+    #[test]
+    fn retain_preserves_survivor_recency_order() {
+        // shards(1) so the recency order is deterministic and observable from one shard.
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let before: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k % 2 == 0)
+            .collect();
+
+        c.retain(|k, _| k % 2 == 0);
+
+        let after: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            before, after,
+            "surviving entries must keep their relative MRU order"
+        );
+    }
+
+    /// Counter-wiring contract (the main correctness trap for this store): `retain` must
+    /// bump the outer `ExpiringLruInner::evictions` counter, NOT the inner `LruCache`'s own
+    /// capacity-eviction counter (`guard.evictions`).
+    #[test]
+    fn retain_wires_to_outer_evictions_not_inner_lru_counter() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let inner_before = c.inner.shards[0]
+            .lock
+            .read()
+            .evictions
+            .load(Ordering::Relaxed);
+        let outer_before = c.inner.evictions.load(Ordering::Relaxed);
+
+        c.retain(|k, _| k % 2 == 0);
+
+        let inner_after = c.inner.shards[0]
+            .lock
+            .read()
+            .evictions
+            .load(Ordering::Relaxed);
+        let outer_after = c.inner.evictions.load(Ordering::Relaxed);
+
+        assert_eq!(
+            inner_after, inner_before,
+            "retain must not touch the inner LRU capacity-eviction counter"
+        );
+        assert_eq!(
+            outer_after - outer_before,
+            5,
+            "retain must count each removal via the outer evictions counter"
+        );
+        assert_eq!(
+            c.metrics().evictions.unwrap() - (inner_before + outer_before),
+            5
+        );
     }
 }

@@ -432,6 +432,57 @@ where
         }
         total
     }
+
+    /// Retain only entries that are unexpired and satisfy `keep`.
+    ///
+    /// Removes every entry that is already TTL-expired **or** for which `keep` returns
+    /// `false` — expired entries are removed without consulting `keep`. `on_evict` is called
+    /// and the eviction counter (`metrics().evictions`) incremented for each removed entry.
+    /// The single-owner counterpart is [`TtlCache::retain`](crate::TtlCache::retain). This
+    /// matches [`ShardedExpiringCache::retain`](crate::ShardedExpiringCache::retain); the
+    /// plain [`ShardedUnboundCache::retain`](crate::ShardedUnboundCache::retain) has no
+    /// expiry dimension and removes solely on the predicate.
+    ///
+    /// Expiry is judged against a single instant sampled once at the start of the call, so
+    /// every entry in every shard is compared against the same instant.
+    ///
+    /// **Not atomic across shards**: shards are locked and swept **one at a time**, never all
+    /// at once (matching [`evict`](Self::evict) and
+    /// [`cache_clear_with_on_evict`](Self::cache_clear_with_on_evict)). A concurrent writer
+    /// can insert into a shard this call has already visited, and that entry is not filtered.
+    ///
+    /// `keep` runs while the shard's write lock is held, so it must not re-enter this cache —
+    /// the same rule the builder states for `on_evict` — or it will deadlock. `on_evict` fires
+    /// **after** the shard lock is released, once per removed entry, in shard order. Because
+    /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
+    /// not yet visited will have that entry filtered by the same in-flight `retain`.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+        let now = Instant::now();
+        for shard in self.inner.shards.iter() {
+            // Collect under the write lock, fire callbacks after releasing it.
+            let removed: Vec<(K, TimedEntry<V>)> = {
+                let mut guard = shard.lock.write();
+                guard
+                    .extract_if(|k, entry| {
+                        // An entry is expired when expires_at is Some(t) and now >= t.
+                        // None means never-expires.
+                        let expired = entry.expires_at.is_some_and(|t| now >= t);
+                        expired || !keep(k, &entry.value)
+                    })
+                    .collect()
+            };
+            if !removed.is_empty() {
+                self.inner
+                    .evictions
+                    .fetch_add(removed.len() as u64, Ordering::Relaxed);
+                if let Some(cb) = &self.inner.on_evict {
+                    for (k, entry) in &removed {
+                        cb(k, &entry.value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<K, V, H> ConcurrentCacheEvict for ShardedTtlCacheBase<K, V, H>
@@ -1417,6 +1468,131 @@ mod tests {
             count.load(Ordering::Relaxed),
             0,
             "clear must not fire on_evict"
+        );
+    }
+
+    #[test]
+    fn retain_fires_on_evict_after_the_shard_lock_is_released() {
+        // The callback must observe every shard lock as free: `retain` collects the
+        // removed entries under the shard write guard, drops it, and only then fires
+        // `on_evict`. `try_write` returning `None` for any shard would mean the guard
+        // was still held while the callback ran.
+        use std::sync::OnceLock;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let handle: Arc<OnceLock<ShardedTtlCache<u32, u32>>> = Arc::new(OnceLock::new());
+        let handle2 = handle.clone();
+        let fired = Arc::new(AtomicU64::new(0));
+        let fired2 = fired.clone();
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_secs(3600))
+            .shards(4)
+            .on_evict(move |_, _| {
+                let cache = handle2.get().expect("handle is set before retain runs");
+                assert!(
+                    cache
+                        .inner
+                        .shards
+                        .iter()
+                        .all(|s| s.lock.try_write().is_some()),
+                    "on_evict must fire after the shard write lock is released"
+                );
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        handle.set(c.clone()).expect("handle set once");
+        for i in 0..32u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        c.retain(|_k, _v| false);
+        assert_eq!(c.len(), 0, "a keep-nothing predicate empties every shard");
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            32,
+            "on_evict fires exactly once per removed entry"
+        );
+    }
+
+    #[test]
+    fn retain_judges_expiry_against_a_single_sampled_instant() {
+        // Expiry is sampled once per call, so an entry whose `expires_at` is in the
+        // future relative to that sample survives, and one already past it does not —
+        // no per-entry re-sampling of the clock.
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_secs(3600))
+            .shards(2)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 10).expect("insert must succeed");
+        SyncConcurrentCached::cache_set(&c, 2, 20).expect("insert must succeed");
+        // Backdate key 1's expiry directly in its shard so it is expired without sleeping:
+        // `retain` samples its own `now` after this line, and `now >= expires_at` is expired.
+        {
+            let shard = c.shard_of(&1);
+            let mut guard = shard.lock.write();
+            let entry = guard.get_mut(&1).expect("key 1 stored");
+            entry.expires_at = Some(Instant::now());
+        }
+        let before = c.metrics().evictions.expect("ttl store tracks evictions");
+        c.retain(|_k, _v| true);
+        assert_eq!(
+            c.len(),
+            1,
+            "the backdated entry is removed despite keep=true"
+        );
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &2).unwrap(), Some(20));
+        assert_eq!(
+            c.metrics().evictions.expect("ttl store tracks evictions") - before,
+            1
+        );
+    }
+
+    #[test]
+    fn retain_and_evict_agree_at_the_expires_at_equals_now_boundary() {
+        // Both `retain` and `evict` decide expiry with the same `now >= expires_at`
+        // comparison. The existing `retain_judges_expiry_against_a_single_sampled_instant`
+        // test only backdates an entry (`expires_at` clearly in the past); this test pins
+        // the boundary itself -- an entry whose `expires_at` is set to (approximately) the
+        // instant just sampled -- and checks `evict()` and `retain()` remove it identically.
+        // Because `Instant` is monotonic, the `now` sampled a moment later inside `evict`/
+        // `retain` is always `>=` the `expires_at` captured here, so both paths must treat
+        // it as expired.
+        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            .ttl(Duration::from_secs(3600))
+            .shards(1)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 10).expect("insert must succeed");
+        SyncConcurrentCached::cache_set(&c, 2, 20).expect("insert must succeed");
+
+        // evict() path: pin key 1's expiry to "now".
+        {
+            let shard = c.shard_of(&1);
+            let mut guard = shard.lock.write();
+            let entry = guard.get_mut(&1).expect("key 1 stored");
+            entry.expires_at = Some(Instant::now());
+        }
+        let removed = c.evict();
+        assert_eq!(
+            removed, 1,
+            "an entry whose expires_at is the just-sampled now must be swept by evict()"
+        );
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &2).unwrap(), Some(20));
+
+        // retain() path: symmetric case with a fresh entry pinned the same way.
+        {
+            let shard = c.shard_of(&2);
+            let mut guard = shard.lock.write();
+            let entry = guard.get_mut(&2).expect("key 2 stored");
+            entry.expires_at = Some(Instant::now());
+        }
+        c.retain(|_k, _v| true);
+        assert_eq!(
+            c.len(),
+            0,
+            "the same now-boundary entry must be swept by retain() too, agreeing with evict()"
         );
     }
 

@@ -435,6 +435,58 @@ where
         }
     }
 
+    /// Remove every entry that is TTL-expired **or** for which `keep` returns `false` — expired
+    /// entries are removed regardless of `keep`, matching
+    /// [`LruTtlCache::retain`](crate::LruTtlCache::retain) semantics. `on_evict` fires (if
+    /// configured) and `metrics().evictions` increments once per removed entry (via
+    /// `non_capacity_evictions`, the same counter used by [`evict`](Self::evict)). The LRU recency
+    /// order of the surviving entries in each shard is unchanged.
+    ///
+    /// Shards are processed one at a time under their own write lock, so this is **not atomic**
+    /// across shards: a concurrent reader may observe some shards already filtered and others not
+    /// yet touched. `keep` runs while the affected shard's write lock is held — do not call
+    /// methods on this same cache from inside `keep`, as re-entering the locked shard can
+    /// deadlock. `on_evict` fires after the shard's write lock has been released, once per removed
+    /// entry, in shard order (and in each shard's iteration order for that shard's removals).
+    /// Because callbacks run between shard sweeps, an `on_evict` that inserts into a shard this
+    /// call has not yet visited will have that entry filtered by the same in-flight `retain`.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+        let now = Instant::now();
+        for shard in self.inner.shards.iter() {
+            let removed: Vec<(K, TimedEntry<V>)> = {
+                let mut guard = shard.lock.write();
+                let doomed: Vec<K> = guard
+                    .iter()
+                    .filter_map(|(k, entry)| {
+                        let expired = entry.expires_at.is_some_and(|t| now >= t);
+                        if expired || !keep(k, &entry.value) {
+                            Some(k.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let mut removed = Vec::with_capacity(doomed.len());
+                for k in doomed {
+                    if let Some(pair) = guard.pop_raw(&k) {
+                        removed.push(pair);
+                    }
+                }
+                removed
+            };
+            if !removed.is_empty() {
+                self.inner
+                    .non_capacity_evictions
+                    .fetch_add(removed.len() as u64, Ordering::Relaxed);
+                if let Some(on_evict) = &self.inner.on_evict {
+                    for (k, entry) in &removed {
+                        on_evict(k, &entry.value);
+                    }
+                }
+            }
+        }
+    }
+
     /// Effective total capacity across all shards.
     ///
     /// When constructed with [`max_size`](ShardedLruTtlCacheBuilder::max_size), this may
@@ -2493,5 +2545,138 @@ mod tests {
             .build()
             .unwrap();
         use_trait(&c, 1, 100);
+    }
+
+    #[test]
+    fn retain_preserves_survivor_recency_order() {
+        // shards(1) so the recency order is deterministic and observable from one shard.
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k % 2 == 0)
+            .collect();
+
+        c.retain(|k, _| k % 2 == 0);
+
+        let after: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            before, after,
+            "surviving entries must keep their relative MRU order"
+        );
+    }
+
+    /// Counter-wiring contract (the main correctness trap for this store): `retain` must
+    /// bump `LruTtlInner::non_capacity_evictions`, NOT the inner `LruCache`'s own
+    /// capacity-eviction counter (`guard.evictions`), which `evict()` also leaves untouched.
+    #[test]
+    fn retain_wires_to_non_capacity_evictions_not_inner_lru_counter() {
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let inner_before = c.inner.shards[0]
+            .lock
+            .read()
+            .evictions
+            .load(Ordering::Relaxed);
+        let outer_before = c.inner.non_capacity_evictions.load(Ordering::Relaxed);
+
+        c.retain(|k, _| k % 2 == 0);
+
+        let inner_after = c.inner.shards[0]
+            .lock
+            .read()
+            .evictions
+            .load(Ordering::Relaxed);
+        let outer_after = c.inner.non_capacity_evictions.load(Ordering::Relaxed);
+
+        assert_eq!(
+            inner_after, inner_before,
+            "retain must not touch the inner LRU capacity-eviction counter"
+        );
+        assert_eq!(
+            outer_after - outer_before,
+            5,
+            "retain must count each removal via non_capacity_evictions"
+        );
+        // metrics() sums inner + outer; the combined total must also reflect exactly the
+        // removed count with no double counting.
+        assert_eq!(
+            c.metrics().evictions.unwrap() - (inner_before + outer_before),
+            5
+        );
+    }
+
+    /// Both `retain` and `evict` decide expiry with the same `now >= expires_at`
+    /// comparison. This pins an entry's `expires_at` to the instant just sampled (rather
+    /// than backdating it, which the other expiry tests already cover) and checks that
+    /// `evict()` and `retain()` both remove it. Because `Instant` is monotonic, the `now`
+    /// sampled a moment later inside `evict`/`retain` is always `>=` the `expires_at`
+    /// captured here, so both paths must treat it as expired -- this is the closest a
+    /// real-clock test can get to exercising the literal `now == expires_at` tie without a
+    /// mock clock.
+    #[test]
+    fn retain_and_evict_agree_at_the_expires_at_equals_now_boundary() {
+        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .ttl(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 10).expect("insert must succeed");
+        SyncConcurrentCached::cache_set(&c, 2, 20).expect("insert must succeed");
+
+        // evict() path: pin key 1's expiry to "now".
+        {
+            let shard = c.shard_of(&1);
+            let mut guard = shard.lock.write();
+            let entry = guard.get_mut_if(&1, |_| true).expect("key 1 stored");
+            entry.expires_at = Some(Instant::now());
+        }
+        let removed = c.evict();
+        assert_eq!(
+            removed, 1,
+            "an entry whose expires_at is the just-sampled now must be swept by evict()"
+        );
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), None);
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &2).unwrap(), Some(20));
+
+        // retain() path: symmetric case with the surviving entry pinned the same way.
+        {
+            let shard = c.shard_of(&2);
+            let mut guard = shard.lock.write();
+            let entry = guard.get_mut_if(&2, |_| true).expect("key 2 stored");
+            entry.expires_at = Some(Instant::now());
+        }
+        c.retain(|_k, _v| true);
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &2).unwrap(),
+            None,
+            "an entry whose expires_at is the just-sampled now must be swept by retain() too, \
+             even under a keep-everything predicate"
+        );
     }
 }

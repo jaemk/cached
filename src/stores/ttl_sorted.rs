@@ -588,9 +588,68 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         count
     }
 
+    /// Retain only entries that are unexpired and satisfy `keep`.
+    ///
+    /// Removes every entry that is already TTL-expired **or** for which `keep`
+    /// returns `false` — expired entries are removed without consulting `keep`.
+    /// `on_evict` is called and the eviction counter incremented for each removed
+    /// entry. Entries stored with no expiry (a zero or overflowing TTL, see
+    /// [`set_with`](Self::set_with)) never expire, so they are removed only when
+    /// `keep` returns `false`. Returns `()`; use [`evict`](Self::evict) or
+    /// [`retain_latest`](Self::retain_latest) when a dropped count is needed.
+    ///
+    /// Not to be confused with [`retain_latest`](Self::retain_latest), which is a
+    /// *size trim*: it drops the next-to-expire entries until at most `count` remain
+    /// (optionally also sweeping expired ones) and returns how many it dropped. This
+    /// method is a *predicate filter plus an expiry sweep*: it consults `keep` for
+    /// every live entry, ignores `size_limit`, and does not reorder the expiry index.
+    ///
+    /// This matches [`TtlCache::retain`](crate::TtlCache::retain) and
+    /// [`LruTtlCache::retain`](crate::LruTtlCache::retain); the plain
+    /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
+    /// removes solely on the predicate.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+        // Sample the clock once so every entry is judged against the same instant.
+        let now = Instant::now();
+        // Disjoint field borrows: `map.retain` takes `&mut self.map` while the closure
+        // holds `&mut self.keys` plus shared borrows of the callback and counter.
+        let keys = &mut self.keys;
+        // Drain both structures first and fire `on_evict` only once the pass is over.
+        // Firing mid-pass would let a panicking callback unwind between the index
+        // removal and the map removal, leaving `keys` short of `map` permanently:
+        // the orphaned entry would be invisible to `evict`/`retain_latest` (their
+        // `pop_first` walk never reaches it) yet still counted by `len`.
+        let removed: Vec<_> = self
+            .map
+            .extract_if(|key, entry| {
+                if entry.is_expired_at(now) || !keep(key, &entry.value) {
+                    // `as_stamped` rebuilds the exact `Stamped` that was inserted (same
+                    // expiry, same `CacheArc` key), so this cannot leave a stale index
+                    // entry that a later `pop_first` would miscount as a drop.
+                    keys.remove(&entry.as_stamped());
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
+        self.evictions
+            .fetch_add(removed.len() as u64, AtomicOrdering::Relaxed);
+        if let Some(on_evict) = &self.on_evict {
+            for (key, entry) in &removed {
+                on_evict(key, &entry.value);
+            }
+        }
+    }
+
     /// Retain only the latest `count` values, dropping the next values to expire.
     /// If `evict`, then also evict values that have expired.
     /// Returns number of dropped items.
+    ///
+    /// This is a *size trim*, not a predicate filter: entries are chosen purely by
+    /// expiry order until at most `count` remain. Use [`retain`](Self::retain) to keep
+    /// entries by a `FnMut(&K, &V) -> bool` predicate (which also sweeps expired entries
+    /// regardless of the predicate, but ignores `size_limit` and returns `()`).
     pub fn retain_latest(&mut self, count: usize, evict: bool) -> usize {
         let retain_drop_count = self.map.len().saturating_sub(count);
 
@@ -2943,5 +3002,359 @@ mod test {
         );
         assert_eq!(cache.cache_evictions(), Some(1));
         assert_eq!(cache.cache_get(&2u32), Some(&222u32));
+    }
+
+    /// Assert the `map` / `keys` lockstep invariant of `TtlSortedCache`: the expiry-ordered
+    /// `BTreeSet` index holds exactly one `Stamped` per stored map entry, each rebuildable
+    /// via `Entry::as_stamped`, and never a `key: None` sentinel (which `evict()` /
+    /// `retain_latest()` would `expect`-panic on).
+    fn assert_index_lockstep<K, V, S>(cache: &TtlSortedCache<K, V, S>, ctx: &str)
+    where
+        K: Hash + Eq + Ord + std::fmt::Debug,
+    {
+        assert_eq!(
+            cache.keys.len(),
+            cache.map.len(),
+            "{ctx}: BTreeSet index length must equal map length"
+        );
+        for stamped in &cache.keys {
+            assert!(
+                stamped.key.is_some(),
+                "{ctx}: only artificial range bounds may have a None key"
+            );
+        }
+        for (k, entry) in &cache.map {
+            assert!(
+                cache.keys.contains(&entry.as_stamped()),
+                "{ctx}: map entry {k:?} is missing from the BTreeSet index"
+            );
+        }
+    }
+
+    #[test]
+    fn retain_keeps_btreeset_index_in_lockstep_with_map() {
+        // A mixed population: normal TTL entries plus never-expiring ones (zero-TTL path
+        // stores `expiry = None`, which sorts last in the index).
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for k in 0u32..6 {
+            cache.set(k, k * 10);
+        }
+        // 100/101 never expire.
+        cache.set_with(100u32, 1000u32).ttl(Duration::ZERO).set();
+        cache.set_with(101u32, 1010u32).ttl(Duration::ZERO).set();
+        assert_index_lockstep(&cache, "before retain");
+
+        // Drop the odd keys (including a never-expiring one) from a live population.
+        cache.retain(|k, _v| k % 2 == 0);
+
+        assert_index_lockstep(&cache, "after predicate retain");
+        assert_eq!(cache.map.len(), 4, "0, 2, 4 and 100 survive, nothing else");
+        assert!(cache.map.contains_key(&100u32));
+        assert!(!cache.map.contains_key(&101u32));
+    }
+
+    #[test]
+    fn retain_index_lockstep_when_expired_entries_are_swept() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        cache.set(1u32, 10u32);
+        cache.set(2u32, 20u32);
+        // Never expires, so it must survive the expiry sweep.
+        cache.set_with(3u32, 30u32).ttl(Duration::ZERO).set();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Long-lived entry added after the sleep.
+        cache
+            .set_with(4u32, 40u32)
+            .ttl(Duration::from_secs(60))
+            .set();
+        assert_index_lockstep(&cache, "before expiry retain");
+
+        // Keep-everything predicate: only the expired entries may be removed.
+        cache.retain(|_k, _v| true);
+
+        assert_index_lockstep(&cache, "after expiry retain");
+        assert_eq!(cache.map.len(), 2);
+        assert!(cache.map.contains_key(&3u32), "never-expiring entry stays");
+        assert!(cache.map.contains_key(&4u32), "live entry stays");
+
+        // A stale index entry would make `pop_first` count a drop for a key that is no
+        // longer in the map; the swept entries must not be counted again here.
+        assert_eq!(cache.evict(), 0, "no stale index entries left to sweep");
+        assert_index_lockstep(&cache, "after post-retain evict");
+    }
+
+    /// `retain` deliberately ignores `size_limit`, so the cap is restored by the *next*
+    /// insert. That insert goes through `retain_latest`, which pops the expiry index: a
+    /// stale stamp left behind by `retain` would be popped first, counted as a drop even
+    /// though its map entry is gone, and leave the cache over its cap.
+    #[test]
+    fn retain_index_lockstep_when_a_size_limited_insert_follows() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(3)
+            .build()
+            .unwrap();
+        for k in 1u32..=3 {
+            cache
+                .set_with(k, k * 10)
+                .ttl(Duration::from_secs(10 * u64::from(k)))
+                .set();
+        }
+        assert_index_lockstep(&cache, "before retain");
+
+        // Drop the soonest-to-expire entry -- the one a stale stamp would make the
+        // phantom victim of the next size-limit eviction.
+        cache.retain(|k, _v| *k != 1);
+        assert_index_lockstep(&cache, "after retain");
+        assert_eq!(cache.map.len(), 2, "retain does not enforce size_limit");
+
+        // Back to the cap exactly: still no eviction (the check is `len > size_limit`).
+        cache
+            .set_with(4u32, 40u32)
+            .ttl(Duration::from_secs(40))
+            .set();
+        assert_eq!(cache.map.len(), 3);
+        assert_index_lockstep(&cache, "at the cap");
+
+        // Over the cap: the victim must be key 2, the soonest-to-expire *survivor*.
+        cache
+            .set_with(5u32, 50u32)
+            .ttl(Duration::from_secs(50))
+            .set();
+        assert_eq!(cache.map.len(), 3, "the cap is restored by the insert");
+        assert!(
+            !cache.map.contains_key(&2u32),
+            "the soonest-to-expire survivor is the victim"
+        );
+        assert!(cache.map.contains_key(&3u32));
+        assert!(cache.map.contains_key(&4u32));
+        assert!(cache.map.contains_key(&5u32));
+        assert_index_lockstep(&cache, "after size-limit eviction");
+    }
+
+    /// `set_and_get_mut` temporarily unlinks the just-inserted `Stamped` from the index
+    /// before running `retain_latest`, then relinks it. Interleaving that protected
+    /// eviction path with `retain` must leave the index in lockstep and evict the correct
+    /// victim.
+    #[test]
+    fn retain_index_lockstep_with_protected_get_or_set_with_mut() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(2)
+            .build()
+            .unwrap();
+        cache
+            .set_with(1u32, 10u32)
+            .ttl(Duration::from_secs(10))
+            .set();
+        cache
+            .set_with(2u32, 20u32)
+            .ttl(Duration::from_secs(20))
+            .set();
+        cache.retain(|k, _v| *k != 1);
+        assert_index_lockstep(&cache, "after retain");
+
+        // Below the cap: the protected-eviction block is skipped entirely.
+        assert_eq!(*cache.cache_get_or_set_with_mut(3u32, || 30), 30);
+        assert_index_lockstep(&cache, "after unprotected insert");
+
+        // Over the cap: the just-inserted key 4 is unlinked, so key 2 (soonest to
+        // expire of the rest) is the victim, and key 4's stamp must be relinked.
+        {
+            let v = cache.cache_get_or_set_with_mut(4u32, || 40);
+            *v += 1;
+        }
+        assert_eq!(cache.map.len(), 2);
+        assert!(cache.map.contains_key(&4u32), "the new entry is protected");
+        assert!(!cache.map.contains_key(&2u32));
+        assert_index_lockstep(&cache, "after protected eviction");
+
+        // The relinked stamp must be usable by a later index-driven trim.
+        assert_eq!(cache.retain_latest(0, false), 2);
+        assert!(cache.map.is_empty());
+        assert_index_lockstep(&cache, "after full trim");
+    }
+
+    /// Same protected path, reached through the fallible factory. An `Err` factory must
+    /// not touch either structure.
+    #[test]
+    fn retain_index_lockstep_with_protected_try_get_or_set_with_mut() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(2)
+            .build()
+            .unwrap();
+        cache
+            .set_with(1u32, 10u32)
+            .ttl(Duration::from_secs(10))
+            .set();
+        cache
+            .set_with(2u32, 20u32)
+            .ttl(Duration::from_secs(20))
+            .set();
+        cache.retain(|k, _v| *k != 1);
+
+        let err: Result<&mut u32, &str> = cache.cache_try_get_or_set_with_mut(9u32, || Err("no"));
+        assert_eq!(err, Err("no"));
+        assert_eq!(cache.map.len(), 1, "a failed factory inserts nothing");
+        assert_index_lockstep(&cache, "after failed factory");
+
+        let ok: Result<&mut u32, &str> = cache.cache_try_get_or_set_with_mut(3u32, || Ok(30));
+        assert_eq!(ok, Ok(&mut 30));
+        let ok: Result<&mut u32, &str> = cache.cache_try_get_or_set_with_mut(4u32, || Ok(40));
+        assert_eq!(ok, Ok(&mut 40));
+        assert_eq!(cache.map.len(), 2);
+        assert!(cache.map.contains_key(&4u32));
+        assert!(!cache.map.contains_key(&2u32), "key 2 expires soonest");
+        assert_index_lockstep(&cache, "after protected eviction");
+    }
+
+    /// `Clone` copies `map` and `keys` separately, so a lockstep violation introduced by
+    /// `retain` would be duplicated silently into the clone.
+    #[test]
+    fn retain_index_lockstep_survives_clone() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for k in 0u32..6 {
+            cache
+                .set_with(k, k * 10)
+                .ttl(Duration::from_secs(10 + u64::from(k)))
+                .set();
+        }
+        cache.set_with(100u32, 1000u32).ttl(Duration::ZERO).set();
+        cache.retain(|k, _v| k % 2 == 0);
+
+        let mut clone = cache.clone();
+        assert_index_lockstep(&clone, "clone of a retained cache");
+        assert_eq!(clone.map.len(), cache.map.len());
+
+        // The clone's index must drive its own trims correctly: 0, 2, 4 and the
+        // never-expiring 100 survived, so trimming to 1 drops exactly three.
+        assert_eq!(clone.retain_latest(1, false), 3);
+        assert!(
+            clone.map.contains_key(&100u32),
+            "the never-expiring entry sorts last and is kept"
+        );
+        assert_index_lockstep(&clone, "clone after trim");
+        // The original is untouched by the clone's trim.
+        assert_eq!(cache.map.len(), 4);
+        assert_index_lockstep(&cache, "original after clone trim");
+
+        // A retain on the clone must not disturb the original either.
+        clone.retain(|_k, _v| false);
+        assert!(clone.map.is_empty());
+        assert_eq!(cache.map.len(), 4);
+        assert_index_lockstep(&cache, "original after clone retain");
+    }
+
+    /// A predicate that rejects everything must drain both structures to zero, leaving a
+    /// reusable cache (not one whose index still holds phantom stamps).
+    #[test]
+    fn retain_rejecting_everything_drains_both_structures() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for k in 0u32..4 {
+            cache.set(k, k);
+        }
+        cache.set_with(100u32, 100u32).ttl(Duration::ZERO).set();
+
+        cache.retain(|_k, _v| false);
+        assert!(cache.map.is_empty());
+        assert!(
+            cache.keys.is_empty(),
+            "the expiry index must be drained with the map"
+        );
+        assert_index_lockstep(&cache, "after draining retain");
+        assert_eq!(cache.evict(), 0);
+        assert_eq!(cache.retain_latest(0, true), 0);
+
+        // Retaining an empty cache is a no-op under either predicate.
+        cache.retain(|_k, _v| false);
+        cache.retain(|_k, _v| true);
+        assert_index_lockstep(&cache, "after empty-cache retain");
+
+        // And the cache still works.
+        cache.set(7u32, 77u32);
+        assert_index_lockstep(&cache, "after reinsert");
+        assert_eq!(cache.cache_get(&7u32), Some(&77u32));
+    }
+
+    /// A panicking `on_evict` must not desynchronize the map from the expiry index.
+    /// `retain` therefore drains both structures before firing any callback: unwinding
+    /// out of a callback that ran mid-pass would strand entries in `map` with no
+    /// matching `keys` stamp, making them unreachable to `evict` / `retain_latest`
+    /// (whose `pop_first` walk never sees them) while `len` still counts them.
+    #[test]
+    fn retain_on_evict_panic_leaves_the_index_in_lockstep() {
+        // Panic on the first callback only, so the later assertions can still run
+        // operations that fire `on_evict`.
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cb = std::sync::Arc::clone(&fired);
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k, _v| {
+                if cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    panic!("boom");
+                }
+            })
+            .build()
+            .unwrap();
+        for k in 0u32..6 {
+            cache.set(k, k);
+        }
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.retain(|k, _v| k % 2 == 0);
+        }));
+        assert!(caught.is_err(), "the callback panic must propagate");
+
+        // Both structures completed their removals before the callback ran.
+        assert_index_lockstep(&cache, "after on_evict panicked mid-retain");
+        assert_eq!(cache.map.len(), 3, "the odd keys were removed");
+        // The survivors are still reachable through the expiry index, so a subsequent
+        // trim sees all of them rather than stopping short at an orphaned entry.
+        assert_eq!(cache.retain_latest(0, false), 3);
+        assert_index_lockstep(&cache, "after trimming the survivors");
+    }
+
+    /// Entries inserted back to back can share an expiry `Instant` on a coarse clock, so
+    /// their `Stamped`s differ only by key. `retain` must remove exactly the index entry
+    /// belonging to each removed map entry, never a same-expiry neighbour.
+    #[test]
+    fn retain_index_lockstep_with_colliding_expiry_instants() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for k in 0u32..64 {
+            cache.set(k, k);
+        }
+        assert_index_lockstep(&cache, "before retain");
+
+        cache.retain(|k, _v| k % 2 == 0);
+        assert_eq!(cache.map.len(), 32);
+        assert_index_lockstep(&cache, "after retain");
+        for k in 0u32..64 {
+            assert_eq!(
+                cache.map.contains_key(&k),
+                k % 2 == 0,
+                "exactly the even keys survive"
+            );
+        }
+        assert_eq!(cache.evict(), 0, "nothing is expired, nothing is stale");
+
+        // Every surviving stamp must still resolve to a map entry.
+        assert_eq!(cache.retain_latest(0, false), 32);
+        assert!(cache.map.is_empty());
+        assert!(cache.keys.is_empty());
     }
 }

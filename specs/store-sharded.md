@@ -55,3 +55,16 @@ by LRU recency (TTL/expiry state is ignored); resize is not atomic across shards
 variants' builders (`ShardedUnboundCacheBuilder`, `ShardedTtlCacheBuilder`,
 `ShardedExpiringCacheBuilder`) take a `per_shard_initial_capacity` preallocation hint, the
 sharded counterpart of the single-owner builders' `initial_capacity`.
+
+## SHARD-6
+
+Inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` on all six sharded stores: same
+contract as the single-owner stores, applied per shard. Shards are locked and swept one at a
+time (not atomic across shards, so concurrent readers may briefly observe some shards already
+filtered and others not), and the predicate runs under the shard write lock, so it must not
+re-enter the cache. `on_evict` fires after each shard's lock is released, once per removed
+entry, in shard order. On the expiry-aware variants, expired entries are removed regardless of
+the predicate and every removal counts an eviction; `ShardedUnboundCache` tracks no evictions
+counter, so an entry there simply survives exactly when `keep` returns `true`. `retain` requires
+no `K: Clone` bound and is inherent-only, not a trait method; see
+[traits-concurrent.md](traits-concurrent.md).

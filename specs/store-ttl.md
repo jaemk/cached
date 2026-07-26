@@ -33,6 +33,9 @@ the public surface. Size/iter/evict semantics follow
 is `set(k, v)` for the plain path, or the `set_with(k, v) -> TtlSortedSetBuilder` entry-setter
 for a per-entry TTL override (`.ttl(Duration)`) and/or opt-in post-insertion eviction
 (`.evict()`); the terminal `.set() -> Option<V>` returns the displaced unexpired value.
+`retain(keep)` removes entries failing the predicate plus any expired entries, firing `on_evict`
+per removal; it is unrelated to `retain_latest(count, evict) -> usize`, which trims to the N
+latest-expiring entries by size rather than filtering by predicate.
 
 ## TTL-5
 

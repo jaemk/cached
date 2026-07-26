@@ -50,11 +50,18 @@
   reads as `None`. Implemented by the six sharded stores (`Self::Error = Infallible`);
   `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately do not implement it. In
   `cached::prelude`.
-- `retain(keep)` on `UnboundCache`, `TtlCache`, and `ExpiringCache`, completing `retain`
-  across the map stores. Each removed entry fires `on_evict`. On the expiry-aware stores
-  expired entries are removed regardless of the predicate and every removal counts an
-  eviction; on `UnboundCache` (no expiry dimension, no eviction counter) an entry
-  survives exactly when `keep` returns `true`.
+- `retain(keep)` on `UnboundCache`, `TtlCache`, `ExpiringCache`, `TtlSortedCache`, and all six
+  sharded stores, completing `retain` across every in-memory store. Every removed entry fires
+  `on_evict`. On the expiry-aware stores expired entries are removed regardless of the predicate
+  and every removal counts an eviction; on `UnboundCache` / `ShardedUnboundCache` (no expiry
+  dimension, no evictions counter) an entry survives exactly when `keep` returns `true`. The
+  sharded form is `retain(&self, keep)`: it locks one shard at a time (not atomic across
+  shards), the predicate runs under the shard write lock so it must not re-enter the cache, and
+  `on_evict` fires after the shard lock is released, once per removed entry, in shard order; no
+  `K: Clone` bound is required. `TtlSortedCache::retain` is distinct from the pre-existing
+  `retain_latest(count, evict) -> usize`, which trims to the N latest-expiring entries by size
+  rather than filtering by predicate. `retain` is inherent-only on both store families (not a
+  trait method) -- see `specs/traits-concurrent.md`.
 - `TtlSortedCache::capacity() -> Option<usize>`: the configured size bound (`None` when
   unbounded), plus the missing `doc(alias = "capacity")` on `TtlSortedCacheBuilder::max_size`.
 
