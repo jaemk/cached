@@ -34,6 +34,12 @@ forward `cache_reset_metrics` directly. `try_get_or_set_with` delegates to
 inherent `contains(&self, &K) -> bool` and `peek(&self, &K) -> Option<V>` (both peek-based: no
 recency, TTL, or metrics effects; `peek` clones the live value) that take call-site priority over
 the ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `reset`).
+They likewise expose inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` (see
+[store-sharded.md](store-sharded.md) SHARD-6). It is deliberately not a `ConcurrentCached*` trait
+method: it is generic over `F`, so a trait method would need `where Self: Sized` to stay object
+safe (the crate already carries that wart on `cache_contains`), and adding a required method to
+`ConcurrentCached*` pre-3.0-final would break external implementors, with no sensible default to
+provide instead. Revisit as a trait method post-3.0 if a generic consumer needs it.
 
 ## CTRAIT-3
 

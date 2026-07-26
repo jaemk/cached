@@ -367,6 +367,48 @@ where
         }
     }
 
+    /// Remove every entry for which `keep` returns `false`, firing `on_evict` (if configured) and
+    /// incrementing `evictions` once per removed entry — matching
+    /// [`LruCache::retain`](crate::LruCache::retain) semantics. The LRU recency order of the
+    /// surviving entries in each shard is unchanged.
+    ///
+    /// Shards are processed one at a time under their own write lock, so this is **not atomic**
+    /// across shards: a concurrent reader may observe some shards already filtered and others not
+    /// yet touched. `keep` runs while the affected shard's write lock is held — do not call
+    /// methods on this same cache from inside `keep`, as re-entering the locked shard can
+    /// deadlock. `on_evict` fires after the shard's write lock has been released, once per removed
+    /// entry, in shard order (and in each shard's iteration order for that shard's removals).
+    /// Because callbacks run between shard sweeps, an `on_evict` that inserts into a shard this
+    /// call has not yet visited will have that entry filtered by the same in-flight `retain`.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+        for shard in self.inner.shards.iter() {
+            let removed: Vec<(K, V)> = {
+                let mut guard = shard.lock.write();
+                let doomed: Vec<K> = guard
+                    .iter()
+                    .filter_map(|(k, v)| if keep(k, v) { None } else { Some(k.clone()) })
+                    .collect();
+                let mut removed = Vec::with_capacity(doomed.len());
+                for k in doomed {
+                    if let Some(pair) = guard.pop_raw(&k) {
+                        removed.push(pair);
+                    }
+                }
+                if !removed.is_empty() {
+                    guard
+                        .evictions
+                        .fetch_add(removed.len() as u64, Ordering::Relaxed);
+                }
+                removed
+            };
+            if let Some(on_evict) = &self.inner.on_evict {
+                for (k, v) in &removed {
+                    on_evict(k, v);
+                }
+            }
+        }
+    }
+
     /// Effective total capacity across all shards.
     ///
     /// When constructed with [`max_size`](ShardedLruCacheBuilder::max_size), this may
@@ -1418,6 +1460,72 @@ mod tests {
         assert_eq!(c.len(), 0);
         assert!(c.is_empty());
         assert_eq!(c.metrics().hits, Some(0));
+    }
+
+    #[test]
+    fn retain_preserves_survivor_recency_order() {
+        // shards(1) so the recency order is deterministic and observable from one shard.
+        let c = ShardedLruCacheBase::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k % 2 == 0)
+            .collect();
+
+        c.retain(|k, _| k % 2 == 0);
+
+        let after: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            before, after,
+            "surviving entries must keep their relative MRU order"
+        );
+    }
+
+    /// Counter-wiring contract: `retain`'s eviction count on the plain LRU sharded store
+    /// is the per-shard `LruCache::evictions` counter directly (there is no separate
+    /// outer/inner split here, unlike the expiry-aware sharded stores).
+    #[test]
+    fn retain_increments_per_shard_evictions_counter_directly() {
+        let c = ShardedLruCacheBase::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        let before = c.inner.shards[0]
+            .lock
+            .read()
+            .evictions
+            .load(Ordering::Relaxed);
+        c.retain(|k, _| k % 2 == 0);
+        let after = c.inner.shards[0]
+            .lock
+            .read()
+            .evictions
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            after - before,
+            5,
+            "retain must bump the per-shard LRU evictions counter by exactly the removed count"
+        );
     }
 
     #[test]
