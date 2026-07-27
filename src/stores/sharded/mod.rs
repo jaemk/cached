@@ -1,5 +1,5 @@
-use std::sync::atomic::AtomicU64;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
 
 use crate::stores::BuildError;
 
@@ -333,9 +333,17 @@ mod tests {
     #[test]
     fn shard_has_evictions_counter_initialized_to_zero() {
         let shard = Shard::new(0u32);
-        assert_eq!(shard.evictions.load(std::sync::atomic::Ordering::Relaxed), 0);
-        shard.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(shard.evictions.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            shard.evictions.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        shard
+            .evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            shard.evictions.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -352,7 +360,10 @@ mod tests {
 
     #[test]
     fn default_shard_count_for_capacity_none_matches_default() {
-        assert_eq!(default_shard_count_for_capacity(None), default_shard_count());
+        assert_eq!(
+            default_shard_count_for_capacity(None),
+            default_shard_count()
+        );
     }
 
     #[test]

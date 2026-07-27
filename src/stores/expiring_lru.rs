@@ -404,13 +404,9 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
         if self.on_evict.is_none() {
             return self.cache_clear();
         }
-        let keys = self.store.key_order();
-        let mut removed = Vec::with_capacity(keys.len());
-        for k in &keys {
-            if let Some(pair) = self.store.pop_raw(k) {
-                removed.push(pair);
-            }
-        }
+        // `drain_all` walks the LRU chain once taking owned pairs (MRU -> LRU, the same
+        // order the old key-by-key drain fired in) -- no key clones, no re-hashing.
+        let removed = self.store.drain_all();
         let count = removed.len() as u64;
         if count > 0 {
             self.evictions.fetch_add(count, Ordering::Relaxed);
@@ -448,17 +444,17 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     where
         K: Clone,
     {
-        self.store
-            .order
-            .iter()
-            .filter_map(|(k, v)| {
-                if v.is_expired() {
-                    None
-                } else {
-                    Some(k.clone())
-                }
-            })
-            .collect()
+        // Upper-bound pre-size on the raw stored count (may include expired entries not
+        // yet swept); the filter below can only shrink the final length.
+        let mut out = Vec::with_capacity(self.store.cache_size());
+        out.extend(self.store.order.iter().filter_map(|(k, v)| {
+            if v.is_expired() {
+                None
+            } else {
+                Some(k.clone())
+            }
+        }));
+        out
     }
 
     /// Return a `Vec` of [`CacheValue`](super::CacheValue)-wrapped values in the
@@ -468,17 +464,17 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     where
         V: Clone,
     {
-        self.store
-            .order
-            .iter()
-            .filter_map(|(_, v)| {
-                if v.is_expired() {
-                    None
-                } else {
-                    Some(super::CacheValue::new(v.clone(), ()))
-                }
-            })
-            .collect()
+        // Upper-bound pre-size on the raw stored count (may include expired entries not
+        // yet swept); the filter below can only shrink the final length.
+        let mut out = Vec::with_capacity(self.store.cache_size());
+        out.extend(self.store.order.iter().filter_map(|(_, v)| {
+            if v.is_expired() {
+                None
+            } else {
+                Some(super::CacheValue::new(v.clone(), ()))
+            }
+        }));
+        out
     }
 }
 
@@ -500,7 +496,9 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
                 Some(&self.store.order.get(index).1)
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((key, old)) = self.store.pop_raw(k) {
+                // `hash` was already computed above for `get_index`; reuse it instead of
+                // letting `pop_raw` re-hash the same key.
+                if let Some((key, old)) = self.store.pop_raw_with_hash(hash, k) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&key, &old);
                     }
@@ -528,7 +526,9 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
                 Some(&mut self.store.order.get_mut(index).1)
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((k, old)) = self.store.pop_raw(key) {
+                // `hash` was already computed above for `get_index`; reuse it instead of
+                // letting `pop_raw` re-hash the same key.
+                if let Some((k, old)) = self.store.pop_raw_with_hash(hash, key) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&k, &old);
                     }
@@ -602,19 +602,24 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         Ok(v)
     }
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
-        // Clone the key only when a callback might need it. The inner `LruCache::cache_set` does
-        // not fire `on_evict` on an overwrite, so an expired displaced value would otherwise be
-        // dropped silently; filter it from the return and fire `on_evict` + count once here.
-        let key_for_evict = self.on_evict.as_ref().map(|_| k.clone());
-        match self.store.cache_set(k, v) {
-            Some(old) if old.is_expired() => {
-                if let (Some(on_evict), Some(key)) = (&self.on_evict, &key_for_evict) {
-                    on_evict(key, &old);
+        // `cache_set_returning_entry` hands back the STORED key/value of the displaced
+        // entry, so no caller-side key clone is needed to feed `on_evict` (unlike the old
+        // `LruCache::cache_set` + `k.clone()` combination, which cloned the key on every
+        // insert whenever `on_evict` was configured). Like the plain `LruCache::cache_set`
+        // it does NOT fire `on_evict` on an overwrite itself, so an expired displaced value
+        // would otherwise be dropped silently; filter it from the return and fire
+        // `on_evict` + count once here -- now with the STORED key, matching
+        // `LruTtlCache::set_entry`.
+        match self.store.cache_set_returning_entry(k, v) {
+            Some((stored_key, old)) if old.is_expired() => {
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(&stored_key, &old);
                 }
                 self.evictions.fetch_add(1, Ordering::Relaxed);
                 None
             }
-            other => other,
+            Some((_, old)) => Some(old),
+            None => None,
         }
     }
     /// Removes the entry and returns the value only if it is still live;
@@ -967,6 +972,39 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_overwrite_does_not_promote_to_mru() {
+        // Perf shard item 5: `cache_set` switched from `LruCache::cache_set` + a caller-key
+        // clone to `LruCache::cache_set_returning_entry`. That primitive replaces an
+        // existing entry in place (`order.set`) and does NOT promote it to MRU (the
+        // documented recency trap) -- matching the old `LruCache::cache_set` behavior. This
+        // guards against a regression that adds an accidental `move_to_front` on this path,
+        // or against the switch silently starting to promote.
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, 1); // live
+        c.cache_set(2, 2); // live
+        c.cache_set(3, 3); // live
+        // LRU order after inserts (MRU -> LRU): 3, 2, 1.
+
+        // Overwrite key 1 -- the least-recently-used entry -- with a new live value.
+        // Because cache_set must not promote, 1 remains the LRU entry.
+        assert_eq!(c.cache_set(1, 10), Some(1));
+
+        // Insert a 4th key to force a capacity eviction. If cache_set had wrongly promoted
+        // key 1, key 2 (now the true LRU) would be evicted instead of key 1.
+        c.cache_set(4, 4);
+        assert_eq!(c.cache_size(), 3);
+        assert_eq!(
+            c.cache_get(&1),
+            None,
+            "key 1 must still be LRU and get evicted -- cache_set must not promote on overwrite"
+        );
+        assert_eq!(c.cache_get(&2), Some(&2));
+        assert_eq!(c.cache_get(&3), Some(&3));
+        assert_eq!(c.cache_get(&4), Some(&4));
+    }
+
+    #[test]
     fn expiring_lru_try_get_or_set_with_err_keeps_expired_and_counts_miss() {
         // EXP-2: on a factory Err over an expired entry, ExpiringLruCache counts a miss the
         // instant the factory runs (matching ExpiringCache) instead of losing it on the `?`
@@ -1044,6 +1082,65 @@ mod tests {
         assert_eq!(c.get(&1), Some(&2));
         assert_eq!(c.cache_hits(), Some(1));
         assert_eq!(c.cache_misses(), Some(0));
+    }
+
+    #[test]
+    fn cache_get_lazy_sweep_of_expired_fires_on_evict_with_correct_key_and_removes_entry() {
+        // Perf shard item 3: cache_get's expired branch now reuses the hash already
+        // computed for get_index via pop_raw_with_hash instead of letting pop_raw
+        // re-hash. Pin that the sweep still fires on_evict with the right key/value,
+        // increments evictions exactly once, and physically removes the entry.
+        use std::sync::{Arc, Mutex};
+        let fired: Arc<Mutex<Vec<(u8, u8)>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired2 = fired.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &u8, v: &ExpiredU8| fired2.lock().unwrap().push((*k, *v)))
+            .build()
+            .unwrap();
+        c.cache_set(1, 20); // expired: 20 > 10
+        assert_eq!(c.cache_get(&1), None, "expired entry must not be returned");
+        assert_eq!(
+            fired.lock().unwrap().clone(),
+            vec![(1u8, 20u8)],
+            "on_evict must fire once with the expired entry's key and value"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(
+            c.cache_size(),
+            0,
+            "the expired entry must be physically removed by the lazy sweep"
+        );
+    }
+
+    #[test]
+    fn cache_get_mut_lazy_sweep_of_expired_fires_on_evict_with_correct_key_and_removes_entry() {
+        // Same as the cache_get variant above, for cache_get_mut's expired branch.
+        use std::sync::{Arc, Mutex};
+        let fired: Arc<Mutex<Vec<(u8, u8)>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired2 = fired.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &u8, v: &ExpiredU8| fired2.lock().unwrap().push((*k, *v)))
+            .build()
+            .unwrap();
+        c.cache_set(1, 20); // expired: 20 > 10
+        assert_eq!(
+            c.cache_get_mut(&1),
+            None,
+            "expired entry must not be returned"
+        );
+        assert_eq!(
+            fired.lock().unwrap().clone(),
+            vec![(1u8, 20u8)],
+            "on_evict must fire once with the expired entry's key and value"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(
+            c.cache_size(),
+            0,
+            "the expired entry must be physically removed by the lazy sweep"
+        );
     }
 
     #[test]
@@ -1243,6 +1340,38 @@ mod tests {
             "on_evict fires for all entries including expired"
         );
         assert_eq!(c.evictions.load(AOrdering::Relaxed), 3);
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_fires_in_mru_to_lru_order() {
+        // Perf shard item 1: `cache_clear_with_on_evict` was rewritten to use
+        // `LruCache::drain_all`, which must preserve the same MRU -> LRU firing order
+        // the old key-by-key `key_order()` + `pop_raw` loop produced.
+        use std::sync::{Arc, Mutex};
+        let fired: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired2 = fired.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(5)
+            .on_evict(move |k: &u8, _v: &ExpiredU8| {
+                fired2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+        // Insert order: 1, 2, 3 -> LRU order after inserts: 1 < 2 < 3.
+        c.cache_set(1, 5);
+        c.cache_set(2, 6);
+        c.cache_set(3, 7);
+        // Access 1 then 2 so the final MRU -> LRU order is: 2, 1, 3.
+        let _ = c.cache_get(&1);
+        let _ = c.cache_get(&2);
+
+        c.cache_clear_with_on_evict();
+
+        assert_eq!(
+            fired.lock().unwrap().clone(),
+            vec![2u8, 1, 3],
+            "on_evict must fire in most-recently-used to least-recently-used order"
+        );
     }
 
     #[test]

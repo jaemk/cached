@@ -1857,17 +1857,24 @@ fn bench_expiry_storm(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(500));
     group.throughput(Throughput::Elements(N_THREADS_STORM as u64));
 
-    // ttl=1ns: by the time the N_KEYS-entry population loop below finishes, every
-    // entry is already expired.
+    // ttl=1ns, so an entry is expired the moment it is written. Each op OVERWRITES an
+    // already-expired entry, which is itself an eviction (fires on_evict, bumps the
+    // counter) and leaves behind a fresh entry that is immediately expired again. That
+    // makes the storm self-sustaining.
+    //
+    // Reading instead would not work: there are only N_KEYS entries, so after the first
+    // N_KEYS reads drained them the remaining millions of iterations would be plain
+    // misses on a read lock, measuring no eviction work at all.
     let storm_ttl = ShardedTtlCache::<usize, usize>::new(Duration::from_nanos(1));
     for i in 0..N_KEYS {
         storm_ttl.cache_set(i, i * 2).expect("infallible");
     }
-    group.bench_function("ShardedTtlCache (all entries expired)", |b| {
+    group.bench_function("ShardedTtlCache (every op evicts an expired entry)", |b| {
         b.iter_custom(|iters| {
             let cache = storm_ttl.clone();
             run_concurrent_n!(N_THREADS_STORM, cache, iters, t, i, {
-                black_box(cache.cache_get(&read_key(i, t)).expect("infallible"));
+                let k = read_key(i, t);
+                black_box(cache.cache_set(k, k).expect("infallible"));
             })
         })
     });
@@ -1884,13 +1891,94 @@ fn bench_expiry_storm(c: &mut Criterion) {
             )
             .expect("infallible");
     }
-    group.bench_function("ShardedExpiringLruCache (all entries expired)", |b| {
-        b.iter_custom(|iters| {
-            let cache = storm_elru.clone();
-            run_concurrent_n!(N_THREADS_STORM, cache, iters, t, i, {
-                black_box(cache.cache_get(&read_key(i, t)).expect("infallible"));
+    group.bench_function(
+        "ShardedExpiringLruCache (every op evicts an expired entry)",
+        |b| {
+            b.iter_custom(|iters| {
+                let cache = storm_elru.clone();
+                run_concurrent_n!(N_THREADS_STORM, cache, iters, t, i, {
+                    let k = read_key(i, t);
+                    black_box(
+                        cache
+                            .cache_set(
+                                k,
+                                SweepExpiring {
+                                    val: k,
+                                    expired: true,
+                                },
+                            )
+                            .expect("infallible"),
+                    );
+                })
             })
-        })
+        },
+    );
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Sharded expiry sweeps: `evict()` over a fully-expired cache. The single-owner
+// "Sweeps" group does not cover the sharded stores, whose sweep walks every shard
+// under its own write lock.
+// ---------------------------------------------------------------------------
+
+fn bench_sharded_sweeps(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Sharded sweeps: evict() at N=10,000");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(500));
+
+    let expired_ttl_usize = || {
+        let c = ShardedTtlCache::<usize, usize>::new(Duration::from_nanos(1));
+        for i in 0..N_SWEEP {
+            c.cache_set(i, i * 2).expect("infallible");
+        }
+        c
+    };
+    group.bench_function("ShardedTtlCache evict (usize keys)", |b| {
+        b.iter_batched(
+            expired_ttl_usize,
+            |c| black_box(cached::ConcurrentCacheEvict::evict(&c)),
+            BatchSize::SmallInput,
+        )
+    });
+
+    let expired_ttl_string = || {
+        let c = ShardedTtlCache::<String, usize>::new(Duration::from_nanos(1));
+        for i in 0..N_SWEEP {
+            c.cache_set(format!("key-{i:016}"), i).expect("infallible");
+        }
+        c
+    };
+    group.bench_function("ShardedTtlCache evict (String keys)", |b| {
+        b.iter_batched(
+            expired_ttl_string,
+            |c| black_box(cached::ConcurrentCacheEvict::evict(&c)),
+            BatchSize::SmallInput,
+        )
+    });
+
+    let expired_exp_string = || {
+        let c = ShardedExpiringCache::<String, SweepExpiring>::new();
+        for i in 0..N_SWEEP {
+            c.cache_set(
+                format!("key-{i:016}"),
+                SweepExpiring {
+                    val: i,
+                    expired: true,
+                },
+            )
+            .expect("infallible");
+        }
+        c
+    };
+    group.bench_function("ShardedExpiringCache evict (String keys)", |b| {
+        b.iter_batched(
+            expired_exp_string,
+            |c| black_box(cached::ConcurrentCacheEvict::evict(&c)),
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -2094,6 +2182,7 @@ criterion_group!(
     bench_sharded_expiring_lru_concurrent,
     bench_sharded_ttl_concurrent,
     bench_expiry_storm,
+    bench_sharded_sweeps,
     bench_sharded_poll,
     bench_sharded_build_time,
     bench_large_value_lru,

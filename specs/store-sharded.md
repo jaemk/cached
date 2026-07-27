@@ -68,3 +68,17 @@ the predicate and every removal counts an eviction; `ShardedUnboundCache` tracks
 counter, so an entry there simply survives exactly when `keep` returns `true`. `retain` requires
 no `K: Clone` bound and is inherent-only, not a trait method; see
 [traits-concurrent.md](traits-concurrent.md).
+
+## SHARD-7
+
+For the LRU-bounded variants (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`),
+the DEFAULT shard count (no explicit `.shards(n)` on the builder) is capped by the requested
+`max_size` rather than derived from `available_parallelism()` alone: it is
+`next_power_of_two(max_size / 16).clamp(1, default_shard_count())`, where `default_shard_count()`
+is `available_parallelism() * 4` clamped to `[8, 1024]` and rounded to a power of two. This keeps
+a small bounded cache (e.g. `ShardedLruCache::new(100)`) from preallocating hundreds of shards on
+a high-core-count machine when the 16-entries-per-shard floor (`per_shard_cap_from_total`) alone
+would already dominate the effective capacity. Building without a `max_size` (the unbounded
+sharded stores) is unaffected and keeps using `default_shard_count()` directly.
+`.shards(n)` on the builder always overrides this default and is authoritative regardless of
+`max_size`. See [design/0037-sharded-lru-default-shard-cap.md](design/0037-sharded-lru-default-shard-cap.md).

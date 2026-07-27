@@ -45,3 +45,14 @@ Order accessors, shared across the LRU family (`LruCache`, `LruTtlCache`, `Expir
 and `ExpiringLruCache`, `M = Option<Instant>` for `LruTtlCache`, read via `expires_at()`. The
 wrapper `Deref`s to `V`, exposes `value()` / `into_value()`, and compares equal against bare
 values (`PartialEq<V>`).
+
+## LRU-6
+
+`on_evict` receives the **stored** key, not the caller's key, whenever an existing entry is
+displaced (an overwrite via `cache_set`, or eviction of an already-present key). The two keys
+compare equal (same `Hash`/`Eq`) but can differ in fields outside `Hash`/`Eq`, and the stored key
+is the one callers with such key types should see. `LruCache`, `LruTtlCache`, and
+`ExpiringLruCache` are all consistent on this contract; the internal
+`LruCache::cache_set_returning_entry` primitive (shared by the timed wrappers) returns the
+displaced `(stored_key, stored_value)` pair for exactly this reason, and `ExpiringLruCache`'s
+`cache_set` was brought onto the same contract (it previously passed the caller's key instead).

@@ -39,3 +39,10 @@ check expiry themselves. See [design/0030-force-refresh-result-fallback-interact
 `ExpiringLruCache` has the LRU-family order accessors (`iter_order` / `key_order` /
 `value_order`) with `CacheValue<V>` values (no per-entry metadata; expiry lives on the value
 itself via `Expires`). See [store-lru.md](store-lru.md) LRU-5.
+
+## EXPIRE-7
+
+`ExpiringLruCache::cache_set` fires `on_evict` with the **stored** key of any displaced entry, not
+the caller's key, matching the rest of the LRU family (`LruCache`, `LruTtlCache`). The two keys
+compare equal (same `Hash`/`Eq`) but can differ in fields outside `Hash`/`Eq`; observable only for
+key types with such fields. See [store-lru.md](store-lru.md) LRU-6.

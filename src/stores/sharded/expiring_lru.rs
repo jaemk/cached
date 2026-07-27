@@ -21,13 +21,46 @@ use crate::stores::{BuildError, LruCache};
 
 type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
+/// Insert or replace an entry in a shard's inner [`LruCache`], returning the **stored** `(K, V)`
+/// pair of the displaced entry (or `None` for a fresh insertion), and leaving the entry at the
+/// most-recently-used position either way.
+///
+/// This replaces the `pop_raw(&k)` + `cache_set(k, v)` pair that `cache_set` used purely to
+/// recover the owned stored key for `on_evict`: that pair hashed and probed the shard twice and
+/// churned the LRU slab (free the slot, then push a fresh one).
+///
+/// # Recency trap
+///
+/// The obvious one-lookup replacement, `LruCache::cache_set_returning_entry`, replaces in place
+/// via `order.set` and does **NOT** promote to MRU, whereas the remove-then-insert it replaces
+/// *does* (the re-insert goes through `push_front`). Dropping the promotion would silently
+/// change which entry a later capacity eviction picks. `get_or_set_with_if` with a never-valid
+/// predicate is exactly "`order.set` + `order.move_to_front`" for an existing key (and
+/// `push_front` + capacity check for a new one) in a single hash + probe, so the promotion is
+/// preserved. Pinned by `cache_set_with_on_evict_promotes_overwritten_entry_to_mru`.
+///
+/// The caller must have disabled hit/miss tracking on the inner cache (every sharded store
+/// does): `get_or_set_with_if` would otherwise record a miss for each overwrite.
+fn set_entry_promoting<K, V>(cache: &mut LruCache<K, V>, key: K, val: V) -> Option<(K, V)>
+where
+    K: Hash + Eq + Clone,
+{
+    debug_assert!(
+        !cache.track_hit_miss,
+        "set_entry_promoting requires hit/miss tracking to be disabled on the inner cache"
+    );
+    // `|_| false` (never valid) forces the replace arm for an existing key; that arm's
+    // `old_val` is the stored `(K, V)` pair.
+    let (_, _, displaced, _) = cache.get_or_set_with_if(key, || val, |_| false);
+    displaced
+}
+
 #[allow(clippy::type_complexity)]
 struct ExpiringLruInner<K, V, H> {
     shards: Box<[CachePadded<Shard<LruCache<K, V>>>]>,
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
-    evictions: AtomicU64,
     /// Total logical capacity (sum of per-shard caps). Stored as `AtomicUsize` so
     /// [`set_max_size`](ShardedExpiringLruCacheBase::set_max_size) can update it from `&self`.
     total_capacity: AtomicUsize,
@@ -74,6 +107,27 @@ impl<K, V, H> Clone for ShardedExpiringLruCacheBase<K, V, H> {
     }
 }
 
+impl<K, V, H> ShardedExpiringLruCacheBase<K, V, H> {
+    /// Sum of the per-shard counters for evictions **not** driven by LRU capacity pressure:
+    /// expired entries dropped lazily on [`cache_get`](ConcurrentCached::cache_get) or swept by
+    /// [`evict`](ShardedExpiringLruCacheBase::evict), [`retain`](Self::retain), and
+    /// [`cache_clear_with_on_evict`](Self::cache_clear_with_on_evict).
+    ///
+    /// These live in [`Shard::evictions`], one atomic per shard (like `hits`/`misses`), rather
+    /// than in a single process-wide counter on `Arc<Inner>`: a thread bumping it has just held
+    /// that shard's lock, so the line is already owned exclusively and no cross-core traffic is
+    /// added. LRU **capacity** evictions (plus explicit removes, which are counted there for
+    /// historical reasons) remain in each shard's inner `LruCache::evictions`;
+    /// [`metrics`](Self::metrics) sums the two families.
+    fn non_capacity_evictions(&self) -> u64 {
+        self.inner
+            .shards
+            .iter()
+            .map(|s| s.evictions.load(Ordering::Relaxed))
+            .sum()
+    }
+}
+
 impl<K, V, H> std::fmt::Debug for ShardedExpiringLruCacheBase<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShardedExpiringLruCache")
@@ -82,7 +136,9 @@ impl<K, V, H> std::fmt::Debug for ShardedExpiringLruCacheBase<K, V, H> {
                 "capacity",
                 &self.inner.total_capacity.load(Ordering::Relaxed),
             )
-            .field("evictions", &self.inner.evictions.load(Ordering::Relaxed))
+            // Same quantity as before the counter moved per-shard: the non-capacity
+            // eviction total (LRU capacity evictions live in the inner stores).
+            .field("evictions", &self.non_capacity_evictions())
             .finish_non_exhaustive()
     }
 }
@@ -157,12 +213,16 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
                 let store_copy = guard.clone();
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);
                 let misses = self.inner.shards[i].misses.load(Ordering::Relaxed);
+                // Carry the shard's non-capacity eviction count across too (it used to live
+                // in a single process-wide counter that `deep_clone` copied wholesale), so
+                // the clone's `metrics().evictions` matches the source's.
+                let evictions = self.inner.shards[i].evictions.load(Ordering::Relaxed);
                 drop(guard);
                 let shard = Shard {
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
                     misses: AtomicU64::new(misses),
-                    evictions: AtomicU64::new(0),
+                    evictions: AtomicU64::new(evictions),
                 };
                 CachePadded(shard)
             })
@@ -174,7 +234,6 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
                 shard_mask: self.inner.shard_mask,
                 hasher: self.inner.hasher.clone(),
                 on_evict: self.inner.on_evict.clone(),
-                evictions: AtomicU64::new(self.inner.evictions.load(Ordering::Relaxed)),
                 total_capacity: AtomicUsize::new(self.inner.total_capacity.load(Ordering::Relaxed)),
             }),
         }
@@ -291,10 +350,15 @@ where
         let mut hits = 0u64;
         let mut misses = 0u64;
         let mut inner_evictions = 0u64;
+        let mut non_capacity_evictions = 0u64;
         let mut size = 0usize;
         for shard in self.inner.shards.iter() {
             hits += shard.hits.load(Ordering::Relaxed);
             misses += shard.misses.load(Ordering::Relaxed);
+            // Per-shard non-capacity evictions (lazy expiry / evict / retain / clear); the
+            // inner `LruCache` counter below holds this shard's capacity evictions and its
+            // explicit removes. The two families are disjoint, so summing cannot double-count.
+            non_capacity_evictions += shard.evictions.load(Ordering::Relaxed);
             let guard = shard.lock.read();
             if let Some(e) = guard.cache_evictions() {
                 inner_evictions += e;
@@ -304,7 +368,7 @@ where
         CacheMetrics {
             hits: Some(hits),
             misses: Some(misses),
-            evictions: Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed)),
+            evictions: Some(inner_evictions + non_capacity_evictions),
             entry_count: Some(size),
             // Acquire, like `capacity()`: a caller that just resized on this thread sees
             // the new total here too, not a stale value alongside a fresh `capacity()`.
@@ -365,13 +429,11 @@ where
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                let keys: Vec<K> = guard.iter().map(|(k, _)| k.clone()).collect();
-                let mut removed = Vec::with_capacity(keys.len());
-                for k in keys {
-                    if let Some(pair) = guard.pop_raw(&k) {
-                        removed.push(pair);
-                    }
-                }
+                // `drain_all` walks each shard's LRU chain once taking owned pairs in
+                // MRU -> LRU order -- the same order the old "clone every key, then
+                // `pop_raw` each one" drain fired in, but with zero key clones and zero
+                // re-hashing.
+                let removed = guard.drain_all();
                 if !removed.is_empty() {
                     guard
                         .evictions
@@ -425,7 +487,7 @@ where
                 removed
             };
             if !removed.is_empty() {
-                self.inner
+                shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
                 if let Some(on_evict) = &self.inner.on_evict {
@@ -577,7 +639,7 @@ where
                 inner_evictions += e;
             }
         }
-        Some(inner_evictions + self.inner.evictions.load(Ordering::Relaxed))
+        Some(inner_evictions + self.non_capacity_evictions())
     }
 }
 
@@ -590,41 +652,42 @@ where
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let mut guard = shard.lock.write();
-        let expired = match guard.cache_peek(k) {
-            None => {
-                shard.misses.fetch_add(1, Ordering::Relaxed);
-                return Ok(None);
-            }
-            Some(v) => v.is_expired(),
-        };
-
-        if expired {
-            let removed = guard.pop_raw(k);
+        // The common case (a live hit) resolves in a SINGLE hash + probe: `get_if` promotes
+        // LRU recency only when the predicate reports the value live, so an expired entry is
+        // neither promoted nor removed here -- exactly the intent of the old peek-then-get
+        // pair, at half the lookups. `track_hit_miss` is disabled on the inner `LruCache`, so
+        // this probe touches no counter.
+        let val = guard.get_if(k, |v| !v.is_expired()).cloned();
+        if let Some(val) = val {
             drop(guard);
-            if let Some((ref key, ref val)) = removed {
-                // `pop_raw` removes the entry without bumping the inner LRU eviction counter,
-                // so track expired-on-access removals in the outer counter instead. Explicit
-                // removes via `cache_remove` bump the inner LRU counter (`guard.evictions`).
-                // Both paths feed into `metrics().evictions` via the combined sum in `metrics()`.
-                self.inner.evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = &self.inner.on_evict {
-                    on_evict(key, val);
-                }
-            }
-            shard.misses.fetch_add(1, Ordering::Relaxed);
-            Ok(None)
-        } else {
-            // Live hit — update LRU recency and extract value
-            let val = guard.cache_get(k).cloned();
             shard.hits.fetch_add(1, Ordering::Relaxed);
-            Ok(val)
+            return Ok(Some(val));
         }
+
+        // Not a live hit: either expired (still stored) or absent. `pop_raw` distinguishes
+        // them -- `Some` means it was expired and is now removed, `None` means absent. This
+        // costs the (rarer) miss path one extra probe to spare every hit one.
+        let removed = guard.pop_raw(k);
+        drop(guard);
+        if let Some((ref key, ref val)) = removed {
+            // `pop_raw` removes the entry without bumping the inner LRU eviction counter, so
+            // track expired-on-access removals in the shard's non-capacity counter instead.
+            // Explicit removes via `cache_remove` bump the inner LRU counter
+            // (`guard.evictions`). Both feed `metrics().evictions` via its combined sum.
+            shard.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(on_evict) = &self.inner.on_evict {
+                on_evict(key, val);
+            }
+        }
+        shard.misses.fetch_add(1, Ordering::Relaxed);
+        Ok(None)
     }
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
-        // With a callback, pop-then-set (`pop_raw` is silent and yields the owned key) so
-        // on_evict can fire after the lock is released; otherwise a plain set. A displaced
+        // With a callback we need the *stored* key to hand to it, so the write goes through
+        // `set_entry_promoting` (one lookup, no LRU slot churn, and it restores the MRU
+        // promotion the old pop-then-set got for free); otherwise a plain set. A displaced
         // expired value is counted as an eviction under the lock (matching cache_remove) and
         // filtered from the return; a live displaced value is returned to the caller unchanged.
         // `is_expired()` is evaluated exactly once, while the write lock is still held, and the
@@ -634,9 +697,7 @@ where
         let old: Option<(Option<K>, V, bool)> = {
             let mut guard = shard.lock.write();
             let old = if self.inner.on_evict.is_some() {
-                let removed = guard.pop_raw(&k);
-                guard.cache_set(k, v);
-                removed.map(|(ok, ov)| {
+                set_entry_promoting(&mut guard, k, v).map(|(ok, ov)| {
                     let expired = ov.is_expired();
                     (Some(ok), ov, expired)
                 })
@@ -648,8 +709,8 @@ where
             };
             if matches!(&old, Some((_, _, true))) {
                 // `guard.evictions` is the inner LRU counter (unlike expired-on-access removals
-                // in `cache_get`, which use the outer `self.inner.evictions` because `pop_raw`
-                // bypasses the inner counter). Both feed the combined sum in `metrics()`.
+                // in `cache_get`, which use the shard's non-capacity counter because `pop_raw`
+                // bypasses the inner one). Both feed the combined sum in `metrics()`.
                 guard.evictions.fetch_add(1, Ordering::Relaxed);
             }
             old
@@ -729,10 +790,11 @@ where
         for shard in self.inner.shards.iter() {
             shard.hits.store(0, Ordering::Relaxed);
             shard.misses.store(0, Ordering::Relaxed);
+            // The shard's non-capacity eviction counter (lazy expiry / evict / retain / clear).
+            shard.evictions.store(0, Ordering::Relaxed);
             // Zero the per-shard inner store's metrics, including its LRU capacity-eviction counter.
             shard.lock.write().cache_reset_metrics();
         }
-        self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -842,7 +904,7 @@ where
 
             total += removed.len();
             if !removed.is_empty() {
-                self.inner
+                shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
                 if let Some(on_evict) = &self.inner.on_evict {
@@ -1132,7 +1194,6 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
                     .hasher
                     .expect("hasher is always initialized via Default or .hasher()"),
                 on_evict: self.on_evict,
-                evictions: AtomicU64::new(0),
                 total_capacity: AtomicUsize::new(total_cap),
             }),
         })
@@ -2289,8 +2350,8 @@ mod tests {
     }
 
     /// Counter-wiring contract (the main correctness trap for this store): `retain` must
-    /// bump the outer `ExpiringLruInner::evictions` counter, NOT the inner `LruCache`'s own
-    /// capacity-eviction counter (`guard.evictions`).
+    /// bump the per-shard non-capacity eviction counter (`Shard::evictions`), NOT the inner
+    /// `LruCache`'s own capacity-eviction counter (`guard.evictions`).
     #[test]
     fn retain_wires_to_outer_evictions_not_inner_lru_counter() {
         let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
@@ -2314,7 +2375,7 @@ mod tests {
             .read()
             .evictions
             .load(Ordering::Relaxed);
-        let outer_before = c.inner.evictions.load(Ordering::Relaxed);
+        let outer_before = c.non_capacity_evictions();
 
         c.retain(|k, _| k % 2 == 0);
 
@@ -2323,7 +2384,7 @@ mod tests {
             .read()
             .evictions
             .load(Ordering::Relaxed);
-        let outer_after = c.inner.evictions.load(Ordering::Relaxed);
+        let outer_after = c.non_capacity_evictions();
 
         assert_eq!(
             inner_after, inner_before,
@@ -2332,11 +2393,429 @@ mod tests {
         assert_eq!(
             outer_after - outer_before,
             5,
-            "retain must count each removal via the outer evictions counter"
+            "retain must count each removal via the per-shard non-capacity counter"
         );
         assert_eq!(
             c.metrics().evictions.unwrap() - (inner_before + outer_before),
             5
         );
+    }
+
+    // --- single-lookup `cache_get`, per-shard eviction counters, and the recency trap ---
+
+    fn live(v: u32) -> Val {
+        Val { v, expired: false }
+    }
+
+    /// Raw per-shard non-capacity eviction counters, in shard order.
+    fn shard_eviction_counters<K, V, H>(c: &ShardedExpiringLruCacheBase<K, V, H>) -> Vec<u64> {
+        c.inner
+            .shards
+            .iter()
+            .map(|s| s.evictions.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    /// Index of the shard that owns `k`.
+    fn owning_shard<K, V, H: ShardHasher<K>>(
+        c: &ShardedExpiringLruCacheBase<K, V, H>,
+        k: &K,
+    ) -> usize {
+        shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
+    }
+
+    /// Keys of one shard in MRU -> LRU order.
+    fn shard_key_order<K: Clone + Hash + Eq, V: Clone, H>(
+        c: &ShardedExpiringLruCacheBase<K, V, H>,
+        shard: usize,
+    ) -> Vec<K> {
+        c.inner.shards[shard]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// `cache_get` resolves a live hit in a single hash + probe (`get_if`) and falls through to
+    /// `pop_raw` only when that probe fails. All three outcomes must keep their old semantics:
+    /// live hit -> value + hit; absent -> None + miss, nothing removed; expired -> None + miss,
+    /// entry removed, one eviction counted, `on_evict` fired with the stored key/value.
+    #[test]
+    fn cache_get_single_lookup_keeps_hit_miss_expired_and_absent_semantics() {
+        use std::sync::Mutex;
+        let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(8)
+            .on_evict(move |k: &u32, v: &Val| seen2.lock().unwrap().push((*k, v.v)))
+            .build()
+            .unwrap();
+
+        // Live hit.
+        SyncConcurrentCached::cache_set(&c, 1, live(10)).unwrap();
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1)
+                .unwrap()
+                .map(|v| v.v),
+            Some(10)
+        );
+        assert_eq!(c.metrics().hits, Some(1));
+        assert_eq!(c.metrics().misses, Some(0));
+        assert_eq!(c.len(), 1, "a live hit must not remove anything");
+
+        // Absent key: a miss, and the fall-through `pop_raw` must remove nothing.
+        assert!(SyncConcurrentCached::cache_get(&c, &404).unwrap().is_none());
+        assert_eq!(c.metrics().hits, Some(1));
+        assert_eq!(c.metrics().misses, Some(1));
+        assert_eq!(c.len(), 1);
+        assert!(seen.lock().unwrap().is_empty(), "no eviction yet");
+        let evictions_before = c.metrics().evictions.expect("evictions tracked");
+
+        // Expired value: a miss, removed from the store, counted, callback fired.
+        SyncConcurrentCached::cache_set(
+            &c,
+            2,
+            Val {
+                v: 20,
+                expired: true,
+            },
+        )
+        .unwrap();
+        assert!(SyncConcurrentCached::cache_get(&c, &2).unwrap().is_none());
+        assert_eq!(c.metrics().misses, Some(2));
+        assert_eq!(c.len(), 1, "the expired entry must be removed on access");
+        assert_eq!(*seen.lock().unwrap(), vec![(2, 20)]);
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked") - evictions_before,
+            1,
+            "lazy expiry must count exactly one eviction"
+        );
+        // A second read of the now-absent key is a plain miss with no extra eviction.
+        assert!(SyncConcurrentCached::cache_get(&c, &2).unwrap().is_none());
+        assert_eq!(c.metrics().misses, Some(3));
+        assert_eq!(
+            c.metrics().evictions.expect("evictions tracked") - evictions_before,
+            1
+        );
+        // The live entry is untouched throughout.
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1)
+                .unwrap()
+                .map(|v| v.v),
+            Some(10)
+        );
+    }
+
+    /// The single-lookup path must still promote what it reads: `get_if` moves the entry to
+    /// MRU when (and only when) the predicate reports the value live. Checked directly on the
+    /// recency chain and through the capacity eviction it decides.
+    #[test]
+    fn cache_get_promotes_recency_through_the_single_lookup_path() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(2)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, live(10)).unwrap();
+        SyncConcurrentCached::cache_set(&c, 2, live(20)).unwrap();
+        assert_eq!(shard_key_order(&c, 0), vec![2, 1]);
+
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1)
+                .unwrap()
+                .map(|v| v.v),
+            Some(10)
+        );
+        assert_eq!(
+            shard_key_order(&c, 0),
+            vec![1, 2],
+            "a live read must promote the entry to MRU"
+        );
+
+        // ... so the next capacity eviction claims key 2, not the just-read key 1.
+        SyncConcurrentCached::cache_set(&c, 3, live(30)).unwrap();
+        assert!(SyncConcurrentCached::cache_contains(&c, &1).unwrap());
+        assert!(!SyncConcurrentCached::cache_contains(&c, &2).unwrap());
+    }
+
+    /// THE RECENCY TRAP. `cache_set` with an `on_evict` callback no longer does
+    /// `pop_raw` + `cache_set` (two lookups plus LRU slab churn) to recover the stored key --
+    /// it uses `set_entry_promoting`. The removed pop-then-insert promoted the overwritten
+    /// entry to MRU for free (the re-insert went through `push_front`); a plain in-place
+    /// `order.set` (i.e. `cache_set_returning_entry`) does NOT. This test fails if that
+    /// promotion is dropped.
+    #[test]
+    fn cache_set_with_on_evict_promotes_overwritten_entry_to_mru() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(2)
+            .on_evict(|_, _| {})
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, live(10)).unwrap();
+        SyncConcurrentCached::cache_set(&c, 2, live(20)).unwrap();
+        assert_eq!(shard_key_order(&c, 0), vec![2, 1]);
+
+        // Overwrite the LRU entry: it must come back as MRU, and return the old value.
+        assert_eq!(
+            SyncConcurrentCached::cache_set(&c, 1, live(11))
+                .unwrap()
+                .map(|v| v.v),
+            Some(10),
+            "overwrite must return the displaced live value"
+        );
+        assert_eq!(
+            shard_key_order(&c, 0),
+            vec![1, 2],
+            "overwriting an entry must promote it to MRU (as pop-then-insert did)"
+        );
+        assert_eq!(c.len(), 2, "an overwrite must not change the entry count");
+
+        // The promotion decides the next capacity eviction victim.
+        SyncConcurrentCached::cache_set(&c, 3, live(30)).unwrap();
+        assert_eq!(
+            SyncConcurrentCached::cache_get(&c, &1)
+                .unwrap()
+                .map(|v| v.v),
+            Some(11),
+            "the promoted (overwritten) entry must survive the capacity eviction"
+        );
+        assert!(!SyncConcurrentCached::cache_contains(&c, &2).unwrap());
+    }
+
+    /// The `on_evict`-free `cache_set` path is a plain `LruCache::cache_set`, which replaces
+    /// in place and does **not** promote. That asymmetry predates the single-lookup rewrite;
+    /// this pins it so the two paths are not silently unified in either direction.
+    #[test]
+    fn cache_set_without_on_evict_does_not_promote_overwritten_entry() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(2)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, live(10)).unwrap();
+        SyncConcurrentCached::cache_set(&c, 2, live(20)).unwrap();
+        assert_eq!(
+            SyncConcurrentCached::cache_set(&c, 1, live(11))
+                .unwrap()
+                .map(|v| v.v),
+            Some(10)
+        );
+        assert_eq!(
+            shard_key_order(&c, 0),
+            vec![2, 1],
+            "without on_evict, an overwrite replaces in place and does not promote"
+        );
+    }
+
+    /// Every eviction counted outside the inner LRU counter lands on the shard that owns the
+    /// key, and `metrics()` aggregates the per-shard counters together with the inner LRU
+    /// counters without double-counting.
+    #[test]
+    fn every_eviction_path_counts_on_the_owning_shard() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(8)
+            .per_shard_max_size(8)
+            .build()
+            .unwrap();
+        let mut expected = vec![0u64; 8];
+        let expired = |v: u32| Val { v, expired: true };
+
+        // 1) Lazy expiry through cache_get.
+        SyncConcurrentCached::cache_set(&c, 1, expired(10)).unwrap();
+        assert!(SyncConcurrentCached::cache_get(&c, &1).unwrap().is_none());
+        expected[owning_shard(&c, &1)] += 1;
+        assert_eq!(
+            shard_eviction_counters(&c),
+            expected,
+            "cache_get lazy expiry"
+        );
+
+        // 2) evict() sweep.
+        SyncConcurrentCached::cache_set(&c, 2, expired(20)).unwrap();
+        SyncConcurrentCached::cache_set(&c, 3, expired(30)).unwrap();
+        assert_eq!(ConcurrentCacheEvict::evict(&c), 2);
+        expected[owning_shard(&c, &2)] += 1;
+        expected[owning_shard(&c, &3)] += 1;
+        assert_eq!(shard_eviction_counters(&c), expected, "evict");
+
+        // 3) retain().
+        SyncConcurrentCached::cache_set(&c, 4, live(40)).unwrap();
+        c.retain(|_k, _v| false);
+        expected[owning_shard(&c, &4)] += 1;
+        assert_eq!(shard_eviction_counters(&c), expected, "retain");
+
+        // 4) Explicit removes stay on the INNER per-shard LruCache counter (unchanged split).
+        SyncConcurrentCached::cache_set(&c, 5, live(50)).unwrap();
+        let non_capacity_before = shard_eviction_counters(&c);
+        let total_before = c.metrics().evictions.expect("evictions tracked");
+        assert!(
+            SyncConcurrentCached::cache_remove(&c, &5)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            shard_eviction_counters(&c),
+            non_capacity_before,
+            "cache_remove must keep counting on the inner LRU counter"
+        );
+        assert_eq!(
+            c.metrics().evictions,
+            Some(total_before + 1),
+            "the removal must still show up in the aggregate exactly once"
+        );
+
+        // 5) cache_clear_with_on_evict also counts on the inner counter for this store.
+        SyncConcurrentCached::cache_set(&c, 6, live(60)).unwrap();
+        let non_capacity_before = shard_eviction_counters(&c);
+        let total_before = c.metrics().evictions.expect("evictions tracked");
+        c.cache_clear_with_on_evict();
+        assert_eq!(shard_eviction_counters(&c), non_capacity_before);
+        assert_eq!(c.metrics().evictions, Some(total_before + 1));
+
+        // 6) Capacity evictions: inner counter only, added on top by metrics().
+        let victims: Vec<u32> = (0..1000u32)
+            .filter(|i| owning_shard(&c, i) == 0)
+            .take(20)
+            .collect();
+        assert_eq!(victims.len(), 20, "need 20 keys landing on shard 0");
+        let non_capacity_before = shard_eviction_counters(&c);
+        let total_before = c.metrics().evictions.expect("evictions tracked");
+        for k in &victims {
+            SyncConcurrentCached::cache_set(&c, *k, live(*k)).unwrap();
+        }
+        assert_eq!(
+            shard_eviction_counters(&c),
+            non_capacity_before,
+            "capacity evictions must NOT touch the non-capacity counters"
+        );
+        assert_eq!(
+            c.metrics().evictions,
+            Some(total_before + 12),
+            "metrics() must sum capacity and non-capacity evictions without double counting"
+        );
+
+        // cache_reset_metrics zeroes both families.
+        ConcurrentCached::cache_reset_metrics(&c).unwrap();
+        assert_eq!(shard_eviction_counters(&c), vec![0u64; 8]);
+        assert_eq!(c.metrics().evictions, Some(0));
+    }
+
+    /// `deep_clone` used to copy one process-wide eviction counter; with the counters
+    /// per-shard it must copy each shard's, so the clone reports the same totals.
+    #[test]
+    fn deep_clone_preserves_per_shard_eviction_counts() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .per_shard_max_size(4)
+            .build()
+            .unwrap();
+        // Non-capacity evictions (lazy expiry) plus capacity evictions from overfilling.
+        for i in 0..4u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: true,
+                },
+            )
+            .unwrap();
+            assert!(SyncConcurrentCached::cache_get(&c, &i).unwrap().is_none());
+        }
+        for i in 100..140u32 {
+            SyncConcurrentCached::cache_set(&c, i, live(i)).unwrap();
+        }
+        let before = c.metrics().evictions.expect("evictions tracked");
+        let per_shard_before = shard_eviction_counters(&c);
+        assert_eq!(per_shard_before.iter().sum::<u64>(), 4);
+        assert!(
+            before > 4,
+            "the fixture must also produce capacity evictions"
+        );
+
+        let cloned = c.deep_clone();
+        assert_eq!(
+            shard_eviction_counters(&cloned),
+            per_shard_before,
+            "each shard's non-capacity counter must carry across a deep_clone"
+        );
+        assert_eq!(
+            cloned.metrics().evictions,
+            Some(before),
+            "the clone must report the same eviction total"
+        );
+
+        // The clone is independent: further non-capacity evictions do not touch the source.
+        SyncConcurrentCached::cache_set(
+            &cloned,
+            999,
+            Val {
+                v: 999,
+                expired: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            SyncConcurrentCached::cache_get(&cloned, &999)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            shard_eviction_counters(&cloned).iter().sum::<u64>(),
+            5,
+            "the lazy expiry must count on the clone's own shard counter"
+        );
+        assert_eq!(
+            shard_eviction_counters(&c),
+            per_shard_before,
+            "the source's per-shard counters must be untouched by the clone"
+        );
+        assert_eq!(
+            c.metrics().evictions,
+            Some(before),
+            "the source's totals must be untouched by the clone"
+        );
+    }
+
+    /// `cache_clear_with_on_evict` drains each shard with `LruCache::drain_all` (no key clones,
+    /// no re-hashing); the callbacks must still arrive most-recently-used first, per shard.
+    #[test]
+    fn cache_clear_with_on_evict_fires_mru_to_lru_per_shard() {
+        use std::sync::Mutex;
+        let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(1)
+            .max_size(64)
+            .on_evict(move |k: &u32, _v: &Val| seen2.lock().unwrap().push(*k))
+            .build()
+            .unwrap();
+        for i in 0..6u32 {
+            SyncConcurrentCached::cache_set(&c, i, live(i)).unwrap();
+        }
+        assert!(SyncConcurrentCached::cache_get(&c, &0).unwrap().is_some());
+        assert!(SyncConcurrentCached::cache_get(&c, &2).unwrap().is_some());
+        let expected = shard_key_order(&c, 0);
+        assert_eq!(
+            expected,
+            vec![2, 0, 5, 4, 3, 1],
+            "precondition: MRU -> LRU chain after the two re-reads"
+        );
+
+        c.cache_clear_with_on_evict();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            expected,
+            "on_evict must fire in MRU -> LRU order"
+        );
+        assert!(c.is_empty());
+        // The drained shard stays usable.
+        SyncConcurrentCached::cache_set(&c, 42, live(42)).unwrap();
+        assert!(SyncConcurrentCached::cache_get(&c, &42).unwrap().is_some());
     }
 }
