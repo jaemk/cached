@@ -1339,6 +1339,13 @@ fn bench_overwrite_existing_key(c: &mut Criterion) {
     // TtlSortedCache::set_and_get_mut via cache_get_or_set_with_mut on a miss (the
     // `#[cached]` write path): every key here is new, so this always takes the
     // miss -> set_and_get_mut branch.
+    //
+    // Three variants, because the unbounded/usize shape exercises none of the work this
+    // path does for real callers: with no `max_size` the size-limit branch (and the
+    // re-lookup inside it) never runs, and a `usize` key makes every key clone free. The
+    // cache also grows without bound here, so the measurement drifts into BTreeSet-insert
+    // and rehash cost. The bounded and String-keyed variants below cover the paths that
+    // owned keys and a capacity bound actually take.
     {
         let mut cache = TtlSortedCache::<usize, usize>::builder()
             .ttl(long_ttl)
@@ -1350,6 +1357,49 @@ fn bench_overwrite_existing_key(c: &mut Criterion) {
             |b| {
                 b.iter(|| {
                     let v = cache.cache_get_or_set_with_mut(key_ctr, || key_ctr);
+                    black_box(v);
+                    key_ctr += 1;
+                })
+            },
+        );
+    }
+
+    // Size-limited: every miss past the cap also runs the protected-eviction branch,
+    // which is where the removed re-lookup lived.
+    {
+        let mut cache = TtlSortedCache::<usize, usize>::builder()
+            .ttl(long_ttl)
+            .max_size(1_000)
+            .build()
+            .unwrap();
+        let mut key_ctr = 0usize;
+        group.bench_function(
+            "TtlSortedCache cache_get_or_set_with_mut (miss, size-limited)",
+            |b| {
+                b.iter(|| {
+                    let v = cache.cache_get_or_set_with_mut(key_ctr, || key_ctr);
+                    black_box(v);
+                    key_ctr += 1;
+                })
+            },
+        );
+    }
+
+    // Owned String keys, size-limited: the shape where the eliminated key clones are
+    // real allocations rather than register moves.
+    {
+        let mut cache = TtlSortedCache::<String, usize>::builder()
+            .ttl(long_ttl)
+            .max_size(1_000)
+            .build()
+            .unwrap();
+        let mut key_ctr = 0usize;
+        group.bench_function(
+            "TtlSortedCache cache_get_or_set_with_mut (miss, size-limited, String keys)",
+            |b| {
+                b.iter(|| {
+                    let key = format!("key-{key_ctr:016}");
+                    let v = cache.cache_get_or_set_with_mut(key, || key_ctr);
                     black_box(v);
                     key_ctr += 1;
                 })

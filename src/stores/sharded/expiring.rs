@@ -163,6 +163,7 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
                     misses: AtomicU64::new(misses),
+                    evictions: AtomicU64::new(0),
                 };
                 CachePadded(shard)
             })

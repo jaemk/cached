@@ -160,6 +160,7 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedUnboundCacheBase<
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
                     misses: AtomicU64::new(misses),
+                    evictions: AtomicU64::new(0),
                 };
                 CachePadded(shard)
             })
@@ -428,10 +429,12 @@ where
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let guard = shard.lock.read();
-        match guard.get(k) {
+        let found = guard.get(k).cloned();
+        drop(guard);
+        match found {
             Some(v) => {
                 shard.hits.fetch_add(1, Ordering::Relaxed);
-                Ok(Some(v.clone()))
+                Ok(Some(v))
             }
             None => {
                 shard.misses.fetch_add(1, Ordering::Relaxed);

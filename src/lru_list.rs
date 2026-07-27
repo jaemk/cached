@@ -135,8 +135,43 @@ impl<T> LRUList<T> {
         });
     }
 
+    /// Move every occupied value into `out` in MRU -> LRU order (leaving the list
+    /// empty), then reset the two sentinel cells so the list is immediately reusable.
+    ///
+    /// This is the allocation-free counterpart of "collect the keys, then remove them
+    /// one at a time": it walks the occupied chain once taking owned values, so callers
+    /// clearing a whole cache never clone a key or re-hash anything. The backing `Vec`'s
+    /// capacity is retained.
+    pub(crate) fn drain_into(&mut self, out: &mut Vec<T>) {
+        let mut index = self.values[Self::OCCUPIED].next;
+        while index != Self::OCCUPIED {
+            let next = self.values[index].next;
+            if let Some(value) = self.values[index].value.take() {
+                out.push(value);
+            }
+            index = next;
+        }
+        // Reset the free/occupied sentinels; every cell is now vacant.
+        self.clear();
+    }
+
     pub fn iter(&self) -> LRUListIterator<'_, T> {
         LRUListIterator::<T> {
+            list: self,
+            index: Self::OCCUPIED,
+        }
+    }
+
+    /// Iterate the *slot indices* of the occupied cells in MRU -> LRU order (the same
+    /// order as [`iter`](Self::iter)).
+    ///
+    /// Lets a sweep collect a `Vec<usize>` of the slots it intends to touch instead of
+    /// cloning every candidate key. Slot indices are stable across removals of *other*
+    /// slots, so a collected list stays valid while the sweep removes entries -- but a
+    /// removal frees its slot for reuse, so a collected index must not be replayed after
+    /// any `push_front`.
+    pub(crate) fn iter_indices(&self) -> LRUListIndexIterator<'_, T> {
+        LRUListIndexIterator::<T> {
             list: self,
             index: Self::OCCUPIED,
         }
@@ -160,6 +195,28 @@ impl<'a, T> Iterator for LRUListIterator<'a, T> {
             let value = self.list.values[next].value.as_ref();
             self.index = next;
             value
+        }
+    }
+}
+
+/// Iterator over the occupied slot indices of an [`LRUList`], MRU -> LRU.
+/// See [`LRUList::iter_indices`].
+#[derive(Debug)]
+pub struct LRUListIndexIterator<'a, T> {
+    list: &'a LRUList<T>,
+    index: usize,
+}
+
+impl<T> Iterator for LRUListIndexIterator<'_, T> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.list.values[self.index].next;
+        if next == LRUList::<T>::OCCUPIED {
+            None
+        } else {
+            self.index = next;
+            Some(next)
         }
     }
 }
@@ -236,5 +293,156 @@ mod tests {
         assert!(order(&l).is_empty());
         let b = l.push_front(9); // still usable after clear
         assert_eq!(*l.get(b), 9);
+    }
+
+    #[test]
+    fn iter_indices_matches_iter_order() {
+        let mut l = LRUList::with_capacity(4);
+        let a = l.push_front(1);
+        let b = l.push_front(2);
+        let c = l.push_front(3);
+        assert_eq!(l.iter_indices().collect::<Vec<_>>(), vec![c, b, a]);
+        // The index order must track the value order (MRU -> LRU) exactly.
+        let by_index: Vec<i32> = l.iter_indices().map(|i| *l.get(i)).collect();
+        assert_eq!(by_index, order(&l));
+
+        // Reordering and removal keep the two views in agreement.
+        l.move_to_front(a);
+        assert_eq!(l.iter_indices().collect::<Vec<_>>(), vec![a, c, b]);
+        assert_eq!(l.remove(c), 3);
+        assert_eq!(l.iter_indices().collect::<Vec<_>>(), vec![a, b]);
+        let by_index: Vec<i32> = l.iter_indices().map(|i| *l.get(i)).collect();
+        assert_eq!(by_index, order(&l));
+
+        // Empty list yields no indices.
+        let empty: LRUList<i32> = LRUList::with_capacity(2);
+        assert!(empty.iter_indices().next().is_none());
+    }
+
+    #[test]
+    fn drain_into_yields_mru_to_lru_and_resets() {
+        let mut l = LRUList::with_capacity(4);
+        l.push_front(1);
+        l.push_front(2);
+        let c = l.push_front(3);
+        l.move_to_front(c); // no-op, but pins that drain follows the live chain
+
+        let mut out = Vec::new();
+        l.drain_into(&mut out);
+        assert_eq!(out, vec![3, 2, 1], "drain must be MRU -> LRU");
+
+        // Sentinels are reset: the list is empty and reports no indices.
+        assert!(order(&l).is_empty());
+        assert!(l.iter_indices().next().is_none());
+
+        // Reusable after a drain, and slot allocation restarts from the free list.
+        let a = l.push_front(9);
+        let b = l.push_front(10);
+        assert_eq!(*l.get(a), 9);
+        assert_eq!(*l.get(b), 10);
+        assert_eq!(order(&l), vec![10, 9]);
+        assert_eq!(l.back(), a);
+
+        // Freed-slot reuse still works after a drain.
+        assert_eq!(l.remove(b), 10);
+        let d = l.push_front(11);
+        assert_eq!(d, b, "a freed slot must be reused after a drain, not grown");
+        assert_eq!(order(&l), vec![11, 9]);
+
+        // Draining an already-empty list appends nothing and leaves it usable.
+        let mut l2: LRUList<i32> = LRUList::with_capacity(2);
+        let mut out2 = vec![42];
+        l2.drain_into(&mut out2);
+        assert_eq!(out2, vec![42]);
+        let e = l2.push_front(5);
+        assert_eq!(*l2.get(e), 5);
+    }
+
+    #[test]
+    fn stale_index_after_push_front_refers_to_recycled_slot() {
+        // Pins the hazard documented on `iter_indices`: a collected index survives the
+        // removal of *other* slots, but a `push_front` recycles the freed slot, so
+        // replaying a stale index afterwards addresses the NEW occupant. Consumers that
+        // collect indices must not insert before they finish replaying them.
+        let mut l = LRUList::with_capacity(4);
+        let a = l.push_front(1);
+        let b = l.push_front(2);
+        let c = l.push_front(3);
+        let snapshot: Vec<usize> = l.iter_indices().collect();
+        assert_eq!(snapshot, vec![c, b, a]);
+
+        assert_eq!(l.remove(b), 2);
+        // Supported case: indices of untouched slots are still valid after a removal.
+        assert_eq!(*l.get(snapshot[0]), 3);
+        assert_eq!(*l.get(snapshot[2]), 1);
+
+        // A push recycles the just-freed slot ...
+        let d = l.push_front(99);
+        assert_eq!(d, b, "push_front must recycle the most recently freed slot");
+        // ... so the stale index now names the new entry, silently and without a panic.
+        assert_eq!(*l.get(snapshot[1]), 99);
+        assert_eq!(
+            l.remove(snapshot[1]),
+            99,
+            "replaying a stale index removes the recycled entry, not the original"
+        );
+        assert_eq!(order(&l), vec![3, 1]);
+    }
+
+    #[test]
+    fn iter_indices_empty_after_all_removals() {
+        let mut l = LRUList::with_capacity(4);
+        let a = l.push_front(1);
+        let b = l.push_front(2);
+        assert_eq!(l.remove(a), 1);
+        assert_eq!(l.remove(b), 2);
+        assert!(l.iter_indices().next().is_none());
+        assert!(order(&l).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid index")]
+    fn remove_of_freed_slot_panics() {
+        // `LruCache::remove_index` documents a panic for a non-occupied slot; this is
+        // the primitive it panics through.
+        let mut l = LRUList::with_capacity(2);
+        let a = l.push_front(1);
+        assert_eq!(l.remove(a), 1);
+        let _ = l.remove(a);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid index")]
+    fn get_of_freed_slot_panics() {
+        let mut l = LRUList::with_capacity(2);
+        let a = l.push_front(1);
+        assert_eq!(l.remove(a), 1);
+        let _ = l.get(a);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn get_out_of_range_index_panics() {
+        let mut l = LRUList::with_capacity(2);
+        l.push_front(1);
+        let _ = l.get(999);
+    }
+
+    #[test]
+    fn drain_into_skips_freed_slots() {
+        // A list with holes (removed entries) must drain only the live chain.
+        let mut l = LRUList::with_capacity(8);
+        let a = l.push_front(1);
+        let b = l.push_front(2);
+        let _c = l.push_front(3);
+        let d = l.push_front(4);
+        assert_eq!(l.remove(b), 2);
+        assert_eq!(l.remove(d), 4);
+        l.move_to_front(a);
+
+        let mut out = Vec::new();
+        l.drain_into(&mut out);
+        assert_eq!(out, vec![1, 3]);
+        assert!(order(&l).is_empty());
     }
 }

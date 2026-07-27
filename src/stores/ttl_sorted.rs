@@ -7,7 +7,6 @@ use std::borrow::Borrow;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeSet;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "async_core")]
@@ -108,6 +107,10 @@ impl<K> Stamped<K> {
     /// Build a sentinel `Stamped` for use as a BTreeSet range bound.
     /// Only `Some(expiry)` bounds are used for expiry-sweep ranges; never-expiring
     /// entries (`None`) sort beyond all `Some(_)` values and are excluded automatically.
+    ///
+    /// This is the canonical constructor for the `key: None` sentinel that the `Option` in
+    /// [`Stamped::key`] exists for: [`TtlSortedCache::evict_at`] uses it as the `split_off`
+    /// pivot, and the tests use it to re-derive the pre-refactor range-based expected counts.
     fn bound(expiry: Instant) -> Stamped<K> {
         Stamped {
             expiry: Some(expiry),
@@ -553,36 +556,79 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Returns number of dropped items.
     #[must_use]
     pub fn evict(&mut self) -> usize {
-        let cutoff = Instant::now();
-        let min = Stamped::bound(self.min_instant);
-        let max = Stamped::bound(cutoff);
-        let min = Included(&min);
-        // `Stamped::bound(cutoff)` has `key: None`, which sorts below every real entry at the
-        // same expiry, so a real entry expiring exactly at `cutoff` is never in this range under
-        // either `Excluded` or `Included`. That matches `is_expired_at`'s at-or-after boundary in
-        // practice: `cutoff` is sampled here, so no stored expiry (computed at an earlier insert)
-        // ever equals it, and any entry that did tie is caught by the next `is_expired` get.
-        let max = Excluded(&max);
-        let remove = self.keys.range((min, max)).count();
+        self.evict_at(Instant::now())
+    }
 
-        let mut count = 0;
-        while count < remove {
-            match self.keys.pop_first() {
-                None => break,
-                Some(stamped) => {
-                    // Invariant: `None` keys are only used as artificial range sentinels
-                    // in `evict()`/`retain_latest()` and are never inserted into `self.keys`.
-                    let key = stamped
-                        .key
-                        .expect("evicting: only artificial bounds are none");
-                    if let Some(entry) = self.map.remove(key.0.as_ref()) {
-                        if let Some(on_evict) = &self.on_evict {
-                            on_evict(key.0.as_ref(), &entry.value);
-                        }
-                        self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
-                    }
-                    count += 1;
+    /// [`evict`](Self::evict) against an explicit `cutoff`, so a caller that already sampled
+    /// the clock (e.g. [`set_inner`](Self::set_inner) on an evicting insert) does not pay for a
+    /// second `Instant::now()`.
+    ///
+    /// The expired entries are exactly the front prefix of `self.keys`: the index is ordered by
+    /// expiry and `None` (never-expires) sorts GREATEST (see [`Stamped`]'s `Ord`). Rather than
+    /// counting a range and then popping the same prefix one entry at a time (two traversals,
+    /// and an `O(log n)` rebalance per popped entry), the prefix is detached in one
+    /// `split_off` and drained by value: the split is a single `O(log n)` descent and the
+    /// drain is an in-order walk of a tree that is being consumed, so no rebalancing happens
+    /// at all.
+    ///
+    /// The boundary is `expiry < cutoff` (strictly-less), exactly what the previous
+    /// `range(Included(bound(min_instant))..Excluded(bound(cutoff)))` selected: the sentinel
+    /// `Stamped::bound(cutoff)` carries `key: None`, which sorts below every real key at the
+    /// same expiry, so a real entry expiring exactly at `cutoff` stays on the live side under
+    /// `split_off` just as it was excluded from the old range. That matches `is_expired_at`'s
+    /// at-or-after boundary in practice: `cutoff` is sampled by the caller, so no stored expiry
+    /// (computed at an earlier insert) ever equals it, and any entry that did tie is caught by
+    /// the next `is_expired` get. The old `min_instant` lower bound is likewise unnecessary —
+    /// every stored expiry is `>= min_instant` by construction (it is `insert_time + ttl` and
+    /// the cache was built before any insert) — so dropping it saves a tree descent.
+    ///
+    /// Returns the number of index entries dropped (matching the old `pop_first` count), while
+    /// `evictions` counts only the entries that were actually present in the map.
+    fn evict_at(&mut self, cutoff: Instant) -> usize {
+        // Detach `[.., cutoff)` in one operation: `split_off` leaves everything BELOW the
+        // sentinel in `self.keys` and returns the rest, so swap the two halves back.
+        let live = self.keys.split_off(&Stamped::bound(cutoff));
+        let expired = std::mem::replace(&mut self.keys, live);
+        let count = expired.len();
+        if count == 0 {
+            return 0;
+        }
+
+        if self.on_evict.is_none() {
+            let mut evicted = 0u64;
+            for stamped in expired {
+                // Invariant: `None` keys are only used as artificial range sentinels
+                // in `evict()`/`retain_latest()` and are never inserted into `self.keys`.
+                let key = stamped
+                    .key
+                    .expect("evicting: only artificial bounds are none");
+                if self.map.remove(key.0.as_ref()).is_some() {
+                    evicted += 1;
                 }
+            }
+            self.evictions.fetch_add(evicted, AtomicOrdering::Relaxed);
+            return count;
+        }
+
+        // With a callback configured, drain both structures FIRST and fire `on_evict` only
+        // once every removal is done — as `retain` does. Firing mid-drain would let a
+        // panicking callback unwind with the remaining stamps already detached from
+        // `self.keys` but their entries still in `self.map`, orphaning them: invisible to a
+        // later sweep yet still counted by `len`.
+        let mut removed = Vec::with_capacity(count);
+        for stamped in expired {
+            let key = stamped
+                .key
+                .expect("evicting: only artificial bounds are none");
+            if let Some(entry) = self.map.remove(key.0.as_ref()) {
+                removed.push((key, entry));
+            }
+        }
+        self.evictions
+            .fetch_add(removed.len() as u64, AtomicOrdering::Relaxed);
+        if let Some(on_evict) = &self.on_evict {
+            for (key, entry) in &removed {
+                on_evict(key.0.as_ref(), &entry.value);
             }
         }
         count
@@ -651,40 +697,55 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// entries by a `FnMut(&K, &V) -> bool` predicate (which also sweeps expired entries
     /// regardless of the predicate, but ignores `size_limit` and returns `()`).
     pub fn retain_latest(&mut self, count: usize, evict: bool) -> usize {
+        self.retain_latest_at(count, evict.then(Instant::now))
+    }
+
+    /// [`retain_latest`](Self::retain_latest) with the expiry sweep driven by an explicit
+    /// cutoff: `Some(cutoff)` is the `evict = true` sweep, `None` disables it. Lets a caller
+    /// that already sampled the clock reuse its own `now`.
+    ///
+    /// Like [`evict_at`](Self::evict_at) this walks the front of the expiry index instead of
+    /// pre-counting a range. The old code took `max(retain_drop_count, expired_count)` and
+    /// popped that many; since the expired entries are exactly a front prefix, popping while
+    /// `dropped < retain_drop_count || (evict && front_is_expired)` removes the same set.
+    fn retain_latest_at(&mut self, count: usize, cutoff: Option<Instant>) -> usize {
         let retain_drop_count = self.map.len().saturating_sub(count);
+        if retain_drop_count == 0 {
+            // No size trim to do: this is either a pure expiry sweep (where the old
+            // `max(0, expired_count)` is just the sweep count) or a complete no-op that must
+            // leave the index untouched.
+            return match cutoff {
+                Some(cutoff) => self.evict_at(cutoff),
+                None => 0,
+            };
+        }
 
-        let remove = if evict {
-            let cutoff = Instant::now();
-            let min = Stamped::bound(self.min_instant);
-            let max = Stamped::bound(cutoff);
-            let min = Included(&min);
-            let max = Excluded(&max);
-            let to_evict_count = self.keys.range((min, max)).count();
-            retain_drop_count.max(to_evict_count)
-        } else {
-            retain_drop_count
-        };
-
-        let mut count = 0;
-        while count < remove {
-            match self.keys.pop_first() {
-                None => break,
-                Some(stamped) => {
-                    // Invariant: same as evict() — None keys are sentinel-only.
-                    let key = stamped
-                        .key
-                        .expect("retaining: only artificial bounds are none");
-                    if let Some(entry) = self.map.remove(key.0.as_ref()) {
-                        if let Some(on_evict) = &self.on_evict {
-                            on_evict(key.0.as_ref(), &entry.value);
-                        }
-                        self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
-                    }
-                    count += 1;
+        let mut dropped = 0;
+        while let Some(stamped) = self.keys.pop_first() {
+            if dropped >= retain_drop_count {
+                // Size trim satisfied; keep going only while the front is expired.
+                let expired = match cutoff {
+                    Some(cutoff) => matches!(stamped.expiry, Some(expiry) if expiry < cutoff),
+                    None => false,
+                };
+                if !expired {
+                    self.keys.insert(stamped);
+                    break;
                 }
             }
+            // Invariant: same as evict() — None keys are sentinel-only.
+            let key = stamped
+                .key
+                .expect("retaining: only artificial bounds are none");
+            if let Some(entry) = self.map.remove(key.0.as_ref()) {
+                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(key.0.as_ref(), &entry.value);
+                }
+            }
+            dropped += 1;
         }
-        count
+        dropped
     }
 
     /// Set k/v pair without running eviction logic, using the cache's default TTL.
@@ -698,7 +759,7 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// years), the entry is stored with no expiry (never expires), matching
     /// [`cache_set`](crate::Cached::cache_set) on the other TTL stores.
     pub fn set(&mut self, key: K, value: V) -> Option<V> {
-        self.set_inner(key, value, None, false, false)
+        self.set_inner(key, value, None, false, false).0
     }
 
     /// Start building a `set` call with an optional per-entry TTL override and/or
@@ -736,6 +797,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     ///
     /// `skip_size_eviction` defers size-limit enforcement to the caller
     /// (`set_and_get_mut` must protect the just-inserted entry before evicting).
+    ///
+    /// Returns the displaced (unexpired) value plus the `Stamped` that was written to the
+    /// expiry index. Handing the stamp back lets `set_and_get_mut` protect and re-find the
+    /// entry it just inserted without cloning the key again or re-hashing it; the stamp holds
+    /// the very same `CacheArc` handle the stored `Entry` does (an `Arc`, so no deep clone).
     fn set_inner(
         &mut self,
         key: K,
@@ -743,42 +809,65 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         ttl: Option<Duration>,
         evict: bool,
         skip_size_eviction: bool,
-    ) -> Option<V> {
-        let arc_key = CacheArc::new(key.clone());
+    ) -> (Option<V>, Stamped<K>) {
         let effective_ttl = ttl.unwrap_or(self.ttl);
+
+        // Sample the clock ONCE for the whole operation: the new expiry, the displaced
+        // entry's expiry check, and any eager sweep below are all judged against this
+        // instant instead of taking two or three separate `Instant::now()` readings.
+        let now = Instant::now();
 
         // A zero TTL means "never expires": store expiry = None. `checked_add`
         // returning `None` on overflow lands on the same never-expires representation.
         let expiry = if effective_ttl.is_zero() {
             None
         } else {
-            Instant::now().checked_add(effective_ttl)
+            now.checked_add(effective_ttl)
+        };
+
+        // `entry` rather than `insert`: on the occupied path the existing `Entry` already owns
+        // a `CacheArc` for this key, so reusing it is a refcount bump instead of an allocation
+        // plus a deep `K::clone`. Only the vacant path allocates, and it clones the key out of
+        // `VacantEntry::key` (the caller's `key` is moved into the map by `insert`).
+        let (arc_key, old) = match self.map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let arc_key = occupied.get().key.clone();
+                let old = occupied.insert(Entry {
+                    expiry,
+                    key: arc_key.clone(),
+                    value,
+                });
+                (arc_key, Some(old))
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                let arc_key = CacheArc::new(vacant.key().clone());
+                vacant.insert(Entry {
+                    expiry,
+                    key: arc_key.clone(),
+                    value,
+                });
+                (arc_key, None)
+            }
         };
 
         let new_stamped = Stamped {
             expiry,
-            key: Some(arc_key.clone()),
+            key: Some(arc_key),
         };
         self.keys.insert(new_stamped.clone());
-        let old = self.map.insert(
-            key,
-            Entry {
-                expiry,
-                key: arc_key,
-                value,
-            },
-        );
-        if let Some(old) = &old {
-            let old_stamped = old.as_stamped();
-            if old_stamped != new_stamped {
-                self.keys.remove(&old_stamped);
-            }
+        // The displaced entry's stamp carries the same (equal) key, so it differs from the new
+        // one exactly when the expiry changed — comparing the two instants avoids rebuilding
+        // `old.as_stamped()` on the (common) unchanged-expiry path.
+        if let Some(old) = &old
+            && old.expiry != expiry
+        {
+            self.keys.remove(&old.as_stamped());
         }
         let old_value = match old {
             // A displaced expired value is filtered from the return (matching the get paths), so
             // it is dropped silently from the caller's view; fire `on_evict` and count an
             // eviction so cleanup and metrics stay consistent with the other removal paths.
-            Some(entry) if entry.is_expired() => {
+            Some(entry) if entry.is_expired_at(now) => {
                 if let Some(on_evict) = &self.on_evict {
                     on_evict(entry.key.0.as_ref(), &entry.value);
                 }
@@ -792,17 +881,18 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         // Size-limit eviction is skipped only when the caller explicitly requests it
         // (`skip_size_eviction`) — e.g. `set_and_get_mut` must guarantee the just-inserted
         // entry is still present to return `&mut V` safely, regardless of the entry's TTL.
+        // The sweeps reuse `now` rather than re-reading the clock.
         if !skip_size_eviction {
             if let Some(size_limit) = self.size_limit {
                 if self.map.len() > size_limit {
-                    self.retain_latest(size_limit, evict);
+                    self.retain_latest_at(size_limit, evict.then_some(now));
                 }
             } else if evict {
-                let _ = self.evict();
+                let _ = self.evict_at(now);
             }
         }
 
-        old_value
+        (old_value, new_stamped)
     }
 
     /// Insert `key`/`value` and return a mutable reference to the stored value.
@@ -812,8 +902,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// capacity. Used by the `cache_get_or_set_with_mut` family.
     fn set_and_get_mut(&mut self, key: K, value: V) -> &mut V {
         // `skip_size_eviction = true` defers size enforcement to the block below,
-        // where we can protect the just-inserted entry.
-        let _ = self.set_inner(key.clone(), value, None, false, true);
+        // where we can protect the just-inserted entry. `set_inner` hands back the exact
+        // `Stamped` it indexed, so the key is moved in (no extra `K::clone`) and the
+        // protect/re-find steps below reuse that stamp instead of re-deriving it from a
+        // second map lookup.
+        let (_, protected) = self.set_inner(key, value, None, false, true);
 
         if let Some(size_limit) = self.size_limit
             && self.map.len() > size_limit
@@ -822,15 +915,22 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             // `retain_latest` cannot select it for eviction. Other entries are
             // dropped in TTL order until the map is back within `size_limit`.
             // The stamp is restored afterward so the index stays consistent.
-            let protected = self.map[&key].as_stamped();
             self.keys.remove(&protected);
             self.retain_latest(size_limit, false);
-            self.keys.insert(protected);
+            self.keys.insert(protected.clone());
         }
 
+        // The stamp shares the stored entry's key `Arc`, so this borrows the key rather than
+        // cloning it. The `&mut V` is tied to `&mut self`, not to `protected`.
+        let key: &K = protected
+            .key
+            .as_ref()
+            .expect("set_and_get_mut: set_inner always stamps a real key")
+            .0
+            .as_ref();
         &mut self
             .map
-            .get_mut(&key)
+            .get_mut(key)
             .expect("set_and_get_mut: the protected eviction path guarantees the entry is present")
             .value
     }
@@ -917,6 +1017,7 @@ impl<'a, K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedSetBuilder<'a, 
     pub fn set(self) -> Option<V> {
         self.cache
             .set_inner(self.key, self.value, self.ttl, self.evict, false)
+            .0
     }
 }
 
@@ -930,9 +1031,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     {
         // Two lookups on the hit path: the first checks expiry (releasing the borrow via
         // `.map`), the second returns the reference. A single-lookup approach is not possible
-        // in stable Rust because returning `&'1 V` from inside an `if let` block ties the
-        // borrow to lifetime `'1`, which prevents `remove_entry` (a mutable borrow) even on
-        // the non-returning path. Polonius (nightly) would fix this.
+        // SAFELY in stable Rust because returning `&'1 V` from inside an `if let` block ties
+        // the borrow to lifetime `'1`, which prevents `remove_entry` (a mutable borrow) even on
+        // the non-returning path. Polonius (nightly) would fix this. It IS possible with
+        // `unsafe`: `TtlCache::cache_get` (see `src/stores/ttl.rs`, the `&entry.value as
+        // *const V` reborrow) collapses this to one lookup behind a documented SAFETY comment.
         let is_expired = match self.map.get(key) {
             None => {
                 self.misses.increment();
@@ -975,7 +1078,7 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
     }
 
     fn cache_set(&mut self, key: K, value: V) -> Option<V> {
-        self.set_inner(key, value, None, false, false)
+        self.set_inner(key, value, None, false, false).0
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
@@ -1037,9 +1140,10 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
             Some(removed) => {
                 let expired = removed.is_expired();
                 self.keys.remove(&removed.as_stamped());
-                let stored_k = (*removed.key.0).clone();
+                // The stored key `Arc` derefs to `&K` directly: no clone is needed to hand the
+                // callback a reference (and the clone previously ran even without a callback).
                 if let Some(on_evict) = &self.on_evict {
-                    on_evict(&stored_k, &removed.value);
+                    on_evict(removed.key.0.as_ref(), &removed.value);
                 }
                 self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 if expired { None } else { Some(removed.value) }
@@ -1135,6 +1239,9 @@ impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedIter<K, V> for TtlSortedCache<
         K: 'a,
         V: 'a,
     {
+        // The clock is read per item rather than hoisted into a construction-time snapshot:
+        // this iterator is lazy and may be held across a long consumer loop, where a stale
+        // snapshot would report entries that have since expired as live.
         self.map.iter().filter_map(|(k, entry)| {
             if entry.is_expired() {
                 None
@@ -1287,14 +1394,24 @@ where
         Fut: Future<Output = V> + Send + 'a,
     {
         async move {
-            if self.cache_get(&k).is_some() {
+            // Same shape as the sync `cache_get_or_set_with_mut`: check liveness in place
+            // (one lookup) instead of going through `cache_get`, which costs two lookups of
+            // its own before this method's `get_mut` — three on an async hit. As in the sync
+            // version, an expired entry is left in place for `set_and_get_mut` to displace
+            // (which fires `on_evict` and counts the eviction) rather than being swept before
+            // the future runs, so a dropped/panicking future leaves the stale entry alone.
+            let live = matches!(self.map.get(&k), Some(entry) if !entry.is_expired());
+            if live {
+                self.hits.increment();
                 return self
                     .map
                     .get_mut(&k)
                     .map(|entry| &mut entry.value)
-                    // Invariant: cache_get confirmed the entry is present and unexpired.
+                    // Invariant: the liveness check above confirmed the entry is present and
+                    // unexpired, and nothing removes it in between.
                     .expect("cache entry vanished");
             }
+            self.misses.increment();
             // `set_and_get_mut` never drops the value, so this path is panic-free.
             let value = f().await;
             self.set_and_get_mut(k, value)
@@ -1314,16 +1431,27 @@ where
         Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
         async move {
-            if self.cache_get(&k).is_some() {
+            // Same shape as `async_cache_get_or_set_with_mut` / the sync fallible sibling:
+            // check liveness in place (one lookup) instead of going through `cache_get`, which
+            // would sweep an expired entry (and fire `on_evict`) before the factory is even
+            // polled. An expired entry is left in place for `set_and_get_mut` to displace on
+            // `Ok` (which fires `on_evict` and counts the eviction) rather than being swept
+            // up front, so a factory `Err` or a dropped/cancelled future leaves the stale entry
+            // alone.
+            let live = matches!(self.map.get(&k), Some(entry) if !entry.is_expired());
+            if live {
+                self.hits.increment();
                 return Ok(self
                     .map
                     .get_mut(&k)
                     .map(|entry| &mut entry.value)
-                    // Invariant: cache_get confirmed the entry is present and unexpired.
+                    // Invariant: the liveness check above confirmed the entry is present and
+                    // unexpired, and nothing removes it in between.
                     .expect("cache entry vanished"));
             }
-            // `set_and_get_mut` never drops the value, so this path is panic-free.
+            self.misses.increment();
             let value = f().await?;
+            // `set_and_get_mut` never drops the value, so this path is panic-free.
             Ok(self.set_and_get_mut(k, value))
         }
     }
@@ -3356,5 +3484,1891 @@ mod test {
         assert_eq!(cache.retain_latest(0, false), 32);
         assert!(cache.map.is_empty());
         assert!(cache.keys.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Front-driven `evict_at` / `retain_latest_at` equivalence with the old two-pass
+    // (`range(..).count()` then pop) logic. The real monotonic clock never produces a
+    // deterministic `now == expiry` tie, so these drive the private `*_at` entry points
+    // with hand-built entries and an explicit cutoff.
+    // ---------------------------------------------------------------------------
+
+    /// Insert an entry with an exact `expiry`, keeping map and index in lockstep the same
+    /// way `set_inner` does (same `CacheArc` in both structures).
+    fn insert_raw(
+        cache: &mut TtlSortedCache<u32, u32>,
+        key: u32,
+        value: u32,
+        expiry: Option<crate::time::Instant>,
+    ) {
+        use super::{CacheArc, Entry, Stamped};
+        let arc = CacheArc::new(key);
+        cache.keys.insert(Stamped {
+            expiry,
+            key: Some(arc.clone()),
+        });
+        cache.map.insert(
+            key,
+            Entry {
+                expiry,
+                key: arc,
+                value,
+            },
+        );
+    }
+
+    /// The number of entries the pre-refactor sweep would have removed: the count of the
+    /// `[bound(min_instant), bound(cutoff))` range over the expiry index.
+    fn old_range_expired_count(
+        cache: &TtlSortedCache<u32, u32>,
+        cutoff: crate::time::Instant,
+    ) -> usize {
+        use super::Stamped;
+        use std::ops::Bound::{Excluded, Included};
+        let min = Stamped::<u32>::bound(cache.min_instant);
+        let max = Stamped::<u32>::bound(cutoff);
+        cache.keys.range((Included(&min), Excluded(&max))).count()
+    }
+
+    /// Build a cache holding one entry strictly before the cutoff, one tied exactly at the
+    /// cutoff, one after it, and one that never expires. All expiries are in the future
+    /// relative to `min_instant`, so the old lower range bound would not have excluded any.
+    fn boundary_population() -> (TtlSortedCache<u32, u32>, crate::time::Instant) {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+        insert_raw(&mut cache, 1, 10, Some(cutoff - Duration::from_nanos(1)));
+        insert_raw(&mut cache, 2, 20, Some(cutoff));
+        insert_raw(&mut cache, 3, 30, Some(cutoff + Duration::from_nanos(1)));
+        insert_raw(&mut cache, 4, 40, None);
+        (cache, cutoff)
+    }
+
+    /// An entry expiring EXACTLY at the cutoff is not swept (the old
+    /// `Excluded(bound(cutoff))` bound excluded it too, because the sentinel's `key: None`
+    /// sorts below every real key at the same expiry), and a never-expiring entry survives.
+    #[test]
+    fn evict_at_boundary_tie_and_never_expiring_entries_match_the_old_range_bounds() {
+        let (mut cache, cutoff) = boundary_population();
+        assert_eq!(
+            old_range_expired_count(&cache, cutoff),
+            1,
+            "reference: the old range selected only the strictly-earlier entry"
+        );
+
+        assert_eq!(
+            cache.evict_at(cutoff),
+            1,
+            "only the entry expiring strictly before the cutoff is swept"
+        );
+        assert!(!cache.map.contains_key(&1u32), "strictly earlier is swept");
+        assert!(
+            cache.map.contains_key(&2u32),
+            "an exact now == expiry tie survives, matching the old Excluded upper bound"
+        );
+        assert!(cache.map.contains_key(&3u32), "later expiry survives");
+        assert!(cache.map.contains_key(&4u32), "never-expiring survives");
+        assert_index_lockstep(&cache, "after a boundary evict_at");
+
+        // A cutoff one tick past the tie now sweeps it, proving the boundary is where the
+        // old range put it and not one entry off.
+        assert_eq!(cache.evict_at(cutoff + Duration::from_nanos(1)), 1);
+        assert!(!cache.map.contains_key(&2u32));
+        assert!(cache.map.contains_key(&3u32));
+        assert!(cache.map.contains_key(&4u32));
+        assert_index_lockstep(&cache, "after sweeping the tie");
+    }
+
+    /// Over a mixed population (many expired, some live, some never-expiring, colliding
+    /// expiries) the front-driven sweep must drop exactly as many entries as the old
+    /// `range(..).count()` pass would have.
+    #[test]
+    fn evict_at_drop_count_matches_the_old_two_pass_range_count() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+        for k in 0u32..30 {
+            let expiry = match k % 3 {
+                // Expired, with pairs of keys colliding on the same instant.
+                0 => Some(cutoff - Duration::from_micros(u64::from(k / 3) + 1)),
+                // Live: half of them tie EXACTLY on the cutoff, which must be kept.
+                1 => Some(cutoff + Duration::from_micros(u64::from(k % 2))),
+                // Never expires.
+                _ => None,
+            };
+            insert_raw(&mut cache, k, k * 10, expiry);
+        }
+        let expected = old_range_expired_count(&cache, cutoff);
+        assert_eq!(expected, 10, "reference count over the mixed population");
+
+        assert_eq!(
+            cache.evict_at(cutoff),
+            expected,
+            "front-driven evict must drop the same count as the old range pass"
+        );
+        assert_eq!(cache.map.len(), 20);
+        assert_index_lockstep(&cache, "after a mixed evict_at");
+        for k in 0u32..30 {
+            assert_eq!(
+                cache.map.contains_key(&k),
+                k % 3 != 0,
+                "exactly the expired third is swept"
+            );
+        }
+        assert_eq!(
+            cache.evict_at(cutoff),
+            0,
+            "a repeat sweep at the same cutoff drops nothing"
+        );
+    }
+
+    /// A panicking `on_evict` must not desynchronize the map from the expiry index during an
+    /// expiry sweep either. `evict` detaches the whole expired prefix from `keys` up front, so
+    /// it must finish every `map` removal before firing any callback — unwinding mid-drain
+    /// would strand the not-yet-removed entries in `map` with their stamps already gone.
+    #[test]
+    fn evict_on_evict_panic_leaves_the_index_in_lockstep() {
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cb = std::sync::Arc::clone(&fired);
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k, _v| {
+                // Panic on the FIRST callback: with an interleaved drain that would leave the
+                // remaining five entries in `map` without stamps.
+                if cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    panic!("boom");
+                }
+            })
+            .build()
+            .unwrap();
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+        for k in 0u32..6 {
+            insert_raw(
+                &mut cache,
+                k,
+                k,
+                Some(cutoff - Duration::from_micros(u64::from(k) + 1)),
+            );
+        }
+        // One live entry that must survive untouched.
+        insert_raw(&mut cache, 100u32, 100u32, Some(cutoff));
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache.evict_at(cutoff);
+        }));
+        assert!(caught.is_err(), "the callback panic must propagate");
+
+        assert_index_lockstep(&cache, "after on_evict panicked mid-evict");
+        assert_eq!(
+            cache.map.len(),
+            1,
+            "every expired entry left the map before the callbacks ran"
+        );
+        assert!(cache.map.contains_key(&100u32), "the live entry survives");
+        assert_eq!(cache.cache_evictions(), Some(6));
+        // The survivor is still reachable through the index.
+        assert_eq!(cache.retain_latest(0, false), 1);
+        assert_index_lockstep(&cache, "after trimming the survivor");
+    }
+
+    /// `retain_latest_at` with the sweep enabled: the tie at the cutoff is kept and
+    /// never-expiring entries sort last, exactly as under the old range bounds.
+    #[test]
+    fn retain_latest_at_boundary_tie_and_never_expiring_entries_match_the_old_range_bounds() {
+        // count = 4 (no size pressure): only the expiry sweep can drop anything.
+        let (mut cache, cutoff) = boundary_population();
+        assert_eq!(
+            cache.retain_latest_at(4, Some(cutoff)),
+            1,
+            "only the strictly-earlier entry is swept; the tie is kept"
+        );
+        assert!(cache.map.contains_key(&2u32), "the exact tie survives");
+        assert!(cache.map.contains_key(&4u32), "never-expiring survives");
+        assert_index_lockstep(&cache, "after a boundary retain_latest_at");
+
+        // Size pressure beyond the expired prefix: the sweep count and the trim count are
+        // combined exactly as `max(retain_drop_count, expired_count)` did.
+        let (mut cache, cutoff) = boundary_population();
+        assert_eq!(
+            cache.retain_latest_at(2, Some(cutoff)),
+            2,
+            "trim of 2 dominates the single expired entry"
+        );
+        assert!(!cache.map.contains_key(&1u32), "expired dropped first");
+        assert!(!cache.map.contains_key(&2u32), "then the soonest-to-expire");
+        assert!(
+            cache.map.contains_key(&4u32),
+            "never-expiring entries are retained last"
+        );
+        assert_index_lockstep(&cache, "after a size-dominated retain_latest_at");
+
+        // Sweep disabled: a size trim alone never consults the cutoff.
+        let (mut cache, _cutoff) = boundary_population();
+        assert_eq!(cache.retain_latest_at(4, None), 0);
+        assert_eq!(cache.map.len(), 4, "no trim needed, no sweep requested");
+        assert_index_lockstep(&cache, "after a no-op retain_latest_at");
+    }
+
+    /// The combined trim/sweep drop count must equal the old
+    /// `max(retain_drop_count, range(..).count())` for every `count` and both sweep modes.
+    #[test]
+    fn retain_latest_at_drop_count_matches_the_old_two_pass_logic() {
+        fn fresh() -> (TtlSortedCache<u32, u32>, crate::time::Instant) {
+            let mut cache = TtlSortedCache::<u32, u32>::builder()
+                .ttl(Duration::from_secs(60))
+                .build()
+                .unwrap();
+            let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+            for k in 0u32..12 {
+                let expiry = match k % 3 {
+                    0 => Some(cutoff - Duration::from_micros(u64::from(k) + 1)),
+                    // Half of the live entries tie EXACTLY on the cutoff.
+                    1 => Some(cutoff + Duration::from_micros(u64::from(k % 2))),
+                    _ => None,
+                };
+                insert_raw(&mut cache, k, k * 10, expiry);
+            }
+            (cache, cutoff)
+        }
+
+        for keep in 0..=13usize {
+            for sweep in [false, true] {
+                let (mut cache, cutoff) = fresh();
+                let retain_drop_count = cache.map.len().saturating_sub(keep);
+                let expected = if sweep {
+                    retain_drop_count.max(old_range_expired_count(&cache, cutoff))
+                } else {
+                    retain_drop_count
+                };
+                let dropped = cache.retain_latest_at(keep, sweep.then_some(cutoff));
+                assert_eq!(
+                    dropped, expected,
+                    "keep={keep} sweep={sweep}: drop count must match the old two-pass logic"
+                );
+                assert_eq!(cache.map.len(), 12 - expected);
+                assert_index_lockstep(&cache, "after retain_latest_at");
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // `set_inner` / `set_and_get_mut` refactor
+    // ---------------------------------------------------------------------------
+
+    /// `set_and_get_mut` no longer re-looks-up the key after inserting; it reuses the stamp
+    /// `set_inner` returns. The map/index lockstep must hold on every branch it takes:
+    /// plain miss, expired displacement, and the protected size-limited eviction.
+    #[test]
+    fn set_and_get_mut_keeps_the_index_in_lockstep() {
+        // Plain miss, no size limit.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        for k in 0u32..4 {
+            let v = cache.cache_get_or_set_with_mut(k, || k * 10);
+            assert_eq!(*v, k * 10);
+            assert_index_lockstep(&cache, "after a miss insert");
+        }
+        assert_eq!(cache.map.len(), 4);
+
+        // Expired displacement: the factory runs again and the stale stamp is replaced.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        cache.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(*cache.cache_get_or_set_with_mut(1u32, || 99u32), 99u32);
+        assert_eq!(cache.map.len(), 1);
+        assert_index_lockstep(&cache, "after replacing an expired entry");
+
+        // Size-limited: the just-inserted entry is protected, its stamp is restored, and the
+        // returned reference points at that entry.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(3)
+            .build()
+            .unwrap();
+        for k in 0u32..8 {
+            let v = cache.cache_get_or_set_with_mut(k, || k * 100);
+            assert_eq!(*v, k * 100, "the reference must be the entry just inserted");
+            *v += 1;
+            assert!(cache.map.len() <= 3, "the size limit is enforced");
+            assert_index_lockstep(&cache, "after a protected size-limited insert");
+            assert_eq!(
+                crate::CachedPeek::cache_peek(&cache, &k),
+                Some(&(k * 100 + 1)),
+                "the protected entry survives its own insert and is mutable through the ref"
+            );
+        }
+        // The index is still complete enough to trim everything.
+        let len = cache.map.len();
+        assert_eq!(cache.retain_latest(0, false), len);
+        assert!(cache.keys.is_empty());
+    }
+
+    /// Overwriting an existing key reuses the stored key `Arc` (a refcount bump) instead of
+    /// allocating a fresh `Arc` from a deep key clone, and the index keeps exactly one stamp.
+    #[test]
+    fn cache_set_overwrite_reuses_the_stored_key_arc() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        cache.cache_set(1u32, 10u32);
+        let before = cache.map.get(&1u32).expect("entry present").key.0.clone();
+
+        assert_eq!(cache.cache_set(1u32, 20u32), Some(10u32));
+        let after = &cache.map.get(&1u32).expect("entry present").key.0;
+        assert!(
+            Arc::ptr_eq(&before, after),
+            "an overwrite must reuse the stored key Arc, not allocate a new one"
+        );
+        assert_eq!(cache.map.len(), 1);
+        assert_eq!(cache.keys.len(), 1, "no orphan stamp is left behind");
+        assert_index_lockstep(&cache, "after an overwrite");
+    }
+
+    /// An overwrite that changes the expiry must remove the old stamp and index the new one;
+    /// an overwrite that leaves the expiry unchanged must leave a single stamp in place.
+    #[test]
+    fn overwrite_replaces_the_index_stamp_only_when_the_expiry_changes() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // Two entries so a stale stamp would be visible as a length mismatch.
+        cache.set_with(1u32, 10u32).ttl(Duration::ZERO).set();
+        cache.set_with(2u32, 20u32).ttl(Duration::ZERO).set();
+        assert_index_lockstep(&cache, "never-expiring pair");
+
+        // Same (None) expiry: the stamp is identical, nothing to remove.
+        assert_eq!(
+            cache.set_with(1u32, 11u32).ttl(Duration::ZERO).set(),
+            Some(10u32)
+        );
+        assert_eq!(cache.keys.len(), 2);
+        assert_index_lockstep(&cache, "after a same-expiry overwrite");
+
+        // Changed expiry (None -> Some): the never-expires stamp must be dropped, leaving the
+        // entry sorted by its new finite expiry (so it now evicts before the never-expiring one).
+        assert_eq!(
+            cache
+                .set_with(1u32, 12u32)
+                .ttl(Duration::from_secs(30))
+                .set(),
+            Some(11u32)
+        );
+        assert_eq!(cache.keys.len(), 2, "the stale never-expires stamp is gone");
+        assert_index_lockstep(&cache, "after an expiry-changing overwrite");
+        assert_eq!(cache.retain_latest(1, false), 1);
+        assert!(
+            !cache.map.contains_key(&1u32),
+            "the re-stamped entry now expires first and is trimmed first"
+        );
+        assert!(cache.map.contains_key(&2u32));
+        assert_index_lockstep(&cache, "after trimming the re-stamped entry");
+    }
+
+    /// The async get-or-set now checks liveness in place instead of routing through
+    /// `cache_get` (which swept the expired entry before the factory even ran). A factory
+    /// future dropped before completion must therefore leave the expired entry alone and
+    /// must not fire `on_evict`, matching the sync path and `TtlCache`.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_cancel_keeps_expired_entry() {
+        use crate::CachedGetOrSetAsync;
+        use std::task::Poll;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut c,
+                1u32,
+                std::future::pending::<u32>,
+            ));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(
+                matches!(
+                    std::future::Future::poll(fut.as_mut(), &mut cx),
+                    Poll::Pending
+                ),
+                "future must be pending while the factory is unresolved"
+            );
+            // Dropped here: cancellation mid-factory.
+        }
+
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            0,
+            "on_evict must not fire when the factory future is dropped"
+        );
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(c.cache_size(), 1, "the expired entry must still be present");
+        assert_index_lockstep(&c, "after async factory cancellation");
+
+        // A completed factory replaces it, firing on_evict exactly once for the displaced
+        // expired value.
+        let v =
+            CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 1u32, || async { 200u32 })
+                .await;
+        assert_eq!(*v, 200u32);
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_index_lockstep(&c, "after async replacement");
+    }
+
+    /// An async hit counts exactly one hit (and no miss), the same as the sync path: the
+    /// in-place liveness check replaced a `cache_get` call that also touched the counters.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_hit_counts_one_hit() {
+        use crate::CachedGetOrSetAsync;
+
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        c.cache_reset_metrics();
+
+        let v = CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 1u32, || async {
+            unreachable!("the factory must not run on a live hit")
+        })
+        .await;
+        assert_eq!(*v, 100u32);
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(0));
+
+        // And a miss counts exactly one miss.
+        let v =
+            CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 2u32, || async { 200u32 })
+                .await;
+        assert_eq!(*v, 200u32);
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_index_lockstep(&c, "after an async miss insert");
+    }
+
+    /// The fallible async sibling (`async_cache_try_get_or_set_with_mut`) was never given a
+    /// dedicated absent-key test: the flagged risk is that its explicit `hits`/`misses`
+    /// increments (replacing the old implicit `cache_get`-driven ones) could be off by one or
+    /// double-counted on the paths the big cross-variant table test does not visit (a key that
+    /// was never inserted, as opposed to one that expired). Walks a live hit, an absent-key
+    /// `Err`, an absent-key `Ok`, an expired-key `Err`, and an expired-key `Ok` in sequence,
+    /// asserting the exact running `hits`/`misses` totals and `on_evict`/`evictions` at each
+    /// step -- a double count or a missed count on any single path desyncs the running total
+    /// for every step after it.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_try_get_or_set_with_mut_hits_and_misses_match_across_absent_expired_and_live()
+     {
+        use crate::CachedGetOrSetAsync;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        // A live entry (key 1, long TTL via the builder) to hit against.
+        c.set_with(1u32, 100u32).ttl(Duration::from_secs(60)).set();
+        c.cache_reset_metrics();
+
+        // Step 1: LIVE HIT. The factory must not run; exactly one hit, no miss, nothing
+        // evicted, the value is unchanged.
+        let v: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 1u32, || async {
+                unreachable!("the factory must not run on a live hit")
+            })
+            .await;
+        assert_eq!(v.ok(), Some(&mut 100u32));
+        assert_eq!(c.cache_hits(), Some(1), "step 1: one hit");
+        assert_eq!(c.cache_misses(), Some(0), "step 1: no miss");
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        assert_eq!(c.cache_evictions(), Some(0));
+
+        // Step 2: ABSENT KEY, factory Err. Nothing is stored, one miss is counted (before the
+        // factory runs), no eviction fires (there was nothing to displace).
+        let v: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 2u32, || async {
+                Err("nope")
+            })
+            .await;
+        assert_eq!(v.err(), Some("nope"));
+        // `cache_peek` (not `cache_get`) to check absence without touching the very counters
+        // under test.
+        assert_eq!(
+            crate::CachedPeek::cache_peek(&c, &2u32),
+            None,
+            "a failed factory inserts nothing"
+        );
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(c.cache_hits(), Some(1), "step 2: still one hit");
+        assert_eq!(c.cache_misses(), Some(1), "step 2: one miss, not two");
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        assert_eq!(c.cache_evictions(), Some(0));
+
+        // Step 3: the SAME absent key, factory Ok this time. One more miss (the key is still
+        // absent going in), a fresh insert with nothing displaced, so no eviction.
+        let v: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 2u32, || async {
+                Ok(200u32)
+            })
+            .await;
+        assert_eq!(v.ok(), Some(&mut 200u32));
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.cache_hits(), Some(1), "step 3: still one hit");
+        assert_eq!(c.cache_misses(), Some(2), "step 3: two misses total");
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        assert_eq!(c.cache_evictions(), Some(0));
+
+        // Step 4: an EXPIRED key (key 3), factory Err. Counts a miss even though the key is
+        // technically present-but-stale; the stale entry is left exactly alone (no eviction).
+        c.set_with(3u32, 300u32).ttl(Duration::from_millis(1)).set();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let v: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 3u32, || async {
+                Err("still nope")
+            })
+            .await;
+        assert_eq!(v.err(), Some("still nope"));
+        assert_eq!(c.cache_hits(), Some(1), "step 4: still one hit");
+        assert_eq!(c.cache_misses(), Some(3), "step 4: three misses total");
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            0,
+            "the stale entry is left alone on Err, not evicted"
+        );
+        assert_eq!(c.cache_evictions(), Some(0));
+
+        // Step 5: the SAME expired key, factory Ok. One more miss, and NOW the stale entry is
+        // displaced: exactly one eviction fires, counted once.
+        let v: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 3u32, || async {
+                Ok(301u32)
+            })
+            .await;
+        assert_eq!(v.ok(), Some(&mut 301u32));
+        assert_eq!(c.cache_hits(), Some(1), "step 5: still one hit");
+        assert_eq!(c.cache_misses(), Some(4), "step 5: four misses total");
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            1,
+            "the stale entry is evicted exactly once when finally displaced"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+
+        // Step 6: a final live hit on the just-replaced key 3, to confirm hits still advance
+        // correctly after a run of misses.
+        let v: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 3u32, || async {
+                unreachable!("the factory must not run on a live hit")
+            })
+            .await;
+        assert_eq!(v.ok(), Some(&mut 301u32));
+        assert_eq!(c.cache_hits(), Some(2), "step 6: two hits total");
+        assert_eq!(c.cache_misses(), Some(4), "step 6: no additional miss");
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(c.cache_size(), 3);
+        assert_index_lockstep(&c, "after the mixed hit/miss/absent/expired sequence");
+    }
+
+    // ===========================================================================
+    // Independent certification coverage (outside-in): the `split_off` pivot,
+    // the two `evict_at` drain branches, deferred-callback panic safety, the
+    // orphaned-stamp divergence, coarse-`Ord` keys, and the async liveness-check
+    // behavior change.
+    // ===========================================================================
+
+    /// Insert a stamp into the expiry index WITHOUT a matching map entry, i.e. deliberately
+    /// break the map/index lockstep invariant. Only reachable from inside this module; used
+    /// to pin what the sweeps do if the invariant were ever violated.
+    fn insert_orphan_stamp(
+        cache: &mut TtlSortedCache<u32, u32>,
+        key: u32,
+        expiry: Option<crate::time::Instant>,
+    ) {
+        use super::{CacheArc, Stamped};
+        cache.keys.insert(Stamped {
+            expiry,
+            key: Some(CacheArc::new(key)),
+        });
+    }
+
+    /// The `key: None` sentinel must sort strictly BELOW every real key carrying the same
+    /// expiry, and strictly below any never-expiring stamp. This is the single ordering fact
+    /// the whole `split_off` boundary rests on.
+    #[test]
+    fn bound_sentinel_sorts_below_every_real_key_at_the_same_expiry() {
+        use super::{CacheArc, Stamped};
+        use crate::time::Instant;
+
+        let t = Instant::now();
+        let sentinel = Stamped::<u32>::bound(t);
+        for k in [u32::MIN, 1u32, u32::MAX] {
+            let real = Stamped {
+                expiry: Some(t),
+                key: Some(CacheArc::new(k)),
+            };
+            assert!(
+                sentinel < real,
+                "bound({t:?}) must sort below the real key {k} at the same expiry"
+            );
+        }
+        // A never-expiring stamp sorts above every finite bound, no matter how far out.
+        let never = Stamped {
+            expiry: None,
+            key: Some(CacheArc::new(0u32)),
+        };
+        assert!(sentinel < never, "None expiry sorts greatest");
+        assert!(
+            Stamped::<u32>::bound(t + Duration::from_secs(60 * 60 * 24 * 365)) < never,
+            "no finite cutoff can ever reach a never-expiring stamp"
+        );
+        // And the sentinel is strictly ordered by expiry.
+        assert!(sentinel < Stamped::<u32>::bound(t + Duration::from_nanos(1)));
+    }
+
+    /// Non-vacuity guard for the boundary tests: the population they use genuinely
+    /// discriminates the pivot. Splitting the SAME index at `bound(cutoff - 1ns)`,
+    /// `bound(cutoff)` and `bound(cutoff + 1ns)` must yield three different prefix sizes
+    /// (0, 1, 2), so an off-by-one-tick pivot could not pass the shipped assertions.
+    #[test]
+    fn evict_at_pivot_choice_is_observable_at_the_tie() {
+        use super::Stamped;
+
+        for (shift_back, expected) in [(true, 0usize), (false, 1)] {
+            let (cache, cutoff) = boundary_population();
+            let pivot = if shift_back {
+                Stamped::<u32>::bound(cutoff - Duration::from_nanos(1))
+            } else {
+                Stamped::<u32>::bound(cutoff)
+            };
+            let mut keys = cache.keys.clone();
+            let prefix_len = keys.len() - keys.split_off(&pivot).len();
+            assert_eq!(
+                prefix_len, expected,
+                "shift_back={shift_back}: the split prefix must be sensitive to the pivot"
+            );
+        }
+        let (cache, cutoff) = boundary_population();
+        let mut keys = cache.keys.clone();
+        let past_tie = keys.len()
+            - keys
+                .split_off(&Stamped::<u32>::bound(cutoff + Duration::from_nanos(1)))
+                .len();
+        assert_eq!(
+            past_tie, 2,
+            "a pivot one tick past the tie would sweep the tied entry too"
+        );
+        // The shipped pivot is the middle one, so both off-by-one-tick mutants are caught.
+        let (mut cache, cutoff) = boundary_population();
+        assert_eq!(cache.evict_at(cutoff), 1);
+    }
+
+    /// `split_off` on an empty index must be a clean no-op, not a panic or a leaked
+    /// half-swapped tree.
+    #[test]
+    fn evict_at_on_an_empty_index_is_a_noop() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let now = crate::time::Instant::now();
+        assert_eq!(cache.evict_at(now), 0);
+        assert_eq!(cache.evict_at(now + Duration::from_secs(1000)), 0);
+        assert!(cache.keys.is_empty());
+        assert!(cache.map.is_empty());
+        assert_eq!(cache.cache_evictions(), Some(0));
+        assert_index_lockstep(&cache, "empty evict_at");
+
+        // Still usable afterwards.
+        cache.set(1u32, 1u32);
+        assert_index_lockstep(&cache, "after reuse");
+        assert_eq!(cache.cache_get(&1u32), Some(&1u32));
+    }
+
+    /// An index that is ENTIRELY expired: `split_off` returns an empty live half, so the
+    /// whole tree is drained and `self.keys` must end up empty (not the detached prefix).
+    #[test]
+    fn evict_at_with_an_entirely_expired_index_drains_everything() {
+        for with_callback in [false, true] {
+            let fired = Arc::new(AtomicUsize::new(0));
+            let fired2 = fired.clone();
+            let mut builder = TtlSortedCache::<u32, u32>::builder().ttl(Duration::from_secs(60));
+            if with_callback {
+                builder = builder.on_evict(move |_k: &u32, _v: &u32| {
+                    fired2.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+            let mut cache = builder.build().unwrap();
+            let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+            for k in 0u32..8 {
+                insert_raw(
+                    &mut cache,
+                    k,
+                    k,
+                    Some(cutoff - Duration::from_micros(u64::from(k) + 1)),
+                );
+            }
+            assert_eq!(cache.evict_at(cutoff), 8, "with_callback={with_callback}");
+            assert!(cache.keys.is_empty(), "the index must be fully drained");
+            assert!(cache.map.is_empty());
+            assert_eq!(cache.cache_evictions(), Some(8));
+            assert_eq!(
+                fired.load(Ordering::Relaxed),
+                usize::from(with_callback) * 8
+            );
+            assert_index_lockstep(&cache, "after draining every entry");
+            assert_eq!(cache.evict_at(cutoff), 0, "a repeat sweep drops nothing");
+        }
+    }
+
+    /// An index that is ENTIRELY live: the detached prefix must be empty and the live half
+    /// must be swapped back intact, in order.
+    #[test]
+    fn evict_at_with_an_entirely_live_index_drops_nothing() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+        for k in 0u32..8 {
+            let expiry = if k % 2 == 0 {
+                Some(cutoff + Duration::from_micros(u64::from(k) + 1))
+            } else {
+                None
+            };
+            insert_raw(&mut cache, k, k * 10, expiry);
+        }
+        let before: Vec<Option<u32>> = cache
+            .keys
+            .iter()
+            .map(|s| s.key.as_ref().map(|k| *k.0))
+            .collect();
+
+        assert_eq!(cache.evict_at(cutoff), 0);
+        assert_eq!(cache.map.len(), 8);
+        assert_eq!(cache.cache_evictions(), Some(0));
+        let after: Vec<Option<u32>> = cache
+            .keys
+            .iter()
+            .map(|s| s.key.as_ref().map(|k| *k.0))
+            .collect();
+        assert_eq!(before, after, "the live half is swapped back in order");
+        assert_index_lockstep(&cache, "after an all-live evict_at");
+    }
+
+    /// The degenerate single-element cases at the tie: one entry exactly at the cutoff is
+    /// kept, one entry a tick earlier is swept, and one never-expiring entry is kept.
+    #[test]
+    fn evict_at_single_element_exactly_at_the_tie_is_kept() {
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+        let cases: [(Option<Duration>, usize); 3] = [
+            (Some(Duration::ZERO), 0),          // expiry == cutoff -> live
+            (Some(Duration::from_nanos(1)), 1), // expiry == cutoff - 1ns -> swept
+            (None, 0),                          // never expires -> live
+        ];
+        for (back_off, expected) in cases {
+            let mut cache = TtlSortedCache::<u32, u32>::builder()
+                .ttl(Duration::from_secs(60))
+                .build()
+                .unwrap();
+            let expiry = back_off.map(|d| cutoff - d);
+            insert_raw(&mut cache, 1u32, 10u32, expiry);
+            assert_eq!(
+                old_range_expired_count(&cache, cutoff),
+                expected,
+                "reference: the old range agrees for back_off={back_off:?}"
+            );
+            assert_eq!(
+                cache.evict_at(cutoff),
+                expected,
+                "single-element boundary for back_off={back_off:?}"
+            );
+            assert_eq!(cache.map.len(), 1 - expected);
+            assert_index_lockstep(&cache, "single-element boundary");
+        }
+    }
+
+    /// DIVERGENCE FROM THE OLD CODE (intentional): the old sweep range started at
+    /// `Included(bound(min_instant))`, so an entry expiring BEFORE the cache was built would
+    /// never have been swept. `split_off` has no lower bound, so such an entry is now swept.
+    /// It is unreachable through the public API (every stored expiry is `insert_time + ttl`
+    /// and every insert happens after `min_instant`), so this is a strict improvement, but it
+    /// is a real behavioral difference and is pinned here.
+    #[test]
+    fn evict_at_sweeps_entries_older_than_min_instant_unlike_the_old_lower_bound() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let min_instant = cache.min_instant;
+        let cutoff = min_instant + Duration::from_secs(1);
+        // Below `min_instant`: outside the old `Included(bound(min_instant))..` range.
+        insert_raw(
+            &mut cache,
+            1u32,
+            10u32,
+            Some(min_instant - Duration::from_nanos(1)),
+        );
+        insert_raw(&mut cache, 2u32, 20u32, Some(min_instant));
+
+        assert_eq!(
+            old_range_expired_count(&cache, cutoff),
+            1,
+            "the old lower bound excluded the pre-min_instant entry"
+        );
+        assert_eq!(
+            cache.evict_at(cutoff),
+            2,
+            "the front-driven sweep has no lower bound and reaps both"
+        );
+        assert!(cache.map.is_empty());
+        assert_index_lockstep(&cache, "after sweeping below min_instant");
+    }
+
+    /// Deferred callbacks must still fire in expiry order, exactly once per entry actually
+    /// removed from the map, with the return value and the eviction counter agreeing.
+    #[test]
+    fn evict_at_fires_on_evict_in_expiry_order_after_every_map_removal() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::<(u32, u32)>::new()));
+        let log2 = log.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |k: &u32, v: &u32| log2.lock().unwrap().push((*k, *v)))
+            .build()
+            .unwrap();
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+        // Inserted in a scrambled order; the index sorts them by expiry regardless.
+        for k in [3u32, 0, 4, 1, 2] {
+            insert_raw(
+                &mut cache,
+                k,
+                k * 10,
+                Some(cutoff - Duration::from_micros(10 - u64::from(k))),
+            );
+        }
+        insert_raw(&mut cache, 100u32, 1000u32, Some(cutoff));
+
+        let dropped = cache.evict_at(cutoff);
+        assert_eq!(dropped, 5, "the returned count is the number of drops");
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(5),
+            "the counter agrees with the return value"
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![(0, 0), (1, 10), (2, 20), (3, 30), (4, 40)],
+            "callbacks fire in ascending expiry order, once per removed entry"
+        );
+        assert_eq!(cache.map.len(), 1);
+        assert_index_lockstep(&cache, "after an ordered deferred sweep");
+    }
+
+    /// A callback that panics on a MIDDLE entry: every map removal has already happened, so
+    /// the index and the map stay in lockstep and the counter reflects all of them.
+    #[test]
+    fn evict_at_on_evict_panic_on_a_middle_callback_leaves_the_index_in_lockstep() {
+        for panic_on in [0usize, 2, 5] {
+            let seen = Arc::new(AtomicUsize::new(0));
+            let seen2 = seen.clone();
+            let mut cache = TtlSortedCache::<u32, u32>::builder()
+                .ttl(Duration::from_secs(60))
+                .on_evict(move |_k: &u32, _v: &u32| {
+                    if seen2.fetch_add(1, Ordering::Relaxed) == panic_on {
+                        panic!("boom");
+                    }
+                })
+                .build()
+                .unwrap();
+            let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+            for k in 0u32..6 {
+                insert_raw(
+                    &mut cache,
+                    k,
+                    k,
+                    Some(cutoff - Duration::from_micros(u64::from(k) + 1)),
+                );
+            }
+            insert_raw(&mut cache, 100u32, 100u32, Some(cutoff));
+
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = cache.evict_at(cutoff);
+            }));
+            assert!(caught.is_err(), "panic_on={panic_on}: must propagate");
+            assert_index_lockstep(&cache, "after a mid-drain callback panic");
+            assert_eq!(
+                cache.map.len(),
+                1,
+                "panic_on={panic_on}: every expired entry left the map before any callback"
+            );
+            assert!(cache.map.contains_key(&100u32));
+            assert_eq!(
+                cache.cache_evictions(),
+                Some(6),
+                "panic_on={panic_on}: the counter is bumped before the callbacks"
+            );
+            assert_eq!(
+                seen.load(Ordering::Relaxed),
+                panic_on + 1,
+                "panic_on={panic_on}: unwinding stops the remaining callbacks"
+            );
+            // The survivor is still reachable through the index.
+            assert_eq!(cache.retain_latest(0, false), 1);
+            assert_index_lockstep(&cache, "after trimming the survivor");
+        }
+    }
+
+    /// The no-callback branch and the callback branch of `evict_at` must produce identical
+    /// return values, identical eviction counts and identical resulting state for the same
+    /// input. Only the callback branch is directly asserted elsewhere.
+    #[test]
+    fn evict_at_drain_branches_agree_on_count_state_and_evictions() {
+        fn populate(cache: &mut TtlSortedCache<u32, u32>, cutoff: crate::time::Instant) {
+            for k in 0u32..24 {
+                let expiry = match k % 4 {
+                    // Expired, with colliding instants in pairs.
+                    0 | 1 => Some(cutoff - Duration::from_micros(u64::from(k / 2) + 1)),
+                    // Live, half of them exactly on the tie.
+                    2 => Some(cutoff + Duration::from_micros(u64::from(k % 3))),
+                    _ => None,
+                };
+                insert_raw(cache, k, k * 7, expiry);
+            }
+        }
+
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+
+        let mut plain = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        populate(&mut plain, cutoff);
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut with_cb = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        populate(&mut with_cb, cutoff);
+
+        let plain_dropped = plain.evict_at(cutoff);
+        let cb_dropped = with_cb.evict_at(cutoff);
+
+        assert_eq!(
+            plain_dropped, cb_dropped,
+            "both drain branches drop the same count"
+        );
+        assert_eq!(plain_dropped, 12, "half the population is expired");
+        assert_eq!(plain.cache_evictions(), with_cb.cache_evictions());
+        assert_eq!(plain.cache_evictions(), Some(12));
+        assert_eq!(fired.load(Ordering::Relaxed), 12);
+
+        let plain_keys: Vec<u32> = {
+            let mut v: Vec<u32> = plain.map.keys().copied().collect();
+            v.sort_unstable();
+            v
+        };
+        let cb_keys: Vec<u32> = {
+            let mut v: Vec<u32> = with_cb.map.keys().copied().collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(plain_keys, cb_keys, "identical surviving map contents");
+
+        let plain_index: Vec<(Option<crate::time::Instant>, Option<u32>)> = plain
+            .keys
+            .iter()
+            .map(|s| (s.expiry, s.key.as_ref().map(|k| *k.0)))
+            .collect();
+        let cb_index: Vec<(Option<crate::time::Instant>, Option<u32>)> = with_cb
+            .keys
+            .iter()
+            .map(|s| (s.expiry, s.key.as_ref().map(|k| *k.0)))
+            .collect();
+        assert_eq!(plain_index, cb_index, "identical surviving index contents");
+        assert_index_lockstep(&plain, "no-callback branch");
+        assert_index_lockstep(&with_cb, "callback branch");
+    }
+
+    /// PINS THE ORPHAN DIVERGENCE. An index stamp with no map entry is unreachable through
+    /// the public API (see the module certification notes: every insert stamps exactly one
+    /// entry and every removal drops the rebuilt stamp), but if it ever occurred, `evict_at`
+    /// would COUNT it as a drop in its return value while NOT counting it as an eviction.
+    /// This test documents that asymmetry so a future change to either counter is deliberate.
+    #[test]
+    fn evict_at_orphaned_stamp_is_counted_as_a_drop_but_not_as_an_eviction() {
+        for with_callback in [false, true] {
+            let fired = Arc::new(AtomicUsize::new(0));
+            let fired2 = fired.clone();
+            let mut builder = TtlSortedCache::<u32, u32>::builder().ttl(Duration::from_secs(60));
+            if with_callback {
+                builder = builder.on_evict(move |_k: &u32, _v: &u32| {
+                    fired2.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+            let mut cache = builder.build().unwrap();
+            let cutoff = crate::time::Instant::now() + Duration::from_secs(1);
+            insert_raw(
+                &mut cache,
+                1u32,
+                10u32,
+                Some(cutoff - Duration::from_micros(2)),
+            );
+            // No map entry for key 9.
+            insert_orphan_stamp(&mut cache, 9u32, Some(cutoff - Duration::from_micros(1)));
+            assert_eq!(cache.keys.len(), 2);
+            assert_eq!(cache.map.len(), 1);
+
+            assert_eq!(
+                cache.evict_at(cutoff),
+                2,
+                "with_callback={with_callback}: the return value counts index drops"
+            );
+            assert_eq!(
+                cache.cache_evictions(),
+                Some(1),
+                "with_callback={with_callback}: only real map removals are evictions"
+            );
+            assert_eq!(fired.load(Ordering::Relaxed), usize::from(with_callback));
+            // The orphan is gone, so the cache is back in lockstep afterwards.
+            assert_index_lockstep(&cache, "after sweeping an orphaned stamp");
+        }
+    }
+
+    /// The same divergence through `retain_latest_at`: `retain_drop_count` is derived from
+    /// `map.len()` while the pop loop walks `keys`, so an orphan makes the trim consume one
+    /// index slot without freeing a map entry, leaving the cache above the requested count.
+    #[test]
+    fn retain_latest_at_orphaned_stamp_diverges_from_the_map_length() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let base = crate::time::Instant::now() + Duration::from_secs(60);
+        // The orphan sorts FIRST, so the trim pops it before any real entry.
+        insert_orphan_stamp(&mut cache, 9u32, Some(base));
+        for k in 0u32..3 {
+            insert_raw(
+                &mut cache,
+                k,
+                k,
+                Some(base + Duration::from_micros(u64::from(k) + 1)),
+            );
+        }
+        assert_eq!(cache.map.len(), 3);
+        assert_eq!(cache.keys.len(), 4);
+
+        // Ask to keep 2 of 3 map entries: one drop. The orphan absorbs it.
+        assert_eq!(cache.retain_latest_at(2, None), 1);
+        assert_eq!(
+            cache.map.len(),
+            3,
+            "the orphan absorbed the trim, so no map entry was freed"
+        );
+        assert_eq!(cache.cache_evictions(), Some(0));
+        assert_eq!(cache.keys.len(), 3, "the cache is back in lockstep");
+        assert_index_lockstep(&cache, "after the orphan absorbed a trim");
+        // A second trim now behaves normally.
+        assert_eq!(cache.retain_latest_at(2, None), 1);
+        assert_eq!(cache.map.len(), 2);
+        assert_eq!(cache.cache_evictions(), Some(1));
+    }
+
+    /// `retain_latest_at` pops one stamp at a time and removes its map entry, counts the
+    /// eviction, and only then fires the callback -- matching `evict_at` / `retain`. So a
+    /// panicking callback still leaves the two structures in lockstep AND the entry whose
+    /// callback panicked is still counted, since the counter is bumped BEFORE the callback runs.
+    #[test]
+    fn retain_latest_at_on_evict_panic_leaves_lockstep_and_counts_the_eviction() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen2 = seen.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                if seen2.fetch_add(1, Ordering::Relaxed) == 1 {
+                    panic!("boom");
+                }
+            })
+            .build()
+            .unwrap();
+        for k in 0u32..5 {
+            cache
+                .set_with(k, k * 10)
+                .ttl(Duration::from_secs(10 * (u64::from(k) + 1)))
+                .set();
+        }
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache.retain_latest(1, false);
+        }));
+        assert!(caught.is_err(), "the callback panic must propagate");
+
+        assert_index_lockstep(&cache, "after a retain_latest callback panic");
+        assert_eq!(
+            cache.map.len(),
+            3,
+            "two entries were removed before the panic"
+        );
+        assert_eq!(seen.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(2),
+            "both removals are counted: the counter is bumped before the callback runs"
+        );
+        // The cache remains usable and fully reachable through the index.
+        assert_eq!(cache.retain_latest(0, false), 3);
+        assert!(cache.map.is_empty());
+        assert!(cache.keys.is_empty());
+    }
+
+    /// The tie boundary reached through the SECOND phase of `retain_latest_at` (after the
+    /// size trim is satisfied), which uses a separate `expiry < cutoff` comparison rather
+    /// than the `split_off` pivot. An entry expiring exactly at the cutoff must stop the
+    /// sweep, matching `evict_at`.
+    #[test]
+    fn retain_latest_at_tie_stops_the_sweep_after_the_size_trim() {
+        // 4 entries, keep 3 -> retain_drop_count = 1: entry 1 (strictly before the cutoff) is
+        // dropped by the trim, then entry 2 sits exactly ON the cutoff and must stop the sweep.
+        let (mut cache, cutoff) = boundary_population();
+        assert_eq!(
+            cache.retain_latest_at(3, Some(cutoff)),
+            1,
+            "the tied entry must not be swept by the post-trim expiry loop"
+        );
+        assert!(!cache.map.contains_key(&1u32));
+        assert!(cache.map.contains_key(&2u32), "the exact tie survives");
+        assert!(cache.map.contains_key(&3u32));
+        assert!(cache.map.contains_key(&4u32));
+        assert_index_lockstep(&cache, "after a post-trim tie stop");
+
+        // One tick later the tie IS expired and the sweep continues past the trim.
+        let (mut cache, cutoff) = boundary_population();
+        assert_eq!(
+            cache.retain_latest_at(3, Some(cutoff + Duration::from_nanos(1))),
+            2
+        );
+        assert!(!cache.map.contains_key(&2u32));
+        assert!(cache.map.contains_key(&3u32));
+        assert_index_lockstep(&cache, "after sweeping past the tie");
+    }
+
+    // --- Coarse `Eq`/`Ord` keys: two distinct values that compare equal ------------------
+
+    /// A key whose `Eq`/`Ord`/`Hash` consider only `label`, so two values carrying different
+    /// `payload`s compare EQUAL. `set_inner`'s occupied branch reuses the stored `Arc`, and
+    /// `BTreeSet::insert` keeps the incumbent on an equal insert, so the index and the map
+    /// can hold different-but-equal `Stamped`s.
+    #[derive(Clone, Debug)]
+    struct CoarseKey {
+        label: &'static str,
+        payload: u32,
+    }
+
+    impl Hash for CoarseKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.label.hash(state);
+        }
+    }
+    impl PartialEq for CoarseKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.label == other.label
+        }
+    }
+    impl Eq for CoarseKey {}
+    impl PartialOrd for CoarseKey {
+        fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for CoarseKey {
+        fn cmp(&self, other: &Self) -> CmpOrdering {
+            self.label.cmp(other.label)
+        }
+    }
+
+    /// Overwriting with an equal-but-distinct key must keep exactly one map entry and one
+    /// stamp, and the STORED key is the FIRST-inserted payload (the occupied branch reuses
+    /// the existing `Arc`, matching `HashMap`'s own "insert keeps the incumbent key" rule).
+    /// `on_evict` and `cache_remove_entry` therefore report the first payload, not the last.
+    #[test]
+    fn coarse_key_overwrite_keeps_lockstep_and_reports_the_first_stored_key() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen2 = seen.clone();
+        let mut cache = TtlSortedCache::<CoarseKey, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |k: &CoarseKey, _v: &u32| seen2.lock().unwrap().push(k.payload))
+            .build()
+            .unwrap();
+
+        let first = CoarseKey {
+            label: "a",
+            payload: 1,
+        };
+        let second = CoarseKey {
+            label: "a",
+            payload: 2,
+        };
+        assert_eq!(first, second, "the two keys compare equal");
+        assert_eq!(first.cmp(&second), CmpOrdering::Equal);
+
+        cache.cache_set(first.clone(), 10u32);
+        assert_eq!(cache.cache_set(second.clone(), 20u32), Some(10u32));
+        assert_eq!(cache.map.len(), 1);
+        assert_eq!(cache.keys.len(), 1, "no duplicate stamp for an equal key");
+        assert_index_lockstep(&cache, "after a coarse-key overwrite");
+
+        // The stored key is the first payload, and the index stamp shares its `Arc`.
+        let entry = cache.map.values().next().expect("one entry");
+        assert_eq!(
+            entry.key.0.payload, 1,
+            "the occupied branch reuses the originally stored key"
+        );
+        let stamp = cache.keys.iter().next().expect("one stamp");
+        assert!(
+            Arc::ptr_eq(
+                &stamp.key.as_ref().expect("real key").0,
+                &cache.map.values().next().expect("one entry").key.0
+            ),
+            "the index stamp and the map entry share the same key Arc"
+        );
+
+        // Removal by the SECOND (equal) key still finds the entry, and hands the callback and
+        // the `cache_remove_entry` return the FIRST payload.
+        let removed = cache.cache_remove_entry(&second).expect("present");
+        assert_eq!(removed.0.payload, 1, "the stored key is returned");
+        assert_eq!(removed.1, 20u32);
+        assert_eq!(*seen.lock().unwrap(), vec![1u32]);
+        assert!(cache.map.is_empty());
+        assert!(cache.keys.is_empty());
+        assert_index_lockstep(&cache, "after a coarse-key removal");
+    }
+
+    /// The same coarse key across an expiry change: the stale stamp must be removed by the
+    /// rebuilt `old.as_stamped()`, which carries the shared `Arc`, so no duplicate survives
+    /// and the sweep order follows the NEW expiry.
+    #[test]
+    fn coarse_key_overwrite_with_a_new_expiry_replaces_exactly_one_stamp() {
+        let mut cache = TtlSortedCache::<CoarseKey, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let a1 = CoarseKey {
+            label: "a",
+            payload: 1,
+        };
+        let a2 = CoarseKey {
+            label: "a",
+            payload: 2,
+        };
+        let b = CoarseKey {
+            label: "b",
+            payload: 9,
+        };
+        cache.set_with(a1, 10u32).ttl(Duration::ZERO).set();
+        cache.set_with(b, 90u32).ttl(Duration::from_secs(30)).set();
+        assert_index_lockstep(&cache, "coarse pair");
+
+        // UNCHANGED expiry (None -> None) with a different-but-equal key: the new stamp is
+        // Ord-equal to the incumbent, so `BTreeSet::insert` is a no-op and the stale-stamp
+        // removal MUST be skipped -- removing it here would delete the only stamp for a live
+        // map entry and orphan it.
+        assert_eq!(
+            cache.set_with(a2.clone(), 10u32).ttl(Duration::ZERO).set(),
+            Some(10u32)
+        );
+        assert_eq!(cache.map.len(), 2);
+        assert_eq!(
+            cache.keys.len(),
+            2,
+            "the single stamp survives the overwrite"
+        );
+        assert_index_lockstep(&cache, "after a same-expiry coarse-key overwrite");
+
+        // None -> Some: the never-expires stamp must go.
+        assert_eq!(
+            cache
+                .set_with(a2.clone(), 11u32)
+                .ttl(Duration::from_secs(5))
+                .set(),
+            Some(10u32)
+        );
+        assert_eq!(cache.cache_evictions(), Some(0), "no expired displacement");
+        assert_eq!(cache.map.len(), 2);
+        assert_eq!(cache.keys.len(), 2, "the stale stamp is gone");
+        assert_index_lockstep(&cache, "after a coarse-key re-stamp");
+
+        // "a" now expires first, so it is trimmed first.
+        assert_eq!(cache.retain_latest(1, false), 1);
+        assert!(!cache.map.contains_key(&a2));
+        assert_index_lockstep(&cache, "after trimming the re-stamped coarse key");
+    }
+
+    /// A long mixed sequence over the public surface: the lockstep invariant must hold after
+    /// every single operation. This is the empirical half of the "an orphaned stamp is
+    /// unreachable by construction" claim.
+    #[test]
+    fn lockstep_holds_across_a_mixed_public_operation_sequence() {
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(30))
+            .max_size(5)
+            .on_evict(|_k: &u32, _v: &u32| {})
+            .build()
+            .unwrap();
+        for round in 0u32..40 {
+            let k = round % 7;
+            match round % 8 {
+                0 => {
+                    cache.set(k, round);
+                }
+                1 => {
+                    cache.set_with(k, round).ttl(Duration::ZERO).set();
+                }
+                2 => {
+                    cache
+                        .set_with(k, round)
+                        .ttl(Duration::from_millis(10))
+                        .evict()
+                        .set();
+                }
+                3 => {
+                    let _ = cache.cache_get(&k);
+                }
+                4 => {
+                    let _ = cache.cache_remove(&k);
+                }
+                5 => {
+                    let _ = cache.cache_get_or_set_with_mut(k, || round);
+                }
+                6 => {
+                    cache.retain(|kk, _v| *kk != round % 5);
+                }
+                _ => {
+                    let _ = cache.retain_latest(3, round % 16 == 7);
+                }
+            }
+            assert_index_lockstep(&cache, "mixed sequence");
+            assert!(cache.map.len() <= 5 || round % 8 == 5);
+        }
+        let _ = cache.evict();
+        assert_index_lockstep(&cache, "after the final sweep");
+        cache.cache_clear();
+        assert_index_lockstep(&cache, "after clear");
+    }
+
+    /// `set_inner` samples the clock ONCE and judges the displaced entry against that sample.
+    /// The classification itself is pinned here with exact expiries; the sub-microsecond
+    /// window between the sample and the map write is NOT observable from a test (see the
+    /// certification notes) because the store exposes no clock injection point.
+    #[test]
+    fn set_inner_classifies_the_displaced_entry_against_its_clock_sample() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        // Displaced entry already past its deadline -> filtered from the return, evicted.
+        insert_raw(
+            &mut cache,
+            1u32,
+            10u32,
+            Some(crate::time::Instant::now() - Duration::from_nanos(1)),
+        );
+        assert_eq!(cache.cache_set(1u32, 11u32), None);
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.cache_evictions(), Some(1));
+        assert_index_lockstep(&cache, "after displacing an expired entry");
+
+        // Displaced entry comfortably in the future -> returned as live, no eviction.
+        insert_raw(
+            &mut cache,
+            2u32,
+            20u32,
+            Some(crate::time::Instant::now() + Duration::from_secs(3600)),
+        );
+        assert_eq!(cache.cache_set(2u32, 21u32), Some(20u32));
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.cache_evictions(), Some(1));
+        assert_index_lockstep(&cache, "after displacing a live entry");
+    }
+
+    // --- Item 7: the async liveness-check behavior change -------------------------------
+
+    /// (c) A PANICKING factory future: the expired entry is left in place, `on_evict` never
+    /// fires and nothing is counted. Under the previous `cache_get`-based shape the entry was
+    /// already swept (and `on_evict` already fired) before the future was ever polled.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_factory_panic_keeps_the_expired_entry() {
+        use crate::CachedGetOrSetAsync;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        c.cache_reset_metrics();
+
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut c,
+                1u32,
+                || async { panic!("factory boom") },
+            ));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = std::future::Future::poll(fut.as_mut(), &mut cx);
+            }));
+            assert!(caught.is_err(), "the factory panic must propagate");
+        }
+
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            0,
+            "on_evict must not fire when the factory panics"
+        );
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(c.cache_size(), 1, "the expired entry is still stored");
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "the miss is counted before the factory runs"
+        );
+        // The stale value is still observable through the expiry-status peek.
+        assert_eq!(
+            crate::CloneCached::cache_peek_with_expiry_status(&c, &1u32),
+            (Some(100u32), true),
+            "the stale value survives the panic and is reported as expired"
+        );
+        assert_index_lockstep(&c, "after an async factory panic");
+    }
+
+    /// (a) NORMAL COMPLETION: the eviction of the displaced expired entry now happens AFTER
+    /// the factory resolves, not before it is polled. Observed through the callback ordering.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_fires_on_evict_after_the_factory_completes() {
+        use crate::CachedGetOrSetAsync;
+
+        let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let log2 = log.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| log2.lock().unwrap().push("evict"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let log3 = log.clone();
+        let v = CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 1u32, || async move {
+            log3.lock().unwrap().push("factory");
+            200u32
+        })
+        .await;
+        assert_eq!(*v, 200u32);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["factory", "evict"],
+            "the displaced expired entry is evicted after the factory resolves"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(c.cache_size(), 1);
+        assert_index_lockstep(&c, "after an async replacement");
+    }
+
+    /// The fallible async sibling now uses the same in-place liveness check as the other
+    /// three `cache_*get_or_set_with_mut` variants instead of routing through `cache_get`
+    /// (which would sweep the expired entry, firing `on_evict`, before the factory is ever
+    /// polled). On `Err` the expired entry is left exactly in place, matching the sync
+    /// fallible sibling.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_try_get_or_set_with_mut_leaves_the_expired_entry_alone_on_err() {
+        use crate::CachedGetOrSetAsync;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        c.cache_reset_metrics();
+
+        let out: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 1u32, || async {
+                Err("nope")
+            })
+            .await;
+        assert_eq!(out.err(), Some("nope"));
+        assert_eq!(
+            c.cache_size(),
+            1,
+            "the fallible async path leaves the expired entry alone on Err"
+        );
+        assert_eq!(fired.load(Ordering::Relaxed), 0, "on_evict must not fire");
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "the miss is counted before the factory runs"
+        );
+        assert_index_lockstep(&c, "after a failed async try factory");
+
+        // The SYNC fallible sibling agrees: the expired entry is left in place.
+        let mut c2: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c2.cache_set(1u32, 100u32);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let out: Result<&mut u32, &'static str> =
+            c2.cache_try_get_or_set_with_mut(1u32, || Err("nope"));
+        assert_eq!(out.err(), Some("nope"));
+        assert_eq!(
+            c2.cache_size(),
+            1,
+            "the sync fallible path leaves the expired entry alone"
+        );
+        assert_eq!(c2.cache_evictions(), Some(0));
+    }
+
+    /// (b) CANCELLATION, contrasted directly between the two async methods on an identical
+    /// starting state. Both now agree: the expired entry survives an in-flight future being
+    /// dropped, and `on_evict` never fires for it.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_or_set_variants_agree_on_cancellation_over_an_expired_entry() {
+        use crate::CachedGetOrSetAsync;
+
+        async fn expired_cache() -> (TtlSortedCache<u32, u32>, Arc<AtomicUsize>) {
+            let fired = Arc::new(AtomicUsize::new(0));
+            let fired2 = fired.clone();
+            let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+                .ttl(Duration::from_millis(20))
+                .on_evict(move |_k: &u32, _v: &u32| {
+                    fired2.fetch_add(1, Ordering::Relaxed);
+                })
+                .build()
+                .unwrap();
+            c.cache_set(1u32, 100u32);
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            (c, fired)
+        }
+
+        // Infallible: nothing observable happens to the entry.
+        let (mut c, fired) = expired_cache().await;
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut c,
+                1u32,
+                std::future::pending::<u32>,
+            ));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(matches!(
+                std::future::Future::poll(fut.as_mut(), &mut cx),
+                std::task::Poll::Pending
+            ));
+        }
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_index_lockstep(&c, "after a cancelled infallible async factory");
+
+        // Fallible: now agrees -- the expired entry is likewise left alone by cancellation.
+        let (mut c, fired) = expired_cache().await;
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut::<
+                _,
+                _,
+                &'static str,
+            >(&mut c, 1u32, || {
+                std::future::pending::<Result<u32, &'static str>>()
+            }));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(matches!(
+                std::future::Future::poll(fut.as_mut(), &mut cx),
+                std::task::Poll::Pending
+            ));
+        }
+        assert_eq!(
+            c.cache_size(),
+            1,
+            "the fallible async path also leaves the expired entry alone when cancelled"
+        );
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        assert_eq!(c.cache_evictions(), Some(0));
+        assert_index_lockstep(&c, "after a cancelled fallible async factory");
+    }
+
+    /// (d) `Ok` completion for the fallible async variant: net end state/counters match the
+    /// pre-fix behavior, but `on_evict` now fires AFTER the factory resolves (observed via
+    /// callback ordering) and the insert takes the OCCUPIED `set_inner` branch (reusing the
+    /// stored key `Arc`) rather than a vacant one, because the expired entry was never swept.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_try_get_or_set_with_mut_fires_on_evict_after_the_factory_completes() {
+        use crate::CachedGetOrSetAsync;
+
+        let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let log2 = log.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| log2.lock().unwrap().push("evict"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let log3 = log.clone();
+        let out: Result<&mut u32, &'static str> =
+            CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 1u32, || async move {
+                log3.lock().unwrap().push("factory");
+                Ok(200u32)
+            })
+            .await;
+        assert_eq!(out.ok(), Some(&mut 200u32));
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["factory", "evict"],
+            "the displaced expired entry is evicted after the factory resolves"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(c.cache_size(), 1);
+        assert_index_lockstep(&c, "after an async fallible replacement");
+    }
+
+    /// Cross-variant agreement table: sync infallible, sync fallible, async infallible, and
+    /// async fallible must all behave identically on an expired-entry key for each terminal
+    /// outcome the family shares, so a future change to one cannot silently desync the group.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn get_or_set_family_agrees_on_expired_entry_across_variants() {
+        use crate::CachedGetOrSetAsync;
+
+        fn expired_cache() -> TtlSortedCache<u32, u32> {
+            let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+                .ttl(Duration::from_millis(1))
+                .build()
+                .unwrap();
+            c.cache_set(1u32, 100u32);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            c
+        }
+
+        /// Same as `expired_cache`, but wired with an `on_evict` that appends to a shared
+        /// log, so the Ok-outcome sub-block below can pin *when* the displaced expired entry
+        /// is evicted relative to the factory, not just the net counts. This is the
+        /// discriminator the plain count assertions below cannot see: reverting the fix-2
+        /// liveness check to an eager `cache_get`-based sweep still nets `cache_size() == 1`
+        /// and `cache_evictions() == Some(1)` for the Ok outcome (the eager sweep evicts, then
+        /// the factory's value is inserted fresh), so only the callback order and `cache_get`
+        /// on-hit accounting expose that regression on this outcome.
+        type Log = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+        fn expired_cache_with_log() -> (TtlSortedCache<u32, u32>, Log) {
+            let log: Log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log2 = log.clone();
+            let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+                .ttl(Duration::from_millis(1))
+                .on_evict(move |_k: &u32, _v: &u32| log2.lock().unwrap().push("evict"))
+                .build()
+                .unwrap();
+            c.cache_set(1u32, 100u32);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            (c, log)
+        }
+
+        // --- Ok / infallible-success outcome: all four end up with the factory's value,
+        // fire on_evict exactly once AFTER the factory runs, and count exactly one eviction. ---
+        {
+            let (mut sync_infallible, log) = expired_cache_with_log();
+            let log2 = log.clone();
+            let v = sync_infallible.cache_get_or_set_with_mut(1u32, || {
+                log2.lock().unwrap().push("factory");
+                200u32
+            });
+            assert_eq!(*v, 200u32);
+            assert_eq!(sync_infallible.cache_size(), 1);
+            assert_eq!(sync_infallible.cache_evictions(), Some(1));
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec!["factory", "evict"],
+                "sync infallible: on_evict fires after the factory"
+            );
+            assert_index_lockstep(&sync_infallible, "sync infallible Ok outcome");
+
+            let (mut sync_try, log) = expired_cache_with_log();
+            let log2 = log.clone();
+            let v: Result<&mut u32, &'static str> = sync_try.cache_try_get_or_set_with_mut(1u32, || {
+                log2.lock().unwrap().push("factory");
+                Ok(200u32)
+            });
+            assert_eq!(v.ok(), Some(&mut 200u32));
+            assert_eq!(sync_try.cache_size(), 1);
+            assert_eq!(sync_try.cache_evictions(), Some(1));
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec!["factory", "evict"],
+                "sync try: on_evict fires after the factory"
+            );
+            assert_index_lockstep(&sync_try, "sync try Ok outcome");
+
+            let (mut async_infallible, log) = expired_cache_with_log();
+            let log2 = log.clone();
+            let v = CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut async_infallible,
+                1u32,
+                || async move {
+                    log2.lock().unwrap().push("factory");
+                    200u32
+                },
+            )
+            .await;
+            assert_eq!(*v, 200u32);
+            assert_eq!(async_infallible.cache_size(), 1);
+            assert_eq!(async_infallible.cache_evictions(), Some(1));
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec!["factory", "evict"],
+                "async infallible: on_evict fires after the factory, not eagerly on the check"
+            );
+            assert_index_lockstep(&async_infallible, "async infallible Ok outcome");
+
+            let (mut async_try, log) = expired_cache_with_log();
+            let log2 = log.clone();
+            let v: Result<&mut u32, &'static str> =
+                CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(
+                    &mut async_try,
+                    1u32,
+                    || async move {
+                        log2.lock().unwrap().push("factory");
+                        Ok(200u32)
+                    },
+                )
+                .await;
+            assert_eq!(v.ok(), Some(&mut 200u32));
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec!["factory", "evict"],
+                "async try: on_evict fires after the factory, not eagerly on the check"
+            );
+            assert_eq!(async_try.cache_size(), 1);
+            assert_eq!(async_try.cache_evictions(), Some(1));
+            assert_index_lockstep(&async_try, "async try Ok outcome");
+        }
+
+        // --- Err outcome (fallible variants only): the expired entry is left exactly alone,
+        // no eviction fires or is counted. ---
+        {
+            let mut sync_try = expired_cache();
+            let v: Result<&mut u32, &'static str> =
+                sync_try.cache_try_get_or_set_with_mut(1u32, || Err("nope"));
+            assert_eq!(v.err(), Some("nope"));
+            assert_eq!(sync_try.cache_size(), 1);
+            assert_eq!(sync_try.cache_evictions(), Some(0));
+            assert_index_lockstep(&sync_try, "sync try Err outcome");
+
+            let mut async_try = expired_cache();
+            let v: Result<&mut u32, &'static str> =
+                CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(
+                    &mut async_try,
+                    1u32,
+                    || async { Err("nope") },
+                )
+                .await;
+            assert_eq!(v.err(), Some("nope"));
+            assert_eq!(async_try.cache_size(), 1);
+            assert_eq!(async_try.cache_evictions(), Some(0));
+            assert_index_lockstep(&async_try, "async try Err outcome");
+        }
+
+        // --- Cancellation (async variants only): dropping the future mid-await leaves the
+        // expired entry exactly alone, no eviction fires or is counted. ---
+        {
+            let mut async_infallible = expired_cache();
+            {
+                let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                    &mut async_infallible,
+                    1u32,
+                    std::future::pending::<u32>,
+                ));
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(waker);
+                assert!(matches!(
+                    std::future::Future::poll(fut.as_mut(), &mut cx),
+                    std::task::Poll::Pending
+                ));
+            }
+            assert_eq!(async_infallible.cache_size(), 1);
+            assert_eq!(async_infallible.cache_evictions(), Some(0));
+            assert_index_lockstep(&async_infallible, "async infallible cancellation");
+
+            let mut async_try = expired_cache();
+            {
+                let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut::<
+                    _,
+                    _,
+                    &'static str,
+                >(&mut async_try, 1u32, || {
+                    std::future::pending::<Result<u32, &'static str>>()
+                }));
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(waker);
+                assert!(matches!(
+                    std::future::Future::poll(fut.as_mut(), &mut cx),
+                    std::task::Poll::Pending
+                ));
+            }
+            assert_eq!(async_try.cache_size(), 1);
+            assert_eq!(async_try.cache_evictions(), Some(0));
+            assert_index_lockstep(&async_try, "async try cancellation");
+        }
     }
 }

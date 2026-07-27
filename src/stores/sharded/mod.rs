@@ -1,4 +1,5 @@
 use std::sync::atomic::AtomicU64;
+use std::sync::OnceLock;
 
 use crate::stores::BuildError;
 
@@ -41,6 +42,13 @@ pub(crate) struct Shard<S> {
     pub lock: parking_lot::RwLock<S>,
     pub hits: AtomicU64,
     pub misses: AtomicU64,
+    /// Per-shard eviction count. Co-located with `hits`/`misses` for the same reason:
+    /// a thread bumping this has just taken `lock`, so it already owns this cache line
+    /// exclusively. Consuming stores that currently keep a single process-wide
+    /// `evictions: AtomicU64` in `Arc<Inner>` (contended from every core, and sharing a
+    /// cache line with fields read on every op) should migrate to summing this field
+    /// across shards instead.
+    pub evictions: AtomicU64,
 }
 
 impl<S> Shard<S> {
@@ -49,19 +57,46 @@ impl<S> Shard<S> {
             lock: parking_lot::RwLock::new(store),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 }
 
 pub(crate) fn default_shard_count() -> usize {
-    let count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .saturating_mul(4);
-    // `clamp(8, 1024)` bounds the input to [8, 1024]; 1024 is itself a power of two, so
-    // `next_power_of_two()` returns at most 1024 and can never overflow. (The user-supplied
-    // path in `checked_shard_count` has no upper bound, so it uses `checked_next_power_of_two`.)
-    count.clamp(8, 1024).next_power_of_two()
+    static DEFAULT_SHARD_COUNT: OnceLock<usize> = OnceLock::new();
+    *DEFAULT_SHARD_COUNT.get_or_init(|| {
+        let count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .saturating_mul(4);
+        // `clamp(8, 1024)` bounds the input to [8, 1024]; 1024 is itself a power of two, so
+        // `next_power_of_two()` returns at most 1024 and can never overflow. (The user-supplied
+        // path in `checked_shard_count` has no upper bound, so it uses `checked_next_power_of_two`.)
+        count.clamp(8, 1024).next_power_of_two()
+    })
+}
+
+/// Default shard count for the *default* (unconfigured) shard-count path, scaled down for
+/// small `max_size` values.
+///
+/// Without this, the default shard count is `available_parallelism() * 4` clamped to
+/// `[8, 1024]`, with no reference to `max_size` at all. Combined with the 16-entries-per-shard
+/// floor in [`per_shard_cap_from_total`] and eager per-shard allocation, `ShardedLruCache::new(100)`
+/// on a 64-core box would build 256 shards x 16 = 4096 effective capacity, preallocating 256
+/// hash tables plus 256 `Vec`s for a cache asked to hold only 100 entries.
+///
+/// This helper caps the shard count so that, for a bounded cache, each shard gets roughly
+/// `max_size / 16` capacity (rounded up to a power of two), never exceeding
+/// [`default_shard_count`] and never going below 1.
+///
+/// An explicit `.shards(n)` on a builder remains authoritative; this helper is only consulted
+/// on the *default* (no explicit shard count given) path.
+#[allow(dead_code)] // consumed by sibling shards migrating their builders' default path
+pub(crate) fn default_shard_count_for_capacity(max_size: Option<usize>) -> usize {
+    match max_size {
+        Some(n) => (n / 16).next_power_of_two().clamp(1, default_shard_count()),
+        None => default_shard_count(),
+    }
 }
 
 /// Compute the per-shard capacity for a given total and shard count, applying the
@@ -293,5 +328,69 @@ mod tests {
     fn check_shard_hasher_supertrait() {
         // DefaultShardHasher derives Clone, so it satisfies the bound.
         assert_shard_hasher_requires_clone(DefaultShardHasher::new());
+    }
+
+    #[test]
+    fn shard_has_evictions_counter_initialized_to_zero() {
+        let shard = Shard::new(0u32);
+        assert_eq!(shard.evictions.load(std::sync::atomic::Ordering::Relaxed), 0);
+        shard.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(shard.evictions.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn default_shard_count_is_stable_across_calls() {
+        // `default_shard_count` caches its result in a `OnceLock`; repeated calls
+        // must return the exact same value (process-stable), and it must always
+        // land in the documented [8, 1024] power-of-two range.
+        let first = default_shard_count();
+        let second = default_shard_count();
+        assert_eq!(first, second);
+        assert!((8..=1024).contains(&first));
+        assert!(first.is_power_of_two());
+    }
+
+    #[test]
+    fn default_shard_count_for_capacity_none_matches_default() {
+        assert_eq!(default_shard_count_for_capacity(None), default_shard_count());
+    }
+
+    #[test]
+    fn default_shard_count_for_capacity_small_sizes_floor_to_one() {
+        // n/16 == 0 for n in [0, 15], and next_power_of_two(0) == 1 (not 0), so the
+        // clamp lower bound of 1 is what actually saves us here -- confirm it does.
+        assert_eq!(default_shard_count_for_capacity(Some(1)), 1);
+        assert_eq!(default_shard_count_for_capacity(Some(15)), 1);
+        // 16/16 == 1, next_power_of_two(1) == 1.
+        assert_eq!(default_shard_count_for_capacity(Some(16)), 1);
+        // 17/16 == 1 (integer division truncates), next_power_of_two(1) == 1.
+        assert_eq!(default_shard_count_for_capacity(Some(17)), 1);
+    }
+
+    #[test]
+    fn default_shard_count_for_capacity_scales_with_size() {
+        // 100/16 == 6, next_power_of_two(6) == 8, and 8 <= default_shard_count()
+        // (whose minimum is 8), so the clamp never kicks in here.
+        assert_eq!(default_shard_count_for_capacity(Some(100)), 8);
+    }
+
+    #[test]
+    fn default_shard_count_for_capacity_clamps_at_max() {
+        // usize::MAX / 16 is huge; next_power_of_two() of that is still hugely larger
+        // than default_shard_count()'s max of 1024, so the upper clamp bound applies
+        // and the result equals default_shard_count() exactly.
+        assert_eq!(
+            default_shard_count_for_capacity(Some(usize::MAX)),
+            default_shard_count()
+        );
+    }
+
+    #[test]
+    fn default_shard_count_for_capacity_never_overflows_or_returns_zero() {
+        for n in [0usize, 1, 15, 16, 17, 100, usize::MAX] {
+            let result = default_shard_count_for_capacity(Some(n));
+            assert!(result >= 1, "result for {n} was 0");
+            assert!(result <= default_shard_count());
+        }
     }
 }

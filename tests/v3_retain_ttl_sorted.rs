@@ -885,3 +885,214 @@ fn retain_matches_ttl_cache_and_lru_ttl_cache() {
     assert_eq!(ttl_outcome, expected, "TtlCache::retain");
     assert_eq!(lru_outcome, expected, "LruTtlCache::retain");
 }
+
+// ===========================================================================
+// Public-API coverage for the combined "size trim AND expiry sweep" path.
+//
+// `set_with(..).evict().set()` on a size-limited cache is the ONLY public route
+// that reaches the trim/sweep combination (an over-capacity insert that also
+// carries a cutoff). Everything else either trims with no cutoff (a plain `set`
+// over the cap, `set_max_size`, `retain_latest(n, false)`) or sweeps with no trim
+// (`evict()`, `retain_latest(n, true)` while under the cap).
+// ===========================================================================
+
+/// The expired prefix is larger than the size overflow: the insert must drop BOTH expired
+/// entries (not just the single entry needed to get back under the cap), fire `on_evict` for
+/// each in expiry order, and leave the cache below its cap.
+#[test]
+fn evicting_insert_over_the_cap_sweeps_the_whole_expired_prefix() {
+    let (mut cache, events) = events_cache_capped(Duration::from_secs(60), 3);
+    cache
+        .set_with(1u32, 11u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    cache
+        .set_with(2u32, 22u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    cache
+        .set_with(3u32, 33u32)
+        .ttl(Duration::from_secs(60))
+        .set();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(cache.cache_size(), 3, "at the cap, nothing swept yet");
+
+    // Over the cap (4 > 3) with the sweep opted in: the trim needs 1 drop, the expiry sweep
+    // wants 2, and the combined pass must take the union.
+    cache
+        .set_with(4u32, 44u32)
+        .ttl(Duration::from_secs(60))
+        .evict()
+        .set();
+
+    assert_eq!(sorted_keys(&cache), vec![3u32, 4]);
+    assert_eq!(
+        cache.cache_size(),
+        2,
+        "the sweep goes past the size overflow"
+    );
+    assert_eq!(
+        fired(&events),
+        vec![(1u32, 11u32), (2, 22)],
+        "both expired entries are reported, in expiry order"
+    );
+    assert_eq!(cache.cache_evictions(), Some(2));
+    // Nothing stale is left behind for a later sweep to double-count.
+    assert_eq!(cache.evict(), 0);
+    assert_eq!(cache.retain_latest(2, true), 0);
+    assert_eq!(cache.cache_evictions(), Some(2));
+}
+
+/// The mirror case: the size overflow is larger than the expired prefix, so the trim must
+/// continue into LIVE entries (soonest-to-expire first) and then stop at the first live
+/// entry once the cap is satisfied.
+#[test]
+fn evicting_insert_over_the_cap_trims_past_the_expired_prefix_into_live_entries() {
+    let (mut cache, events) = events_cache_capped(Duration::from_secs(60), 2);
+    cache
+        .set_with(1u32, 11u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    cache
+        .set_with(2u32, 22u32)
+        .ttl(Duration::from_secs(10))
+        .set();
+    // `set` (no `.evict()`) over the cap still trims, so add the third with the cap already
+    // at 2: this drops the soonest-to-expire, which is the expired key 1.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    cache
+        .set_with(3u32, 33u32)
+        .ttl(Duration::from_secs(20))
+        .set();
+    assert_eq!(sorted_keys(&cache), vec![2u32, 3]);
+    assert_eq!(fired(&events), vec![(1u32, 11u32)]);
+
+    // Now an evicting insert over the cap with NOTHING expired: the cutoff contributes
+    // nothing and the trim alone picks the soonest-to-expire live entry.
+    cache
+        .set_with(4u32, 44u32)
+        .ttl(Duration::from_secs(30))
+        .evict()
+        .set();
+    assert_eq!(sorted_keys(&cache), vec![3u32, 4]);
+    assert_eq!(
+        fired(&events),
+        vec![(1u32, 11u32), (2, 22)],
+        "the live soonest-to-expire entry is the victim"
+    );
+    assert_eq!(cache.cache_evictions(), Some(2));
+    assert_eq!(cache.cache_size(), 2);
+}
+
+/// Never-expiring entries must be retained last by the combined pass: they sort after every
+/// finite expiry, so a trim only reaches them once every dated entry is gone.
+#[test]
+fn evicting_insert_over_the_cap_retains_never_expiring_entries_last() {
+    let (mut cache, events) = events_cache_capped(Duration::from_secs(60), 3);
+    cache.set_with(1u32, 11u32).ttl(Duration::ZERO).set();
+    cache.set_with(2u32, 22u32).ttl(Duration::ZERO).set();
+    cache
+        .set_with(3u32, 33u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    // Over the cap with the sweep on: key 3 is expired AND is the only dated entry, so the
+    // single required drop and the sweep pick the same victim; the two never-expiring
+    // entries survive.
+    cache
+        .set_with(4u32, 44u32)
+        .ttl(Duration::from_secs(60))
+        .evict()
+        .set();
+    assert_eq!(sorted_keys(&cache), vec![1u32, 2, 4]);
+    assert_eq!(fired(&events), vec![(3u32, 33u32)]);
+    assert_eq!(cache.cache_evictions(), Some(1));
+
+    // Push past the cap again with everything live: the dated key 4 must go before either
+    // never-expiring entry.
+    cache
+        .set_with(5u32, 55u32)
+        .ttl(Duration::from_secs(120))
+        .evict()
+        .set();
+    assert_eq!(sorted_keys(&cache), vec![1u32, 2, 5]);
+    assert_eq!(fired(&events), vec![(3u32, 33u32), (4, 44)]);
+
+    // And only when no dated entry remains does a trim reach the never-expiring ones.
+    assert_eq!(cache.retain_latest(1, true), 2);
+    assert_eq!(sorted_keys(&cache), vec![2u32]);
+}
+
+/// An evicting insert that *replaces* an existing key while the cache is at its cap: the map
+/// length never exceeds the cap, so no trim runs, but the sweep still must not be reachable
+/// through this branch (the store only sweeps when it is over the cap). Pins the documented
+/// asymmetry that `.evict()` on a size-limited cache is a no-op unless the insert overflows.
+#[test]
+fn evicting_insert_at_the_cap_without_overflow_does_not_sweep() {
+    let (mut cache, events) = events_cache_capped(Duration::from_secs(60), 3);
+    cache
+        .set_with(1u32, 11u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    cache
+        .set_with(2u32, 22u32)
+        .ttl(Duration::from_secs(60))
+        .set();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    // Under the cap (2 -> 3) with `.evict()`: no overflow, so the expired key 1 stays.
+    cache
+        .set_with(3u32, 33u32)
+        .ttl(Duration::from_secs(60))
+        .evict()
+        .set();
+    assert_eq!(
+        cache.cache_size(),
+        3,
+        "a size-limited cache only sweeps when the insert overflows the cap"
+    );
+    assert_eq!(fired(&events), Vec::new());
+    assert_eq!(cache.cache_evictions(), Some(0));
+
+    // An explicit `evict()` still reaps it.
+    assert_eq!(cache.evict(), 1);
+    assert_eq!(fired(&events), vec![(1u32, 11u32)]);
+    assert_eq!(cache.cache_evictions(), Some(1));
+}
+
+/// The same combined pass reached through `set_max_size` on a cache holding expired entries:
+/// the shrink trims to the new bound (no cutoff), so expired entries are dropped only
+/// because they sort first, and the resulting count must still match the observable state.
+#[test]
+fn set_max_size_shrink_drops_the_soonest_to_expire_first() {
+    let (mut cache, events) = events_cache(Duration::from_secs(60));
+    cache
+        .set_with(1u32, 11u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    cache
+        .set_with(2u32, 22u32)
+        .ttl(Duration::from_secs(10))
+        .set();
+    cache
+        .set_with(3u32, 33u32)
+        .ttl(Duration::from_secs(20))
+        .set();
+    cache.set_with(4u32, 44u32).ttl(Duration::ZERO).set();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    assert_eq!(cache.set_max_size(2), None, "no previous bound was set");
+    assert_eq!(sorted_keys(&cache), vec![3u32, 4]);
+    assert_eq!(
+        fired(&events),
+        vec![(1u32, 11u32), (2, 22)],
+        "expiry order, expired first"
+    );
+    assert_eq!(cache.cache_evictions(), Some(2));
+    assert_eq!(
+        cache.evict(),
+        0,
+        "no stale index entries survive the shrink"
+    );
+}
