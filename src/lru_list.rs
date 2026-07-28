@@ -283,6 +283,65 @@ mod tests {
         assert_eq!(l.back(), b); // 2 is now LRU
     }
 
+    /// Walk the occupied ring backwards via `prev`. `order` only follows `next`, so a
+    /// corrupted `prev` chain is invisible to it; comparing the two directions is what
+    /// actually proves the doubly-linked list is intact.
+    fn order_reversed(l: &LRUList<i32>) -> Vec<i32> {
+        let mut out = Vec::new();
+        let mut idx = l.values[LRUList::<i32>::OCCUPIED].prev;
+        while idx != LRUList::<i32>::OCCUPIED {
+            out.push(*l.get(idx));
+            idx = l.values[idx].prev;
+        }
+        out.reverse();
+        out
+    }
+
+    /// `move_to_front` on an index that is ALREADY the head is on the hot path now that
+    /// `cache_set` promotes an overwritten key. It aliases (`unlink` writes the same
+    /// sentinel links `link_after` then re-reads), so it gets its own integrity check
+    /// rather than only a shallow forward-order assertion.
+    #[test]
+    fn move_to_front_on_the_current_head_keeps_both_link_directions_intact() {
+        let mut l = LRUList::with_capacity(4);
+        let a = l.push_front(1);
+        let _b = l.push_front(2);
+        let c = l.push_front(3);
+        assert_eq!(order(&l), vec![3, 2, 1]);
+
+        // `c` is already the head; promoting it must be a no-op in both directions.
+        for _ in 0..3 {
+            l.move_to_front(c);
+            assert_eq!(order(&l), vec![3, 2, 1]);
+            assert_eq!(order_reversed(&l), order(&l), "prev chain must mirror next");
+            assert_eq!(l.back(), a);
+        }
+
+        // And the list still behaves normally afterwards.
+        l.move_to_front(a);
+        assert_eq!(order(&l), vec![1, 3, 2]);
+        assert_eq!(order_reversed(&l), order(&l));
+    }
+
+    /// The degenerate case: promoting the only entry empties and rebuilds the ring.
+    #[test]
+    fn move_to_front_on_the_sole_entry_keeps_the_ring_intact() {
+        let mut l = LRUList::with_capacity(2);
+        let a = l.push_front(42);
+        for _ in 0..3 {
+            l.move_to_front(a);
+            assert_eq!(order(&l), vec![42]);
+            assert_eq!(order_reversed(&l), vec![42]);
+            assert_eq!(l.back(), a);
+        }
+        // A later push must still link correctly onto the rebuilt ring.
+        let b = l.push_front(7);
+        assert_eq!(order(&l), vec![7, 42]);
+        assert_eq!(order_reversed(&l), order(&l));
+        assert_eq!(l.back(), a);
+        assert_eq!(*l.get(b), 7);
+    }
+
     #[test]
     fn set_replaces_and_clear_resets() {
         let mut l = LRUList::with_capacity(2);
