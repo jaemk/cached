@@ -1,7 +1,7 @@
 /*!
 Certification: the pre-lock clock sample on the sharded LRU-family stores.
 
-`ShardedLruTtlCache::cache_get` / `cache_set` read the clock **once, before acquiring the
+`ShardedLruTtlCache::cache_get` / `cache_set` sample the clock **before acquiring the
 shard write lock**, and every expiry decision (and the `expires_at` seeded on a write) is made
 against that sample. The observable consequence is deliberate and documented: a caller that
 queues behind the shard lock for longer than the TTL still judges the entry by the clock it

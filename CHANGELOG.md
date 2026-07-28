@@ -98,11 +98,11 @@
   payload; it also removes an unconditional key clone from every set.
 - `TtlSortedCache::retain_latest` counts an eviction before firing `on_evict`, so a panicking
   callback can no longer remove an entry without counting it. Matches `evict` and `retain`.
-- `ShardedTtlCache` decides expiry against a clock sample taken before the shard lock is
-  acquired. Under contention, an entry that crosses its expiry while the caller queues for the
-  lock is judged live: `cache_set` returns `Some(old)` with no eviction and no `on_evict`,
-  where previously the clock was re-read under the lock. This stays within the documented
-  lazy-expiry contract, which makes no promise of prompt removal.
+- `ShardedTtlCache` and `ShardedLruTtlCache` decide expiry against a clock sample taken before
+  the shard lock is acquired. Under contention, an entry that crosses its expiry while the
+  caller queues for the lock is judged live: `cache_set` returns `Some(old)` with no eviction
+  and no `on_evict`, where previously the clock was re-read under the lock. This stays within
+  the documented lazy-expiry contract, which makes no promise of prompt removal.
 
 ### Fixed
 

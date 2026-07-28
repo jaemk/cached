@@ -1845,9 +1845,9 @@ fn bench_sharded_ttl_concurrent(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Expiry storm: 8 threads, every entry already expired, so every concurrent read
-// takes the lazy-eviction path and contends on the single global `evictions`
-// AtomicU64 (ShardedTtlCache / ShardedExpiringLruCache both use one counter shared
-// across all shards, rather than a per-shard counter).
+// takes the lazy-eviction path and bumps that shard's `evictions` AtomicU64
+// (ShardedTtlCache / ShardedExpiringLruCache each give every shard its own counter,
+// summed at read time, rather than sharing a single global counter).
 // ---------------------------------------------------------------------------
 
 fn bench_expiry_storm(c: &mut Criterion) {

@@ -58,7 +58,7 @@ For caches built through the default (no explicit `.shards(n)`) path with a `max
 
 - `capacity()`: the effective total capacity is smaller for small `max_size` values on
   high-core-count machines, though it can still exceed `max_size` when the 16-per-shard floor
-  applies (e.g. `max_size = 100` now yields 8 shards x 16 = 128, versus 256 shards x 16 = 4096
+  applies (e.g. `max_size = 100` would yield 8 shards x 16 = 128, versus 256 shards x 16 = 4096
   before).
 - `shards()`: reports the capped default shard count, not the raw
   `available_parallelism() * 4` figure.

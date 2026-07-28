@@ -898,21 +898,38 @@ fn refresh_on_hit_with_a_disabled_ttl_keeps_the_original_expiry() {
 
 // The complement: with a live ttl, repeated hits keep pushing the deadline out,
 // so the entry outlives an interval far longer than the ttl.
+//
+// This uses its own local ttl/interval, deliberately NOT the file-wide `TTL`
+// (150ms): with a 100ms inter-hit sleep, `TTL` left only a ~50ms scheduling
+// margin before an unrenewed entry would expire, so a >50ms stall under CI load
+// flipped the "each hit must renew the ttl" assertion spuriously. The interval
+// below leaves a much wider per-hit margin while the total time across all hits
+// still comfortably exceeds the ttl, so an entry that silently stopped being
+// renewed is still caught -- only the deliberately-past-expiry sleep at the end
+// decides the final, idle-expiry assertion.
 #[test]
 fn refresh_on_hit_keeps_an_entry_alive_across_repeated_hits() {
+    const RENEWAL_TTL: Duration = Duration::from_secs(1);
+    const HIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+    const IDLE_PAST_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
     let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
         .max_size(4)
-        .ttl(TTL)
+        .ttl(RENEWAL_TTL)
         .refresh_on_hit(true)
         .build()
         .expect("build refreshing LruTtlCache");
     c.cache_set(1, 10);
-    // Total elapsed (5 * 100ms) far exceeds the 150ms ttl.
-    for _ in 0..5 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    // Six hits at 300ms apart: each single interval is well under the 1s ttl (a
+    // large scheduling stall would have to eat ~700ms before it could flip a hit
+    // to a spurious expiry), but the 1.8s total across all six hits comfortably
+    // exceeds the ttl -- so an entry that is NOT refreshed on each hit would
+    // already be gone well before the last iteration.
+    for _ in 0..6 {
+        std::thread::sleep(HIT_INTERVAL);
         assert_eq!(c.cache_get(&1), Some(&10), "each hit must renew the ttl");
     }
-    std::thread::sleep(PAST_TTL);
+    std::thread::sleep(IDLE_PAST_TTL);
     assert_eq!(c.cache_get(&1), None, "and it must still expire once idle");
 }
 
@@ -1167,4 +1184,166 @@ async fn async_try_get_or_set_with_counts_a_miss_when_the_factory_fails() {
     assert_eq!(v.copied(), Ok(30));
     assert_eq!(c.cache_hits(), Some(1));
     assert_eq!(c.cache_misses(), Some(0));
+}
+
+// =============================================================================
+// The `_mut` methods directly (EXP-2 pin).
+//
+// The tests above drive the contract through the shared-reference wrapper
+// (`cache_try_get_or_set_with` / `async_cache_try_get_or_set_with`), which is a
+// provided default that delegates straight to the `_mut` method
+// (`Cached::cache_try_get_or_set_with`, `CachedGetOrSetAsync::async_cache_try_get_or_set_with`
+// in src/lib.rs). `LruTtlCache` itself only implements the `_mut` variants
+// (src/stores/lru_ttl.rs:778 sync, :1118 async), so calling the `_mut` methods
+// below exercises the exact code the store owns, with no indirection through a
+// default method that a future change could alter independently. Same
+// contract, named explicitly: on `Err`, exactly one miss, no `on_evict`, no
+// eviction, and no entry inserted -- for both an absent key and an expired one.
+// =============================================================================
+
+#[test]
+fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails_on_an_absent_key(
+) {
+    let l = log();
+    let mut c = logging_cache(4, Duration::from_secs(60), l.clone());
+
+    assert_eq!(
+        c.cache_try_get_or_set_with_mut(1, || Err::<u32, &str>("boom")),
+        Err("boom")
+    );
+    assert_eq!(
+        c.cache_misses(),
+        Some(1),
+        "an absent-key lookup through cache_try_get_or_set_with_mut is a miss even when the factory fails"
+    );
+    assert_eq!(c.cache_hits(), Some(0));
+    assert_eq!(c.cache_size(), 0, "a failed factory must insert nothing");
+    assert_eq!(drain(&l), Vec::new(), "on_evict must not fire");
+    assert_eq!(c.cache_evictions(), Some(0));
+
+    // A second failing call over the same still-absent key counts a second,
+    // separate miss: the first failure must not have left anything behind.
+    assert_eq!(
+        c.cache_try_get_or_set_with_mut(1, || Err::<u32, &str>("boom again")),
+        Err("boom again")
+    );
+    assert_eq!(c.cache_misses(), Some(2));
+    assert_eq!(c.cache_size(), 0);
+}
+
+#[test]
+fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails_over_an_expired_entry(
+) {
+    let l = log();
+    let mut c = logging_cache(4, TTL, l.clone());
+    c.cache_set(1, 10);
+    std::thread::sleep(PAST_TTL);
+    c.cache_reset_metrics();
+
+    assert_eq!(
+        c.cache_try_get_or_set_with_mut(1, || Err::<u32, &str>("boom")),
+        Err("boom")
+    );
+    assert_eq!(
+        c.cache_misses(),
+        Some(1),
+        "finding only an expired entry through cache_try_get_or_set_with_mut is a miss even when the factory fails"
+    );
+    assert_eq!(c.cache_hits(), Some(0));
+    assert_eq!(
+        drain(&l),
+        Vec::new(),
+        "on_evict must not fire while the expired entry is still stored"
+    );
+    assert_eq!(c.cache_evictions(), Some(0));
+    assert_eq!(
+        c.cache_size(),
+        1,
+        "the expired entry is left in place, not replaced by a failed factory"
+    );
+
+    // A later call that really succeeds fires on_evict exactly once, for the one
+    // physical entry: no double-fire from the earlier failure.
+    assert_eq!(
+        c.cache_try_get_or_set_with_mut(1, || Ok::<u32, &str>(11)),
+        Ok(&mut 11)
+    );
+    assert_eq!(drain(&l), vec![(1, 10)], "exactly one eviction, once");
+    assert_eq!(c.cache_evictions(), Some(1));
+    assert_eq!(c.cache_misses(), Some(2), "the replacement is a miss too");
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails() {
+    use cached::CachedGetOrSetAsync;
+
+    let l = log();
+    let mut c = logging_cache(4, TTL, l.clone());
+
+    // Absent key.
+    assert_eq!(
+        CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 1, || async {
+            Err::<u32, &str>("boom")
+        })
+        .await,
+        Err("boom")
+    );
+    assert_eq!(
+        c.cache_misses(),
+        Some(1),
+        "an absent-key lookup through async_cache_try_get_or_set_with_mut is a miss even when the factory fails"
+    );
+    assert_eq!(c.cache_size(), 0, "a failed factory must insert nothing");
+    assert_eq!(drain(&l), Vec::new());
+    assert_eq!(c.cache_evictions(), Some(0));
+
+    // Expired entry.
+    c.cache_set(2, 20);
+    std::thread::sleep(PAST_TTL);
+    c.cache_reset_metrics();
+    assert_eq!(
+        CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 2, || async {
+            Err::<u32, &str>("boom")
+        })
+        .await,
+        Err("boom")
+    );
+    assert_eq!(
+        c.cache_misses(),
+        Some(1),
+        "finding only an expired entry through async_cache_try_get_or_set_with_mut is a miss even when the factory fails"
+    );
+    assert_eq!(
+        drain(&l),
+        Vec::new(),
+        "the expired entry is still stored, so on_evict must not fire"
+    );
+    assert_eq!(c.cache_evictions(), Some(0));
+    assert_eq!(
+        c.cache_size(),
+        1,
+        "only the expired key-2 entry is stored; key 1's absent-key attempt inserted nothing"
+    );
+
+    // A live entry is still a hit, and the factory does not run.
+    c.cache_set(3, 30);
+    c.cache_reset_metrics();
+    let v = CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 3, || async {
+        Err::<u32, &str>("boom")
+    })
+    .await;
+    assert_eq!(v.copied(), Ok(30));
+    assert_eq!(c.cache_hits(), Some(1));
+    assert_eq!(c.cache_misses(), Some(0));
+
+    // The later call that really replaces the expired key-2 entry fires on_evict
+    // exactly once for it: no double-fire from the earlier failed attempt.
+    let v2 = CachedGetOrSetAsync::async_cache_try_get_or_set_with_mut(&mut c, 2, || async {
+        Ok::<u32, &str>(22)
+    })
+    .await;
+    assert_eq!(v2.copied(), Ok(22));
+    assert_eq!(drain(&l), vec![(2, 20)], "exactly one eviction, once");
+    assert_eq!(c.cache_evictions(), Some(1));
 }

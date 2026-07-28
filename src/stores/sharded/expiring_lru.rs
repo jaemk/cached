@@ -76,8 +76,7 @@ impl<K, V, H> Clone for ShardedExpiringLruCacheBase<K, V, H> {
 impl<K, V, H> ShardedExpiringLruCacheBase<K, V, H> {
     /// Sum of the per-shard counters for evictions **not** driven by LRU capacity pressure:
     /// expired entries dropped lazily on [`cache_get`](ConcurrentCached::cache_get) or swept by
-    /// [`evict`](ShardedExpiringLruCacheBase::evict), [`retain`](Self::retain), and
-    /// [`cache_clear_with_on_evict`](Self::cache_clear_with_on_evict).
+    /// [`evict`](ShardedExpiringLruCacheBase::evict) or [`retain`](Self::retain).
     ///
     /// These live in [`Shard::evictions`], one atomic per shard (like `hits`/`misses`), rather
     /// than in a single process-wide counter on `Arc<Inner>`: a thread bumping it has just held
@@ -321,7 +320,7 @@ where
         for shard in self.inner.shards.iter() {
             hits += shard.hits.load(Ordering::Relaxed);
             misses += shard.misses.load(Ordering::Relaxed);
-            // Per-shard non-capacity evictions (lazy expiry / evict / retain / clear); the
+            // Per-shard non-capacity evictions (lazy expiry / evict / retain); the
             // inner `LruCache` counter below holds this shard's capacity evictions and its
             // explicit removes. The two families are disjoint, so summing cannot double-count.
             non_capacity_evictions += shard.evictions.load(Ordering::Relaxed);

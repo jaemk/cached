@@ -154,40 +154,62 @@ fn sharded_ttl_flip_stress_evictions_and_callback_stay_in_lockstep() {
     );
 
     const ROUNDS: u32 = 200;
+    let stop = Arc::new(AtomicBool::new(false));
     let gate = Arc::new(Barrier::new(RACERS + 1));
 
-    let mut handles = Vec::new();
-    // Reader threads: hammer cache_get across the whole run.
+    // Reader threads: hammer cache_get continuously until the writer signals done.
+    // Looping on the stop flag (rather than a fixed round count that finishes in
+    // microseconds) keeps readers contending while each freshly-written entry ages
+    // past the 2ms TTL, so they actually reach and evict expired entries.
+    let mut readers = Vec::new();
     for _ in 0..RACERS {
         let cache = cache.clone();
         let gate = gate.clone();
-        handles.push(std::thread::spawn(move || {
+        let stop = stop.clone();
+        readers.push(std::thread::spawn(move || {
             gate.wait();
-            for _ in 0..ROUNDS {
+            let mut reads = 0u64;
+            while !stop.load(Ordering::Relaxed) {
                 let _ = ConcurrentCached::cache_get(&*cache, &1).unwrap();
+                reads += 1;
             }
+            reads
         }));
     }
-    // Writer thread: re-insert a fresh value each round, letting the short TTL
-    // lapse in between so readers alternately hit and evict.
-    {
+    // Writer thread: re-insert a fresh value each round, sleeping LONGER than the
+    // TTL between rounds so the entry expires before the next overwrite. That lets
+    // the still-looping readers hit the expired entry and evict it, alternating the
+    // hit-and-evict path and driving the write-upgrade recheck branch.
+    let writer = {
         let cache = cache.clone();
         let gate = gate.clone();
-        handles.push(std::thread::spawn(move || {
+        std::thread::spawn(move || {
             gate.wait();
             for r in 0..ROUNDS {
                 ConcurrentCached::cache_set(&*cache, 1, r).unwrap();
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(4));
             }
-        }));
+        })
+    };
+    writer.join().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let mut reads = 0u64;
+    for h in readers {
+        reads += h.join().unwrap();
     }
-    for h in handles {
-        h.join().unwrap();
-    }
+    assert!(reads > 0, "the readers must have run");
 
+    // Guard against a vacuous run: readers looping while entries age past the TTL
+    // must actually reach expired entries and evict them, so the eviction counter
+    // has to advance. Without this the lockstep check below could pass trivially as
+    // 0 == 0 while never exercising the expiry/recheck branch it claims to cover.
+    let evictions = ConcurrentCacheBase::cache_evictions(&*cache).unwrap();
+    assert!(
+        evictions > 0,
+        "no entry ever expired -- the write-upgrade recheck branch was never exercised"
+    );
     // The counter and the callback are bumped together on every removal, so they
     // must be equal regardless of how the race interleaved.
-    let evictions = ConcurrentCacheBase::cache_evictions(&*cache).unwrap();
     assert_eq!(
         fired.load(Ordering::Relaxed),
         evictions,
@@ -272,7 +294,7 @@ fn sharded_ttl_refresh_on_hit_flip_stress_conserves_entries_and_evictions() {
     let stop = Arc::new(AtomicBool::new(false));
     let gate = Arc::new(Barrier::new(RACERS + WRITERS as usize));
 
-    // Readers: hammer every key. With a 2ms TTL each key keeps flipping between live
+    // Readers: hammer every key. With a 200us TTL each key keeps flipping between live
     // (refreshed in place under the write lock) and expired (removed, counted, callback).
     let mut readers = Vec::new();
     for _ in 0..RACERS {

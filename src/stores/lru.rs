@@ -694,13 +694,14 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// Slot indices (MRU -> LRU) of the entries for which `keep` returns `false`.
     /// Shared by [`retain`](Self::retain) and [`retain_silent`](Self::retain_silent).
     fn doomed_indices<F: FnMut(&K, &V) -> bool>(&self, keep: &mut F) -> Vec<usize> {
-        self.order
-            .iter_indices()
-            .filter(|&i| {
-                let (k, v) = self.order.get(i);
-                !keep(k, v)
-            })
-            .collect()
+        // The live entry count is an upper bound on the number of doomed indices;
+        // pre-size instead of growing the Vec from zero.
+        let mut doomed = Vec::with_capacity(self.store.len());
+        doomed.extend(self.order.iter_indices().filter(|&i| {
+            let (k, v) = self.order.get(i);
+            !keep(k, v)
+        }));
+        doomed
     }
 
     /// Removes entries for which `keep` returns `false` without firing `on_evict` or

@@ -939,7 +939,8 @@ pub trait Cached<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized;
 
-    /// Insert a key-value pair and return the previous value.
+    /// Insert a key-value pair and return the previous value. On recency-ordered stores,
+    /// overwriting an existing key promotes it to most-recently-used.
     fn cache_set(&mut self, k: K, v: V) -> Option<V>;
 
     /// Fallible variant of [`Self::cache_set`] for custom stores whose insertion can fail.

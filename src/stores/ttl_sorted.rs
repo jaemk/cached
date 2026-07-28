@@ -595,18 +595,28 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         }
 
         if self.on_evict.is_none() {
-            let mut evicted = 0u64;
+            // Drain the map FIRST, moving every removed `Entry` into `removed`, and let the
+            // values/keys drop only after the whole prefix has left `self.map` — exactly as
+            // the callback branch below does. A per-iteration drop (dropping each `Entry`
+            // inside the loop) would let a panicking `Drop` for `V` or `K` unwind with the
+            // remaining stamps already detached from `self.keys` but their entries still in
+            // `self.map`: orphaned rows, invisible to a later sweep yet still counted by
+            // `len`. Collecting keeps `self.map` and `self.keys` in lockstep across a panic.
+            let mut removed = Vec::with_capacity(count);
             for stamped in expired {
                 // Invariant: `None` keys are only used as artificial range sentinels
                 // in `evict()`/`retain_latest()` and are never inserted into `self.keys`.
                 let key = stamped
                     .key
                     .expect("evicting: only artificial bounds are none");
-                if self.map.remove(key.0.as_ref()).is_some() {
-                    evicted += 1;
+                if let Some(entry) = self.map.remove(key.0.as_ref()) {
+                    removed.push((key, entry));
                 }
             }
-            self.evictions.fetch_add(evicted, AtomicOrdering::Relaxed);
+            // Count before the drop: a `Drop` panic while `removed` unwinds must not leave
+            // the counter short of what was actually pulled from the map.
+            self.evictions
+                .fetch_add(removed.len() as u64, AtomicOrdering::Relaxed);
             return count;
         }
 
@@ -2496,6 +2506,80 @@ mod test {
         );
         assert_eq!(cache.cache_size(), 1, "never-expiring entry must remain");
         assert_eq!(cache.cache_get(&2u32), Some(&20u32));
+    }
+
+    /// A `Drop` panic mid-sweep must not orphan entries. In the no-callback branch of
+    /// `evict_at`, the whole expired prefix is detached from `self.keys` up front (one
+    /// `split_off`); the map rows are then removed one at a time. If a value's (or key's)
+    /// `Drop` panics before every row has left `self.map`, the not-yet-removed rows are
+    /// orphaned: their stamps are already gone from `self.keys`, so a later sweep never
+    /// reaches them, yet `len` still counts them. The fix drains `self.map` fully into a
+    /// local `Vec` and lets the values drop only after the drain, matching the callback
+    /// branch, so `self.map` and `self.keys` stay in lockstep and the eviction counter
+    /// reflects exactly what was pulled from the map — even across a panicking `Drop`.
+    #[test]
+    fn evict_no_callback_keeps_map_and_keys_in_lockstep_on_drop_panic() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        // A value whose `Drop` panics only when armed. Exactly ONE instance is armed so
+        // the unwinding drop of the drain `Vec` (a slice drop continues dropping the
+        // remaining elements after one panics) never double-panics into a process abort.
+        struct PanicOnDrop {
+            armed: bool,
+        }
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                if self.armed {
+                    panic!("PanicOnDrop::drop fired");
+                }
+            }
+        }
+
+        // No `on_evict` configured, so `evict()` takes the no-callback branch of `evict_at`.
+        let mut cache: TtlSortedCache<u32, PanicOnDrop> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(5))
+            .build()
+            .unwrap();
+
+        // Insert the armed value FIRST: sequential inserts give ascending expiry stamps and
+        // `Stamped` orders by (expiry, key), so key 0 is the earliest in the sweep and its
+        // `Drop` runs before the two later rows have left `self.map`. On the pre-fix
+        // per-iteration-drop code that panic orphans keys 1 and 2 in `self.map` while their
+        // stamps are already gone from `self.keys`.
+        cache.set_with(0u32, PanicOnDrop { armed: true }).set();
+        cache.set_with(1u32, PanicOnDrop { armed: false }).set();
+        cache.set_with(2u32, PanicOnDrop { armed: false }).set();
+        assert_eq!(cache.map.len(), 3);
+        assert_eq!(cache.keys.len(), 3);
+
+        // Let the whole 5ms-TTL prefix expire, then sweep. The armed `Drop` panics mid-sweep.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = cache.evict();
+        }));
+        assert!(
+            result.is_err(),
+            "the armed value's Drop must have panicked during the sweep"
+        );
+
+        // Lockstep is the core property: whatever left `self.keys` must also have left
+        // `self.map`. Pre-fix this failed (map.len() == 2 vs keys.len() == 0: two orphans).
+        assert_eq!(
+            cache.map.len(),
+            cache.keys.len(),
+            "map and keys must stay in lockstep across a Drop panic (no orphaned rows)"
+        );
+        // Every entry had expired, so the sweep drained the whole prefix from both.
+        assert_eq!(cache.map.len(), 0, "all expired entries must have left the map");
+        assert_eq!(cache.cache_size(), 0);
+        // The counter is incremented before the drain `Vec` drops, so it reflects exactly
+        // the three rows pulled from the map. Pre-fix the batched `fetch_add` after the loop
+        // was skipped by the panic, leaving it at 0.
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(3),
+            "eviction counter must match the rows actually removed from the map"
+        );
     }
 
     /// `set_with(..).ttl(..)` called with an EXPLICIT `Duration::ZERO` (not the cache-level

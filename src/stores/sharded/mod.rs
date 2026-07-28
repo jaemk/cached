@@ -85,9 +85,10 @@ pub(crate) fn default_shard_count() -> usize {
 /// on a 64-core box would build 256 shards x 16 = 4096 effective capacity, preallocating 256
 /// hash tables plus 256 `Vec`s for a cache asked to hold only 100 entries.
 ///
-/// This helper caps the shard count so that, for a bounded cache, each shard gets roughly
-/// `max_size / 16` capacity (rounded up to a power of two), never exceeding
-/// [`default_shard_count`] and never going below 1.
+/// This helper caps the shard count itself to roughly `max_size / 16` (rounded up to a power
+/// of two), never exceeding [`default_shard_count`] and never going below 1, so that a bounded
+/// cache ends up with each shard holding roughly 16 entries rather than 16 entries times an
+/// oversized shard count.
 ///
 /// An explicit `.shards(n)` on a builder remains authoritative; this helper is only consulted
 /// on the *default* (no explicit shard count given) path.

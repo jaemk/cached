@@ -829,20 +829,26 @@ mod refresh_on_hit {
     /// reports the previous value.
     #[test]
     fn runtime_toggle_switches_the_read_path_both_ways() {
+        // A comfortably large TTL (relative to the 150 ms poll interval below) so that only the
+        // deliberate past-expiry sleeps decide expiry, never scheduling jitter in the CI runner.
+        let ttl = Duration::from_millis(1000);
         let store = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .per_shard_max_size(8)
-            .ttl(Duration::from_millis(400))
+            .ttl(ttl)
             .build()
             .expect("build ShardedLruTtlCache");
         assert!(!store.refresh_on_hit(), "the builder default is off");
 
-        // Off: repeated reads do not push the expiry out.
+        // Off: repeated reads do not push the expiry out. Poll a few times inside the TTL
+        // window (their results are irrelevant here), then deliberately sleep well past the
+        // TTL before checking that the original expiry stood.
         ConcurrentCached::cache_set(&store, 1, 10).unwrap();
         for _ in 0..3 {
             std::thread::sleep(Duration::from_millis(150));
             let _ = ConcurrentCached::cache_get(&store, &1).unwrap();
         }
+        std::thread::sleep(Duration::from_millis(900));
         assert_eq!(
             ConcurrentCached::cache_get(&store, &1).unwrap(),
             None,
@@ -855,7 +861,9 @@ mod refresh_on_hit {
         );
         assert!(store.refresh_on_hit());
 
-        // On: the same read pattern keeps the entry alive well past one TTL.
+        // On: the same read pattern keeps the entry alive well past one TTL. Each hit renews
+        // the deadline, so the gap the scheduler must blow through to falsify this is the full
+        // 1000 ms TTL minus the 150 ms poll interval, not a shrinking cumulative margin.
         ConcurrentCached::cache_set(&store, 2, 20).unwrap();
         for _ in 0..3 {
             std::thread::sleep(Duration::from_millis(150));
@@ -868,7 +876,7 @@ mod refresh_on_hit {
 
         // And back off again: the entry now expires on the last refreshed deadline.
         assert!(store.set_refresh_on_hit(false));
-        std::thread::sleep(Duration::from_millis(600));
+        std::thread::sleep(Duration::from_millis(1300));
         assert_eq!(ConcurrentCached::cache_get(&store, &2).unwrap(), None);
     }
 
@@ -902,16 +910,20 @@ mod refresh_on_hit {
     /// `cache_peek` and `cache_contains` neither renew the expiry nor promote recency.
     #[test]
     fn peek_and_contains_do_not_refresh_the_expiry() {
+        // A comfortably large TTL (relative to the 100 ms poll interval below) so that only the
+        // deliberate past-expiry sleep at the end decides expiry, never scheduling jitter in the
+        // CI runner: only the intentional final sleep should ever flip this to expired.
+        let ttl = Duration::from_millis(1000);
         let store = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .per_shard_max_size(8)
-            .ttl(Duration::from_millis(400))
+            .ttl(ttl)
             .refresh_on_hit(true)
             .build()
             .expect("build ShardedLruTtlCache");
         ConcurrentCached::cache_set(&store, 1, 10).unwrap();
-        // Three peeks inside the entry's single 400 ms lifetime; if any of them refreshed the
-        // expiry the final read below would still be a hit.
+        // Three peeks well inside the entry's single 1000 ms lifetime; if any of them refreshed
+        // the expiry the final read below would still be a hit.
         for _ in 0..3 {
             std::thread::sleep(Duration::from_millis(100));
             assert_eq!(store.peek(&1), Some(10), "peek still reads the live value");
@@ -921,7 +933,8 @@ mod refresh_on_hit {
                 Some(10)
             );
         }
-        std::thread::sleep(Duration::from_millis(200));
+        // Deliberately push well past the TTL now that the peeks are done.
+        std::thread::sleep(Duration::from_millis(1000));
         assert_eq!(
             ConcurrentCached::cache_get(&store, &1).unwrap(),
             None,
