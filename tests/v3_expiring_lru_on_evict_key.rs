@@ -47,8 +47,14 @@ impl Hash for IdTagKey {
 /// `tag`s so the test can distinguish which one the callback observed.
 #[test]
 fn id_tag_key_is_equal_but_distinct() {
-    let stored = IdTagKey { id: 1, tag: "first" };
-    let lookup = IdTagKey { id: 1, tag: "second" };
+    let stored = IdTagKey {
+        id: 1,
+        tag: "first",
+    };
+    let lookup = IdTagKey {
+        id: 1,
+        tag: "second",
+    };
     assert_eq!(stored, lookup, "keys with the same id must compare equal");
     assert_ne!(
         stored.tag, lookup.tag,

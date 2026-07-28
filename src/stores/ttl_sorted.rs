@@ -3978,8 +3978,7 @@ mod test {
     /// for every step after it.
     #[cfg(feature = "async")]
     #[tokio::test]
-    async fn async_try_get_or_set_with_mut_hits_and_misses_match_across_absent_expired_and_live()
-     {
+    async fn async_try_get_or_set_with_mut_hits_and_misses_match_across_absent_expired_and_live() {
         use crate::CachedGetOrSetAsync;
 
         let fired = Arc::new(AtomicUsize::new(0));
@@ -5246,10 +5245,11 @@ mod test {
 
             let (mut sync_try, log) = expired_cache_with_log();
             let log2 = log.clone();
-            let v: Result<&mut u32, &'static str> = sync_try.cache_try_get_or_set_with_mut(1u32, || {
-                log2.lock().unwrap().push("factory");
-                Ok(200u32)
-            });
+            let v: Result<&mut u32, &'static str> =
+                sync_try.cache_try_get_or_set_with_mut(1u32, || {
+                    log2.lock().unwrap().push("factory");
+                    Ok(200u32)
+                });
             assert_eq!(v.ok(), Some(&mut 200u32));
             assert_eq!(sync_try.cache_size(), 1);
             assert_eq!(sync_try.cache_evictions(), Some(1));

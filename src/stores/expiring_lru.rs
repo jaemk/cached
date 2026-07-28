@@ -972,36 +972,70 @@ mod tests {
     }
 
     #[test]
-    fn cache_set_overwrite_does_not_promote_to_mru() {
-        // Perf shard item 5: `cache_set` switched from `LruCache::cache_set` + a caller-key
-        // clone to `LruCache::cache_set_returning_entry`. That primitive replaces an
-        // existing entry in place (`order.set`) and does NOT promote it to MRU (the
-        // documented recency trap) -- matching the old `LruCache::cache_set` behavior. This
-        // guards against a regression that adds an accidental `move_to_front` on this path,
-        // or against the switch silently starting to promote.
+    fn cache_set_overwrite_promotes_to_mru() {
+        // `cache_set` goes through `LruCache::cache_set_returning_entry`, which promotes an
+        // overwritten key to MRU: a write is an access. The user-visible consequence is
+        // which entry a later capacity eviction picks.
         let mut c: ExpiringLruCache<u8, ExpiredU8> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
         c.cache_set(1, 1); // live
         c.cache_set(2, 2); // live
         c.cache_set(3, 3); // live
         // LRU order after inserts (MRU -> LRU): 3, 2, 1.
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
 
         // Overwrite key 1 -- the least-recently-used entry -- with a new live value.
-        // Because cache_set must not promote, 1 remains the LRU entry.
+        // The write promotes it, so 2 becomes the LRU entry.
         assert_eq!(c.cache_set(1, 10), Some(1));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
 
-        // Insert a 4th key to force a capacity eviction. If cache_set had wrongly promoted
-        // key 1, key 2 (now the true LRU) would be evicted instead of key 1.
+        // Insert a 4th key to force a capacity eviction: key 2 is now the victim.
         c.cache_set(4, 4);
         assert_eq!(c.cache_size(), 3);
         assert_eq!(
-            c.cache_get(&1),
+            c.cache_get(&2),
             None,
-            "key 1 must still be LRU and get evicted -- cache_set must not promote on overwrite"
+            "key 2 is the LRU victim -- cache_set promoted key 1 on overwrite"
         );
-        assert_eq!(c.cache_get(&2), Some(&2));
+        assert_eq!(c.cache_get(&1), Some(&10));
         assert_eq!(c.cache_get(&3), Some(&3));
         assert_eq!(c.cache_get(&4), Some(&4));
+    }
+
+    #[test]
+    fn cache_set_over_current_mru_and_sole_entry_keep_the_list_intact() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        c.cache_set(3, 3);
+        // Overwriting the head exercises `move_to_front` on an already-front slot.
+        assert_eq!(c.cache_set(3, 4), Some(3));
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.cache_size(), 3);
+        let values: Vec<u8> = c.value_order().iter().map(|v| **v).collect();
+        assert_eq!(values, vec![4u8, 2, 1]);
+
+        // Sole entry of a 1-capacity cache.
+        let mut d: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(1).build().unwrap();
+        d.cache_set(1, 1);
+        assert_eq!(d.cache_set(1, 2), Some(1));
+        assert_eq!(d.key_order(), vec![1]);
+        assert_eq!(d.cache_size(), 1);
+    }
+
+    #[test]
+    fn cache_peek_still_does_not_promote_after_set_does() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        c.cache_set(3, 3);
+        assert!(CachedPeek::cache_peek(&c, &1).is_some());
+        assert_eq!(c.key_order(), vec![3, 2, 1], "peek must not promote");
+        assert_eq!(c.cache_set(1, 4), Some(1));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
     }
 
     #[test]

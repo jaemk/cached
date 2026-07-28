@@ -2328,7 +2328,10 @@ mod tests {
     }
 
     /// Index of the shard that owns `k`.
-    fn owning_shard<K, V, H: ShardHasher<K>>(c: &ShardedExpiringCacheBase<K, V, H>, k: &K) -> usize {
+    fn owning_shard<K, V, H: ShardHasher<K>>(
+        c: &ShardedExpiringCacheBase<K, V, H>,
+        k: &K,
+    ) -> usize {
         shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
     }
 
@@ -2347,7 +2350,9 @@ mod tests {
 
     /// Every stored entry as `(key, value, expired)`, sorted, for a full cross-cache
     /// state comparison.
-    fn entry_snapshot<H: ShardHasher<u32>>(c: &ShardedExpiringCacheBase<u32, Val, H>) -> Vec<(u32, u32, bool)> {
+    fn entry_snapshot<H: ShardHasher<u32>>(
+        c: &ShardedExpiringCacheBase<u32, Val, H>,
+    ) -> Vec<(u32, u32, bool)> {
         let mut out: Vec<(u32, u32, bool)> = Vec::new();
         for shard in c.inner.shards.iter() {
             let guard = shard.lock.read();
@@ -2507,7 +2512,8 @@ mod tests {
         // Gap: assert the callback (extract_if) and no-callback (retain + length-delta)
         // evict() branches return identical counts and leave identical state for the same
         // input, including a multi-shard mix where some shards have nothing expired.
-        let fired: Arc<std::sync::Mutex<Vec<(u32, u32)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fired: Arc<std::sync::Mutex<Vec<(u32, u32)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let fired2 = fired.clone();
         let with_cb = ShardedExpiringCacheBase::<u32, Val>::builder()
             .shards(4)
@@ -2557,7 +2563,10 @@ mod tests {
 
         let removed_cb = with_cb.evict();
         let removed_plain = no_cb.evict();
-        assert_eq!(removed_cb, 8, "only the eight backdated entries are expired");
+        assert_eq!(
+            removed_cb, 8,
+            "only the eight backdated entries are expired"
+        );
         assert_eq!(
             removed_plain, removed_cb,
             "the retain + length-delta branch must return the same count as the extract_if branch"
@@ -2701,14 +2710,13 @@ mod tests {
                     let k = r % KEYS;
                     // Unique id per stored value lets on_evict distinguish "this exact
                     // stored entry" from "a same-key entry that replaced it".
-                    let id = u32::try_from(next_id.fetch_add(1, Ordering::Relaxed) % 1_000_000)
-                        .unwrap();
+                    let id =
+                        u32::try_from(next_id.fetch_add(1, Ordering::Relaxed) % 1_000_000).unwrap();
                     // A third of inserts are born already-expired, so cache_set's
                     // displaced-expired-entry branch races cache_remove and evict() for
                     // the very same entries.
                     let expired = id % 3 == 0;
-                    let _ =
-                        SyncConcurrentCached::cache_set(&c, k, Val { v: id, expired }).unwrap();
+                    let _ = SyncConcurrentCached::cache_set(&c, k, Val { v: id, expired }).unwrap();
                 }
             }));
         }

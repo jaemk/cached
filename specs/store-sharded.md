@@ -82,3 +82,14 @@ would already dominate the effective capacity. Building without a `max_size` (th
 sharded stores) is unaffected and keeps using `default_shard_count()` directly.
 `.shards(n)` on the builder always overrides this default and is authoritative regardless of
 `max_size`. See [design/0037-sharded-lru-default-shard-cap.md](design/0037-sharded-lru-default-shard-cap.md).
+
+## SHARD-8
+
+On the expiry-aware sharded stores, the liveness of an entry is decided against a single clock
+sample taken by the calling thread BEFORE it acquires the shard lock, not re-read once the lock is
+held. Under lock contention an entry that crosses its expiry while the caller is queued is
+therefore judged live for that operation: `cache_set` returns `Some(old_value)` and fires no
+`on_evict`, and the entry is swept on a later access instead. This is inside the lazy-expiry
+contract in [SHARD-3](#shard-3), which promises only that an expired entry never reads as present,
+never that removal is prompt. Callers that need a hard bound on how long an expired entry can
+occupy space should call `evict()`.

@@ -723,23 +723,20 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// differ in those extra fields. Used by `LruTtlCache::set_entry` to pass the correct stored
     /// key to `on_evict`.
     ///
-    /// # Recency trap
+    /// # Recency
     ///
-    /// On an existing key this replaces the entry **in place** (`order.set`) and does
-    /// **NOT** promote it to most-recently-used, matching [`Cached::cache_set`]. A
-    /// remove-then-insert (`pop_raw` + `cache_set`) *does* promote, because the insert
-    /// goes through `push_front`. Any caller switching from remove-then-insert to this
-    /// method changes observable LRU order unless it follows up with
-    /// `order.move_to_front(index)` (or a `cache_get`) to restore the promotion.
+    /// Like [`Cached::cache_set`], writing over an existing key promotes that entry to
+    /// most-recently-used: a write counts as an access, so an overwrite is equivalent to
+    /// inserting a fresh value. This matches a remove-then-insert (`pop_raw` +
+    /// `cache_set`), whose insert goes through `push_front`.
     // Deliberately NOT `#[cfg(feature = "time_stores")]`: nothing in the body is
-    // time-related, and non-time_stores callers need it too. The only in-tree callers
-    // today are `time_stores`-gated, hence the dead-code allowance for builds without
-    // that feature.
-    #[cfg_attr(not(feature = "time_stores"), allow(dead_code))]
+    // time-related, and non-time_stores callers need it too.
     pub(super) fn cache_set_returning_entry(&mut self, key: K, val: V) -> Option<(K, V)> {
         let hash = self.hash(&key);
         let entry = if let Some(index) = self.get_index(hash, &key) {
-            self.order.set(index, (key, val))
+            let displaced = self.order.set(index, (key, val));
+            self.order.move_to_front(index);
+            displaced
         } else {
             let index = self.order.push_front((key, val));
             self.insert_index(hash, index);
@@ -901,14 +898,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruCache<K, V, S>
     /// Returns the previous value if the key already existed, or `None` for a
     /// new insertion.
     ///
-    /// **Note:** overwriting an existing key replaces the value in-place
-    /// **without** refreshing the key's LRU recency. The entry stays at its
-    /// current position in the eviction order. Use `cache_get` before
-    /// `cache_set` if you need to promote the entry to most-recently-used.
+    /// **Note:** overwriting an existing key promotes that key to
+    /// most-recently-used. A write counts as an access, so an overwrite moves
+    /// the entry to the front of the eviction order exactly as a fresh
+    /// insertion would. Use [`CachedPeek::cache_peek`](crate::CachedPeek::cache_peek)
+    /// if you need to inspect an entry without touching recency.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let hash = self.hash(&key);
         let v = if let Some(index) = self.get_index(hash, &key) {
-            self.order.set(index, (key, val)).map(|(_, v)| v)
+            let displaced = self.order.set(index, (key, val)).map(|(_, v)| v);
+            self.order.move_to_front(index);
+            displaced
         } else {
             let index = self.order.push_front((key, val));
             self.insert_index(hash, index);
@@ -1601,30 +1601,29 @@ mod tests {
     }
 
     #[test]
-    fn cache_set_returning_entry_replaces_in_place_without_promoting() {
-        // TRAP: `cache_set_returning_entry` replaces via `order.set` and does NOT
-        // promote to MRU, while remove-then-insert does (`push_front`). Any caller
-        // switching to it must add `order.move_to_front(index)` for promotion.
+    fn cache_set_returning_entry_promotes_replaced_entry_to_mru() {
+        // `cache_set_returning_entry` matches `Cached::cache_set`: a write over an
+        // existing key promotes it to MRU, exactly as remove-then-insert would.
         let mut c = LruCache::builder().max_size(3).build().unwrap();
         c.cache_set(1u32, 10u32);
         c.cache_set(2u32, 20u32);
         c.cache_set(3u32, 30u32);
         assert_eq!(c.key_order(), vec![3, 2, 1]);
 
-        // Replacing the least-recently-used entry returns the stored pair and leaves
-        // the entry exactly where it was.
+        // Replacing the least-recently-used entry returns the stored pair and moves
+        // the entry to the front.
         assert_eq!(c.cache_set_returning_entry(1, 11), Some((1, 10)));
         assert_eq!(
             c.key_order(),
-            vec![3, 2, 1],
-            "cache_set_returning_entry must NOT promote the replaced entry"
+            vec![1, 3, 2],
+            "cache_set_returning_entry must promote the replaced entry to MRU"
         );
-        assert_eq!(c.value_order(), vec![30, 20, 11]);
+        assert_eq!(c.value_order(), vec![11, 30, 20]);
 
-        // Contrast: remove-then-insert DOES promote.
-        assert_eq!(c.pop_raw(&1u32), Some((1, 11)));
-        assert_eq!(Cached::cache_set(&mut c, 1u32, 12u32), None);
-        assert_eq!(c.key_order(), vec![1, 3, 2]);
+        // Remove-then-insert agrees.
+        assert_eq!(c.pop_raw(&2u32), Some((2, 20)));
+        assert_eq!(Cached::cache_set(&mut c, 2u32, 22u32), None);
+        assert_eq!(c.key_order(), vec![2, 1, 3]);
 
         // A fresh key inserts at the front and returns None.
         let mut d = LruCache::builder().max_size(3).build().unwrap();
@@ -1648,17 +1647,88 @@ mod tests {
     }
 
     #[test]
-    fn cache_set_over_existing_key_does_not_promote_recency() {
+    fn cache_set_over_existing_key_promotes_to_mru() {
         let mut c = LruCache::builder().max_size(3).build().unwrap();
         c.set(1, 10);
         c.set(2, 20);
         c.set(3, 30);
         assert_eq!(c.key_order(), vec![3, 2, 1]);
-        // Overwriting the least-recently-used key updates the value in-place and
-        // returns the old value, but must NOT move it to the front.
+        // Overwriting the least-recently-used key returns the old value and promotes
+        // the entry to most-recently-used: a write is an access.
         assert_eq!(Cached::cache_set(&mut c, 1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
+        assert_eq!(c.value_order(), vec![11, 30, 20]);
+    }
+
+    #[test]
+    fn cache_set_over_current_mru_keeps_it_at_the_front() {
+        // Exercises `move_to_front` on a slot that is already the head: `unlink` +
+        // `link_after` must be a no-op there, not corrupt the chain.
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
+        c.set(1, 10);
+        c.set(2, 20);
+        c.set(3, 30);
         assert_eq!(c.key_order(), vec![3, 2, 1]);
-        assert_eq!(c.value_order(), vec![30, 20, 11]);
+
+        assert_eq!(Cached::cache_set(&mut c, 3, 33), Some(30));
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.value_order(), vec![33, 20, 10]);
+
+        // The chain is still intact in both directions: the LRU victim is still 1,
+        // and every entry is reachable.
+        assert_eq!(c.cache_size(), 3);
+        let entries: Vec<(u32, u32)> = c.iter_order().into_iter().map(|(k, v)| (k, *v)).collect();
+        assert_eq!(entries, vec![(3, 33), (2, 20), (1, 10)]);
+        c.set(4, 40);
+        assert_eq!(c.key_order(), vec![4, 3, 2]);
+        assert_eq!(c.cache_get(&1), None);
+    }
+
+    #[test]
+    fn cache_set_over_sole_entry_of_capacity_one_cache() {
+        let mut c: LruCache<u32, u32> = LruCache::builder().max_size(1).build().unwrap();
+        c.set(1, 10);
+        assert_eq!(Cached::cache_set(&mut c, 1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![1]);
+        assert_eq!(c.value_order(), vec![11]);
+        assert_eq!(c.cache_size(), 1);
+        // Still evicts correctly afterwards.
+        c.set(2, 20);
+        assert_eq!(c.key_order(), vec![2]);
+        assert_eq!(c.cache_size(), 1);
+    }
+
+    #[test]
+    fn cache_set_promotion_changes_the_capacity_eviction_victim() {
+        // The user-visible consequence of promote-on-set: after overwriting the LRU
+        // entry, the next insertion evicts the *other* old entry instead.
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
+        c.set(1, 10);
+        c.set(2, 20);
+        c.set(3, 30);
+        // 1 is the LRU victim, but overwriting it makes 2 the victim.
+        assert_eq!(Cached::cache_set(&mut c, 1, 11), Some(10));
+        c.set(4, 40);
+        assert_eq!(c.key_order(), vec![4, 1, 3]);
+        assert_eq!(c.cache_get(&2), None, "2 became the LRU victim");
+        assert_eq!(c.cache_peek(&1), Some(&11));
+    }
+
+    #[test]
+    fn cache_peek_still_does_not_promote_after_set_does() {
+        // `cache_set` and `cache_peek` must remain distinguishable: only the write
+        // touches recency.
+        let mut c = LruCache::builder().max_size(3).build().unwrap();
+        c.set(1, 10);
+        c.set(2, 20);
+        c.set(3, 30);
+        assert_eq!(c.cache_peek(&1), Some(&10));
+        assert_eq!(c.key_order(), vec![3, 2, 1], "peek must not promote");
+        assert!(c.cache_contains(&1), "contains must not promote");
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        // The write on the same key does promote.
+        assert_eq!(Cached::cache_set(&mut c, 1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
     }
 
     #[test]
@@ -2834,10 +2904,10 @@ mod tests {
         // No eviction: a replace is not an eviction.
         assert!(seen.lock().unwrap().is_empty());
         assert_eq!(c.cache_evictions(), Some(0));
-        // And no promotion (the recency trap), so 1 is still the LRU victim.
+        // The write promoted 1 to MRU, so 2 is now the LRU victim.
         assert_eq!(
             c.key_order().iter().map(|k| k.id).collect::<Vec<_>>(),
-            vec![2, 1]
+            vec![1, 2]
         );
 
         // A fresh key over capacity evicts the LRU entry through `check_capacity`.
@@ -2851,11 +2921,11 @@ mod tests {
             ),
             None
         );
-        assert_eq!(*seen.lock().unwrap(), vec![(1, 11)]);
+        assert_eq!(*seen.lock().unwrap(), vec![(2, 20)]);
         assert_eq!(c.cache_evictions(), Some(1));
         assert_eq!(
             c.key_order().iter().map(|k| k.id).collect::<Vec<_>>(),
-            vec![3, 2]
+            vec![3, 1]
         );
         assert_store_and_order_agree(&c);
     }

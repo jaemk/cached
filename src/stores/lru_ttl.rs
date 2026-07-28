@@ -781,7 +781,14 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         f: F,
     ) -> Result<&mut V, E> {
         let ttl = self.ttl;
-        let setter = || {
+        // Count the miss the instant the setter runs. The inner store calls the setter only
+        // when the lookup found no live entry (absent key or expired entry), so a hit never
+        // counts one; and because the increment lands before `f` returns, an `Err` factory
+        // still records the miss instead of losing it on the `?` early return below. This
+        // matches `TtlCache` and `ExpiringLruCache`'s try-path accounting (EXP-2).
+        let misses = &self.misses;
+        let setter = move || {
+            misses.fetch_add(1, Ordering::Relaxed);
             // Anchor the expiry after the factory succeeds (CORE-3); deliberately a
             // fresh clock read, not the `hit_at` sample taken before `f()` ran.
             let value = f()?;
@@ -803,14 +810,14 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
-            if let Some((old_key, old)) = old_entry {
-                if let Some(on_evict) = &self.on_evict {
-                    on_evict(&old_key, &old.value);
-                }
-                self.evictions.fetch_add(1, Ordering::Relaxed);
+        } else if let Some((old_key, old)) = old_entry {
+            // The miss was already counted by `setter`. On `Err` the expired entry is left
+            // in place, so `on_evict` / `evictions` deliberately stay behind until a call
+            // actually displaces it -- firing early would double-fire for one physical entry.
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&old_key, &old.value);
             }
-            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         Ok(&mut entry.value)
     }
@@ -819,9 +826,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
     /// An expired previous value is filtered from the return; it fires `on_evict` and counts as
     /// an eviction, matching the other removal paths.
     ///
-    /// Overwriting an existing key replaces the value in-place **without** refreshing the key's
-    /// LRU recency; the entry keeps its position in the eviction order (its expiry is still reset
-    /// from the current TTL). Read with `cache_get` first if you need to promote it.
+    /// Overwriting an existing key promotes it to most-recently-used: a write counts as an
+    /// access, so the entry moves to the front of the eviction order exactly as a fresh
+    /// insertion would (its expiry is also reset from the current TTL). Use
+    /// [`CachedPeek::cache_peek`](crate::CachedPeek::cache_peek) if you need to inspect an
+    /// entry without touching recency.
     fn cache_set(&mut self, key: K, val: V) -> Option<V> {
         let now = Instant::now();
         let expires_at = Self::compute_expires_at(self.ttl, now);
@@ -1120,7 +1129,12 @@ where
     {
         async move {
             let ttl = self.ttl;
-            let setter = || async move {
+            // Count the miss before awaiting the factory, so an `Err` still records it
+            // instead of losing it on the `?` early return below (EXP-2); see the sync
+            // `cache_try_get_or_set_with_mut` for the full rationale.
+            let misses = &self.misses;
+            let setter = move || async move {
+                misses.fetch_add(1, Ordering::Relaxed);
                 // Fresh clock read anchored after the factory resolves (CORE-3).
                 let new_val = f().await?;
                 let now = Instant::now();
@@ -1146,14 +1160,14 @@ where
                     entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
-            } else {
-                if let Some((old_key, old)) = old_entry {
-                    if let Some(on_evict) = &self.on_evict {
-                        on_evict(&old_key, &old.value);
-                    }
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
+            } else if let Some((old_key, old)) = old_entry {
+                // The miss was already counted by `setter`; on `Err` the expired entry is
+                // still stored, so the eviction side deliberately waits for the call that
+                // actually displaces it.
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(&old_key, &old.value);
                 }
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
             }
             Ok(&mut entry.value)
         }
@@ -1258,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_set_over_existing_key_does_not_promote_recency() {
+    fn cache_set_over_existing_key_promotes_to_mru() {
         let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
             .max_size(3)
             .ttl(Duration::from_secs(60))
@@ -1268,11 +1282,74 @@ mod tests {
         c.cache_set(2, 20);
         c.cache_set(3, 30);
         assert_eq!(c.key_order(), vec![3, 2, 1]);
-        // Overwriting the least-recently-used key updates the value in-place and
-        // returns the old (still-live) value, but must NOT move it to the front.
+        // Overwriting the least-recently-used key returns the old (still-live) value
+        // and promotes the entry to most-recently-used.
         assert_eq!(c.cache_set(1, 11), Some(10));
-        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
         assert_eq!(c.cache_get(&1), Some(&11));
+    }
+
+    #[test]
+    fn cache_set_promotion_changes_the_capacity_eviction_victim() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        // 1 was the LRU victim; overwriting it makes 2 the victim instead.
+        assert_eq!(c.cache_set(1, 11), Some(10));
+        c.cache_set(4, 40);
+        assert_eq!(c.key_order(), vec![4, 1, 3]);
+        assert_eq!(c.cache_get(&2), None, "2 became the LRU victim");
+        assert_eq!(c.cache_get(&1), Some(&11));
+    }
+
+    #[test]
+    fn cache_set_over_current_mru_and_sole_entry_keep_the_list_intact() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        // Overwriting the head must not corrupt the chain.
+        assert_eq!(c.cache_set(3, 33), Some(30));
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+        assert_eq!(c.value_order(), vec![33, 20, 10]);
+        assert_eq!(c.cache_size(), 3);
+
+        // Sole entry of a 1-capacity cache.
+        let mut d: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(1)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        d.cache_set(1, 10);
+        assert_eq!(d.cache_set(1, 11), Some(10));
+        assert_eq!(d.key_order(), vec![1]);
+        assert_eq!(d.cache_size(), 1);
+    }
+
+    #[test]
+    fn cache_peek_still_does_not_promote_after_set_does() {
+        use crate::CachedPeek;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        assert_eq!(c.cache_peek(&1), Some(&10));
+        assert_eq!(c.key_order(), vec![3, 2, 1], "peek must not promote");
+        assert_eq!(c.cache_set(1, 11), Some(10));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
     }
 
     #[test]
@@ -2950,9 +3027,8 @@ mod tests {
 
     #[test]
     fn clock_threading_does_not_change_cache_set_recency() {
-        // `set_entry` still goes through `cache_set_returning_entry`, which replaces
-        // IN PLACE and deliberately does not promote (the documented recency trap).
-        // Threading `now` through must not have changed that.
+        // `set_entry` goes through `cache_set_returning_entry`, which promotes the
+        // overwritten key to MRU. Threading `now` through must not change that.
         let mut c = long_ttl_cache(3);
         c.cache_set(1, 10);
         c.cache_set(2, 20);
@@ -2961,16 +3037,19 @@ mod tests {
         assert_eq!(c.cache_set(1, 11), Some(10));
         assert_eq!(
             c.key_order(),
-            vec![3, 2, 1],
-            "an overwrite must not promote the entry"
+            vec![1, 3, 2],
+            "an overwrite must promote the entry to MRU"
         );
-        // ... while the get paths DO promote.
-        assert_eq!(c.cache_get(&1), Some(&11));
-        assert_eq!(c.key_order(), vec![1, 3, 2]);
-        // Overwriting an expired entry (the other `set_entry` arm) must not promote
-        // either.
+        // ... and the get paths promote too.
+        assert_eq!(c.cache_get(&2), Some(&20));
+        assert_eq!(c.key_order(), vec![2, 1, 3]);
+        // Overwriting an EXPIRED entry (the other `set_entry` arm) promotes as well;
+        // the displaced expired value is filtered from the return.
+        // (`put_raw` writes through the inner store, so it promotes too; `key_order`
+        // filters the now-expired key 3 out of the visible order.)
         put_raw(&mut c, 3, 33, Some(Instant::now()));
+        assert_eq!(c.key_order(), vec![2, 1]);
         assert_eq!(c.cache_set(3, 333), None);
-        assert_eq!(c.key_order(), vec![1, 3, 2]);
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
     }
 }

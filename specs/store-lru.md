@@ -56,3 +56,35 @@ is the one callers with such key types should see. `LruCache`, `LruTtlCache`, an
 `LruCache::cache_set_returning_entry` primitive (shared by the timed wrappers) returns the
 displaced `(stored_key, stored_value)` pair for exactly this reason, and `ExpiringLruCache`'s
 `cache_set` was brought onto the same contract (it previously passed the caller's key instead).
+
+Which key SURVIVES an overwrite is a separate question from which key `on_evict` sees, and the
+two store families deliberately differ. The LRU family overwrites through `LRUList::set`, which
+replaces the whole `(K, V)` slot, so the caller's key REBINDS the entry and the previous stored
+key is handed to `on_evict` and then dropped. The HashMap-backed stores (`ExpiringCache`,
+`TtlSortedCache`) overwrite through `Entry::Occupied::insert`, which keeps the original key and
+discards the caller's, matching `HashMap::insert` (see
+[store-ttl.md](store-ttl.md) TTL-7). For a key type whose `Eq` ignores part of its payload, the
+key left in an LRU-family cache after `cache_set` / a `get_or_set` overwrite is therefore the
+most recently inserted one, while in the HashMap-backed stores it is the first-inserted one.
+Key rebinding is independent of recency (LRU-7): a rebind happens on every overwrite regardless
+of where the entry sits in the eviction order.
+
+## LRU-7
+
+`cache_set` over an EXISTING key promotes that key to most-recently-used. A write is an access,
+so an overwrite moves the entry to the front of the eviction order exactly as a fresh insertion
+would, and it therefore changes which entry a later capacity eviction selects. This holds across
+`LruCache`, `LruTtlCache`, `ExpiringLruCache`, `ShardedLruCache`, `ShardedLruTtlCache`, and
+`ShardedExpiringLruCache`, and it holds regardless of whether an `on_evict` callback is
+configured: on the sharded LRU-TTL and expiring-LRU stores the callback branch (which needs the
+displaced stored key, so it writes through `LruCache::cache_set_returning_entry`) and the
+no-callback branch (a plain `LruCache::cache_set`) now agree, so attaching a purely
+observational callback cannot change eviction order.
+
+Reads that are documented as side-effect-free stay side-effect-free: `cache_peek`,
+`cache_peek_with_expiry_status`, and `cache_contains` do NOT promote, so a write and a peek
+remain distinguishable. Inserting a NEW key already went to the front and is unchanged.
+
+Before 3.0 an overwrite replaced the value in place and left recency untouched (an artifact of
+the original `SizedCache` implementation, where `LRUList::set` in place was the cheap path).
+See [design/0038-cache-set-promotes-on-overwrite.md](design/0038-cache-set-promotes-on-overwrite.md).
