@@ -382,7 +382,7 @@ lru.set("key1", Response {
 
 The basic usage looks like:
 
-```rust,no_run,ignore
+```rust
 use cached::macros::cached;
 
 /// Defines a function named `fib` that uses a cache implicitly named `FIB`.
@@ -393,12 +393,11 @@ fn fib(n: u64) -> u64 {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }
-# pub fn main() { }
 ```
 
 ----
 
-```rust,no_run,ignore
+```rust
 use std::thread::sleep;
 use cached::time::Duration;
 use cached::macros::cached;
@@ -415,12 +414,11 @@ fn keyed(a: &str, b: &str) -> usize {
     sleep(Duration::new(size as u64, 0));
     size
 }
-# pub fn main() { }
 ```
 
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::once;
 
 /// Only cache the initial function call.
@@ -437,7 +435,6 @@ fn keyed(a: String) -> Option<usize> {
         None
     }
 }
-# pub fn main() { }
 ```
 
 ----
@@ -470,7 +467,7 @@ let _: &mut u32 = cache.cache_get_or_set_with(1, || 2);
 ```
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::concurrent_cached;
 use cached::AsyncRedisCache;
 use cached::time::Duration;
@@ -508,7 +505,7 @@ async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
 
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::concurrent_cached;
 use cached::RedbCache;
 use thiserror::Error;
@@ -536,7 +533,7 @@ fn cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
 
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::concurrent_cached;
 
 /// Memoize with the default in-memory sharded store — no `map_error`, `ty`,
