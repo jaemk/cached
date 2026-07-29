@@ -1202,8 +1202,8 @@ async fn async_try_get_or_set_with_counts_a_miss_when_the_factory_fails() {
 // =============================================================================
 
 #[test]
-fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails_on_an_absent_key(
-) {
+fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails_on_an_absent_key()
+ {
     let l = log();
     let mut c = logging_cache(4, Duration::from_secs(60), l.clone());
 
@@ -1232,8 +1232,8 @@ fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fa
 }
 
 #[test]
-fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails_over_an_expired_entry(
-) {
+fn try_get_or_set_with_mut_counts_a_miss_and_inserts_nothing_when_the_factory_fails_over_an_expired_entry()
+ {
     let l = log();
     let mut c = logging_cache(4, TTL, l.clone());
     c.cache_set(1, 10);

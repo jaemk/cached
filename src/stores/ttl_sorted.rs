@@ -2573,7 +2573,11 @@ mod test {
             "map and keys must stay in lockstep across a Drop panic (no orphaned rows)"
         );
         // Every entry had expired, so the sweep drained the whole prefix from both.
-        assert_eq!(cache.map.len(), 0, "all expired entries must have left the map");
+        assert_eq!(
+            cache.map.len(),
+            0,
+            "all expired entries must have left the map"
+        );
         assert_eq!(cache.cache_size(), 0);
         // The counter is incremented before the drain `Vec` drops, so it reflects exactly
         // the three rows pulled from the map. Pre-fix the batched `fetch_add` after the loop
