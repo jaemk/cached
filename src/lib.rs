@@ -2202,11 +2202,12 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     #[must_use = "cache_get returns the looked-up value; ignoring it discards the result"]
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
-    /// Insert a key, value pair and return the previous value at the key, if any,
-    /// without checking expiry. For TTL-based stores the returned value may have
-    /// elapsed its TTL; for per-value expiry stores (implementing [`Expires`]) the
-    /// returned value may report `is_expired() == true`. Check expiry on the returned
-    /// value if you need to distinguish a live previous entry from an expired one.
+    /// Insert a key, value pair and return the previous live value at the key, if any.
+    /// A displaced entry that has already expired is not returned: it is filtered to
+    /// `None` and delivered to `on_evict` instead (see `specs/store-sharded.md` SHARD-8),
+    /// so a returned `Some(v)` is always a previous value that was live for this
+    /// operation. On recency-ordered sharded stores, overwriting an existing key promotes
+    /// it to most-recently-used.
     ///
     /// # Errors
     ///

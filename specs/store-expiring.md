@@ -42,7 +42,8 @@ itself via `Expires`). See [store-lru.md](store-lru.md) LRU-5.
 
 ## EXPIRE-7
 
-`ExpiringLruCache::cache_set` fires `on_evict` with the **stored** key of any displaced entry, not
-the caller's key, matching the rest of the LRU family (`LruCache`, `LruTtlCache`). The two keys
-compare equal (same `Hash`/`Eq`) but can differ in fields outside `Hash`/`Eq`; observable only for
-key types with such fields. See [store-lru.md](store-lru.md) LRU-6.
+`ExpiringLruCache::cache_set` fires `on_evict` only when the displaced entry has already
+**expired**; a live overwrite returns the old value via `Some` and fires no callback. When it does
+fire, it passes the **stored** key of the displaced entry, not the caller's key, matching
+`LruTtlCache`. The two keys compare equal (same `Hash`/`Eq`) but can differ in fields outside
+`Hash`/`Eq`; observable only for key types with such fields. See [store-lru.md](store-lru.md) LRU-6.

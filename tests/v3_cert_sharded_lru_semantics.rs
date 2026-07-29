@@ -933,8 +933,13 @@ mod refresh_on_hit {
                 Some(10)
             );
         }
-        // Deliberately push well past the TTL now that the peeks are done.
-        std::thread::sleep(Duration::from_millis(1000));
+        // Land the final read strictly inside the window (original 1000 ms deadline,
+        // refreshed 1300 ms deadline): the last peek was at t~=300 ms, so sleeping 850 ms
+        // more reads at t~=1150 ms. A correctly non-refreshing entry (deadline 1000 ms) is
+        // expired; an entry that a buggy peek had refreshed (deadline 1300 ms) would still
+        // be live, flipping the assertion below. 700 <= 850 < 1000 keeps this true under
+        // scheduling jitter without false failures.
+        std::thread::sleep(Duration::from_millis(850));
         assert_eq!(
             ConcurrentCached::cache_get(&store, &1).unwrap(),
             None,

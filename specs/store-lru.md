@@ -48,10 +48,13 @@ values (`PartialEq<V>`).
 
 ## LRU-6
 
-`on_evict` receives the **stored** key, not the caller's key, whenever an existing entry is
-displaced (an overwrite via `cache_set`, or eviction of an already-present key). The two keys
-compare equal (same `Hash`/`Eq`) but can differ in fields outside `Hash`/`Eq`, and the stored key
-is the one callers with such key types should see. `LruCache`, `LruTtlCache`, and
+When `on_evict` fires for a displaced entry it receives the **stored** key, not the caller's key.
+It does not fire on every overwrite: a plain `cache_set` overwrite on `LruCache` returns the old
+value and fires no callback, and on `LruTtlCache` / `ExpiringLruCache` an overwrite fires
+`on_evict` only when the displaced entry has already expired; capacity eviction of an
+already-present key always fires it. The two keys compare equal (same `Hash`/`Eq`) but can differ
+in fields outside `Hash`/`Eq`, and the stored key is the one callers with such key types should
+see. `LruCache`, `LruTtlCache`, and
 `ExpiringLruCache` are all consistent on this contract; the internal
 `LruCache::cache_set_returning_entry` primitive (shared by the timed wrappers) returns the
 displaced `(stored_key, stored_value)` pair for exactly this reason, and `ExpiringLruCache`'s

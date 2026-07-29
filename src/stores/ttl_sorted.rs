@@ -760,10 +760,13 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
 
     /// Set k/v pair without running eviction logic, using the cache's default TTL.
     ///
-    /// The entry is inserted first. If a `size_limit` was specified and capacity is exceeded,
-    /// the next-to-expire entry is dropped after insertion, but only if `.set_with(..).evict()`
-    /// was used — plain `set` never runs eviction logic itself; see
-    /// [`set_with`](Self::set_with) for per-entry TTL overrides and opt-in eviction.
+    /// The entry is inserted first. If a `size_limit` was configured and the insertion
+    /// pushes the map over it, the soonest-to-expire entry is trimmed to restore the
+    /// bound; this size-limit enforcement runs on every `set`, independent of the
+    /// `.evict()` opt-in. The `.set_with(..).evict()` opt-in controls only the separate
+    /// expiry sweep (dropping entries already past their TTL), not size-limit
+    /// enforcement; see [`set_with`](Self::set_with) for per-entry TTL overrides and the
+    /// opt-in sweep.
     ///
     /// If computing the expiry instant overflows (a TTL on the order of hundreds of
     /// years), the entry is stored with no expiry (never expires), matching
