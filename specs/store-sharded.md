@@ -71,20 +71,23 @@ no `K: Clone` bound and is inherent-only, not a trait method; see
 
 ## SHARD-7
 
-**Planned, not yet in effect.** For the LRU-bounded variants (`ShardedLruCache`,
-`ShardedLruTtlCache`, `ShardedExpiringLruCache`), the DEFAULT shard count (no explicit
-`.shards(n)` on the builder) is intended to be capped by the requested `max_size` rather than
-derived from `available_parallelism()` alone: the helper `default_shard_count_for_capacity`
-would yield `next_power_of_two(max_size / 16).clamp(1, default_shard_count())`, where
-`default_shard_count()` is `available_parallelism() * 4` clamped to `[8, 1024]` and rounded to a
-power of two. This helper exists (`#[allow(dead_code)]`) but no builder's default path calls it
-yet, so today every LRU-bounded builder still ignores `max_size` when sizing the default shard
-count and can preallocate hundreds of shards on a high-core-count machine even for a small
-bounded cache (e.g. `ShardedLruCache::new(100)`), since the 16-entries-per-shard floor
-(`per_shard_cap_from_total`) alone would already dominate the effective capacity. Once wired in,
-building without a `max_size` (the unbounded sharded stores) would be unaffected and would keep
-using `default_shard_count()` directly, and `.shards(n)` on the builder would always override
-this default and remain authoritative regardless of `max_size`. See
+**Current behavior:** for the LRU-bounded variants (`ShardedLruCache`, `ShardedLruTtlCache`,
+`ShardedExpiringLruCache`), the DEFAULT shard count (no explicit `.shards(n)` on the builder)
+ignores `max_size` entirely; it is derived only from `available_parallelism()`. Combined with the
+16-entries-per-shard floor (`per_shard_cap_from_total`), this means the effective capacity can
+exceed the requested `max_size` by a wide margin on a high-core-count host: `ShardedLruCache::new(100)`
+on a 64-core box preallocates 256 shards and yields an effective capacity of 4096, not 100. Read
+`capacity()` after construction to see the actual figure a given host resolves to; an explicit
+`.shards(n)` on the builder is the only way to control this today.
+
+**Planned, not yet in effect.** The DEFAULT shard count is intended to be capped by the requested
+`max_size` instead: the helper `default_shard_count_for_capacity` would yield
+`next_power_of_two(max_size / 16).clamp(1, default_shard_count())`, where `default_shard_count()`
+is `available_parallelism() * 4` clamped to `[8, 1024]` and rounded to a power of two. This helper
+exists (`#[allow(dead_code)]`) but no builder's default path calls it yet. Once wired in, building
+without a `max_size` (the unbounded sharded stores) would be unaffected and would keep using
+`default_shard_count()` directly, and `.shards(n)` on the builder would always override this
+default and remain authoritative regardless of `max_size`. See
 [design/0037-sharded-lru-default-shard-cap.md](design/0037-sharded-lru-default-shard-cap.md).
 
 ## SHARD-8

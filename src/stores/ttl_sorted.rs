@@ -3766,6 +3766,166 @@ mod test {
         assert_index_lockstep(&cache, "after trimming the survivor");
     }
 
+    /// A panicking `on_evict` must not desynchronize the map from the expiry index during a
+    /// `retain_latest` size trim either. Unlike `evict_at`'s batch-then-notify drain,
+    /// `retain_latest_at`'s pop loop fires `on_evict` inline per popped entry, so this path
+    /// only stays correct because each iteration finishes its `map` removal and the eviction
+    /// counter bump BEFORE the callback runs. Panic on the third callback (after two full,
+    /// uninterrupted iterations) so the test also proves the ordering holds across repeated
+    /// iterations, not merely on the very first one.
+    #[test]
+    fn retain_latest_on_evict_panic_leaves_the_index_in_lockstep() {
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cb = std::sync::Arc::clone(&fired);
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k, _v| {
+                if cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 2 {
+                    panic!("boom");
+                }
+            })
+            .build()
+            .unwrap();
+        let cutoff = crate::time::Instant::now() + Duration::from_secs(60);
+        // Five entries with strictly ascending expiry (soonest-to-expire first, matching the
+        // order `retain_latest_at`'s pop loop visits them in), plus a never-expiring survivor
+        // that must remain untouched by the trim.
+        for k in 0u32..5 {
+            insert_raw(
+                &mut cache,
+                k,
+                k,
+                Some(cutoff - Duration::from_secs(5) + Duration::from_micros(u64::from(k))),
+            );
+        }
+        insert_raw(&mut cache, 100u32, 100u32, None);
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Keep only 1 entry: this must trim k=0..4, dropping the far end of the pop loop
+            // to the third callback's panic.
+            let _ = cache.retain_latest_at(1, None);
+        }));
+        assert!(caught.is_err(), "the callback panic must propagate");
+
+        assert_index_lockstep(&cache, "after on_evict panicked mid retain_latest_at");
+        // k=0 and k=1 completed a full (pop, map.remove, counter bump, callback) cycle before
+        // the panic; k=2's own removal also completed before its callback panicked. A reordered
+        // `retain_latest_at` that fires the callback before removing from `map` would strand
+        // k=2 in `map` with its stamp already gone from `keys` -- caught by the lockstep assert
+        // above, but pinned down explicitly here too.
+        assert!(!cache.map.contains_key(&0u32), "k=0 fully removed");
+        assert!(!cache.map.contains_key(&1u32), "k=1 fully removed");
+        assert!(
+            !cache.map.contains_key(&2u32),
+            "k=2 fully removed despite its callback panic"
+        );
+        // The pop loop never reached these: it unwound out of the panicking callback first.
+        assert!(
+            cache.map.contains_key(&3u32),
+            "k=3 untouched by the interrupted trim"
+        );
+        assert!(
+            cache.map.contains_key(&4u32),
+            "k=4 untouched by the interrupted trim"
+        );
+        assert!(
+            cache.map.contains_key(&100u32),
+            "never-expiring survivor untouched"
+        );
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(3),
+            "counter reflects exactly the three rows removed before the panic"
+        );
+        // The survivor is still reachable through the index after the panic.
+        assert_eq!(cache.cache_get(&100u32), Some(&100u32));
+        assert_eq!(cache.retain_latest(0, false), 3);
+        assert_index_lockstep(&cache, "after trimming what the panic left behind");
+    }
+
+    /// The value-`Drop` panic path of the `retain_latest_at` size trim, with no `on_evict`
+    /// configured. Unlike `evict_at` -- which detaches the whole expired prefix from
+    /// `self.keys` in one `split_off` and so must drain `self.map` into a local `Vec` before
+    /// any value drops -- `retain_latest_at`'s pop loop removes one stamp and its map row
+    /// together before that value drops, so a panicking `Drop` mid-trim leaves map and keys
+    /// in lockstep without a collect step. A regression that detached the trim prefix up front
+    /// and dropped per iteration (as the pre-fix `evict_at` did) would orphan the
+    /// not-yet-removed rows: their stamps already gone from `self.keys` while their entries
+    /// linger in `self.map`.
+    #[test]
+    fn retain_latest_no_callback_keeps_map_and_keys_in_lockstep_on_drop_panic() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        // A value whose `Drop` panics only when armed. Exactly ONE instance is armed so the
+        // unwind never double-panics into a process abort.
+        struct PanicOnDrop {
+            armed: bool,
+        }
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                if self.armed {
+                    panic!("PanicOnDrop::drop fired");
+                }
+            }
+        }
+
+        // No `on_evict` and no `size_limit`: the trim runs through `retain_latest` directly.
+        let mut cache: TtlSortedCache<u32, PanicOnDrop> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // Five finite entries with ascending expiry (soonest first, the pop order). Arm the
+        // THIRD to pop (key 2) so two full iterations complete before it drops -- proving the
+        // remove-before-drop ordering holds across iterations, and leaving keys 3/4 to be
+        // stranded by a batched regression.
+        for k in 0u32..5 {
+            cache
+                .set_with(k, PanicOnDrop { armed: k == 2 })
+                .ttl(Duration::from_secs(10 * (u64::from(k) + 1)))
+                .set();
+        }
+        assert_eq!(cache.map.len(), 5);
+        assert_eq!(cache.keys.len(), 5);
+
+        // Keep 1 -> retain_drop_count = 4: the trim pops keys 0..=3, and the armed value's
+        // Drop panics on the third pop before keys 3/4 are reached.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = cache.retain_latest(1, false);
+        }));
+        assert!(
+            result.is_err(),
+            "the armed value's Drop must have panicked mid-trim"
+        );
+
+        // Lockstep is the core property: whatever left `self.keys` also left `self.map`.
+        assert_index_lockstep(&cache, "after a Drop panic mid retain_latest trim");
+        assert!(!cache.map.contains_key(&0u32), "key 0 fully removed");
+        assert!(!cache.map.contains_key(&1u32), "key 1 fully removed");
+        assert!(
+            !cache.map.contains_key(&2u32),
+            "the armed row left the map before its Drop panicked"
+        );
+        assert!(
+            cache.map.contains_key(&3u32),
+            "key 3 untouched by the interrupted trim"
+        );
+        assert!(
+            cache.map.contains_key(&4u32),
+            "key 4 untouched by the interrupted trim"
+        );
+        assert_eq!(cache.map.len(), 2);
+        // The counter is bumped before each value drops, so all three removed rows are counted.
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(3),
+            "the counter reflects the three rows removed before the panic"
+        );
+        // The survivors remain reachable through the index for a later trim.
+        assert_eq!(cache.retain_latest(0, false), 2);
+        assert!(cache.map.is_empty());
+        assert!(cache.keys.is_empty());
+    }
+
     /// `retain_latest_at` with the sweep enabled: the tie at the cutoff is kept and
     /// never-expiring entries sort last, exactly as under the old range bounds.
     #[test]

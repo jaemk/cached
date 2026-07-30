@@ -417,9 +417,10 @@ where
     /// Remove every entry that is expired (per [`Expires::is_expired`]) **or** for which `keep`
     /// returns `false` — expired entries are removed regardless of `keep`, matching
     /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain) semantics. `on_evict` fires
-    /// (if configured) and `metrics().evictions` increments once per removed entry (via the outer
-    /// eviction counter, the same one used by [`evict`](Self::evict)). The LRU recency order of
-    /// the surviving entries in each shard is unchanged.
+    /// (if configured) and `metrics().evictions` increments once per removed entry (via the
+    /// per-shard eviction counter (`Shard::evictions`), the same one used by
+    /// [`evict`](Self::evict)). The LRU recency order of the surviving entries in each shard is
+    /// unchanged.
     ///
     /// Shards are processed one at a time under their own write lock, so this is **not atomic**
     /// across shards: a concurrent reader may observe some shards already filtered and others not

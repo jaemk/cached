@@ -74,19 +74,22 @@ of where the entry sits in the eviction order.
 
 ## LRU-7
 
-`cache_set` over an EXISTING key promotes that key to most-recently-used. A write is an access,
-so an overwrite moves the entry to the front of the eviction order exactly as a fresh insertion
-would, and it therefore changes which entry a later capacity eviction selects. This holds across
-`LruCache`, `LruTtlCache`, `ExpiringLruCache`, `ShardedLruCache`, `ShardedLruTtlCache`, and
-`ShardedExpiringLruCache`, and it holds regardless of whether an `on_evict` callback is
-configured: on the sharded LRU-TTL and expiring-LRU stores the callback branch (which needs the
-displaced stored key, so it writes through `LruCache::cache_set_returning_entry`) and the
-no-callback branch (a plain `LruCache::cache_set`) now agree, so attaching a purely
-observational callback cannot change eviction order.
+`cache_set` and a `get_or_set` overwrite (`cache_get_or_set_with` and its try variants, backed by
+`LruCache::get_or_set_with_if`) over an EXISTING key both promote that key to most-recently-used.
+A write is an access, so an overwrite moves the entry to the front of the eviction order exactly
+as a fresh insertion would, and it therefore changes which entry a later capacity eviction
+selects. This holds across `LruCache`, `LruTtlCache`, `ExpiringLruCache`, `ShardedLruCache`,
+`ShardedLruTtlCache`, and `ShardedExpiringLruCache`, and it holds regardless of whether an
+`on_evict` callback is configured: on the sharded LRU-TTL and expiring-LRU stores the callback
+branch (which needs the displaced stored key, so it writes through
+`LruCache::cache_set_returning_entry`) and the no-callback branch (a plain `LruCache::cache_set`)
+now agree, so attaching a purely observational callback cannot change eviction order.
 
 Reads that are documented as side-effect-free stay side-effect-free: `cache_peek`,
 `cache_peek_with_expiry_status`, and `cache_contains` do NOT promote, so a write and a peek
-remain distinguishable. Inserting a NEW key already went to the front and is unchanged.
+remain distinguishable. Inserting a NEW key already went to the front and is unchanged. There is
+no public API that writes a value without touching recency: nothing substitutes for the pre-3.0
+in-place overwrite described below.
 
 Before 3.0 an overwrite replaced the value in place and left recency untouched (an artifact of
 the original `SizedCache` implementation, where `LRUList::set` in place was the cheap path).

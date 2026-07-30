@@ -296,17 +296,20 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 **Performance**
 
 v3 reworks the hot paths of the in-memory and sharded stores. Steady-state `O(1)` reads and
-capacity-bounded inserts are unchanged; the wins concentrate in a few paths (measured with
-`cargo bench --bench cache_benches`, so the exact figures are hardware- and workload-dependent):
+capacity-bounded inserts are unchanged; the wins concentrate in a few paths (figures are
+hardware- and workload-dependent; see `benches/cache_benches.rs` for the paths measured):
 
-- Overwriting an existing key with `cache_set` reuses the stored key instead of re-cloning it.
-  On the timed stores this is roughly 10-30% faster, and the gain grows with key clone cost, so
-  `String`-keyed caches benefit most.
+- Overwriting an existing key with `cache_set` on the map-backed stores (`TtlCache`,
+  `TtlSortedCache`, `ExpiringCache`) reuses the stored key instead of cloning the caller's key.
+  The gain grows with key clone cost, so caches with expensive keys benefit most. The LRU-family
+  stores instead rebind the slot to the caller's key (see the recency note below).
 - Bulk eviction and retention (`evict`, `retain`, `retain_latest`) and the key/iteration order
-  helpers now sweep in a single pass instead of collecting keys first, up to about 2x faster at
-  10k entries. TTL stores also sample the clock once per operation rather than once per entry.
-- Single-threaded `cache_get` hits on the sharded LRU and expiring-LRU variants resolve in one
-  hash lookup instead of two, about 5-15% faster.
+  helpers on the single-owner in-memory and TTL stores now sweep in a single pass instead of
+  collecting keys first, up to about 2x faster at 10k entries. TTL stores also sample the clock
+  once per operation rather than once per entry.
+- Single-threaded `cache_get` hits on the expiring-LRU and sharded LRU-TTL variants resolve in
+  one hash lookup instead of two, about 5-15% faster. The plain sharded LRU releases the shard
+  lock before updating its counters.
 
 One deliberate tradeoff comes with the `cache_set` recency change (see the migration guide): an
 overwrite now promotes the key to most-recently-used, which adds a small cost on stores with cheap
@@ -2223,10 +2226,13 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
 
     /// Insert a key, value pair and return the previous live value at the key, if any.
     /// A displaced entry that has already expired is not returned: it is filtered to
-    /// `None` and delivered to `on_evict` instead (see `specs/store-sharded.md` SHARD-8),
-    /// so a returned `Some(v)` is always a previous value that was live for this
-    /// operation. On recency-ordered sharded stores, overwriting an existing key promotes
-    /// it to most-recently-used.
+    /// `None` and delivered to `on_evict` instead, so a returned `Some(v)` is always a
+    /// previous value that was live for this operation. When an entry crosses its expiry
+    /// while the caller is queued for the shard lock, the TTL stores judge it against the
+    /// pre-lock instant (returned as a live `Some`), while the per-value-expiry stores
+    /// judge it expired (filtered to `None` and delivered to `on_evict`). On
+    /// recency-ordered sharded stores, overwriting an existing key promotes it to
+    /// most-recently-used.
     ///
     /// # Errors
     ///

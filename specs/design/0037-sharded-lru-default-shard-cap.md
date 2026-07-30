@@ -22,24 +22,24 @@ more capacity than requested for a bounded cache on a high-core-count machine:
 4096 effective capacity: 256 hash tables and 256 `Vec`s eagerly allocated for a cache asked to
 hold only 100 entries.
 
-## The rule
+## The rule (proposed)
 
 When a builder has a total `max_size` (as opposed to an explicit `per_shard_max_size`), the
-DEFAULT shard count becomes:
+DEFAULT shard count would become:
 
 ```text
 next_power_of_two(max_size / 16).clamp(1, default_shard_count())
 ```
 
-implemented by `default_shard_count_for_capacity(Option<usize>)` in
-`src/stores/sharded/mod.rs`. Passing `None` (the unbounded stores' path) reproduces
-`default_shard_count()` exactly, unchanged. This keeps each shard at roughly its 16-entry floor
-by construction instead of relying on the floor to silently inflate a shard count picked without
-regard to capacity.
+to be implemented by `default_shard_count_for_capacity(Option<usize>)` in
+`src/stores/sharded/mod.rs`. Passing `None` (the unbounded stores' path) would reproduce
+`default_shard_count()` exactly, unchanged. This would keep each shard at roughly its 16-entry
+floor by construction instead of relying on the floor to silently inflate a shard count picked
+without regard to capacity.
 
-**An explicit `.shards(n)` on a builder remains authoritative.** `default_shard_count_for_capacity`
-is consulted only on the default (unconfigured) shard-count path; a caller who sets `.shards(n)`
-gets exactly `n` shards regardless of `max_size`.
+**An explicit `.shards(n)` on a builder would remain authoritative.** `default_shard_count_for_capacity`
+would be consulted only on the default (unconfigured) shard-count path; a caller who sets
+`.shards(n)` would still get exactly `n` shards regardless of `max_size`.
 
 ## Why this is default tuning, not a bug fix
 
@@ -52,23 +52,25 @@ over-provisioning to reduce shard contention). Changing the default is a conside
 decision (trading some of that headroom for allocation cost proportional to the requested size),
 not a correctness fix for behavior that violated its own contract.
 
-## Observable surface that changes
+## Observable surface that would change
 
-For caches built through the default (no explicit `.shards(n)`) path with a `max_size`:
+For caches built through the default (no explicit `.shards(n)`) path with a `max_size`, once this
+lands:
 
-- `capacity()`: the effective total capacity is smaller for small `max_size` values on
-  high-core-count machines, though it can still exceed `max_size` when the 16-per-shard floor
+- `capacity()`: the effective total capacity would be smaller for small `max_size` values on
+  high-core-count machines, though it could still exceed `max_size` when the 16-per-shard floor
   applies (e.g. `max_size = 100` would yield 8 shards x 16 = 128, versus 256 shards x 16 = 4096
-  before).
-- `shards()`: reports the capped default shard count, not the raw
+  today).
+- `shards()`: would report the capped default shard count, not the raw
   `available_parallelism() * 4` figure.
 - `shard_sizes()`: fewer, larger shards under the new default.
-- Eviction distribution: with fewer shards, each shard holds a larger fraction of the total
-  entries, so LRU eviction (which is per-shard) is coarser-grained under concurrent load.
+- Eviction distribution: with fewer shards, each shard would hold a larger fraction of the total
+  entries, so LRU eviction (which is per-shard) would be coarser-grained under concurrent load.
 
-Existing tests that construct sharded LRU caches with an explicit `.shards(n)` are unaffected,
-since `.shards(n)` overrides the default path entirely. Only default-shard-count construction
-(`::new(max_size)` or `.max_size(n).build()` with no `.shards()` call) observes the new sizing.
+Existing tests that construct sharded LRU caches with an explicit `.shards(n)` would be
+unaffected, since `.shards(n)` overrides the default path entirely. Only default-shard-count
+construction (`::new(max_size)` or `.max_size(n).build()` with no `.shards()` call) would observe
+the new sizing.
 
 This must land before the 3.0.0 final release: it changes an observable default (not just an
 internal allocation detail), and 3.0 is the last point where a default like this can move without
@@ -84,4 +86,5 @@ a deprecation cycle.
   `shards.unwrap_or_else(default_shard_count)` call site each builder's `build()` goes through.
 - The 16-per-shard floor itself (`per_shard_cap_from_total`) is unchanged; this record only
   changes how many shards the default path asks for.
-- See [store-sharded.md](../store-sharded.md) for the shipped behavior statement.
+- See [store-sharded.md](../store-sharded.md) SHARD-7 for the current (not-yet-changed) behavior
+  and the same planned cap described here.
