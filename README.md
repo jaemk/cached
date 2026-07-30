@@ -294,6 +294,28 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
   counting, LRU promotion, or TTL renewal).
 
+**Performance**
+
+v3 reworks the hot paths of the in-memory and sharded stores. Steady-state `O(1)` reads and
+capacity-bounded inserts are unchanged; the wins concentrate in a few paths (figures are
+hardware- and workload-dependent; see `benches/cache_benches.rs` for the paths measured):
+
+- Overwriting an existing key with `cache_set` on the map-backed stores (`TtlCache`,
+  `TtlSortedCache`, `ExpiringCache`) reuses the stored key instead of cloning the caller's key.
+  The gain grows with key clone cost, so caches with expensive keys benefit most. The LRU-family
+  stores instead rebind the slot to the caller's key (see the recency note below).
+- Bulk eviction and retention (`evict`, `retain`, `retain_latest`) and the key/iteration order
+  helpers on the single-owner in-memory and TTL stores now sweep in a single pass instead of
+  collecting keys first, up to about 2x faster at 10k entries. TTL stores also sample the clock
+  once per operation rather than once per entry.
+- Single-threaded `cache_get` hits on the expiring-LRU and sharded LRU-TTL variants resolve in
+  one hash lookup instead of two, about 5-15% faster. The plain sharded LRU releases the shard
+  lock before updating its counters.
+
+One deliberate tradeoff comes with the `cache_set` recency change (see the migration guide): an
+overwrite now promotes the key to most-recently-used, which adds a small cost on stores with cheap
+`Copy` keys where there is no key clone to save.
+
 **Per-Value Expiry via the `Expires` Trait**
 
 While standard timed stores (`TtlCache`, `LruTtlCache`, `TtlSortedCache`) enforce a single, global Time-To-Live (TTL) duration applied to all entries in the cache, [`ExpiringLruCache`] and [`ExpiringCache`] let each individual value determine its own expiration. This is accomplished by storing values that implement the [`Expires`] trait.
@@ -382,7 +404,7 @@ lru.set("key1", Response {
 
 The basic usage looks like:
 
-```rust,no_run,ignore
+```rust
 use cached::macros::cached;
 
 /// Defines a function named `fib` that uses a cache implicitly named `FIB`.
@@ -393,12 +415,11 @@ fn fib(n: u64) -> u64 {
     if n == 0 || n == 1 { return n }
     fib(n-1) + fib(n-2)
 }
-# pub fn main() { }
 ```
 
 ----
 
-```rust,no_run,ignore
+```rust
 use std::thread::sleep;
 use cached::time::Duration;
 use cached::macros::cached;
@@ -415,12 +436,11 @@ fn keyed(a: &str, b: &str) -> usize {
     sleep(Duration::new(size as u64, 0));
     size
 }
-# pub fn main() { }
 ```
 
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::once;
 
 /// Only cache the initial function call.
@@ -437,7 +457,6 @@ fn keyed(a: String) -> Option<usize> {
         None
     }
 }
-# pub fn main() { }
 ```
 
 ----
@@ -470,7 +489,7 @@ let _: &mut u32 = cache.cache_get_or_set_with(1, || 2);
 ```
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::concurrent_cached;
 use cached::AsyncRedisCache;
 use cached::time::Duration;
@@ -508,7 +527,7 @@ async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
 
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::concurrent_cached;
 use cached::RedbCache;
 use thiserror::Error;
@@ -536,7 +555,7 @@ fn cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
 
 ----
 
-```rust,no_run,ignore
+```rust
 use cached::macros::concurrent_cached;
 
 /// Memoize with the default in-memory sharded store — no `map_error`, `ty`,

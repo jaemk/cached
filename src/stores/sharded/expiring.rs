@@ -32,7 +32,6 @@ struct ExpiringInner<K, V, H> {
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
-    evictions: AtomicU64,
 }
 
 /// A fully-concurrent, partitioned, unbounded in-memory cache with per-value expiry.
@@ -78,9 +77,15 @@ impl<K, V, H> Clone for ShardedExpiringCacheBase<K, V, H> {
 
 impl<K, V, H> std::fmt::Debug for ShardedExpiringCacheBase<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let evictions: u64 = self
+            .inner
+            .shards
+            .iter()
+            .map(|s| s.evictions.load(Ordering::Relaxed))
+            .sum();
         f.debug_struct("ShardedExpiringCache")
             .field("shards", &self.inner.shards.len())
-            .field("evictions", &self.inner.evictions.load(Ordering::Relaxed))
+            .field("evictions", &evictions)
             .finish_non_exhaustive()
     }
 }
@@ -151,18 +156,20 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
         let n = self.inner.shards.len();
         let shards = (0..n)
             .map(|i| {
-                // Load the hit/miss counters under the read lock so the metrics snapshot is
-                // consistent with the entry snapshot (B4: loading after drop(guard) could yield
-                // counters newer than the cloned entries).
+                // Load the hit/miss/eviction counters under the read lock so the metrics
+                // snapshot is consistent with the entry snapshot (B4: loading after
+                // drop(guard) could yield counters newer than the cloned entries).
                 let guard = self.inner.shards[i].lock.read();
                 let store_copy = guard.clone();
                 let hits = self.inner.shards[i].hits.load(Ordering::Relaxed);
                 let misses = self.inner.shards[i].misses.load(Ordering::Relaxed);
+                let evictions = self.inner.shards[i].evictions.load(Ordering::Relaxed);
                 drop(guard);
                 let shard = Shard {
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
                     misses: AtomicU64::new(misses),
+                    evictions: AtomicU64::new(evictions),
                 };
                 CachePadded(shard)
             })
@@ -174,7 +181,6 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
                 shard_mask: self.inner.shard_mask,
                 hasher: self.inner.hasher.clone(),
                 on_evict: self.inner.on_evict.clone(),
-                evictions: AtomicU64::new(self.inner.evictions.load(Ordering::Relaxed)),
             }),
         }
     }
@@ -277,16 +283,18 @@ where
     pub fn metrics(&self) -> CacheMetrics {
         let mut hits = 0u64;
         let mut misses = 0u64;
+        let mut evictions = 0u64;
         let mut size = 0usize;
         for shard in self.inner.shards.iter() {
             hits += shard.hits.load(Ordering::Relaxed);
             misses += shard.misses.load(Ordering::Relaxed);
+            evictions += shard.evictions.load(Ordering::Relaxed);
             size += shard.lock.read().len();
         }
         CacheMetrics {
             hits: Some(hits),
             misses: Some(misses),
-            evictions: Some(self.inner.evictions.load(Ordering::Relaxed)),
+            evictions: Some(evictions),
             entry_count: Some(size),
             capacity: None,
         }
@@ -335,10 +343,22 @@ where
     /// (`metrics().evictions`) whether or not an `on_evict` callback is configured; the callback
     /// fires only when one is set.
     pub fn cache_clear_with_on_evict(&self) {
+        if self.inner.on_evict.is_none() {
+            for shard in self.inner.shards.iter() {
+                let mut guard = shard.lock.write();
+                let n = guard.len();
+                guard.clear();
+                drop(guard);
+                if n > 0 {
+                    shard.evictions.fetch_add(n as u64, Ordering::Relaxed);
+                }
+            }
+            return;
+        }
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, V)> = shard.lock.write().drain().collect();
             if !removed.is_empty() {
-                self.inner
+                shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
                 if let Some(on_evict) = &self.inner.on_evict {
@@ -358,26 +378,34 @@ where
         K: Clone,
     {
         let mut total = 0;
-        for shard in self.inner.shards.iter() {
-            let removed = {
+        if self.inner.on_evict.is_none() {
+            // No callback: nothing needs the removed keys/values, so avoid cloning any
+            // key and skip building a `Vec` entirely — `retain` plus a length delta.
+            for shard in self.inner.shards.iter() {
                 let mut guard = shard.lock.write();
-                let expired_keys: Vec<K> = guard
-                    .iter()
-                    .filter(|(_, v)| v.is_expired())
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                let mut removed = Vec::new();
-                for k in expired_keys {
-                    if let Some((key, v)) = guard.remove_entry(&k) {
-                        removed.push((key, v));
-                    }
+                let before = guard.len();
+                guard.retain(|_, v| !v.is_expired());
+                let removed = before - guard.len();
+                drop(guard);
+                if removed > 0 {
+                    shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
+                    total += removed;
                 }
-                removed
+            }
+            return total;
+        }
+        for shard in self.inner.shards.iter() {
+            // Single-pass sweep: `extract_if` removes matching entries in place without
+            // cloning keys or re-probing the map. Collect under the write lock, fire
+            // callbacks after releasing it.
+            let removed: Vec<(K, V)> = {
+                let mut guard = shard.lock.write();
+                guard.extract_if(|_, v| v.is_expired()).collect()
             };
 
             total += removed.len();
             if !removed.is_empty() {
-                self.inner
+                shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
                 if let Some(on_evict) = &self.inner.on_evict {
@@ -421,7 +449,7 @@ where
                     .collect()
             };
             if !removed.is_empty() {
-                self.inner
+                shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
                 if let Some(on_evict) = &self.inner.on_evict {
@@ -467,7 +495,13 @@ where
     }
 
     fn cache_evictions(&self) -> Option<u64> {
-        Some(self.inner.evictions.load(Ordering::Relaxed))
+        Some(
+            self.inner
+                .shards
+                .iter()
+                .map(|s| s.evictions.load(Ordering::Relaxed))
+                .sum(),
+        )
     }
 }
 
@@ -489,6 +523,7 @@ where
                     (expired, val)
                 }
                 None => {
+                    drop(guard);
                     shard.misses.fetch_add(1, Ordering::Relaxed);
                     return Ok(None);
                 }
@@ -513,7 +548,7 @@ where
             let removed = guard.remove_entry(k);
             drop(guard);
             if let Some((stored_k, v)) = removed {
-                self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 if let Some(on_evict) = &self.inner.on_evict {
                     on_evict(&stored_k, &v);
                 }
@@ -553,7 +588,7 @@ where
                 if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
                     cb(key, &old_v);
                 }
-                self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
             Some((_, old_v, false)) => Ok(Some(old_v)),
@@ -569,7 +604,7 @@ where
         let shard = self.shard_of(k);
         let removed = shard.lock.write().remove_entry(k);
         if let Some((stored_k, v)) = removed {
-            self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+            shard.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.inner.on_evict {
                 on_evict(&stored_k, &v);
             }
@@ -590,7 +625,7 @@ where
         let shard = self.shard_of(k);
         let removed = shard.lock.write().remove_entry(k);
         if let Some((ref stored_k, ref v)) = removed {
-            self.inner.evictions.fetch_add(1, Ordering::Relaxed);
+            shard.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.inner.on_evict {
                 on_evict(stored_k, v);
             }
@@ -612,8 +647,8 @@ where
         for shard in self.inner.shards.iter() {
             shard.hits.store(0, Ordering::Relaxed);
             shard.misses.store(0, Ordering::Relaxed);
+            shard.evictions.store(0, Ordering::Relaxed);
         }
-        self.inner.evictions.store(0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -874,7 +909,6 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
                     .hasher
                     .expect("hasher is always initialized via Default or .hasher()"),
                 on_evict: self.on_evict,
-                evictions: AtomicU64::new(0),
             }),
         })
     }
@@ -1964,6 +1998,296 @@ mod tests {
         );
     }
 
+    // --- Per-shard evictions counter aggregation (internal-only refactor coverage) ---
+
+    #[test]
+    fn evictions_aggregate_across_multiple_shards_via_metrics_and_cache_evictions() {
+        // Force many shards so evictions land on distinct per-shard counters, then
+        // confirm both metrics().evictions and the trait-level cache_evictions()
+        // sum every shard exactly (no double counting, no dropped counts).
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        for i in 0..64u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        // Remove every entry — cache_remove increments the per-shard evictions
+        // counter for whichever shard the key hashes into.
+        for i in 0..64u32 {
+            SyncConcurrentCached::cache_remove(&c, &i).expect("remove must succeed");
+        }
+        assert_eq!(
+            c.metrics().evictions,
+            Some(64),
+            "metrics().evictions must sum every shard's counter"
+        );
+        assert_eq!(
+            ConcurrentCacheBase::cache_evictions(&c),
+            Some(64),
+            "cache_evictions() must sum every shard's counter"
+        );
+        // Sanity: with 8 shards and 64 distinct keys, more than one shard must have
+        // actually recorded an eviction (otherwise this test would pass trivially
+        // even if only shard 0's counter were summed).
+        let nonzero_shards = c
+            .inner
+            .shards
+            .iter()
+            .filter(|s| s.evictions.load(Ordering::Relaxed) > 0)
+            .count();
+        assert!(
+            nonzero_shards > 1,
+            "evictions must be spread across multiple shards for this to be a meaningful test"
+        );
+    }
+
+    #[test]
+    fn evictions_aggregate_correctly_after_deep_clone() {
+        // deep_clone must carry each shard's evictions counter into the corresponding
+        // cloned shard so the aggregate reported by the clone matches the source.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        for i in 0..64u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        // Evict half of them (odd keys) so several shards record nonzero evictions.
+        for i in (0..64u32).step_by(2) {
+            SyncConcurrentCached::cache_remove(&c, &i).expect("remove must succeed");
+        }
+        let before = c.metrics().evictions.unwrap();
+        assert_eq!(before, 32);
+
+        let clone = c.deep_clone();
+        assert_eq!(
+            clone.metrics().evictions,
+            Some(32),
+            "deep_clone must carry the summed evictions count through unchanged"
+        );
+        // Per-shard carry-over: every shard's evictions counter in the clone must match
+        // the corresponding source shard, not just the aggregate.
+        for (src, cloned) in c.inner.shards.iter().zip(clone.inner.shards.iter()) {
+            assert_eq!(
+                src.evictions.load(Ordering::Relaxed),
+                cloned.evictions.load(Ordering::Relaxed),
+                "deep_clone must carry each shard's evictions counter individually"
+            );
+        }
+
+        // The clone and the source must be independent from here on.
+        SyncConcurrentCached::cache_remove(&clone, &1u32).expect("remove must succeed");
+        assert_eq!(
+            clone.metrics().evictions,
+            Some(33),
+            "post-clone evictions on the clone must not affect the source"
+        );
+        assert_eq!(
+            c.metrics().evictions,
+            Some(32),
+            "post-clone evictions on the clone must not leak back to the source"
+        );
+    }
+
+    // --- One-pass evict() coverage ---
+
+    #[test]
+    fn evict_with_callback_fires_exactly_once_per_removed_entry_with_correct_pairs() {
+        use std::sync::Mutex;
+
+        let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .on_evict(move |k, v| {
+                seen2.lock().unwrap().push((*k, v.v));
+            })
+            .build()
+            .unwrap();
+
+        // Live entries that must survive the sweep.
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i * 100,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        // Expired entries that must be swept, with distinguishable values.
+        for i in 10..20u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i * 100,
+                    expired: true,
+                },
+            )
+            .expect("insert must succeed");
+        }
+
+        let removed_count = c.evict();
+        assert_eq!(removed_count, 10, "evict must report exactly 10 removed");
+        assert_eq!(
+            c.len(),
+            10,
+            "only the 10 expired entries must have been removed"
+        );
+
+        let mut got = seen.lock().unwrap().clone();
+        got.sort_unstable();
+        let mut expected: Vec<(u32, u32)> = (10..20u32).map(|i| (i, i * 100)).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            got, expected,
+            "on_evict must fire exactly once per removed entry with the correct (k, v) pair"
+        );
+
+        // Live entries must all still be retrievable.
+        for i in 0..10u32 {
+            assert_eq!(
+                SyncConcurrentCached::cache_get(&c, &i)
+                    .expect("cache_get must succeed")
+                    .map(|v| v.v),
+                Some(i * 100),
+                "live entry {i} must survive evict()"
+            );
+        }
+
+        // A second evict() call finds nothing left to remove.
+        assert_eq!(c.evict(), 0, "a second evict() call must be a no-op");
+        assert_eq!(seen.lock().unwrap().len(), 10, "no further callbacks fire");
+    }
+
+    #[test]
+    fn evict_without_callback_returns_correct_count_and_removes_entries() {
+        // No on_evict configured: the single-pass retain+len-delta branch must still
+        // return the correct count, physically remove the expired entries, and
+        // increment the per-shard evictions counters aggregated via metrics().
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .build()
+            .unwrap();
+        for i in 0..10u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        for i in 10..25u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: true,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        assert_eq!(c.len(), 25);
+
+        let before_evictions = c.metrics().evictions.unwrap();
+        let removed_count = c.evict();
+        assert_eq!(
+            removed_count, 15,
+            "evict must report exactly the 15 expired entries removed"
+        );
+        assert_eq!(
+            c.len(),
+            10,
+            "expired entries must be physically removed from the map"
+        );
+        assert_eq!(
+            c.metrics().evictions.unwrap() - before_evictions,
+            15,
+            "evictions must be counted through the no-callback branch too"
+        );
+
+        for i in 0..10u32 {
+            assert!(
+                SyncConcurrentCached::cache_get(&c, &i)
+                    .expect("cache_get must succeed")
+                    .is_some(),
+                "live entry {i} must survive evict() with no callback"
+            );
+        }
+
+        assert_eq!(
+            c.evict(),
+            0,
+            "a second evict() call with no callback must be a no-op"
+        );
+    }
+
+    // --- cache_clear_with_on_evict early-return (no-callback) path ---
+
+    #[test]
+    fn cache_clear_with_on_evict_no_callback_counts_via_early_return_across_shards() {
+        // Exercises the item-3 early-return branch across multiple shards, confirming
+        // it still counts every removed entry as an eviction (via the per-shard
+        // counters summed in metrics()/cache_evictions()) without ever building a
+        // Vec of the removed entries.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        for i in 0..40u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: false,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let before = c.metrics().evictions.unwrap();
+        c.cache_clear_with_on_evict();
+        assert_eq!(
+            c.len(),
+            0,
+            "cache must be empty after the early-return path"
+        );
+        assert_eq!(
+            c.metrics().evictions.unwrap() - before,
+            40,
+            "every removed entry must be counted even via the no-callback early return"
+        );
+        assert_eq!(
+            ConcurrentCacheBase::cache_evictions(&c),
+            Some(40),
+            "cache_evictions() must reflect the early-return path's counts too"
+        );
+    }
+
     #[test]
     fn inherent_and_trait_methods_coexist_via_fully_qualified_path() {
         fn use_trait<C>(cache: &C, k: u32, v: Val)
@@ -1982,6 +2306,468 @@ mod tests {
                 v: 42,
                 expired: false,
             },
+        );
+    }
+
+    // --- Certification: adversarial coverage of the per-shard eviction counter rewrite ---
+    //
+    // The rewrite removed `ExpiringInner.evictions: AtomicU64` in favor of one counter per
+    // shard, and turned `evict()` into a single-pass sweep. These tests approach that from
+    // the outside: per-shard placement (not just the aggregate), the two `evict` branches
+    // agreeing exactly, `deep_clone` after a mix of eviction paths, and concurrent
+    // evict()/cache_remove()/cache_set() hitting many shards at once without losing or
+    // double-counting an eviction.
+
+    /// Raw per-shard eviction counters, in shard order.
+    fn shard_eviction_counters<K, V, H>(c: &ShardedExpiringCacheBase<K, V, H>) -> Vec<u64> {
+        c.inner
+            .shards
+            .iter()
+            .map(|s| s.evictions.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    /// Index of the shard that owns `k`.
+    fn owning_shard<K, V, H: ShardHasher<K>>(
+        c: &ShardedExpiringCacheBase<K, V, H>,
+        k: &K,
+    ) -> usize {
+        shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
+    }
+
+    /// Deterministic shard placement for cross-cache comparisons. `DefaultShardHasher` is
+    /// randomly seeded per instance, so two independently built caches would scatter the
+    /// same keys onto different shards and a shard-for-shard comparison between them would
+    /// be meaningless.
+    #[derive(Clone)]
+    struct FixedShardHasher;
+
+    impl ShardHasher<u32> for FixedShardHasher {
+        fn shard_hash(&self, key: &u32) -> u64 {
+            u64::from(*key).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        }
+    }
+
+    /// Every stored entry as `(key, value, expired)`, sorted, for a full cross-cache
+    /// state comparison.
+    fn entry_snapshot<H: ShardHasher<u32>>(
+        c: &ShardedExpiringCacheBase<u32, Val, H>,
+    ) -> Vec<(u32, u32, bool)> {
+        let mut out: Vec<(u32, u32, bool)> = Vec::new();
+        for shard in c.inner.shards.iter() {
+            let guard = shard.lock.read();
+            for (k, v) in guard.iter() {
+                out.push((*k, v.v, v.expired));
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn evict_is_callable_through_both_entry_points_under_the_key_clone_bound() {
+        // The one-pass rewrite no longer clones keys internally, but the public `K: Clone`
+        // bound on the inherent `evict` and on the `ConcurrentCacheEvict` impl was
+        // deliberately kept (relaxing a public bound was explicitly out of scope for this
+        // refactor). A passing test cannot prove a bound is still *required* (that needs a
+        // compile-fail harness), so this pins the callable surface: both entry points
+        // resolve for a `K: Clone` key and agree on the swept count.
+        fn evict_both_ways<K: Clone + Hash + Eq, V: Clone + Expires>(
+            c: &ShardedExpiringCache<K, V>,
+        ) -> usize {
+            let via_inherent = ShardedExpiringCacheBase::evict(c);
+            let via_trait = ConcurrentCacheEvict::evict(c);
+            via_inherent + via_trait
+        }
+        let c = ShardedExpiringCache::<u32, Val>::builder().build().unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1,
+            Val {
+                v: 10,
+                expired: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(evict_both_ways(&c), 0, "nothing is expired");
+        assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn cache_set_displaced_expired_entry_counts_land_on_the_owning_shard() {
+        // Gap: the displaced-expired-entry branch of cache_set was only exercised on a
+        // single default-shard-count cache, asserting only the aggregate. Here 32 distinct
+        // keys spread over 8 shards each get an expired entry displaced by cache_set, and
+        // every shard's *own* counter (not just the sum) must move by exactly the right
+        // amount -- a bug that bumped the wrong shard's counter would still pass an
+        // aggregate-only assertion.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        let keys: Vec<u32> = (0..32u32).collect();
+        for &k in &keys {
+            SyncConcurrentCached::cache_set(
+                &c,
+                k,
+                Val {
+                    v: k,
+                    expired: true,
+                },
+            )
+            .unwrap();
+        }
+        let mut expected = vec![0u64; c.shards()];
+        for &k in &keys {
+            let idx = owning_shard(&c, &k);
+            let result = SyncConcurrentCached::cache_set(
+                &c,
+                k,
+                Val {
+                    v: k + 1000,
+                    expired: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result.map(|v| v.v),
+                None,
+                "displacing an expired entry must return None for key {k}"
+            );
+            expected[idx] += 1;
+        }
+        assert_eq!(
+            shard_eviction_counters(&c),
+            expected,
+            "cache_set displacing an expired entry must count on the key's own shard"
+        );
+        assert!(
+            expected.iter().filter(|&&n| n > 0).count() >= 2,
+            "the 32 keys must spread over more than one shard: {expected:?}"
+        );
+        assert_eq!(c.metrics().evictions, Some(expected.iter().sum::<u64>()));
+    }
+
+    #[test]
+    fn evict_no_callback_zero_expired_shard_counter_stays_exactly_zero() {
+        // Gap: the guards are `if removed > 0` / `if !removed.is_empty()`, but nothing
+        // asserted a specific *untouched* shard's counter stays exactly 0 while a sibling
+        // shard's counter moves -- an aggregate-only assertion cannot catch a spurious
+        // per-shard bump. FixedShardHasher pins two disjoint 4-key buckets, one per shard,
+        // so shard 1 (all-live) is guaranteed to see zero evictions.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(2)
+            .hasher(FixedShardHasher)
+            .build()
+            .unwrap();
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 2];
+        for k in 0..256u32 {
+            let idx = owning_shard(&c, &k);
+            if buckets[idx].len() < 4 {
+                buckets[idx].push(k);
+            }
+        }
+        assert!(
+            buckets.iter().all(|b| b.len() == 4),
+            "both shards must receive keys: {buckets:?}"
+        );
+        for &k in &buckets[0] {
+            SyncConcurrentCached::cache_set(
+                &c,
+                k,
+                Val {
+                    v: k,
+                    expired: true,
+                },
+            )
+            .unwrap();
+        }
+        for &k in &buckets[1] {
+            SyncConcurrentCached::cache_set(
+                &c,
+                k,
+                Val {
+                    v: k,
+                    expired: false,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(c.evict(), 4, "only shard 0's entries are expired");
+        assert_eq!(
+            shard_eviction_counters(&c),
+            vec![4, 0],
+            "the emptied shard counts four, the untouched shard's counter must be exactly zero"
+        );
+        assert_eq!(
+            c.shard_sizes(),
+            vec![0, 4],
+            "the all-expired shard is emptied, the none-expired shard is untouched"
+        );
+    }
+
+    #[test]
+    fn evict_callback_and_no_callback_branches_agree_exactly() {
+        // Gap: assert the callback (extract_if) and no-callback (retain + length-delta)
+        // evict() branches return identical counts and leave identical state for the same
+        // input, including a multi-shard mix where some shards have nothing expired.
+        let fired: Arc<std::sync::Mutex<Vec<(u32, u32)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fired2 = fired.clone();
+        let with_cb = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .hasher(FixedShardHasher)
+            .on_evict(move |k: &u32, v: &Val| {
+                fired2.lock().expect("callback lock").push((*k, v.v));
+            })
+            .build()
+            .unwrap();
+        let no_cb = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(4)
+            .hasher(FixedShardHasher)
+            .build()
+            .unwrap();
+
+        // Keys 0..8 expired, 8..24 live -- spread across all 4 shards via FixedShardHasher,
+        // with at least one shard ending up with nothing expired.
+        for c in [&with_cb, &no_cb] {
+            for i in 0..8u32 {
+                SyncConcurrentCached::cache_set(
+                    c,
+                    i,
+                    Val {
+                        v: i * 10,
+                        expired: true,
+                    },
+                )
+                .unwrap();
+            }
+            for i in 8..24u32 {
+                SyncConcurrentCached::cache_set(
+                    c,
+                    i,
+                    Val {
+                        v: i * 10,
+                        expired: false,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            entry_snapshot(&with_cb),
+            entry_snapshot(&no_cb),
+            "the two caches must start from identical state"
+        );
+
+        let removed_cb = with_cb.evict();
+        let removed_plain = no_cb.evict();
+        assert_eq!(
+            removed_cb, 8,
+            "only the eight backdated entries are expired"
+        );
+        assert_eq!(
+            removed_plain, removed_cb,
+            "the retain + length-delta branch must return the same count as the extract_if branch"
+        );
+        assert_eq!(
+            entry_snapshot(&with_cb),
+            entry_snapshot(&no_cb),
+            "both branches must leave identical state"
+        );
+        assert_eq!(
+            shard_eviction_counters(&with_cb),
+            shard_eviction_counters(&no_cb),
+            "both branches must move the same per-shard counters"
+        );
+        let mut fired_keys = fired.lock().expect("callback lock").clone();
+        fired_keys.sort_unstable();
+        assert_eq!(
+            fired_keys,
+            (0..8u32).map(|i| (i, i * 10)).collect::<Vec<_>>(),
+            "on_evict must fire once per expired entry"
+        );
+
+        // A second, zero-removal sweep: both branches at their empty extreme, no counter
+        // moves for either.
+        let counters = shard_eviction_counters(&with_cb);
+        assert_eq!(with_cb.evict(), 0, "nothing is left to expire");
+        assert_eq!(no_cb.evict(), 0, "nothing is left to expire");
+        assert_eq!(shard_eviction_counters(&with_cb), counters);
+        assert_eq!(shard_eviction_counters(&no_cb), counters);
+        assert_eq!(
+            fired.lock().expect("callback lock").len(),
+            8,
+            "a no-op sweep must not fire on_evict"
+        );
+    }
+
+    #[test]
+    fn deep_clone_carries_per_shard_counts_after_a_mix_of_evict_and_cache_remove() {
+        // Gap: the author only tested deep_clone after cache_remove-only accrual. Mix
+        // evict() (sweeping a third of the entries) with cache_remove_entry (removing half
+        // of what's left) before cloning, and confirm every shard's counter -- not just the
+        // aggregate -- carries over exactly, and that the clone is independent afterward.
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        for i in 0..64u32 {
+            SyncConcurrentCached::cache_set(
+                &c,
+                i,
+                Val {
+                    v: i,
+                    expired: i % 3 == 0,
+                },
+            )
+            .expect("insert must succeed");
+        }
+        let via_evict = u64::try_from(c.evict()).unwrap();
+        assert!(via_evict > 0, "some entries must have been expired");
+
+        let mut removed_via_remove = 0u64;
+        for i in (1..64u32).step_by(2) {
+            if SyncConcurrentCached::cache_remove_entry(&c, &i)
+                .expect("cache_remove_entry must succeed")
+                .is_some()
+            {
+                removed_via_remove += 1;
+            }
+        }
+        let expected_total = via_evict + removed_via_remove;
+        let source_counters = shard_eviction_counters(&c);
+        assert_eq!(source_counters.iter().sum::<u64>(), expected_total);
+        assert_eq!(c.metrics().evictions, Some(expected_total));
+
+        let clone = c.deep_clone();
+        assert_eq!(
+            shard_eviction_counters(&clone),
+            source_counters,
+            "deep_clone must carry each shard's counter shard-for-shard after a mix of \
+             evict() and cache_remove()"
+        );
+        assert_eq!(clone.metrics().evictions, Some(expected_total));
+        assert_eq!(clone.len(), c.len());
+
+        // The copy is independent: a further eviction on the clone does not move the source.
+        SyncConcurrentCached::cache_remove(&clone, &2u32).expect("key must still be present");
+        assert_eq!(clone.metrics().evictions, Some(expected_total + 1));
+        assert_eq!(c.metrics().evictions, Some(expected_total));
+    }
+
+    #[test]
+    fn concurrent_evict_cache_remove_and_cache_set_do_not_lose_or_double_count_evictions() {
+        // Gap: nothing exercised evict() / cache_remove() / cache_set() hitting different
+        // shards simultaneously. Per-shard relaxed loads mean a *mid-flight* aggregate can
+        // be torn, so the only things asserted here are conservation identities checked
+        // after every worker has joined, not timing-sensitive exact interleavings:
+        // (1) on_evict never fires twice for the same stored value (no double-count/double-
+        // fire), (2) the total fire count exactly matches the total eviction-counter
+        // movement, (3) the raw per-shard sum agrees with metrics(), and (4) no shard is
+        // left in a torn state (shard_sizes sums to len()).
+        use std::collections::HashSet;
+        use std::sync::{Barrier, Mutex};
+
+        const SHARDS: usize = 8;
+        const KEYS: u32 = 32;
+        const ROUNDS: u32 = 200;
+        const WRITERS: usize = 4;
+        const REMOVERS: usize = 2;
+
+        let next_id = Arc::new(AtomicU64::new(0));
+        let fired_ids: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
+        let fired_count = Arc::new(AtomicU64::new(0));
+        let fired_ids2 = fired_ids.clone();
+        let fired_count2 = fired_count.clone();
+        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+            .shards(SHARDS)
+            .on_evict(move |_k: &u32, v: &Val| {
+                let mut seen = fired_ids2.lock().expect("fired recorder poisoned");
+                assert!(
+                    seen.insert(u64::from(v.v)),
+                    "on_evict fired twice for the same stored value {} -- double-fire under \
+                     concurrent evict/cache_remove/cache_set",
+                    v.v
+                );
+                fired_count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        let evictions_before = c.metrics().evictions.unwrap();
+
+        let gate = Arc::new(Barrier::new(WRITERS + REMOVERS + 1));
+        let mut handles = Vec::new();
+
+        for _ in 0..WRITERS {
+            let c = c.clone();
+            let gate = gate.clone();
+            let next_id = next_id.clone();
+            handles.push(std::thread::spawn(move || {
+                gate.wait();
+                for r in 0..ROUNDS {
+                    let k = r % KEYS;
+                    // Unique id per stored value lets on_evict distinguish "this exact
+                    // stored entry" from "a same-key entry that replaced it".
+                    let id =
+                        u32::try_from(next_id.fetch_add(1, Ordering::Relaxed) % 1_000_000).unwrap();
+                    // A third of inserts are born already-expired, so cache_set's
+                    // displaced-expired-entry branch races cache_remove and evict() for
+                    // the very same entries.
+                    let expired = id % 3 == 0;
+                    let _ = SyncConcurrentCached::cache_set(&c, k, Val { v: id, expired }).unwrap();
+                }
+            }));
+        }
+        for _ in 0..REMOVERS {
+            let c = c.clone();
+            let gate = gate.clone();
+            handles.push(std::thread::spawn(move || {
+                gate.wait();
+                for r in 0..ROUNDS {
+                    let k = r % KEYS;
+                    let _ = SyncConcurrentCached::cache_remove(&c, &k).unwrap();
+                }
+            }));
+        }
+        {
+            let c = c.clone();
+            let gate = gate.clone();
+            handles.push(std::thread::spawn(move || {
+                gate.wait();
+                for _ in 0..ROUNDS {
+                    let _ = c.evict();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("worker thread must not panic");
+        }
+
+        let fired = fired_count.load(Ordering::Relaxed);
+        let evictions_after = c.metrics().evictions.unwrap();
+        assert_eq!(
+            fired,
+            evictions_after - evictions_before,
+            "on_evict must fire exactly once per counted eviction across the whole race, no \
+             matter how evict()/cache_remove()/cache_set() interleaved"
+        );
+        assert_eq!(
+            shard_eviction_counters(&c).iter().sum::<u64>(),
+            evictions_after,
+            "the raw per-shard counters must sum to the same total metrics() reports"
+        );
+        assert_eq!(
+            ConcurrentCacheBase::cache_evictions(&c),
+            Some(evictions_after),
+            "cache_evictions() must agree with metrics() after the race"
+        );
+        assert_eq!(
+            c.shard_sizes().iter().sum::<usize>(),
+            c.len(),
+            "post-race shard sizes must still sum to the total length (no torn shard)"
         );
     }
 }

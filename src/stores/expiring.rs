@@ -1,5 +1,6 @@
-use super::{CacheEvict, Cached, DefaultHashBuilder, Expires, UnboundCache};
+use super::{CacheEvict, Cached, DefaultHashBuilder, Expires};
 use crate::{CachedIter, CachedPeek, CloneCached};
+use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,7 +53,8 @@ use {super::CachedGetOrSetAsync, std::collections::hash_map::Entry, std::future:
 ///
 /// Note: This cache is in-memory only.
 pub struct ExpiringCache<K, V, S = DefaultHashBuilder> {
-    pub(super) store: UnboundCache<K, V, S>,
+    pub(super) store: HashMap<K, V, S>,
+    pub(super) initial_capacity: Option<usize>,
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
     pub(super) evictions: AtomicU64,
@@ -101,6 +103,7 @@ where
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
+            initial_capacity: self.initial_capacity,
             hits: AtomicU64::new(self.hits.load(Ordering::Relaxed)),
             misses: AtomicU64::new(self.misses.load(Ordering::Relaxed)),
             evictions: AtomicU64::new(self.evictions.load(Ordering::Relaxed)),
@@ -211,18 +214,12 @@ impl<K, V, S> ExpiringCacheBuilder<K, V, S> {
         S: BuildHasher,
     {
         let store = match self.capacity {
-            Some(cap) => UnboundCache::builder()
-                .initial_capacity(cap)
-                .hasher(self.hasher)
-                .build()
-                .expect("infallible"),
-            None => UnboundCache::builder()
-                .hasher(self.hasher)
-                .build()
-                .expect("infallible"),
+            Some(cap) => HashMap::with_capacity_and_hasher(cap, self.hasher),
+            None => HashMap::with_hasher(self.hasher),
         };
         Ok(ExpiringCache {
             store,
+            initial_capacity: self.capacity,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
@@ -261,7 +258,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         let mut removed = 0;
-        self.store.store.retain(|key, value| {
+        self.store.retain(|key, value| {
             if value.is_expired() {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, value);
@@ -287,7 +284,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
         if self.on_evict.is_none() {
             return self.cache_clear();
         }
-        let entries: Vec<(K, V)> = self.store.store.drain().collect();
+        let entries: Vec<(K, V)> = self.store.drain().collect();
         let count = entries.len() as u64;
         if count > 0 {
             self.evictions.fetch_add(count, Ordering::Relaxed);
@@ -312,7 +309,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
-        self.store.store.retain(|key, value| {
+        self.store.retain(|key, value| {
             if value.is_expired() || !keep(key, value) {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, value);
@@ -342,17 +339,20 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
     {
         // Two lookups on the hit path: the first checks expiry (releasing the borrow via
         // `.map`), the second returns the reference. A single-lookup approach is not possible
-        // in stable Rust because returning `&'1 V` from inside an `if let` block ties the
-        // borrow to lifetime `'1`, which prevents `remove_entry` (a mutable borrow) even on
-        // the non-returning path. Polonius (nightly) would fix this.
-        match self.store.store.get(k).map(|v| v.is_expired()) {
+        // SAFELY in stable Rust because returning `&'1 V` from inside an `if let` block ties
+        // the borrow to lifetime `'1`, which prevents `remove_entry` (a mutable borrow) even on
+        // the non-returning path. Polonius (nightly) would fix this without unsafe.
+        // `TtlCache::cache_get` (src/stores/ttl.rs) already collapses this to a single lookup
+        // via a documented `&entry.value as *const V` reborrow; that unsafe tradeoff is
+        // intentionally not made here.
+        match self.store.get(k).map(|v| v.is_expired()) {
             None => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
             Some(true) => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((key, old)) = self.store.store.remove_entry(k) {
+                if let Some((key, old)) = self.store.remove_entry(k) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&key, &old);
                     }
@@ -362,7 +362,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
             }
             Some(false) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                self.store.store.get(k)
+                self.store.get(k)
             }
         }
     }
@@ -373,14 +373,14 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         Q: std::hash::Hash + Eq + ?Sized,
     {
         // Two lookups on the hit path for the same reason as `cache_get` (NLL limitation).
-        match self.store.store.get(k).map(|v| v.is_expired()) {
+        match self.store.get(k).map(|v| v.is_expired()) {
             None => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
             Some(true) => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some((key, old)) = self.store.store.remove_entry(k) {
+                if let Some((key, old)) = self.store.remove_entry(k) {
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(&key, &old);
                     }
@@ -390,13 +390,13 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
             }
             Some(false) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                self.store.store.get_mut(k)
+                self.store.get_mut(k)
             }
         }
     }
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, k: K, f: F) -> &mut V {
-        match self.store.store.entry(k) {
+        match self.store.entry(k) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 if !occupied.get().is_expired() {
                     self.hits.fetch_add(1, Ordering::Relaxed);
@@ -432,7 +432,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         k: K,
         f: F,
     ) -> Result<&mut V, E> {
-        match self.store.store.entry(k) {
+        match self.store.entry(k) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 if !occupied.get().is_expired() {
                     self.hits.fetch_add(1, Ordering::Relaxed);
@@ -459,7 +459,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
 
     fn cache_set(&mut self, k: K, v: V) -> Option<V> {
         use std::collections::hash_map::Entry;
-        match self.store.store.entry(k) {
+        match self.store.entry(k) {
             Entry::Occupied(mut occupied) => {
                 let old = occupied.insert(v);
                 if old.is_expired() {
@@ -502,7 +502,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some((stored_k, v)) = self.store.store.remove_entry(k) {
+        if let Some((stored_k, v)) = self.store.remove_entry(k) {
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&stored_k, &v);
             }
@@ -514,16 +514,19 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
     }
 
     fn cache_clear(&mut self) {
-        self.store.cache_clear();
+        self.store.clear();
     }
 
     fn cache_reset(&mut self) {
-        self.store.cache_reset();
+        // Clear all entries and shrink capacity back toward the initial hint, matching
+        // `UnboundCache::cache_reset` (which this store used to delegate to).
+        self.store.clear();
+        self.store.shrink_to(self.initial_capacity.unwrap_or(0));
         self.cache_reset_metrics();
     }
 
     fn cache_size(&self) -> usize {
-        self.store.cache_size()
+        self.store.len()
     }
 
     fn cache_hits(&self) -> Option<u64> {
@@ -542,7 +545,6 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
         self.evictions.store(0, Ordering::Relaxed);
-        self.store.cache_reset_metrics();
     }
 
     /// Check whether the cache contains a live (non-expired) entry for `k`.
@@ -565,7 +567,6 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> CachedIter<K, V> for ExpiringCach
         V: 'a,
     {
         self.store
-            .store
             .iter()
             .filter_map(|(k, v)| if v.is_expired() { None } else { Some((k, v)) })
     }
@@ -577,7 +578,7 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> CachedPeek<K, V> for ExpiringCach
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.store.store.get(key).and_then(|value| {
+        self.store.get(key).and_then(|value| {
             if value.is_expired() {
                 None
             } else {
@@ -607,7 +608,7 @@ where
         Fut: Future<Output = V> + Send + 'a,
     {
         async move {
-            match self.store.store.entry(k) {
+            match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
                     if !occupied.get().is_expired() {
                         self.hits.fetch_add(1, Ordering::Relaxed);
@@ -646,7 +647,7 @@ where
         Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
         async move {
-            let v = match self.store.store.entry(k) {
+            let v = match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
                     if !occupied.get().is_expired() {
                         self.hits.fetch_add(1, Ordering::Relaxed);
@@ -686,7 +687,7 @@ impl<K: Hash + Eq, V: Expires + Clone, S: BuildHasher> CloneCached<K, V>
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        if let Some(value) = self.store.store.get(k) {
+        if let Some(value) = self.store.get(k) {
             let expired = value.is_expired();
             if expired {
                 self.misses.fetch_add(1, Ordering::Relaxed);
@@ -712,7 +713,7 @@ impl<K: Hash + Eq, V: Expires + Clone, S: BuildHasher> CloneCached<K, V>
         Q: std::hash::Hash + Eq + ?Sized,
         V: Clone,
     {
-        if let Some(value) = self.store.store.get(k) {
+        if let Some(value) = self.store.get(k) {
             let expired = value.is_expired();
             (Some(value.clone()), expired)
         } else {
@@ -1282,6 +1283,268 @@ mod tests {
             .build()
             .unwrap();
         // The backing store must have at least the requested capacity.
-        assert!(c.store.store.capacity() >= 32);
+        assert!(c.store.capacity() >= 32);
+    }
+
+    #[test]
+    fn struct_holds_hashmap_directly_not_an_unbound_cache() {
+        // `ExpiringCache` used to wrap a full `UnboundCache` (HashMap + two
+        // `StripedCounter`s, each a `Box<[Slot]>` fat-pointer field, plus a dead
+        // `on_evict` field) purely for `cache_clear` / `cache_reset` / `cache_size`
+        // / `cache_reset_metrics`, while every read/write bypassed it entirely.
+        // Now the struct holds a `HashMap` directly (plus an `initial_capacity`
+        // hint for `cache_reset`'s shrink behavior).
+        //
+        // The prior version of this test hard-coded the expected byte size of
+        // `Option<usize>` / `AtomicU64` / `Option<Arc<dyn Fn>>` and a padding
+        // slack constant. `#[repr(Rust)]` layout (padding, niche optimization,
+        // field reordering) is not guaranteed by the language, so that arithmetic
+        // could drift on a different toolchain or target and flake without any
+        // real regression. Comparing directly against the sibling `UnboundCache`
+        // struct (same K/V, built in the same compilation) sidesteps all of that:
+        // whatever the concrete field layout is on a given target, `ExpiringCache`
+        // holding its own bare `HashMap` + `initial_capacity` + 3x `AtomicU64` +
+        // `on_evict` is strictly smaller than `UnboundCache` holding a `HashMap` +
+        // 2x `StripedCounter` + `initial_capacity` + `on_evict` (one extra
+        // `AtomicU64` costs less than a second `StripedCounter`). If `ExpiringCache`
+        // ever again embeds an `UnboundCache` (directly or via a wrapper), its size
+        // becomes `UnboundCache`'s size *plus* its own extra fields, which flips
+        // this comparison and fails the assertion on any target.
+        let expiring = std::mem::size_of::<ExpiringCache<u8, ExpiredU8>>();
+        let unbound = std::mem::size_of::<crate::UnboundCache<u8, ExpiredU8>>();
+        assert!(
+            expiring < unbound,
+            "ExpiringCache ({expiring} bytes) must be smaller than UnboundCache \
+             ({unbound} bytes) for the same K/V types; equal-or-larger implies \
+             ExpiringCache is once again wrapping a full UnboundCache instead of \
+             holding a bare HashMap directly"
+        );
+    }
+
+    #[test]
+    fn cache_reset_shrinks_toward_initial_capacity_hint_matching_unbound_cache() {
+        // Exercise the `shrink_to(initial_capacity.unwrap_or(0))` branch with a
+        // real, non-default hint (the other reset test uses the default builder,
+        // so `initial_capacity` is `None` and this branch collapses to
+        // `shrink_to(0)`, leaving it unexercised).
+        let init_capacity = 4usize;
+        let n: u32 = 200;
+        let mut c: ExpiringCache<u32, ExpiredU8> = ExpiringCache::builder()
+            .initial_capacity(init_capacity)
+            .build()
+            .unwrap();
+        for i in 0..n {
+            c.cache_set(i, ExpiredU8(1));
+        }
+        let grown_capacity = c.store.capacity();
+        assert!(
+            grown_capacity >= n as usize,
+            "sanity: inserting well beyond the hint must have grown the map"
+        );
+
+        c.cache_reset();
+        assert_eq!(c.cache_size(), 0);
+        let reset_capacity = c.store.capacity();
+        assert!(
+            reset_capacity < grown_capacity,
+            "cache_reset must shrink the map back down from the grown capacity \
+             ({grown_capacity}), not leave it in place (got {reset_capacity})"
+        );
+        assert!(
+            reset_capacity >= init_capacity,
+            "cache_reset must settle near the initial_capacity hint ({init_capacity}), \
+             not shrink all the way to 0 (got {reset_capacity})"
+        );
+
+        // Equivalence contract: `ExpiringCache::cache_reset` is documented to
+        // reproduce `UnboundCache::cache_reset`'s shrink behavior. For the same
+        // key type, initial_capacity hint, and insert sequence -- both back onto
+        // `HashMap<u32, _, DefaultHashBuilder>` -- they must settle on the exact
+        // same capacity.
+        let mut u: crate::UnboundCache<u32, ExpiredU8> = crate::UnboundCache::builder()
+            .initial_capacity(init_capacity)
+            .build()
+            .unwrap();
+        for i in 0..n {
+            u.cache_set(i, ExpiredU8(1));
+        }
+        u.cache_reset();
+        assert_eq!(
+            reset_capacity,
+            u.store.capacity(),
+            "ExpiringCache::cache_reset must settle on the same capacity as \
+             UnboundCache::cache_reset for the same initial_capacity hint"
+        );
+    }
+
+    #[test]
+    fn clone_preserves_initial_capacity_hint_for_reset() {
+        // `Clone` now also copies `initial_capacity`; verify that copy is not
+        // just structural but actually drives the clone's own `cache_reset`
+        // shrink behavior, and that the clone remains independent of the
+        // original (mutating/resetting the clone does not affect the source).
+        let init_capacity = 8usize;
+        let n: u32 = 100;
+        let mut c: ExpiringCache<u32, ExpiredU8> = ExpiringCache::builder()
+            .initial_capacity(init_capacity)
+            .build()
+            .unwrap();
+        for i in 0..n {
+            c.cache_set(i, ExpiredU8(1));
+        }
+        let mut clone = c.clone();
+        assert_eq!(clone.cache_size(), n as usize);
+
+        let grown_capacity = clone.store.capacity();
+        clone.cache_reset();
+        assert_eq!(clone.cache_size(), 0);
+        assert!(
+            clone.store.capacity() < grown_capacity,
+            "clone must shrink on reset just like the original would"
+        );
+        assert!(
+            clone.store.capacity() >= init_capacity,
+            "clone must carry its own initial_capacity hint after Clone, not \
+             default to shrinking all the way to 0"
+        );
+        // The original is untouched by resetting the clone.
+        assert_eq!(c.cache_size(), n as usize);
+    }
+
+    #[test]
+    fn cache_size_includes_expired_but_iter_excludes_and_evict_removes_them() {
+        // Pins the documented `cache_size` / `iter` / `evict` contract: `cache_size`
+        // is the raw stored-entry count (including expired-but-unswept entries),
+        // `iter()` filters expired entries from the view without removing them,
+        // and `evict()` is the only one of the three that physically removes them.
+        use crate::{CacheEvict, CachedIter};
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        c.cache_set(1, ExpiredU8(5)); // live
+        c.cache_set(2, ExpiredU8(15)); // expired, never re-accessed so stays physically present
+        c.cache_set(3, ExpiredU8(20)); // expired
+
+        assert_eq!(
+            c.cache_size(),
+            3,
+            "cache_size includes unswept expired entries"
+        );
+        assert_eq!(
+            CachedIter::iter(&c).count(),
+            1,
+            "iter excludes expired entries"
+        );
+        assert_eq!(
+            c.cache_size(),
+            3,
+            "iter must not physically remove anything"
+        );
+
+        let removed = CacheEvict::evict(&mut c);
+        assert_eq!(removed, 2, "evict must sweep both expired entries");
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(CachedIter::iter(&c).count(), 1);
+    }
+
+    #[test]
+    fn cache_get_or_set_with_miss_inserts_value_and_counts() {
+        // The Vacant arm of `cache_get_or_set_with_mut` (a plain cache miss on an
+        // absent key) has no direct coverage elsewhere in this module -- existing
+        // tests only exercise the Occupied (hit / expired) arms.
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let mut called = false;
+        let v = c.cache_get_or_set_with(1, || {
+            called = true;
+            ExpiredU8(9)
+        });
+        assert!(called, "closure must run on cache miss");
+        assert_eq!(*v, ExpiredU8(9));
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_hits(), Some(0));
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(
+            c.cache_peek(&1),
+            Some(&ExpiredU8(9)),
+            "the value must actually be stored, not just returned transiently"
+        );
+    }
+
+    #[test]
+    fn cache_try_get_or_set_with_miss_ok_inserts_value() {
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let result: Result<&ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Ok(ExpiredU8(7)));
+        assert_eq!(*result.unwrap(), ExpiredU8(7));
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_size(), 1);
+    }
+
+    #[test]
+    fn cache_try_get_or_set_with_miss_err_inserts_nothing() {
+        // The Vacant + Err arm: `f()?` short-circuits before `vacant.insert` runs,
+        // so a failing factory on an absent key must leave the cache empty.
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let result: Result<&ExpiredU8, &str> = c.cache_try_get_or_set_with(1, || Err("boom"));
+        assert!(result.is_err());
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(
+            c.cache_size(),
+            0,
+            "a failing factory on a vacant key must not insert anything"
+        );
+    }
+
+    #[cfg(feature = "async_core")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_hit_does_not_call_factory() {
+        // The Occupied + live arm of `async_cache_get_or_set_with_mut` has no
+        // coverage anywhere in the crate; only the Occupied + expired arm is
+        // covered (tests/v3_expiring_evict_order.rs).
+        use crate::CachedGetOrSetAsync;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering as AOrdering};
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        c.cache_set(1, ExpiredU8(5)); // live
+        let called = Arc::new(AtomicBool::new(false));
+        let called2 = called.clone();
+        let v = c
+            .async_cache_get_or_set_with_mut(1, move || async move {
+                called2.store(true, AOrdering::Relaxed);
+                ExpiredU8(99)
+            })
+            .await;
+        assert!(
+            !called.load(AOrdering::Relaxed),
+            "factory must not run on cache hit"
+        );
+        assert_eq!(*v, ExpiredU8(5));
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(0));
+    }
+
+    #[cfg(feature = "async_core")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_miss_inserts_value_and_counts() {
+        // The Vacant arm has no coverage anywhere in the crate.
+        use crate::CachedGetOrSetAsync;
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let v = c
+            .async_cache_get_or_set_with_mut(1, || async { ExpiredU8(9) })
+            .await;
+        assert_eq!(*v, ExpiredU8(9));
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_size(), 1);
+    }
+
+    #[cfg(feature = "async_core")]
+    #[tokio::test]
+    async fn async_cache_try_get_or_set_with_miss_err_inserts_nothing() {
+        // The Vacant + Err arm has no coverage anywhere in the crate.
+        use crate::CachedGetOrSetAsync;
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let result: Result<&mut ExpiredU8, &str> = c
+            .async_cache_try_get_or_set_with_mut(1, || async { Err("boom") })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_size(), 0);
     }
 }

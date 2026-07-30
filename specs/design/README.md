@@ -55,3 +55,5 @@ the item stays here for history.
 | [0034](0034-prime-companion-body-before-lock.md) | Prime companion runs body before lock | Implemented |
 | [0035](0035-seeded-per-key-lock-bucket-hasher.md) | Seeded per-key lock-bucket hasher | Implemented |
 | [0036](0036-in-impl-static-placement.md) | `in_impl` static placement | Implemented |
+| [0037](0037-sharded-lru-default-shard-cap.md) | Sharded LRU default shard count bounded by `max_size` | Not implemented |
+| [0038](0038-cache-set-promotes-on-overwrite.md) | `cache_set` over an existing key promotes to MRU | Implemented |

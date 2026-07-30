@@ -147,6 +147,7 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedLruCacheBase<K, V
                     lock: parking_lot::RwLock::new(store_copy),
                     hits: AtomicU64::new(hits),
                     misses: AtomicU64::new(misses),
+                    evictions: AtomicU64::new(0),
                 };
                 CachePadded(shard)
             })
@@ -345,13 +346,11 @@ where
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                let keys: Vec<K> = guard.iter().map(|(k, _)| k.clone()).collect();
-                let mut removed = Vec::with_capacity(keys.len());
-                for k in keys {
-                    if let Some(pair) = guard.pop_raw(&k) {
-                        removed.push(pair);
-                    }
-                }
+                // `drain_all` walks each shard's LRU chain once taking owned pairs in
+                // MRU -> LRU order -- the same order the old "clone every key, then
+                // `pop_raw` each one" drain fired in, but with zero key clones and zero
+                // re-hashing.
+                let removed = guard.drain_all();
                 if !removed.is_empty() {
                     guard
                         .evictions
@@ -560,9 +559,13 @@ where
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(k);
         let mut guard = shard.lock.write();
-        match guard.cache_get(k) {
+        let value = guard.cache_get(k).cloned();
+        // Release the shard lock before touching the counters: the atomics are
+        // shard-local but there is no reason to hold the write lock across them
+        // (the `drop(guard)`-first pattern used by the other sharded stores).
+        drop(guard);
+        match value {
             Some(v) => {
-                let v = v.clone();
                 shard.hits.fetch_add(1, Ordering::Relaxed);
                 Ok(Some(v))
             }
@@ -1495,6 +1498,80 @@ mod tests {
             before, after,
             "surviving entries must keep their relative MRU order"
         );
+    }
+
+    /// `cache_clear_with_on_evict` drains each shard with `LruCache::drain_all` (no key
+    /// clones, no re-hashing) instead of "collect every key, then `pop_raw` each one". The
+    /// firing order is load-bearing: `drain_all` walks the LRU chain, so callbacks must still
+    /// arrive most-recently-used first, per shard.
+    #[test]
+    fn cache_clear_with_on_evict_fires_mru_to_lru_per_shard() {
+        use std::sync::Mutex;
+        let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let c = ShardedLruCacheBase::<u32, u32>::builder()
+            .shards(1) // one shard: a single, fully deterministic recency chain
+            .max_size(64)
+            .on_evict(move |k: &u32, _v: &u32| seen2.lock().unwrap().push(*k))
+            .build()
+            .unwrap();
+        for i in 0..6u32 {
+            SyncConcurrentCached::cache_set(&c, i, i).expect("insert must succeed");
+        }
+        // Re-read 0 and 2 so the recency chain is not simply insertion order reversed.
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &0).unwrap(), Some(0));
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &2).unwrap(), Some(2));
+        let expected: Vec<u32> = c.inner.shards[0]
+            .lock
+            .read()
+            .iter_order_raw()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            expected,
+            vec![2, 0, 5, 4, 3, 1],
+            "precondition: MRU -> LRU chain after the two re-reads"
+        );
+
+        c.cache_clear_with_on_evict();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            expected,
+            "on_evict must fire in MRU -> LRU order"
+        );
+        assert!(c.is_empty(), "every entry must be drained");
+        // The drained shard is immediately reusable (drain_all resets the slab sentinels).
+        SyncConcurrentCached::cache_set(&c, 42, 42).expect("insert must succeed");
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &42).unwrap(), Some(42));
+        assert_eq!(c.len(), 1);
+    }
+
+    /// `cache_get` clones the value and releases the shard lock before bumping the
+    /// hit/miss counters; the counters must still be exact for both outcomes, and a hit
+    /// must still promote LRU recency.
+    #[test]
+    fn cache_get_counts_and_promotes_after_releasing_the_lock() {
+        let c = ShardedLruCacheBase::<u32, u32>::builder()
+            .shards(1)
+            .max_size(2)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 10).expect("insert must succeed");
+        SyncConcurrentCached::cache_set(&c, 2, 20).expect("insert must succeed");
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(10));
+        assert_eq!(SyncConcurrentCached::cache_get(&c, &99).unwrap(), None);
+        let m = c.metrics();
+        assert_eq!(m.hits, Some(1));
+        assert_eq!(m.misses, Some(1));
+        // The hit promoted key 1, so the capacity eviction must claim key 2.
+        SyncConcurrentCached::cache_set(&c, 3, 30).expect("insert must succeed");
+        assert!(
+            SyncConcurrentCached::cache_contains(&c, &1).unwrap(),
+            "the entry read via cache_get must have been promoted to MRU"
+        );
+        assert!(!SyncConcurrentCached::cache_contains(&c, &2).unwrap());
     }
 
     /// Counter-wiring contract: `retain`'s eviction count on the plain LRU sharded store

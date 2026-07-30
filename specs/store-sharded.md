@@ -68,3 +68,42 @@ the predicate and every removal counts an eviction; `ShardedUnboundCache` tracks
 counter, so an entry there simply survives exactly when `keep` returns `true`. `retain` requires
 no `K: Clone` bound and is inherent-only, not a trait method; see
 [traits-concurrent.md](traits-concurrent.md).
+
+## SHARD-7
+
+**Current behavior:** for the LRU-bounded variants (`ShardedLruCache`, `ShardedLruTtlCache`,
+`ShardedExpiringLruCache`), the DEFAULT shard count (no explicit `.shards(n)` on the builder)
+ignores `max_size` entirely; it is derived only from `available_parallelism()`. Combined with the
+16-entries-per-shard floor (`per_shard_cap_from_total`), this means the effective capacity can
+exceed the requested `max_size` by a wide margin on a high-core-count host: `ShardedLruCache::new(100)`
+on a 64-core box preallocates 256 shards and yields an effective capacity of 4096, not 100. Read
+`capacity()` after construction to see the actual figure a given host resolves to; an explicit
+`.shards(n)` on the builder is the only way to control this today.
+
+**Planned, not yet in effect.** The DEFAULT shard count is intended to be capped by the requested
+`max_size` instead: the helper `default_shard_count_for_capacity` would yield
+`next_power_of_two(max_size / 16).clamp(1, default_shard_count())`, where `default_shard_count()`
+is `available_parallelism() * 4` clamped to `[8, 1024]` and rounded to a power of two. This helper
+exists (`#[allow(dead_code)]`) but no builder's default path calls it yet. Once wired in, building
+without a `max_size` (the unbounded sharded stores) would be unaffected and would keep using
+`default_shard_count()` directly, and `.shards(n)` on the builder would always override this
+default and remain authoritative regardless of `max_size`. See
+[design/0037-sharded-lru-default-shard-cap.md](design/0037-sharded-lru-default-shard-cap.md).
+
+## SHARD-8
+
+On the TTL-based sharded stores (`ShardedTtlCache`, `ShardedLruTtlCache`), the liveness of an
+entry is decided against a single clock sample taken by the calling thread BEFORE it acquires the
+shard lock, not re-read once the lock is held. Under lock contention an entry that crosses its
+expiry while the caller is queued is therefore judged live for that operation: `cache_set` returns
+`Some(old_value)` and fires no `on_evict`, and the entry is swept on a later access instead. This
+is inside the lazy-expiry contract in [SHARD-3](#shard-3), which promises only that an expired
+entry never reads as present, never that removal is prompt. Callers that need a hard bound on how
+long an expired entry can occupy space should call `evict()`.
+
+The per-value-`Expires` family (`ShardedExpiringCache`, `ShardedExpiringLruCache`) does not follow
+this contract: `is_expired()` is evaluated on the stored value while the shard write lock is
+already held in `cache_set`, so a value that crosses its own expiry boundary while the caller is
+queued for the lock is judged expired, not live, for that operation. In that case `cache_set`
+returns `None` and fires `on_evict` for the displaced entry, the opposite of the TTL-family
+outcome above.

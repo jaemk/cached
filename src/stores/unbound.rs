@@ -256,10 +256,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(v) = self.store.get(key) {
-            self.hits.increment();
+            self.hits.increment_mut();
             Some(v)
         } else {
-            self.misses.increment();
+            self.misses.increment_mut();
             None
         }
     }
@@ -269,10 +269,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(v) = self.store.get_mut(key) {
-            self.hits.increment();
+            self.hits.increment_mut();
             Some(v)
         } else {
-            self.misses.increment();
+            self.misses.increment_mut();
             None
         }
     }
@@ -282,12 +282,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
-                self.hits.increment();
+                self.hits.increment_mut();
                 occupied.into_mut()
             }
 
             Entry::Vacant(vacant) => {
-                self.misses.increment();
+                self.misses.increment_mut();
                 vacant.insert(f())
             }
         }
@@ -299,12 +299,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for UnboundCache<K, V, S> {
     ) -> Result<&mut V, E> {
         match self.store.entry(key) {
             Entry::Occupied(occupied) => {
-                self.hits.increment();
+                self.hits.increment_mut();
                 Ok(occupied.into_mut())
             }
 
             Entry::Vacant(vacant) => {
-                self.misses.increment();
+                self.misses.increment_mut();
                 Ok(vacant.insert(f()?))
             }
         }
@@ -428,11 +428,11 @@ where
         async move {
             match self.store.entry(key) {
                 Entry::Occupied(occupied) => {
-                    self.hits.increment();
+                    self.hits.increment_mut();
                     occupied.into_mut()
                 }
                 Entry::Vacant(vacant) => {
-                    self.misses.increment();
+                    self.misses.increment_mut();
                     vacant.insert(f().await)
                 }
             }
@@ -454,11 +454,11 @@ where
         async move {
             let v = match self.store.entry(key) {
                 Entry::Occupied(occupied) => {
-                    self.hits.increment();
+                    self.hits.increment_mut();
                     occupied.into_mut()
                 }
                 Entry::Vacant(vacant) => {
-                    self.misses.increment();
+                    self.misses.increment_mut();
                     vacant.insert(f().await?)
                 }
             };
@@ -897,5 +897,227 @@ mod tests {
             .unwrap();
         // The backing store must have at least the requested capacity.
         assert!(c.store.capacity() >= 32);
+    }
+
+    // --- `increment_mut` soundness / aggregate-correctness certification ---
+    //
+    // `Cached::cache_get` / `cache_get_mut` / `cache_get_or_set_with_mut` (all `&mut self`)
+    // use `StripedCounter::increment_mut`, a non-atomic write to slot 0 that is only sound
+    // with exclusive access. `CachedRead::cache_get_read` (`&self`) still uses the striped,
+    // atomic `increment()`. The tests below certify that:
+    //   1. this is sound under the *only* concurrency shape the crate actually produces for
+    //      an `UnboundCache` shared across threads (an `RwLock`, exactly as the `#[cached]`
+    //      macro wires it for `unsync_reads = true`; `unsync_reads` is rejected at macro
+    //      expansion time when paired with `sync_lock = "mutex"`, and no sharded wrapper or
+    //      `Arc`-without-a-lock path exposes `UnboundCache` directly - see
+    //      `ShardedUnboundCacheBase`, which owns its own per-shard `RwLock<HashMap<..>>` and
+    //      never wraps `UnboundCache`), and
+    //   2. the aggregate stays exact when the two increment paths are interleaved.
+
+    #[test]
+    fn mixed_increment_paths_produce_exact_aggregate_through_lock() {
+        // Mirrors the real concurrency shape: an `RwLock<UnboundCache<..>>`, exactly as
+        // `#[cached(unsync_reads = true)]` generates (write lock for `&mut self` methods
+        // like `cache_get`, read lock for `CachedRead::cache_get_read`). `RwLock` guarantees
+        // no read-lock critical section can run concurrently with a write-lock critical
+        // section, so `increment_mut`'s non-atomic write to slot 0 (under the write lock)
+        // can never race with a concurrent `increment()`/`load()` (under a read lock). If
+        // that invariant were ever violated - e.g. by wiring `unsync_reads` through a
+        // `Mutex`-shaped store that still exposed `&self` reads without exclusion, or by a
+        // future refactor that hands out `UnboundCache` behind a bare `Arc` - this test would
+        // start flaking or losing updates.
+        use std::sync::{Arc, RwLock};
+
+        let mut seed: UnboundCache<u32, u32> = UnboundCache::new();
+        seed.cache_set(1, 100); // present key -> deterministic hit
+        let cache = Arc::new(RwLock::new(seed));
+
+        const THREADS: usize = 8;
+        const ITERS: usize = 500;
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for i in 0..THREADS {
+            let cache = Arc::clone(&cache);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    if i % 2 == 0 {
+                        // Exclusive path: write lock -> `&mut self` -> `increment_mut`.
+                        let mut guard = cache.write().unwrap();
+                        assert_eq!(guard.cache_get(&1), Some(&100)); // hit
+                        assert_eq!(guard.cache_get(&999), None); // miss
+                    } else {
+                        // Shared path: read lock -> `&self` -> striped `increment`.
+                        let guard = cache.read().unwrap();
+                        assert_eq!(guard.cache_get_read(&1), Some(&100)); // hit
+                        assert_eq!(guard.cache_get_read(&999), None); // miss
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let guard = cache.read().unwrap();
+        let expected = (THREADS * ITERS) as u64;
+        assert_eq!(
+            guard.cache_hits(),
+            Some(expected),
+            "hits must equal the exact call count with no lost updates from mixing \
+             increment_mut and increment"
+        );
+        assert_eq!(
+            guard.cache_misses(),
+            Some(expected),
+            "misses must equal the exact call count with no lost updates from mixing \
+             increment_mut and increment"
+        );
+    }
+
+    #[test]
+    fn cache_reset_metrics_and_clone_snapshot_after_mixed_increment_paths() {
+        // `reset()`/`snapshot()`/`cache_reset_metrics` must behave correctly even though
+        // `increment_mut` always writes to slot 0 - the same slot `StripedCounter::snapshot`
+        // collapses the aggregate into - when mixed with `increment`'s striped writes.
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+        c.cache_set(1, 100);
+
+        // 3 hits, 2 misses via increment_mut (through &mut self cache_get).
+        c.cache_get(&1);
+        c.cache_get(&1);
+        c.cache_get(&1);
+        c.cache_get(&999);
+        c.cache_get(&999);
+
+        // 2 hits, 3 misses via increment (through &self CachedRead::cache_get_read).
+        c.cache_get_read(&1);
+        c.cache_get_read(&1);
+        c.cache_get_read(&999);
+        c.cache_get_read(&999);
+        c.cache_get_read(&999);
+
+        assert_eq!(c.cache_hits(), Some(5));
+        assert_eq!(c.cache_misses(), Some(5));
+
+        // `cache_reset_metrics` zeroes both counters regardless of which path last wrote
+        // which slot (including slot 0, last written by `increment_mut`).
+        c.cache_reset_metrics();
+        assert_eq!(c.cache_hits(), Some(0));
+        assert_eq!(c.cache_misses(), Some(0));
+
+        // Counters keep working correctly post-reset, mixing paths again.
+        c.cache_get(&1); // hit, increment_mut
+        c.cache_get_read(&1); // hit, increment
+        c.cache_get(&999); // miss, increment_mut
+        assert_eq!(c.cache_hits(), Some(2));
+        assert_eq!(c.cache_misses(), Some(1));
+
+        // `Clone` uses `StripedCounter::snapshot`, which collapses the aggregate (built
+        // from both increment paths) into the clone's slot 0.
+        let mut cloned = c.clone();
+        assert_eq!(cloned.cache_hits(), c.cache_hits());
+        assert_eq!(cloned.cache_misses(), c.cache_misses());
+
+        // The clone's counters are independent: further increments on the clone (through
+        // either path) must not perturb the original.
+        cloned.cache_get(&1); // hit, increment_mut on the clone
+        assert_eq!(cloned.cache_hits(), Some(3));
+        assert_eq!(
+            c.cache_hits(),
+            Some(2),
+            "clone must not share counter state with the original"
+        );
+
+        // A full `cache_reset` also zeroes counters last written through increment_mut.
+        c.cache_reset();
+        assert_eq!(c.cache_hits(), Some(0));
+        assert_eq!(c.cache_misses(), Some(0));
+    }
+
+    #[test]
+    fn cache_get_mut_hits_and_misses_are_counted_and_mutation_is_visible() {
+        // `cache_get_mut` was switched to `increment_mut` by this diff but had no
+        // dedicated test anywhere in the crate before this one: `cache_get` and
+        // `cache_get_or_set_with_mut` were covered, `cache_get_mut` was not. Certify
+        // both the mutation contract and exact hit/miss accounting through it.
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+        c.cache_set(1, 100);
+
+        // Miss: absent key.
+        assert_eq!(c.cache_get_mut(&999), None);
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_hits(), Some(0));
+
+        // Hit: present key, and the returned reference actually mutates in place.
+        {
+            let v = c.cache_get_mut(&1).expect("key must be present");
+            *v += 1;
+        }
+        assert_eq!(c.cache_hits(), Some(1));
+        assert_eq!(c.cache_misses(), Some(1));
+        assert_eq!(c.cache_get(&1), Some(&101));
+    }
+
+    // The get-or-set families also count through `increment_mut`; their accounting must
+    // be exact on both the hit and the miss arm.
+
+    #[test]
+    fn cache_try_get_or_set_with_hits_and_misses_are_counted() {
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+
+        fn ok(n: u32) -> Result<u32, String> {
+            Ok(n)
+        }
+
+        // 3 misses (fresh keys).
+        assert_eq!(c.cache_try_get_or_set_with(1, || ok(1)).unwrap(), &1);
+        assert_eq!(c.cache_try_get_or_set_with(2, || ok(2)).unwrap(), &2);
+        assert_eq!(c.cache_try_get_or_set_with(3, || ok(3)).unwrap(), &3);
+        assert_eq!(c.cache_misses(), Some(3));
+        assert_eq!(c.cache_hits(), Some(0));
+
+        // 2 hits (existing keys); the factory's return value must be ignored.
+        assert_eq!(c.cache_try_get_or_set_with(1, || ok(99)).unwrap(), &1);
+        assert_eq!(c.cache_try_get_or_set_with(2, || ok(99)).unwrap(), &2);
+        assert_eq!(c.cache_misses(), Some(3));
+        assert_eq!(c.cache_hits(), Some(2));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_get_or_set_with_hits_and_misses_are_counted() {
+        use crate::CachedGetOrSetAsync;
+
+        let mut c: UnboundCache<u32, u32> = UnboundCache::new();
+
+        // Misses: fresh keys via both async methods.
+        assert_eq!(
+            c.async_cache_get_or_set_with_mut(1u32, || async { 1u32 })
+                .await,
+            &1
+        );
+        assert_eq!(
+            c.async_cache_try_get_or_set_with_mut(2u32, || async { Ok::<u32, String>(2) })
+                .await
+                .unwrap(),
+            &2
+        );
+        assert_eq!(c.cache_misses(), Some(2));
+        assert_eq!(c.cache_hits(), Some(0));
+
+        // Hits: same keys again; the factory's return value must be ignored.
+        assert_eq!(
+            c.async_cache_get_or_set_with_mut(1u32, || async { 99u32 })
+                .await,
+            &1
+        );
+        assert_eq!(
+            c.async_cache_try_get_or_set_with_mut(2u32, || async { Ok::<u32, String>(99) })
+                .await
+                .unwrap(),
+            &2
+        );
+        assert_eq!(c.cache_misses(), Some(2));
+        assert_eq!(c.cache_hits(), Some(2));
     }
 }

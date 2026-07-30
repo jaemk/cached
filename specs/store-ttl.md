@@ -42,3 +42,21 @@ latest-expiring entries by size rather than filtering by predicate.
 `LruTtlCache` has the LRU-family order accessors (`iter_order` / `key_order` / `value_order`)
 with `CacheValue<V, Option<Instant>>` values carrying the entry expiry via `expires_at()`. See
 [store-lru.md](store-lru.md) LRU-5.
+
+## TTL-6
+
+`TtlSortedCache`'s `get_or_set` family (sync infallible, sync try, async infallible, async try)
+checks liveness in place instead of sweeping an expired entry before running the factory. A
+cancelled or panicking factory leaves the stale entry untouched and fires no `on_evict`; on
+success, the factory's value replaces the entry and `on_evict` fires after the factory completes,
+not before. All four variants agree with each other and with `TtlCache` / `LruTtlCache`.
+
+## TTL-7
+
+For a key type whose `Eq` ignores part of its payload, `set` / `set_with` report the
+**first-inserted** key to `on_evict` and the displaced value's key in `cache_remove_entry`, not
+the most recently inserted key: the occupied-entry insert path reuses the existing entry's stored
+key `Arc` rather than replacing it with the caller's new key. This matches `HashMap::insert`'s own
+rule for keys that compare equal. `retain_latest` counts an eviction (increments the `evictions`
+counter) before invoking `on_evict` for that entry, so a panicking `on_evict` callback still
+leaves the eviction counted.

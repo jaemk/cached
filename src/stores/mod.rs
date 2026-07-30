@@ -100,6 +100,16 @@ impl StripedCounter {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment slot 0 by one, without a thread-local lookup or an atomic RMW.
+    ///
+    /// Only valid where the caller statically holds `&mut self` (exclusive access),
+    /// e.g. behind an existing lock or an owning `&mut` receiver. `load()` sums all
+    /// slots regardless of which slot was bumped, so the aggregate stays correct.
+    #[inline]
+    pub(super) fn increment_mut(&mut self) {
+        *self.slots[0].0.get_mut() += 1;
+    }
+
     /// Sum across all stripes.
     pub(super) fn load(&self) -> u64 {
         self.slots.iter().map(|s| s.0.load(Ordering::Relaxed)).sum()
@@ -596,6 +606,51 @@ pub trait ConcurrentCacheEvict {
 /// Cache store tests
 mod tests {
     use super::*;
+
+    // `increment_mut` (the exclusive-access, non-atomic fast path used by `&mut self`
+    // call sites) and `increment` (the striped, thread-local-indexed atomic path used by
+    // `CachedRead`'s shared-reference call sites) must both feed the same aggregate: a mix
+    // of the two, in either order, sums to the total call count under `load()`.
+    #[test]
+    fn increment_mut_and_increment_agree_on_aggregate() {
+        let mut counter = StripedCounter::new();
+        assert_eq!(counter.load(), 0);
+
+        // Mix `increment_mut` and `increment` calls; every call, regardless of which
+        // method, must contribute exactly 1 to the aggregate.
+        counter.increment_mut();
+        counter.increment();
+        counter.increment_mut();
+        counter.increment();
+        counter.increment();
+        counter.increment_mut();
+
+        assert_eq!(counter.load(), 6);
+
+        // `reset()` still zeroes everything, including whatever `increment_mut` wrote to
+        // slot 0 and whatever `increment` scattered across the striped slots.
+        counter.reset();
+        assert_eq!(counter.load(), 0);
+
+        // After reset, further mixed increments still land correctly.
+        for _ in 0..10 {
+            counter.increment_mut();
+        }
+        for _ in 0..10 {
+            counter.increment();
+        }
+        assert_eq!(counter.load(), 20);
+
+        // `snapshot()` carries the aggregate (from a mix of both increment paths) across
+        // a clone, collapsed into a fresh counter's slot 0.
+        let snap = counter.snapshot();
+        assert_eq!(snap.load(), 20);
+        // The snapshot is independent: incrementing it must not affect the original.
+        let mut snap = snap;
+        snap.increment_mut();
+        assert_eq!(snap.load(), 21);
+        assert_eq!(counter.load(), 20);
+    }
 
     #[test]
     fn hashmap() {

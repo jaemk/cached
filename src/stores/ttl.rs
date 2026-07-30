@@ -265,18 +265,29 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
         expires_at.is_none_or(|t| Instant::now() < t)
     }
 
+    /// Same as [`entry_live`](Self::entry_live) but takes an already-sampled `now`
+    /// instead of reading the clock. Lets hot paths that already have `now` in hand
+    /// (e.g. a caller that just computed a fresh expiry) avoid a redundant clock read.
+    #[inline]
+    pub(super) fn entry_live_at(expires_at: Option<Instant>, now: Instant) -> bool {
+        expires_at.is_none_or(|t| now < t)
+    }
+
     /// Insert `entry` for `key`, returning the previous value only if it was still live.
     ///
     /// When the displaced previous value had already expired it is filtered from the return
     /// (matching the get paths), so it is dropped silently from the caller's view; in that case
     /// fire `on_evict` and count an eviction so resource cleanup and metrics stay consistent
     /// with the other removal paths.
-    fn set_entry(&mut self, key: K, entry: TimedEntry<V>) -> Option<V> {
+    ///
+    /// `now` is the caller's already-sampled clock reading, used to decide whether the
+    /// displaced entry was still live -- avoids a second `Instant::now()` call here.
+    fn set_entry(&mut self, key: K, entry: TimedEntry<V>, now: Instant) -> Option<V> {
         use std::collections::hash_map::Entry;
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
                 let old = occupied.insert(entry);
-                if Self::entry_live(old.expires_at) {
+                if Self::entry_live_at(old.expires_at, now) {
                     Some(old.value)
                 } else {
                     if let Some(on_evict) = &self.on_evict {
@@ -365,8 +376,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
+        // Sample the clock once for the whole eager sweep, as `evict` does above --
+        // one `now` shared across every entry instead of a clock read per entry.
+        let now = Instant::now();
         self.store.retain(|key, entry| {
-            let expired = !Self::entry_live(entry.expires_at);
+            let expired = !Self::entry_live_at(entry.expires_at, now);
             if expired || !keep(key, &entry.value) {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, &entry.value);
@@ -390,12 +404,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
     {
         // Resolve hit / expired / absent from a SINGLE lookup: an absent key
         // (the common miss) must not pay a second `remove_entry` probe (CORE-7).
+        let now = Instant::now();
         let expired_present = match self.store.get_mut(key) {
-            Some(entry) if Self::entry_live(entry.expires_at) => {
+            Some(entry) if Self::entry_live_at(entry.expires_at, now) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    entry.expires_at =
-                        Self::compute_expires_at(self.ttl, Instant::now()).or(entry.expires_at);
+                    entry.expires_at = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                 }
                 // SAFETY: `ptr` points into a HashMap entry obtained from
                 // `get_mut`. We return immediately without modifying the map, so
@@ -425,12 +439,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         // Single lookup on the miss path, as in `cache_get` (CORE-7).
+        let now = Instant::now();
         let expired_present = match self.store.get_mut(key) {
-            Some(entry) if Self::entry_live(entry.expires_at) => {
+            Some(entry) if Self::entry_live_at(entry.expires_at, now) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    entry.expires_at =
-                        Self::compute_expires_at(self.ttl, Instant::now()).or(entry.expires_at);
+                    entry.expires_at = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                 }
                 // SAFETY: same as `cache_get` -- entry is not moved between
                 // obtaining the pointer and returning, and `&mut self` prevents
@@ -454,9 +468,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
-                if Self::entry_live(occupied.get().expires_at) {
+                // Sample once and reuse for both the liveness check and the refresh
+                // computation below -- avoids a second clock read on the hit path.
+                let now = Instant::now();
+                if Self::entry_live_at(occupied.get().expires_at, now) {
                     if self.refresh {
-                        let now = Instant::now();
                         let new_exp =
                             Self::compute_expires_at(self.ttl, now).or(occupied.get().expires_at);
                         occupied.get_mut().expires_at = new_exp;
@@ -504,9 +520,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
     ) -> Result<&mut V, E> {
         match self.store.entry(key) {
             Entry::Occupied(mut occupied) => {
-                if Self::entry_live(occupied.get().expires_at) {
+                // Sample once and reuse for both the liveness check and the refresh
+                // computation below -- avoids a second clock read on the hit path.
+                let now = Instant::now();
+                if Self::entry_live_at(occupied.get().expires_at, now) {
                     if self.refresh {
-                        let now = Instant::now();
                         let new_exp =
                             Self::compute_expires_at(self.ttl, now).or(occupied.get().expires_at);
                         occupied.get_mut().expires_at = new_exp;
@@ -561,6 +579,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                 expires_at,
                 value: val,
             },
+            now,
         )
     }
 
@@ -648,6 +667,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> CachedIter<K, V> for TtlCache<K, V, S> {
         K: 'a,
         V: 'a,
     {
+        // Deliberately NOT hoisted (unlike the eager `retain`/`evict` sweeps above):
+        // this iterator is lazy and may be held and advanced over an arbitrary span
+        // of wall-clock time, so each item's liveness must be judged against a clock
+        // read taken at the moment that item is produced, not a single snapshot from
+        // when `iter()` was called.
         self.store.iter().filter_map(move |(k, entry)| {
             if Self::entry_live(entry.expires_at) {
                 Some((k, &entry.value))
@@ -713,14 +737,14 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some(entry) = self.store.get_mut(k) {
-            let expired = !Self::entry_live(entry.expires_at);
+            let now = Instant::now();
+            let expired = !Self::entry_live_at(entry.expires_at, now);
             if expired {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 (Some(entry.value.clone()), true)
             } else {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    let now = Instant::now();
                     let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
                     entry.expires_at = new_exp;
                 }
@@ -771,11 +795,13 @@ where
         Fut: Future<Output = V> + Send + 'a,
     {
         async move {
+            // One clock sample serves both the liveness check and the refresh
+            // recompute; the miss branch re-samples after the factory (CORE-3).
+            let now = Instant::now();
             match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
-                    if Self::entry_live(occupied.get().expires_at) {
+                    if Self::entry_live_at(occupied.get().expires_at, now) {
                         if self.refresh {
-                            let now = Instant::now();
                             let new_exp = Self::compute_expires_at(self.ttl, now)
                                 .or(occupied.get().expires_at);
                             occupied.get_mut().expires_at = new_exp;
@@ -833,11 +859,13 @@ where
         Fut: Future<Output = Result<V, E>> + Send + 'a,
     {
         async move {
+            // One clock sample serves both the liveness check and the refresh
+            // recompute; the miss branch re-samples after the factory (CORE-3).
+            let now = Instant::now();
             let v = match self.store.entry(k) {
                 Entry::Occupied(mut occupied) => {
-                    if Self::entry_live(occupied.get().expires_at) {
+                    if Self::entry_live_at(occupied.get().expires_at, now) {
                         if self.refresh {
-                            let now = Instant::now();
                             let new_exp = Self::compute_expires_at(self.ttl, now)
                                 .or(occupied.get().expires_at);
                             occupied.get_mut().expires_at = new_exp;
@@ -1695,6 +1723,784 @@ mod tests {
             c.cache_peek(&1),
             Some(&200),
             "the new value must be cached and live"
+        );
+    }
+
+    // PERF-1: `entry_live_at` must preserve the exact same `now >= expires_at`
+    // boundary convention as `entry_live` (which reads `Instant::now()` internally).
+    // At `now == expires_at` the entry must be considered expired, mirroring
+    // `entry_live`'s strict `now < t` liveness check.
+    #[test]
+    fn entry_live_at_matches_now_ge_expires_at_is_expired_convention() {
+        let now = Instant::now();
+        let future = now + crate::time::Duration::from_millis(10);
+        let past = now - crate::time::Duration::from_millis(10);
+
+        // `expires_at = None` never expires, regardless of `now`.
+        assert!(TtlCache::<u32, u32>::entry_live_at(None, now));
+        // `now < expires_at`: live.
+        assert!(TtlCache::<u32, u32>::entry_live_at(Some(future), now));
+        // `now == expires_at`: the boundary itself is NOT live.
+        assert!(!TtlCache::<u32, u32>::entry_live_at(Some(now), now));
+        // `now > expires_at`: not live.
+        assert!(!TtlCache::<u32, u32>::entry_live_at(Some(past), now));
+    }
+
+    // PERF-1: `retain`'s eager sweep now samples the clock once per call (mirroring
+    // `evict`) instead of once per entry. Expired entries must still be removed
+    // unconditionally, regardless of what the predicate returns.
+    #[test]
+    fn retain_removes_expired_entries_regardless_of_predicate() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(30))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        // Inserted after the sleep: still live relative to the single `now` sampled
+        // at the top of `retain`.
+        c.cache_set(2, 20);
+
+        // Predicate always says "keep" -- the expired entry must be swept anyway.
+        c.retain(|_, _| true);
+
+        assert_eq!(
+            c.cache_size(),
+            1,
+            "expired entry must be removed even though the predicate kept it"
+        );
+        assert_eq!(
+            c.cache_peek(&2),
+            Some(&20),
+            "live entry kept by the predicate must survive"
+        );
+    }
+
+    // PERF-1: with `refresh_on_hit`, a hit must extend the entry's expiry by the
+    // FULL configured ttl measured from the moment of the hit -- not by
+    // ttl-minus-epsilon (e.g. from a stale/earlier clock read). Verified directly
+    // against the stored `expires_at`, bracketed by clock reads taken immediately
+    // before and after the hit.
+    #[test]
+    fn refresh_on_hit_extends_expiry_by_full_ttl_from_hit_time() {
+        let ttl = crate::time::Duration::from_millis(200);
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(ttl)
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        let before = Instant::now();
+        assert_eq!(c.cache_get(&1), Some(&100));
+        let after = Instant::now();
+
+        let expires_at = c
+            .store
+            .get(&1)
+            .expect("entry must still be present after the hit")
+            .expires_at
+            .expect("ttl is configured, so the entry must carry an expiry");
+        assert!(
+            expires_at >= before + ttl,
+            "refresh must extend by the FULL ttl measured from the hit, not less"
+        );
+        assert!(
+            expires_at <= after + ttl,
+            "refresh must not anchor to a clock read taken before the hit"
+        );
+    }
+
+    // --- PERF-1 boundary coverage: every call site converted to `entry_live_at`
+    // must preserve the exact `now >= expires_at` boundary, not just the pure
+    // helper (already pinned above by
+    // `entry_live_at_matches_now_ge_expires_at_is_expired_convention`).
+    //
+    // Each test below crafts a `TimedEntry` directly (the store field is
+    // `pub(crate)`) with `expires_at` set to an `Instant` sampled just before the
+    // call under test. Because the process clock is monotonic, the call's own
+    // internal `Instant::now()` read is guaranteed to be `>= ` that sampled
+    // instant, so this deterministically exercises the "tie or later" edge of the
+    // boundary without needing a mock clock. A comfortably-future `expires_at`
+    // exercises the live side, and `expires_at = None` exercises "never expires".
+
+    #[test]
+    fn cache_get_boundary_matches_now_ge_expires_at_convention() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+        assert_eq!(
+            c.cache_get(&1),
+            None,
+            "tie (now >= expires_at) must be a miss"
+        );
+        assert_eq!(c.cache_size(), 0, "expired entry must be swept on access");
+
+        let future = Instant::now() + crate::time::Duration::from_millis(200);
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: Some(future),
+                value: 200,
+            },
+        );
+        assert_eq!(
+            c.cache_get(&2),
+            Some(&200),
+            "now < expires_at must be a hit"
+        );
+
+        c.store.insert(
+            3,
+            TimedEntry {
+                expires_at: None,
+                value: 300,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(
+            c.cache_get(&3),
+            Some(&300),
+            "expires_at = None never expires"
+        );
+    }
+
+    #[test]
+    fn cache_get_mut_boundary_matches_now_ge_expires_at_convention() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+        assert_eq!(
+            c.cache_get_mut(&1),
+            None,
+            "tie (now >= expires_at) must be a miss"
+        );
+        assert_eq!(c.cache_size(), 0, "expired entry must be swept on access");
+
+        let future = Instant::now() + crate::time::Duration::from_millis(200);
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: Some(future),
+                value: 200,
+            },
+        );
+        assert_eq!(
+            c.cache_get_mut(&2).map(|v| *v),
+            Some(200),
+            "now < expires_at must be a hit"
+        );
+
+        c.store.insert(
+            3,
+            TimedEntry {
+                expires_at: None,
+                value: 300,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(
+            c.cache_get_mut(&3).map(|v| *v),
+            Some(300),
+            "expires_at = None never expires"
+        );
+    }
+
+    #[test]
+    fn cache_set_previous_value_liveness_boundary_matches_convention() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        // Tie: `set_entry`'s previous-value liveness check must treat this as
+        // expired -- filtered from the return, on_evict fires, eviction counted.
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+        assert_eq!(
+            c.cache_set(1, 999),
+            None,
+            "tie (now >= expires_at) previous value must be filtered as expired"
+        );
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        assert_eq!(c.cache_evictions(), Some(1));
+
+        // Comfortably future: previous value is still live and must be returned,
+        // with no on_evict / eviction bump.
+        let future = Instant::now() + crate::time::Duration::from_millis(200);
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: Some(future),
+                value: 200,
+            },
+        );
+        assert_eq!(
+            c.cache_set(2, 888),
+            Some(200),
+            "now < expires_at: previous value must be returned, not filtered"
+        );
+        assert_eq!(
+            fired.load(Ordering::Relaxed),
+            1,
+            "no new eviction for a live overwrite"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+
+        // None: previous value never expires, must always be returned.
+        c.store.insert(
+            3,
+            TimedEntry {
+                expires_at: None,
+                value: 300,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(
+            c.cache_set(3, 777),
+            Some(300),
+            "expires_at = None previous value never expires"
+        );
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        assert_eq!(c.cache_evictions(), Some(1));
+    }
+
+    #[test]
+    fn cache_get_or_set_with_mut_hit_liveness_boundary_matches_convention() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        // Tie: expired -> the factory MUST run (miss + expired-replace branch).
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let val = c.cache_get_or_set_with_mut(1u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            999u32
+        });
+        assert_eq!(
+            *val, 999,
+            "tie must be treated as expired: factory value used"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "factory must run at the tie boundary"
+        );
+
+        // Comfortably future: live -> factory must NOT run.
+        let future = Instant::now() + crate::time::Duration::from_millis(200);
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: Some(future),
+                value: 200,
+            },
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let val = c.cache_get_or_set_with_mut(2u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            999u32
+        });
+        assert_eq!(
+            *val, 200,
+            "now < expires_at must be a hit: existing value returned"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "factory must not run on a hit"
+        );
+
+        // None: never expires -> always a hit, even after elapsed time.
+        c.store.insert(
+            3,
+            TimedEntry {
+                expires_at: None,
+                value: 300,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let val = c.cache_get_or_set_with_mut(3u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            999u32
+        });
+        assert_eq!(*val, 300, "expires_at = None must always be a hit");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cache_try_get_or_set_with_mut_hit_liveness_boundary_matches_convention() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let val: Result<&mut u32, ()> = c.cache_try_get_or_set_with_mut(1u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            Ok(999u32)
+        });
+        assert_eq!(
+            *val.unwrap(),
+            999,
+            "tie must be treated as expired: factory value used"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "factory must run at the tie boundary"
+        );
+
+        let future = Instant::now() + crate::time::Duration::from_millis(200);
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: Some(future),
+                value: 200,
+            },
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let val: Result<&mut u32, ()> = c.cache_try_get_or_set_with_mut(2u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            Ok(999u32)
+        });
+        assert_eq!(
+            *val.unwrap(),
+            200,
+            "now < expires_at must be a hit: existing value returned"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "factory must not run on a hit"
+        );
+
+        c.store.insert(
+            3,
+            TimedEntry {
+                expires_at: None,
+                value: 300,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let val: Result<&mut u32, ()> = c.cache_try_get_or_set_with_mut(3u32, move || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            Ok(999u32)
+        });
+        assert_eq!(*val.unwrap(), 300, "expires_at = None must always be a hit");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cache_get_with_expiry_status_boundary_matches_convention() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+        assert_eq!(
+            c.cache_get_with_expiry_status(&1u32),
+            (Some(100), true),
+            "tie (now >= expires_at) must report expired=true"
+        );
+
+        let future = Instant::now() + crate::time::Duration::from_millis(200);
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: Some(future),
+                value: 200,
+            },
+        );
+        assert_eq!(
+            c.cache_get_with_expiry_status(&2u32),
+            (Some(200), false),
+            "now < expires_at must report expired=false"
+        );
+
+        c.store.insert(
+            3,
+            TimedEntry {
+                expires_at: None,
+                value: 300,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(
+            c.cache_get_with_expiry_status(&3u32),
+            (Some(300), false),
+            "expires_at = None must always report expired=false"
+        );
+    }
+
+    #[test]
+    fn retain_boundary_matches_now_ge_expires_at_convention() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        // Tie: expires_at == an instant sampled just before retain() is invoked.
+        // retain's hoisted `now` is sampled strictly later, so this entry must be
+        // removed unconditionally, even though the predicate says "keep".
+        let tie = Instant::now();
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(tie),
+                value: 100,
+            },
+        );
+
+        // None: never expires, so retain must only remove it if the predicate says so.
+        c.store.insert(
+            2,
+            TimedEntry {
+                expires_at: None,
+                value: 200,
+            },
+        );
+
+        c.retain(|_, _| true);
+
+        assert_eq!(
+            c.cache_size(),
+            1,
+            "tie entry must be swept regardless of predicate"
+        );
+        assert_eq!(
+            c.cache_peek(&2),
+            Some(&200),
+            "never-expiring entry kept by predicate must survive"
+        );
+    }
+
+    // PERF-1: `retain`'s hoisted `now` is a single snapshot taken BEFORE the sweep
+    // begins (mirroring `evict`). An entry that was live at that snapshot must
+    // stay judged live for the whole pass, even if real wall-clock time advances
+    // past its expiry while the predicate is busy on other entries. A regression
+    // back to a per-entry `Instant::now()` read would evict entries examined later
+    // in the pass despite every entry having been live when `retain()` began.
+    #[test]
+    fn retain_judges_every_entry_against_the_pass_start_snapshot() {
+        let margin = crate::time::Duration::from_millis(35);
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        // 6 entries, all live at "now" (the snapshot retain() will take), all
+        // sharing the same expires_at margin above it.
+        let base = Instant::now();
+        let expires_at = base + margin;
+        for k in 0..6u32 {
+            c.store.insert(
+                k,
+                TimedEntry {
+                    expires_at: Some(expires_at),
+                    value: k,
+                },
+            );
+        }
+
+        // The predicate sleeps on every call. With 6 entries at 20ms each, the
+        // cumulative elapsed time crosses the 35ms margin partway through the
+        // pass -- enough that a per-entry `Instant::now()` read would see entries
+        // examined later in the pass as expired, even though every entry was live
+        // when `retain()` began.
+        c.retain(|_, _| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            true
+        });
+
+        assert_eq!(
+            c.cache_size(),
+            6,
+            "every entry must be judged live against the pass-start snapshot, \
+             regardless of how long the predicate takes on other entries"
+        );
+    }
+
+    // Confirms `CachedIter::iter` was deliberately NOT changed to hoist `now`
+    // (unlike `retain`/`evict`): a lazy iterator advanced after a delay must judge
+    // each item against a clock read taken at production time, not at the time
+    // `iter()` was called.
+    #[test]
+    fn iter_judges_each_item_at_production_time_not_at_iter_call_time() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let expires_at = Instant::now() + crate::time::Duration::from_millis(30);
+        c.store.insert(
+            1,
+            TimedEntry {
+                expires_at: Some(expires_at),
+                value: 100,
+            },
+        );
+
+        // The entry is live at the moment `iter()` is called -- building the lazy
+        // iterator does not itself read the clock.
+        let mut it = c.iter();
+
+        // Advance real time past the entry's expiry BEFORE consuming the iterator.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        assert_eq!(
+            it.next(),
+            None,
+            "item must be judged expired at consumption time, proving `iter` samples \
+             the clock per item rather than hoisting a single snapshot from iter() call time"
+        );
+    }
+
+    // PERF-1 / CORE-3 (sync): the expiry for a freshly-replaced expired entry must
+    // be anchored to the clock read taken AFTER the factory resolves, not the
+    // sample taken before the liveness check. A factory slower than the ttl proves
+    // this: if the expiry were computed from the pre-factory sample, the
+    // freshly-inserted entry would already be expired the instant it lands.
+    #[test]
+    fn cache_get_or_set_with_mut_expiry_anchored_after_slow_factory() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(40))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60)); // now expired
+
+        let val = c.cache_get_or_set_with_mut(1u32, || {
+            std::thread::sleep(std::time::Duration::from_millis(120)); // 3x the ttl
+            200u32
+        });
+        assert_eq!(*val, 200);
+        assert_eq!(
+            c.cache_peek(&1),
+            Some(&200),
+            "entry must be live immediately after a factory slower than the ttl \
+             resolves -- expiry must be anchored post-factory, not pre-factory"
+        );
+    }
+
+    #[test]
+    fn cache_try_get_or_set_with_mut_expiry_anchored_after_slow_factory() {
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(40))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60)); // now expired
+
+        let val: Result<&mut u32, ()> = c.cache_try_get_or_set_with_mut(1u32, || {
+            std::thread::sleep(std::time::Duration::from_millis(120)); // 3x the ttl
+            Ok(200u32)
+        });
+        assert_eq!(*val.unwrap(), 200);
+        assert_eq!(
+            c.cache_peek(&1),
+            Some(&200),
+            "entry must be live immediately after a factory slower than the ttl \
+             resolves -- expiry must be anchored post-factory, not pre-factory"
+        );
+    }
+
+    // Tight bracketing refresh-on-hit tests, mirroring
+    // `refresh_on_hit_extends_expiry_by_full_ttl_from_hit_time` (for `cache_get`)
+    // on the other call sites the `now`-threading change touched. Threading made
+    // the liveness-check sample and the refresh-compute sample the SAME value at
+    // each site, so these can no longer distinguish "pre-check" from "post-check"
+    // anchoring (that distinction no longer exists structurally) -- they instead
+    // pin the property that actually matters: the persisted `expires_at` reflects
+    // a full ttl measured from within the call, not a partial/stale extension.
+
+    #[test]
+    fn cache_get_mut_refresh_extends_expiry_by_full_ttl_from_hit_time() {
+        let ttl = crate::time::Duration::from_millis(200);
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(ttl)
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        let before = Instant::now();
+        assert_eq!(c.cache_get_mut(&1).map(|v| *v), Some(100));
+        let after = Instant::now();
+
+        let expires_at = c
+            .store
+            .get(&1)
+            .expect("entry must still be present after the hit")
+            .expires_at
+            .expect("ttl is configured, so the entry must carry an expiry");
+        assert!(
+            expires_at >= before + ttl,
+            "refresh must extend by the FULL ttl measured from the hit, not less"
+        );
+        assert!(
+            expires_at <= after + ttl,
+            "refresh must not anchor to a clock read taken before the hit"
+        );
+    }
+
+    #[test]
+    fn cache_get_or_set_with_mut_refresh_extends_expiry_by_full_ttl_from_hit_time() {
+        let ttl = crate::time::Duration::from_millis(200);
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(ttl)
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        let before = Instant::now();
+        let val = c.cache_get_or_set_with_mut(1u32, || 999u32);
+        assert_eq!(*val, 100, "still a hit, factory ignored");
+        let after = Instant::now();
+
+        let expires_at = c
+            .store
+            .get(&1)
+            .expect("entry must still be present after the hit")
+            .expires_at
+            .expect("ttl is configured, so the entry must carry an expiry");
+        assert!(
+            expires_at >= before + ttl,
+            "refresh must extend by the FULL ttl measured from the hit, not less"
+        );
+        assert!(
+            expires_at <= after + ttl,
+            "refresh must not anchor to a clock read taken before the hit"
+        );
+    }
+
+    #[test]
+    fn cache_try_get_or_set_with_mut_refresh_extends_expiry_by_full_ttl_from_hit_time() {
+        let ttl = crate::time::Duration::from_millis(200);
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(ttl)
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        let before = Instant::now();
+        let val: Result<&mut u32, ()> = c.cache_try_get_or_set_with_mut(1u32, || Ok(999u32));
+        assert_eq!(*val.unwrap(), 100, "still a hit, factory ignored");
+        let after = Instant::now();
+
+        let expires_at = c
+            .store
+            .get(&1)
+            .expect("entry must still be present after the hit")
+            .expires_at
+            .expect("ttl is configured, so the entry must carry an expiry");
+        assert!(
+            expires_at >= before + ttl,
+            "refresh must extend by the FULL ttl measured from the hit, not less"
+        );
+        assert!(
+            expires_at <= after + ttl,
+            "refresh must not anchor to a clock read taken before the hit"
+        );
+    }
+
+    #[test]
+    fn cache_get_with_expiry_status_refresh_extends_expiry_by_full_ttl_from_hit_time() {
+        let ttl = crate::time::Duration::from_millis(200);
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(ttl)
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        let before = Instant::now();
+        assert_eq!(c.cache_get_with_expiry_status(&1u32), (Some(100), false));
+        let after = Instant::now();
+
+        let expires_at = c
+            .store
+            .get(&1)
+            .expect("entry must still be present after the hit")
+            .expires_at
+            .expect("ttl is configured, so the entry must carry an expiry");
+        assert!(
+            expires_at >= before + ttl,
+            "refresh must extend by the FULL ttl measured from the hit, not less"
+        );
+        assert!(
+            expires_at <= after + ttl,
+            "refresh must not anchor to a clock read taken before the hit"
         );
     }
 }

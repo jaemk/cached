@@ -22,6 +22,35 @@
   metadata: `()` for `LruCache` / `ExpiringLruCache`, `Option<Instant>` for `LruTtlCache`
   (exposed via `CacheValue::expires_at`; `None` means never expires). `LruTtlCache` no longer
   leaks bare `(Option<Instant>, V)` tuples. `key_order` is unchanged.
+- `cache_set` over an existing key now promotes that key to most-recently-used. Previously the
+  value was replaced in place and the entry kept its position in the eviction order. This
+  affects `LruCache`, `LruTtlCache`, `ExpiringLruCache`, `ShardedLruCache`, `ShardedLruTtlCache`,
+  and `ShardedExpiringLruCache`, and it changes which entry a capacity eviction selects in
+  overwrite-heavy workloads: the overwritten key survives longer and another key becomes the
+  victim. It also resolves a divergence on `ShardedLruTtlCache` / `ShardedExpiringLruCache`,
+  where configuring an `on_evict` callback changed eviction order because the callback branch
+  promoted an overwritten entry and the no-callback branch did not; both branches now promote.
+  `cache_peek`, `cache_peek_with_expiry_status`, and `cache_contains` remain non-promoting, and
+  inserting a new key is unchanged. There is no direct substitute for the old behavior: no
+  public API writes a value without touching recency.
+- `TtlSortedCache`'s `get_or_set` family (sync infallible, sync try, async infallible, async
+  try) no longer removes an expired entry before running the initializer. A cancelled or
+  panicking initializer now leaves the expired entry in place and fires no `on_evict`; on
+  success `on_evict` fires after the initializer rather than before. All four variants now
+  agree with each other and with `TtlCache` / `LruTtlCache`.
+- `TtlSortedCache` reuses the stored key when overwriting an existing entry, so `on_evict` and
+  `cache_remove_entry` report the first-inserted key rather than the most recent one. Matches
+  `HashMap::insert`. Observable only for key types whose `Eq` ignores part of the payload.
+- `ExpiringLruCache::cache_set` fires `on_evict` with the stored key rather than the caller's
+  key, matching `LruTtlCache`. Observable only for key types whose `Eq` ignores part of the
+  payload; it also removes an unconditional key clone from every set.
+- `TtlSortedCache::retain_latest` counts an eviction before firing `on_evict`, so a panicking
+  callback can no longer remove an entry without counting it. Matches `evict` and `retain`.
+- `ShardedTtlCache` and `ShardedLruTtlCache` decide expiry against a clock sample taken before
+  the shard lock is acquired. Under contention, an entry that crosses its expiry while the
+  caller queues for the lock is judged live: `cache_set` returns `Some(old)` with no eviction
+  and no `on_evict`, where previously the clock was re-read under the lock. This stays within
+  the documented lazy-expiry contract, which makes no promise of prompt removal.
 
 ### Added
 
@@ -64,6 +93,16 @@
   trait method) -- see `specs/traits-concurrent.md`.
 - `TtlSortedCache::capacity() -> Option<usize>`: the configured size bound (`None` when
   unbounded), plus the missing `doc(alias = "capacity")` on `TtlSortedCacheBuilder::max_size`.
+
+### Changed
+
+- The in-memory and sharded stores are faster, with no change to the documented contracts
+  beyond the behavior changes listed under Breaking Changes above. The sharded stores resolve
+  a read hit in one hash lookup instead of two, count evictions per shard rather than through a
+  shared striped counter, and cache the host's CPU topology instead of probing it on every
+  construction. The LRU-family and expiry-aware stores sweep in one pass instead of collecting
+  keys first, and the TTL stores sample the clock once per operation instead of once per entry
+  examined. `ExpiringCache` is 48 bytes plus two heap buffers smaller per instance.
 
 ### Fixed
 
