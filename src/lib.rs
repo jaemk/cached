@@ -293,6 +293,25 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
   counting, LRU promotion, or TTL renewal).
 
+**Performance**
+
+v3 reworks the hot paths of the in-memory and sharded stores. Steady-state `O(1)` reads and
+capacity-bounded inserts are unchanged; the wins concentrate in a few paths (measured with
+`cargo bench --bench cache_benches`, so the exact figures are hardware- and workload-dependent):
+
+- Overwriting an existing key with `cache_set` reuses the stored key instead of re-cloning it.
+  On the timed stores this is roughly 10-30% faster, and the gain grows with key clone cost, so
+  `String`-keyed caches benefit most.
+- Bulk eviction and retention (`evict`, `retain`, `retain_latest`) and the key/iteration order
+  helpers now sweep in a single pass instead of collecting keys first, up to about 2x faster at
+  10k entries. TTL stores also sample the clock once per operation rather than once per entry.
+- Single-threaded `cache_get` hits on the sharded LRU and expiring-LRU variants resolve in one
+  hash lookup instead of two, about 5-15% faster.
+
+One deliberate tradeoff comes with the `cache_set` recency change (see the migration guide): an
+overwrite now promotes the key to most-recently-used, which adds a small cost on stores with cheap
+`Copy` keys where there is no key clone to save.
+
 **Per-Value Expiry via the `Expires` Trait**
 
 While standard timed stores (`TtlCache`, `LruTtlCache`, `TtlSortedCache`) enforce a single, global Time-To-Live (TTL) duration applied to all entries in the cache, [`ExpiringLruCache`] and [`ExpiringCache`] let each individual value determine its own expiration. This is accomplished by storing values that implement the [`Expires`] trait.
