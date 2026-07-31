@@ -787,10 +787,12 @@ where
         let removed = guard.pop_raw(k);
         drop(guard);
         if let Some((ref ek, ref entry)) = removed {
+            // Count BEFORE notifying: a panicking callback must never leave an
+            // entry removed-but-uncounted.
+            shard.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(cb) = &self.inner.on_evict {
                 cb(ek, &entry.value);
             }
-            shard.evictions.fetch_add(1, Ordering::Relaxed);
         }
         shard.misses.fetch_add(1, Ordering::Relaxed);
         Ok(None)
@@ -829,10 +831,12 @@ where
             // A displaced expired value is filtered from the return (matching cache_remove and
             // the single-owner TTL stores); fire on_evict and count an eviction for it.
             Some((key, entry, true)) => {
+                // Count BEFORE notifying: a panicking callback must never leave an
+                // entry removed-but-uncounted.
+                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 if let (Some(on_evict), Some(key)) = (&self.inner.on_evict, &key) {
                     on_evict(key, &entry.value);
                 }
-                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
             Some((_, entry, false)) => Ok(Some(entry.value)),

@@ -684,10 +684,12 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         let doomed = self.doomed_indices(&mut keep);
         for index in doomed {
             let (key, value) = self.remove_index(index);
+            // Count BEFORE notifying: a panicking callback must never leave an
+            // entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&key, &value);
             }
-            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -948,10 +950,12 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruCache<K, V, S>
     {
         let removed = self.pop_raw(k);
         if let Some((ref key, ref value)) = removed {
+            // Count BEFORE notifying: a panicking callback must never leave an
+            // entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(key, value);
             }
-            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         removed
     }
@@ -2002,6 +2006,27 @@ mod tests {
     }
 
     #[test]
+    fn cache_remove_entry_with_panicking_on_evict_still_counts_eviction() {
+        // The entry is popped and counted BEFORE `on_evict` runs, so a panicking
+        // callback must not leave the removed entry uncounted.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_remove_entry(&1u32)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(c.cache_get(&1u32), None, "entry must still be removed");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
     fn cache_remove_entry_increments_eviction_counter() {
         let mut c = LruCache::builder().max_size(4).build().unwrap();
         c.cache_set(1u32, 10u32);
@@ -2585,10 +2610,10 @@ mod tests {
 
     #[test]
     fn retain_with_panicking_on_evict_leaves_cache_consistent() {
-        // The rewrite removes the entry BEFORE notifying, so a panicking callback can
-        // never leave an entry half-removed. The remaining doomed entries stay (the
-        // loop unwinds) and `evictions` is not credited for the panicking entry --
-        // both match the pre-rewrite `cache_remove` loop.
+        // The entry is removed AND counted BEFORE notifying, so a panicking callback
+        // can never leave an entry half-removed or removed-but-uncounted. The
+        // remaining doomed entries stay (the loop unwinds), but `evictions` IS
+        // credited for the panicking entry since counting happens before the call.
         use std::panic::{AssertUnwindSafe, catch_unwind};
         use std::sync::{Arc, Mutex};
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2616,8 +2641,8 @@ mod tests {
         assert_eq!(c.key_order(), vec![4, 2, 1, 0]);
         assert_eq!(
             c.cache_evictions(),
-            Some(0),
-            "evictions is credited after the callback, so a panicking callback skips it"
+            Some(1),
+            "evictions is credited BEFORE the callback, so a panicking callback still counts"
         );
         // No entry is both removed and still present.
         assert_store_and_order_agree(&c);
@@ -2626,7 +2651,7 @@ mod tests {
         c.retain(|k, _v| k % 2 == 0);
         assert_eq!(*seen.lock().unwrap(), vec![(3, 30), (1, 10)]);
         assert_eq!(c.key_order(), vec![4, 2, 0]);
-        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(c.cache_evictions(), Some(2));
         assert_store_and_order_agree(&c);
     }
 

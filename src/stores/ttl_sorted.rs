@@ -881,10 +881,12 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             // it is dropped silently from the caller's view; fire `on_evict` and count an
             // eviction so cleanup and metrics stay consistent with the other removal paths.
             Some(entry) if entry.is_expired_at(now) => {
+                // Count BEFORE notifying: a panicking callback must never leave
+                // an entry removed-but-uncounted.
+                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 if let Some(on_evict) = &self.on_evict {
                     on_evict(entry.key.0.as_ref(), &entry.value);
                 }
-                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 None
             }
             Some(entry) => Some(entry.value),
@@ -955,10 +957,12 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     {
         if let Some(entry) = self.map.remove(key) {
             self.keys.remove(&entry.as_stamped());
+            // Count BEFORE notifying: a panicking callback must never leave an
+            // entry removed-but-uncounted.
+            self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(entry.key.0.as_ref(), &entry.value);
             }
-            self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
@@ -1155,10 +1159,12 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
                 self.keys.remove(&removed.as_stamped());
                 // The stored key `Arc` derefs to `&K` directly: no clone is needed to hand the
                 // callback a reference (and the clone previously ran even without a callback).
+                // Count BEFORE notifying: a panicking callback must never leave an entry
+                // removed-but-uncounted.
+                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 if let Some(on_evict) = &self.on_evict {
                     on_evict(removed.key.0.as_ref(), &removed.value);
                 }
-                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 if expired { None } else { Some(removed.value) }
             }
         }
@@ -1174,10 +1180,12 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> Cached<K, V> for TtlSortedCa
             Some(removed) => {
                 self.keys.remove(&removed.as_stamped());
                 let stored_k = (*removed.key.0).clone();
+                // Count BEFORE notifying: a panicking callback must never leave an
+                // entry removed-but-uncounted.
+                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 if let Some(on_evict) = &self.on_evict {
                     on_evict(&stored_k, &removed.value);
                 }
-                self.evictions.fetch_add(1, AtomicOrdering::Relaxed);
                 Some((stored_k, removed.value))
             }
         }
@@ -2371,6 +2379,90 @@ mod test {
 
         let _ = c.cache_remove_entry(&999u32);
         assert_eq!(count.load(Ordering::Relaxed), 1, "no fire for absent key");
+    }
+
+    #[test]
+    fn cache_remove_entry_with_panicking_on_evict_still_counts_eviction() {
+        // The entry is popped from the map and index and counted BEFORE `on_evict`
+        // runs, so a panicking callback must not leave the removed entry uncounted.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_remove_entry(&1u32)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(c.cache_get(&1u32), None, "entry must still be removed");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
+    fn cache_remove_with_panicking_on_evict_still_counts_eviction() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_remove(&1u32)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(c.cache_get(&1u32), None, "entry must still be removed");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
+    fn cache_get_lazy_sweep_with_panicking_on_evict_still_counts_eviction() {
+        // `remove_expired_entry` (the lazy-sweep path used by `cache_get`/`cache_get_mut`)
+        // removes the entry from the map and index and counts the eviction BEFORE
+        // `on_evict` runs.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let _ = c.cache_get(&1u32);
+        }));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
+    fn cache_set_over_expired_with_panicking_on_evict_still_counts_eviction() {
+        // `set_inner`'s displaced-expired-value branch counts BEFORE notifying.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_set(1u32, 20u32)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
     }
 
     #[test]

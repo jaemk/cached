@@ -44,8 +44,14 @@
 - `ExpiringLruCache::cache_set` fires `on_evict` with the stored key rather than the caller's
   key, matching `LruTtlCache`. Observable only for key types whose `Eq` ignores part of the
   payload; it also removes an unconditional key clone from every set.
-- `TtlSortedCache::retain_latest` counts an eviction before firing `on_evict`, so a panicking
-  callback can no longer remove an entry without counting it. Matches `evict` and `retain`.
+- Every in-memory store now counts an eviction before firing `on_evict`, on every removal path
+  (`evict`, `retain`, `cache_remove` / `cache_remove_entry`, lazy expiry sweeps in `cache_get`,
+  `cache_set` over an expired entry, capacity evictions, and the `get_or_set` families), so a
+  panicking callback can no longer remove an entry without counting it. Previously `LruCache`,
+  `TtlCache`, `LruTtlCache`, `ExpiringCache`, and `ExpiringLruCache` counted after the callback
+  returned on most of these paths, and a few `TtlSortedCache` / sharded-store paths did too.
+  Observable only when `on_evict` panics (or, on the sharded stores, when a callback reads
+  metrics concurrently). `TtlSortedCache::retain_latest` already counted before firing.
 - `ShardedTtlCache` and `ShardedLruTtlCache` decide expiry against a clock sample taken before
   the shard lock is acquired. Under contention, an entry that crosses its expiry while the
   caller queues for the lock is judged live: `cache_set` returns `Some(old)` with no eviction
@@ -133,8 +139,8 @@
 - docs.rs feature badges on the `async_core`-gated `CachedGetOrSetAsync` and
   `ConcurrentCachedAsync` impls for the in-memory and sharded stores (and `HashMap`), which
   previously rendered as unconditionally available.
-- `#[cached]` on a function whose return type does not implement `Clone` now emits a clear
-  `Clone`-bound error spanned at the return type, ahead of the opaque errors from the
+- `#[cached]` and `#[once]` on a function whose return type does not implement `Clone` now emit
+  a clear `Clone`-bound error spanned at the return type, ahead of the opaque errors from the
   generated internals.
 
 [#64]: https://github.com/jaemk/cached/issues/64

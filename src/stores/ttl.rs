@@ -290,10 +290,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
                 if Self::entry_live_at(old.expires_at, now) {
                     Some(old.value)
                 } else {
+                    // Count BEFORE notifying: a panicking callback must never leave
+                    // an entry removed-but-uncounted.
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(occupied.key(), &old.value);
                     }
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
                     None
                 }
             }
@@ -353,10 +355,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
             if entry.expires_at.is_none_or(|t| now < t) {
                 true
             } else {
+                // Count BEFORE notifying: a panicking callback must never leave
+                // an entry removed-but-uncounted.
+                evictions.fetch_add(1, Ordering::Relaxed);
                 if let Some(on_evict) = on_evict {
                     on_evict(key, &entry.value);
                 }
-                evictions.fetch_add(1, Ordering::Relaxed);
                 removed += 1;
                 false
             }
@@ -382,10 +386,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
         self.store.retain(|key, entry| {
             let expired = !Self::entry_live_at(entry.expires_at, now);
             if expired || !keep(key, &entry.value) {
+                // Count BEFORE notifying: a panicking callback must never leave
+                // an entry removed-but-uncounted.
+                evictions.fetch_add(1, Ordering::Relaxed);
                 if let Some(on_evict) = on_evict {
                     on_evict(key, &entry.value);
                 }
-                evictions.fetch_add(1, Ordering::Relaxed);
                 false
             } else {
                 true
@@ -425,10 +431,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         };
         self.misses.fetch_add(1, Ordering::Relaxed);
         if expired_present && let Some((k, entry)) = self.store.remove_entry(key) {
+            // Count BEFORE notifying: a panicking callback must never leave
+            // an entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&k, &entry.value);
             }
-            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         None
     }
@@ -457,10 +465,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         };
         self.misses.fetch_add(1, Ordering::Relaxed);
         if expired_present && let Some((k, entry)) = self.store.remove_entry(key) {
+            // Count BEFORE notifying: a panicking callback must never leave
+            // an entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&k, &entry.value);
             }
-            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         None
     }
@@ -485,10 +495,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                     // so firing on_evict / counting here would double-fire when the
                     // next call finally evicts the same physical entry (EXP-3).
                     let val = f();
+                    // Count BEFORE notifying: a panicking callback must never leave
+                    // an entry removed-but-uncounted.
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(occupied.key(), &occupied.get().value);
                     }
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now);
                     occupied.insert(TimedEntry {
@@ -537,10 +549,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                     // firing on_evict / counting here would double-fire when the
                     // next call finally evicts the same physical entry (EXP-3).
                     let val = f()?;
+                    // Count BEFORE notifying: a panicking callback must never leave
+                    // an entry removed-but-uncounted.
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
                     if let Some(on_evict) = &self.on_evict {
                         on_evict(occupied.key(), &occupied.get().value);
                     }
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now);
                     occupied.insert(TimedEntry {
@@ -589,10 +603,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some((stored_k, entry)) = self.store.remove_entry(k) {
+            // Count BEFORE notifying: a panicking callback must never leave
+            // an entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&stored_k, &entry.value);
             }
-            self.evictions.fetch_add(1, Ordering::Relaxed);
             if Self::entry_live(entry.expires_at) {
                 Some(entry.value)
             } else {
@@ -609,10 +625,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some((stored_k, entry)) = self.store.remove_entry(k) {
+            // Count BEFORE notifying: a panicking callback must never leave
+            // an entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&stored_k, &entry.value);
             }
-            self.evictions.fetch_add(1, Ordering::Relaxed);
             Some((stored_k, entry.value))
         } else {
             None
@@ -817,10 +835,12 @@ where
                         // expiry after the factory resolves so a slow factory does
                         // not eat into the fresh entry's TTL (CORE-3).
                         let val = f().await;
+                        // Count BEFORE notifying: a panicking callback must never
+                        // leave an entry removed-but-uncounted.
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
                         if let Some(on_evict) = &self.on_evict {
                             on_evict(occupied.key(), &occupied.get().value);
                         }
-                        self.evictions.fetch_add(1, Ordering::Relaxed);
                         let now = Instant::now();
                         let expires_at = Self::compute_expires_at(self.ttl, now);
                         occupied.insert(TimedEntry {
@@ -878,10 +898,12 @@ where
                         // (CORE-3). On `Err` the expired entry is left in place
                         // and nothing is fired, so the next call evicts it once.
                         let val = f().await?;
+                        // Count BEFORE notifying: a panicking callback must never
+                        // leave an entry removed-but-uncounted.
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
                         if let Some(on_evict) = &self.on_evict {
                             on_evict(occupied.key(), &occupied.get().value);
                         }
-                        self.evictions.fetch_add(1, Ordering::Relaxed);
                         let now = Instant::now();
                         let expires_at = Self::compute_expires_at(self.ttl, now);
                         occupied.insert(TimedEntry {
@@ -1790,6 +1812,96 @@ mod tests {
             c.cache_peek(&2),
             Some(&20),
             "live entry kept by the predicate must survive"
+        );
+    }
+
+    #[test]
+    fn retain_with_panicking_on_evict_still_counts_eviction() {
+        // The entry is removed from the map and counted BEFORE `on_evict` runs
+        // (`HashMap::retain` returns `false`, dropping the entry, only after the
+        // closure -- but the counter increment happens before the callback inside
+        // that closure), so a panicking callback must not leave the eviction
+        // uncounted.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        let r = catch_unwind(AssertUnwindSafe(|| c.retain(|_, _| false)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
+    fn cache_remove_entry_with_panicking_on_evict_still_counts_eviction() {
+        // The entry is popped from the map and counted BEFORE `on_evict` runs, so a
+        // panicking callback must not leave the removed entry uncounted.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_remove_entry(&1u32)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(c.cache_peek(&1), None, "entry must still be removed");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
+    fn cache_get_lazy_sweep_with_panicking_on_evict_still_counts_eviction() {
+        // `cache_get`'s lazy-sweep path removes the expired entry from the map and
+        // counts the eviction BEFORE `on_evict` runs, so a panicking callback must
+        // not leave the swept entry uncounted.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let _ = c.cache_get(&1u32);
+        }));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
+        );
+    }
+
+    #[test]
+    fn cache_set_over_expired_with_panicking_on_evict_still_counts_eviction() {
+        // Overwriting an already-expired entry fires `on_evict` for the displaced
+        // value; `set_entry` counts the eviction BEFORE notifying, so a panicking
+        // callback must not leave it uncounted.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(|_k: &u32, _v: &u32| panic!("boom"))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let r = catch_unwind(AssertUnwindSafe(|| c.cache_set(1, 20)));
+        assert!(r.is_err(), "on_evict should have panicked");
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "eviction must be counted even though on_evict panicked"
         );
     }
 

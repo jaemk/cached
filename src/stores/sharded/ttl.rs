@@ -493,6 +493,23 @@ where
     /// not yet visited will have that entry filtered by the same in-flight `retain`.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
         let now = Instant::now();
+        let Some(cb) = &self.inner.on_evict else {
+            // No callback: only the removed *count* is observable, so drop the filtered-out
+            // entries in place via `retain` and take the length delta -- no key clones, no
+            // `Vec` (matching `evict`'s no-callback fast path).
+            for shard in self.inner.shards.iter() {
+                let removed = {
+                    let mut guard = shard.lock.write();
+                    let before = guard.len();
+                    guard.retain(|k, entry| !expired_at(entry, now) && keep(k, &entry.value));
+                    before - guard.len()
+                };
+                if removed > 0 {
+                    shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
+                }
+            }
+            return;
+        };
         for shard in self.inner.shards.iter() {
             // Collect under the write lock, fire callbacks after releasing it.
             let removed: Vec<(K, TimedEntry<V>)> = {
@@ -505,10 +522,8 @@ where
                 shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
-                if let Some(cb) = &self.inner.on_evict {
-                    for (k, entry) in &removed {
-                        cb(k, &entry.value);
-                    }
+                for (k, entry) in &removed {
+                    cb(k, &entry.value);
                 }
             }
         }
@@ -741,10 +756,12 @@ where
             // A displaced expired value is filtered from the return (matching cache_remove and
             // the single-owner TTL stores); fire on_evict and count an eviction for it.
             Some((key, entry, true)) => {
+                // Count BEFORE notifying: a panicking callback must never leave an
+                // entry removed-but-uncounted.
+                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
                     cb(key, &entry.value);
                 }
-                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
             Some((_, entry, false)) => Ok(Some(entry.value)),

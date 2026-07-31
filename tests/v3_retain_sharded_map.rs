@@ -389,6 +389,61 @@ fn sharded_ttl_retain_keeps_never_expiring_entries() {
     assert_eq!(fired.len(), 16);
 }
 
+// No `on_evict` configured: exercises the in-place `HashMap::retain` fast path (no `Vec`
+// collection, no key clones) added alongside `evict`'s existing no-callback fast path.
+// Covers predicate filtering, expired-entry removal regardless of the predicate, and
+// eviction counting, all without a callback to fire.
+#[cfg(feature = "time_stores")]
+#[test]
+fn sharded_ttl_retain_no_callback_fast_path_filters_and_removes_expired() {
+    let c = ShardedTtlCache::<u32, u32>::builder()
+        .shards(4)
+        .ttl(Duration::from_millis(30))
+        .build()
+        .expect("build ShardedTtlCache");
+
+    for i in 0..16u32 {
+        c.set(i, i * 10);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert!(
+        populated_shards(&c.shard_sizes()) >= 2,
+        "cross-shard precondition: expired entries must span at least two shards, got {:?}",
+        c.shard_sizes()
+    );
+
+    // Long TTL for the live cohort; only even keys are kept by the predicate.
+    c.set_ttl(Duration::from_secs(3600));
+    for i in 100..116u32 {
+        c.set(i, i * 10);
+    }
+    let before = c
+        .metrics()
+        .evictions
+        .expect("ShardedTtlCache tracks evictions");
+
+    c.retain(|k, _v| k % 2 == 0);
+
+    // The 16 expired entries are gone regardless of the predicate; among the 16 live
+    // entries (100..116), only the even keys survive the predicate.
+    assert_eq!(c.len(), 8, "expired entries swept, odd live keys filtered");
+    for i in 0..16u32 {
+        assert_eq!(c.peek(&i), None, "expired key {i} must be gone");
+    }
+    for i in 100..116u32 {
+        let expected = if i % 2 == 0 { Some(i * 10) } else { None };
+        assert_eq!(c.peek(&i), expected, "live key {i} survivor mismatch");
+    }
+    assert_eq!(
+        c.metrics()
+            .evictions
+            .expect("ShardedTtlCache tracks evictions")
+            - before,
+        24,
+        "16 expired + 8 predicate-filtered removals all count as evictions"
+    );
+}
+
 // ── ShardedExpiringCache ─────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -574,6 +629,61 @@ fn sharded_expiring_retain_is_visible_through_a_shared_clone_handle() {
     assert_eq!(c.len(), 4, "the original handle observes the same store");
     assert_eq!(c.peek(&0), Some(live(0)));
     assert_eq!(c.peek(&31), None);
+}
+
+// No `on_evict` configured: exercises the in-place `HashMap::retain` fast path (no `Vec`
+// collection, no key clones) added alongside `evict`'s existing no-callback fast path.
+// Covers predicate filtering, expired-entry removal regardless of the predicate, and
+// eviction counting, all without a callback to fire.
+#[test]
+fn sharded_expiring_retain_no_callback_fast_path_filters_and_removes_expired() {
+    let c = ShardedExpiringCache::<u32, Val>::builder()
+        .shards(4)
+        .build()
+        .expect("build ShardedExpiringCache");
+
+    // Even keys expired, odd keys live — both cohorts spread over the shards.
+    for i in 0..32u32 {
+        if i % 2 == 0 {
+            c.set(i, dead(i * 10));
+        } else {
+            c.set(i, live(i * 10));
+        }
+    }
+    assert!(
+        populated_shards(&c.shard_sizes()) >= 2,
+        "cross-shard precondition: entries must span at least two shards, got {:?}",
+        c.shard_sizes()
+    );
+    let before = c
+        .metrics()
+        .evictions
+        .expect("ShardedExpiringCache tracks evictions");
+
+    // Predicate additionally filters out live keys below 100 (i.e. i < 10).
+    c.retain(|_k, v| v.v >= 100);
+
+    // Expired (even) keys are gone regardless of the predicate; among the 16 live (odd)
+    // keys, only those with value >= 100 (i >= 11, odd) survive the predicate.
+    let expected_survivors = (0..32u32).filter(|i| i % 2 != 0 && i * 10 >= 100).count();
+    assert_eq!(c.len(), expected_survivors);
+    for i in 0..32u32 {
+        let expected = if i % 2 != 0 && i * 10 >= 100 {
+            Some(live(i * 10))
+        } else {
+            None
+        };
+        assert_eq!(c.peek(&i), expected, "key {i} survivor mismatch");
+    }
+    let expected_removed = 32 - expected_survivors;
+    assert_eq!(
+        c.metrics()
+            .evictions
+            .expect("ShardedExpiringCache tracks evictions")
+            - before,
+        expected_removed as u64,
+        "expired + predicate-filtered removals all count as evictions"
+    );
 }
 
 // ── Zero-removal fast paths: empty cache, and a hot shard alongside empty shards ────
@@ -1342,6 +1452,220 @@ fn sharded_expiring_retain_races_concurrent_set_get_evict_without_double_fire() 
         sizes.iter().sum::<usize>(),
         c.len(),
         "post-race shard sizes must still sum to the total length"
+    );
+}
+
+// ── Concurrency: the NO-callback retain fast path racing set/get/evict ─────────────
+//
+// The two race tests above build the cache WITH an `on_evict`, so they only exercise the
+// callback branch of `retain` (collect-under-lock, fire-after-release). The no-callback
+// fast path is a *different* code path: it drops filtered entries in place via
+// `HashMap::retain` and counts the length delta (`before - after`) under the same write
+// lock, with no `Vec` collection and no callback. These tests drive that path under the
+// same contention (concurrent set/get/evict) and certify:
+//   * no torn shard / no lost entries -- `shard_sizes().sum() == len()` post-race, and
+//   * exact eviction counting with no double-count -- a final, uncontended drain removes
+//     every remaining entry and bumps `metrics().evictions` by exactly that many. A
+//     `before - after` delta that ever over- or under-counted (e.g. if the subtraction
+//     were moved outside the write lock, or the retain double-visited an entry) would
+//     break this exact-count check.
+
+#[cfg(feature = "time_stores")]
+#[test]
+fn sharded_ttl_retain_no_callback_races_concurrent_set_get_evict() {
+    const SHARDS: usize = 4;
+    const KEYS: u32 = 16;
+    const ROUNDS: u32 = 150;
+    const WRITERS: usize = 3;
+    const READERS: usize = 3;
+
+    let next_id = Arc::new(AtomicU64::new(0));
+    // No `on_evict`: this exercises the in-place `HashMap::retain` + length-delta fast path.
+    let c = Arc::new(
+        ShardedTtlCache::<u32, u64>::builder()
+            .shards(SHARDS)
+            .ttl(Duration::from_millis(3))
+            .build()
+            .expect("build ShardedTtlCache"),
+    );
+
+    let gate = Arc::new(Barrier::new(WRITERS + READERS + 1));
+    let mut handles = Vec::new();
+
+    for _ in 0..WRITERS {
+        let c = c.clone();
+        let gate = gate.clone();
+        let next_id = next_id.clone();
+        handles.push(std::thread::spawn(move || {
+            gate.wait();
+            for r in 0..ROUNDS {
+                let k = r % KEYS;
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                c.set(k, id);
+            }
+        }));
+    }
+    for _ in 0..READERS {
+        let c = c.clone();
+        let gate = gate.clone();
+        handles.push(std::thread::spawn(move || {
+            gate.wait();
+            for r in 0..ROUNDS {
+                let k = r % KEYS;
+                let _ = c.get(&k);
+            }
+        }));
+    }
+    {
+        let c = c.clone();
+        let gate = gate.clone();
+        handles.push(std::thread::spawn(move || {
+            gate.wait();
+            for r in 0..ROUNDS {
+                c.retain(|k, _v| (*k + r) % 2 == 0);
+                let _ = c.evict();
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("worker thread must not panic");
+    }
+
+    // No torn shard: shard_sizes() (each acquired independently) must still sum to len().
+    let sizes = c.shard_sizes();
+    assert_eq!(
+        sizes.iter().sum::<usize>(),
+        c.len(),
+        "post-race shard sizes must still sum to the total length"
+    );
+
+    // Exact no-callback counting: sweep expired first (deterministic now that the workers
+    // have joined), then a keep-nothing retain must remove exactly the live remainder and
+    // bump the eviction counter by exactly that many -- no double-count, no undercount.
+    c.retain(|_k, _v| true);
+    let live = c.len();
+    let before_drain = c
+        .metrics()
+        .evictions
+        .expect("ShardedTtlCache tracks evictions");
+    c.retain(|_k, _v| false);
+    assert_eq!(c.len(), 0, "keep-nothing retain must empty the cache");
+    assert_eq!(
+        c.metrics()
+            .evictions
+            .expect("ShardedTtlCache tracks evictions")
+            - before_drain,
+        live as u64,
+        "the no-callback fast path must count exactly one eviction per drained entry"
+    );
+    let sizes = c.shard_sizes();
+    assert_eq!(
+        sizes.iter().sum::<usize>(),
+        0,
+        "drained cache has empty shards"
+    );
+}
+
+#[test]
+fn sharded_expiring_retain_no_callback_races_concurrent_set_get_evict() {
+    const SHARDS: usize = 4;
+    const KEYS: u32 = 16;
+    const ROUNDS: u32 = 150;
+    const WRITERS: usize = 3;
+    const READERS: usize = 3;
+
+    let next_id = Arc::new(AtomicU64::new(0));
+    // No `on_evict`: this exercises the in-place `HashMap::retain` + length-delta fast path.
+    let c = Arc::new(
+        ShardedExpiringCache::<u32, Val>::builder()
+            .shards(SHARDS)
+            .build()
+            .expect("build ShardedExpiringCache"),
+    );
+
+    let gate = Arc::new(Barrier::new(WRITERS + READERS + 1));
+    let mut handles = Vec::new();
+
+    for _ in 0..WRITERS {
+        let c = c.clone();
+        let gate = gate.clone();
+        let next_id = next_id.clone();
+        handles.push(std::thread::spawn(move || {
+            gate.wait();
+            for r in 0..ROUNDS {
+                let k = r % KEYS;
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                // Roughly a third of inserts are born already-expired, so lazy-expiry
+                // removal (via cache_get), evict(), and retain()'s forced expired-removal
+                // all race to remove the very same entries.
+                if id.is_multiple_of(3) {
+                    c.set(k, dead(id as u32));
+                } else {
+                    c.set(k, live(id as u32));
+                }
+            }
+        }));
+    }
+    for _ in 0..READERS {
+        let c = c.clone();
+        let gate = gate.clone();
+        handles.push(std::thread::spawn(move || {
+            gate.wait();
+            for r in 0..ROUNDS {
+                let k = r % KEYS;
+                let _ = c.get(&k);
+            }
+        }));
+    }
+    {
+        let c = c.clone();
+        let gate = gate.clone();
+        handles.push(std::thread::spawn(move || {
+            gate.wait();
+            for r in 0..ROUNDS {
+                c.retain(|k, _v| (*k + r) % 2 == 0);
+                let _ = c.evict();
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("worker thread must not panic");
+    }
+
+    // No torn shard: shard_sizes() (each acquired independently) must still sum to len().
+    let sizes = c.shard_sizes();
+    assert_eq!(
+        sizes.iter().sum::<usize>(),
+        c.len(),
+        "post-race shard sizes must still sum to the total length"
+    );
+
+    // Exact no-callback counting: sweep already-expired values first (deterministic now
+    // that the workers have joined), then a keep-nothing retain must remove exactly the
+    // live remainder and bump the eviction counter by exactly that many.
+    c.retain(|_k, _v| true);
+    let live = c.len();
+    let before_drain = c
+        .metrics()
+        .evictions
+        .expect("ShardedExpiringCache tracks evictions");
+    c.retain(|_k, _v| false);
+    assert_eq!(c.len(), 0, "keep-nothing retain must empty the cache");
+    assert_eq!(
+        c.metrics()
+            .evictions
+            .expect("ShardedExpiringCache tracks evictions")
+            - before_drain,
+        live as u64,
+        "the no-callback fast path must count exactly one eviction per drained entry"
+    );
+    let sizes = c.shard_sizes();
+    assert_eq!(
+        sizes.iter().sum::<usize>(),
+        0,
+        "drained cache has empty shards"
     );
 }
 

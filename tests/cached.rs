@@ -91,6 +91,17 @@ fn compile_fail_cached_with_cached_flag_return_type_requires_clone() {
     t.compile_fail("tests/ui/cached_with_cached_flag_return_type_requires_clone.rs");
 }
 
+// Companion to `compile_fail_cached_return_type_requires_clone` for `#[once]`:
+// `#[once]` has the identical `.clone()` failure mode (on cache-set and on a
+// cache hit) as `#[cached]`, so it gets the same return-type `Clone`
+// assertion and must produce the same clear, precisely-spanned diagnostic.
+#[test]
+#[cfg(feature = "proc_macro")]
+fn compile_fail_once_return_type_requires_clone() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/once_return_type_requires_clone.rs");
+}
+
 // One negative trybuild case per *semantic* compile error the macros raise
 // (i.e. errors we define for invalid attribute/signature states). Pure
 // syn-parser pass-through messages for malformed user strings (bad `ty` /
