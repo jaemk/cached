@@ -971,6 +971,56 @@ mod tests {
         );
     }
 
+    // B1 regression: on_evict must receive the STORED key, not the caller's lookup key.
+    // Key types can have fields not covered by Eq/Hash; the stored key and the new key may
+    // differ in those extra fields even though they compare equal.
+    #[test]
+    fn on_evict_receives_stored_key_not_callers_key() {
+        use std::sync::{Arc, Mutex};
+
+        // A key whose Hash/PartialEq use only `id`; `tag` is transparent to equality.
+        #[derive(Clone, Debug)]
+        struct TaggedKey {
+            id: u32,
+            tag: &'static str,
+        }
+        impl PartialEq for TaggedKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.id == other.id
+            }
+        }
+        impl Eq for TaggedKey {}
+        impl std::hash::Hash for TaggedKey {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.id.hash(state);
+            }
+        }
+
+        let evicted_tags: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_tags2 = evicted_tags.clone();
+
+        let mut cache: ExpiringLruCache<TaggedKey, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &TaggedKey, _v: &ExpiredU8| {
+                evicted_tags2.lock().unwrap().push(k.tag);
+            })
+            .build()
+            .unwrap();
+
+        // Insert with tag "a"; value 15 is expired (>10).
+        cache.cache_set(TaggedKey { id: 1, tag: "a" }, 15);
+        // Overwrite with an equal key (same id) but different tag "b".
+        // The displaced entry was stored with tag "a"; on_evict must report "a".
+        cache.cache_set(TaggedKey { id: 1, tag: "b" }, 3);
+
+        let tags = evicted_tags.lock().unwrap();
+        assert_eq!(
+            tags.as_slice(),
+            &["a"],
+            "on_evict must receive the stored key (tag='a'), not the caller's key (tag='b')"
+        );
+    }
+
     #[test]
     fn cache_set_overwrite_promotes_to_mru() {
         // `cache_set` goes through `LruCache::cache_set_returning_entry`, which promotes an

@@ -44,10 +44,15 @@ pub(crate) struct Shard<S> {
     pub misses: AtomicU64,
     /// Per-shard eviction count. Co-located with `hits`/`misses` for the same reason:
     /// a thread bumping this has just taken `lock`, so it already owns this cache line
-    /// exclusively. Consuming stores that currently keep a single process-wide
-    /// `evictions: AtomicU64` in `Arc<Inner>` (contended from every core, and sharing a
-    /// cache line with fields read on every op) should migrate to summing this field
-    /// across shards instead.
+    /// exclusively.
+    ///
+    /// Not every consuming store uses this field. The ttl/expiring family (sharded ttl,
+    /// expiring, lru_ttl, expiring_lru) counts shard-level evictions here and sums the
+    /// field across shards for its metrics. Sharded lru instead counts evictions via the
+    /// inner `LruCache`'s own per-store counter (read back through `cache_evictions()`),
+    /// and sharded unbound has no eviction concept at all; for those two the field is
+    /// intentionally left unused. Keeping one shared field (rather than a type-level split
+    /// of `Shard`) is a deliberate simplification.
     pub evictions: AtomicU64,
 }
 
@@ -62,6 +67,14 @@ impl<S> Shard<S> {
     }
 }
 
+/// The default shard count: `available_parallelism() * 4`, clamped to `[8, 1024]` and rounded
+/// up to a power of two.
+///
+/// The host CPU topology is sampled exactly once per process (memoized in a `OnceLock`) on the
+/// first call, then reused for every cache built afterward. A later change to the effective CPU
+/// count -- for example a cgroup/container CPU-quota adjustment made after the first sample --
+/// does not affect the shard count of subsequently built caches; they all see the value latched
+/// at first call.
 pub(crate) fn default_shard_count() -> usize {
     static DEFAULT_SHARD_COUNT: OnceLock<usize> = OnceLock::new();
     *DEFAULT_SHARD_COUNT.get_or_init(|| {
@@ -92,7 +105,6 @@ pub(crate) fn default_shard_count() -> usize {
 ///
 /// An explicit `.shards(n)` on a builder remains authoritative; this helper is only consulted
 /// on the *default* (no explicit shard count given) path.
-#[allow(dead_code)] // consumed by sibling shards migrating their builders' default path
 pub(crate) fn default_shard_count_for_capacity(max_size: Option<usize>) -> usize {
     match max_size {
         Some(n) => (n / 16).next_power_of_two().clamp(1, default_shard_count()),

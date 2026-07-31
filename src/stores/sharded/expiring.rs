@@ -204,7 +204,10 @@ where
 
     /// Insert a key-value pair and return the previous value, if any.
     ///
-    /// This is the infallible ergonomic API for the concrete type.
+    /// This is the infallible ergonomic API for the concrete type. Unlike the trait's
+    /// [`cache_set`](ConcurrentCached::cache_set) (which returns `Result<Option<V>, _>`), this
+    /// inherent form returns the displaced `Option<V>` directly, so `.set(k, v).unwrap()` panics
+    /// on a fresh insert -- there is no prior value to unwrap.
     pub fn set(&self, k: K, v: V) -> Option<V> {
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
@@ -654,10 +657,7 @@ where
 
     /// Efficient peek-based contains: acquires a read lock, does not clone the value,
     /// and does not record hit/miss metrics. Returns `true` only for live (not expired) entries.
-    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        Self: Sized,
-    {
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
         let shard = self.shard_of(k);
         Ok(shard.lock.read().get(k).is_some_and(|v| !v.is_expired()))
     }

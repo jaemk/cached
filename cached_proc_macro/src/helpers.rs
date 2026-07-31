@@ -380,8 +380,9 @@ pub(super) fn find_value_type(
 /// Without this, a non-`Clone` return type only fails deep inside the
 /// generated cache internals (the `.clone()` call in the `cache_set` block, or
 /// the `.to_owned()` call on a cache hit), producing a trait-bound error that
-/// points at macro-generated code rather than at the user's return type -
-/// confusing and hard to act on.
+/// points at macro-generated code rather than at the user's return type. This
+/// assertion is emitted ahead of those internals, so its clear,
+/// precisely-spanned error appears first; the opaque ones still follow it.
 ///
 /// The assertion is a local, non-generic-over-`value_ty` helper fn plus a
 /// call that names `value_ty` as its turbofish argument, e.g.
