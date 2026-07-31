@@ -195,7 +195,10 @@ where
 
     /// Insert a key-value pair and return the previous value, if any.
     ///
-    /// This is the infallible ergonomic API for the concrete type.
+    /// This is the infallible ergonomic API for the concrete type. Unlike the trait's
+    /// [`cache_set`](ConcurrentCached::cache_set) (which returns `Result<Option<V>, _>`), this
+    /// inherent form returns the displaced `Option<V>` directly, so `.set(k, v).unwrap()` panics
+    /// on a fresh insert -- there is no prior value to unwrap.
     pub fn set(&self, k: K, v: V) -> Option<V> {
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
@@ -483,10 +486,7 @@ where
 
     /// Efficient peek-based contains: acquires a read lock, does not clone the value,
     /// and does not record hit/miss metrics.
-    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        Self: Sized,
-    {
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
         let shard = self.shard_of(k);
         Ok(shard.lock.read().contains_key(k))
     }
@@ -740,6 +740,21 @@ mod tests {
         assert_eq!(SyncConcurrentCached::cache_set(&c, 1, 100).unwrap(), None);
         assert_eq!(SyncConcurrentCached::cache_get(&c, &1).unwrap(), Some(100));
         assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn default_shard_count_is_plain_default_no_capacity_scaling() {
+        use crate::stores::sharded::default_shard_count;
+        // The unbounded store has no max_size to scale against, so the capacity-derived cap
+        // never applies: the default path keeps the plain default_shard_count().
+        let c = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
+        assert_eq!(c.shards(), default_shard_count());
+        // An explicit .shards(n) still rounds up to a power of two and is authoritative.
+        let c2 = ShardedUnboundCache::<u32, u32>::builder()
+            .shards(10)
+            .build()
+            .unwrap();
+        assert_eq!(c2.shards(), 16);
     }
 
     #[test]

@@ -1415,10 +1415,7 @@ where
     ///
     /// Delegates to [`cache_get`](ConcurrentCached::cache_get): the value is
     /// fetched and deserialized to determine presence.
-    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        Self: Sized,
-    {
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_get(k).map(|v| v.is_some())
     }
 }

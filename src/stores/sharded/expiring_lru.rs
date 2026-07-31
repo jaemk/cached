@@ -13,7 +13,7 @@ use core::future::Future;
 
 use super::{
     CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
-    per_shard_cap_from_total, shard_index,
+    default_shard_count_for_capacity, per_shard_cap_from_total, shard_index,
 };
 use crate::Cached;
 use crate::ConcurrentCacheEvict;
@@ -116,10 +116,13 @@ where
     /// Construct a ready-to-use [`ShardedExpiringLruCache`] holding up to roughly `max_size`
     /// entries total, with the [`DefaultShardHasher`] and a default shard count.
     ///
-    /// Note that the effective total capacity can exceed `max_size` for small values
+    /// Note that the effective total capacity can still exceed `max_size` for small values
     /// because each shard reserves a minimum capacity (see
-    /// [`max_size`](ShardedExpiringLruCacheBuilder::max_size)). For a custom hasher, shard
-    /// count, per-shard cap, or `on_evict`, use [`builder`](Self::builder).
+    /// [`max_size`](ShardedExpiringLruCacheBuilder::max_size)). The default shard count is now
+    /// scaled down for small `max_size` (roughly `max_size / 16` shards, capped by the
+    /// CPU-derived default), so the overshoot is modest -- `max_size = 100` yields 8 shards x 16
+    /// = 128 effective capacity. For a custom hasher, shard count, per-shard cap, or `on_evict`,
+    /// use [`builder`](Self::builder).
     ///
     /// # Panics
     ///
@@ -223,7 +226,10 @@ where
 
     /// Insert a key-value pair and return the previous value, if any.
     ///
-    /// This is the infallible ergonomic API for the concrete type.
+    /// This is the infallible ergonomic API for the concrete type. Unlike the trait's
+    /// [`cache_set`](ConcurrentCached::cache_set) (which returns `Result<Option<V>, _>`), this
+    /// inherent form returns the displaced `Option<V>` directly, so `.set(k, v).unwrap()` panics
+    /// on a fresh insert -- there is no prior value to unwrap.
     pub fn set(&self, k: K, v: V) -> Option<V> {
         ConcurrentCached::cache_set(self, k, v).unwrap()
     }
@@ -767,10 +773,7 @@ where
     /// Efficient peek-based contains: acquires a read lock, does not clone the value, does not
     /// update LRU recency, and does not record hit/miss metrics. Returns `true` only for live
     /// (not expired) entries.
-    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        Self: Sized,
-    {
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
         use crate::CachedPeek;
         let shard = self.shard_of(k);
         Ok(shard
@@ -947,7 +950,12 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     ///
     /// Because each shard reserves a minimum of **16** entries when `shards > 1`, the effective
     /// total capacity is at least `shards * 16` and may **exceed** the requested `max_size` for
-    /// small values (e.g. `max_size = 10` with 8 shards yields an effective capacity of 128).
+    /// small values. On the default shard-count path the shard count itself is scaled down for
+    /// small `max_size` (roughly `max_size / 16`, capped by the CPU-derived default), so the
+    /// overshoot stays modest: `max_size = 100` builds 8 shards x 16 = 128 effective capacity.
+    /// An explicit [`shards`](Self::shards) count opts out of that scaling, so a large explicit
+    /// count with a small `max_size` still overshoots by `shards * 16` (e.g. `max_size = 10`
+    /// with an explicit 8 shards yields 128).
     /// [`metrics()`](ShardedExpiringLruCacheBase::metrics)'s `capacity` and `entry_count` reflect
     /// the actual (possibly larger) amount. Use [`per_shard_max_size`](Self::per_shard_max_size)
     /// or `shards = 1` if you need a strict small cap.
@@ -1076,6 +1084,24 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
             })
     }
 
+    /// Resolve the shard count for this build.
+    ///
+    /// An explicit `.shards(n)` is authoritative: it goes through
+    /// [`checked_shard_count`], which rounds up to a power of two, rejects `Some(0)`, and
+    /// guards against the rounding overflowing `usize`.
+    ///
+    /// On the default path (no explicit shard count) the count is derived from capacity via
+    /// [`default_shard_count_for_capacity`]: a configured total `max_size` scales the default
+    /// shard count down toward `max_size / 16` so a small cache does not preallocate an
+    /// oversized shard array. The `per_shard_max_size` path has no total to scale against, so
+    /// `self.max_size` is `None` there and the plain `default_shard_count()` is kept.
+    fn resolve_shard_count(&self) -> Result<usize, BuildError> {
+        match self.shards {
+            Some(_) => checked_shard_count(self.shards),
+            None => Ok(default_shard_count_for_capacity(self.max_size)),
+        }
+    }
+
     /// Build the new cache and copy every non-expired entry from `existing` into it,
     /// preserving LRU ordering (least-recently-used entries inserted first so that
     /// most-recently-used entries end up at the head of the new cache).
@@ -1138,7 +1164,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
         K: Hash + Eq + Clone,
         H: ShardHasher<K>,
     {
-        let n = checked_shard_count(self.shards)?;
+        let n = self.resolve_shard_count()?;
         let mask = n - 1;
         let per_shard_cap = self.resolve_per_shard_cap(n)?;
         let total_cap = self.total_capacity(n, per_shard_cap)?;
@@ -1235,6 +1261,55 @@ mod tests {
         fn is_expired(&self) -> bool {
             self.expired
         }
+    }
+
+    #[test]
+    fn default_shard_count_scales_with_max_size() {
+        use crate::stores::sharded::{default_shard_count, default_shard_count_for_capacity};
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .max_size(100)
+            .build()
+            .unwrap();
+        let expected = default_shard_count_for_capacity(Some(100));
+        assert_eq!(c.shards(), expected);
+        // 100/16 == 6, next_power_of_two(6) == 8, clamped into [1, default_shard_count()].
+        assert_eq!(expected, 8usize.clamp(1, default_shard_count()));
+        assert_eq!(c.capacity(), c.shards() * 16);
+    }
+
+    #[test]
+    fn explicit_shards_override_capacity_default() {
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .shards(64)
+            .max_size(100)
+            .build()
+            .unwrap();
+        assert_eq!(c.shards(), 64);
+        assert_eq!(c.capacity(), 64 * 16);
+    }
+
+    #[test]
+    fn default_shard_count_clamps_at_upper_bound_end_to_end() {
+        // This builder has its own resolve_shard_count copy; verify the large-max_size clamp
+        // reaches default_shard_count() through it, with the expectation computed at runtime.
+        use crate::stores::sharded::default_shard_count;
+        let d = default_shard_count();
+        let big = d.checked_mul(16).unwrap().checked_mul(4).unwrap();
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .max_size(big)
+            .build()
+            .unwrap();
+        assert_eq!(c.shards(), d);
+    }
+
+    #[test]
+    fn per_shard_max_size_keeps_plain_default_shard_count() {
+        use crate::stores::sharded::default_shard_count;
+        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            .per_shard_max_size(4)
+            .build()
+            .unwrap();
+        assert_eq!(c.shards(), default_shard_count());
     }
 
     #[test]

@@ -964,6 +964,23 @@ mod tests {
         assert_eq!(c.cache_evictions(), Some(1));
     }
 
+    #[test]
+    fn cache_set_with_ttl_overflow_stores_never_expiring_entry() {
+        // A TTL that would overflow Instant bounds (compute_expires_at's
+        // now.checked_add(ttl) -> None) stores the entry with no expiry: it never
+        // expires, matching TtlSortedCache's set_with(..).ttl(..) overflow behavior.
+        use crate::CacheTtl;
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set_ttl(crate::time::Duration::MAX);
+        assert_eq!(c.cache_set(1, 42), None);
+        assert_eq!(c.cache_get(&1), Some(&42));
+        // Never-expiring: cache_peek_with_expiry_status must not report it as expired.
+        assert_eq!(c.cache_peek_with_expiry_status(&1), (Some(42), false));
+    }
+
     // BUG-1 regression (sync): a panicking factory on the infallible get-or-set
     // path must not fire on_evict or increment evictions; the expired entry must
     // remain in place for the next access to evict it exactly once.

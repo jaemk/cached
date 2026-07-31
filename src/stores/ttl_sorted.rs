@@ -1899,6 +1899,37 @@ mod test {
     }
 
     #[test]
+    fn capacity_returns_bound_not_live_size() {
+        let cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(cache.capacity(), None);
+        assert_eq!(cache.capacity(), cache.cache_capacity());
+
+        let mut cache = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(3)
+            .build()
+            .unwrap();
+        assert_eq!(cache.capacity(), Some(3));
+        assert_eq!(cache.capacity(), cache.cache_capacity());
+
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        assert_eq!(
+            cache.capacity(),
+            Some(3),
+            "capacity tracks the bound, not live entries"
+        );
+        assert_eq!(cache.len(), 2);
+
+        cache.set_max_size(5);
+        assert_eq!(cache.capacity(), Some(5));
+        assert_eq!(cache.capacity(), cache.cache_capacity());
+    }
+
+    #[test]
     fn updating_existing_key_at_size_limit_does_not_evict_another_key() {
         let mut cache = TtlSortedCache::builder()
             .ttl(Duration::from_millis(1_000))

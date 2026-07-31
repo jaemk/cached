@@ -37,9 +37,10 @@ the ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `
 They likewise expose inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` (see
 [store-sharded.md](store-sharded.md) SHARD-6). It is deliberately not a `ConcurrentCached*` trait
 method: it is generic over `F`, so a trait method would need `where Self: Sized` to stay object
-safe (the crate already carries that wart on `cache_contains`), and adding a required method to
-`ConcurrentCached*` pre-3.0-final would break external implementors, with no sensible default to
-provide instead. Revisit as a trait method post-3.0 if a generic consumer needs it.
+safe, which would keep it off the vtable and out of reach through `dyn ConcurrentCached`. Adding a
+required method to `ConcurrentCached*` pre-3.0-final would also break external implementors, with
+no sensible default to provide instead. Revisit as a trait method post-3.0 if a generic consumer
+needs it.
 
 ## CTRAIT-3
 

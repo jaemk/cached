@@ -1272,6 +1272,27 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_with_ttl_overflow_stores_never_expiring_entry() {
+        // A TTL that would overflow Instant bounds (compute_expires_at's
+        // now.checked_add(ttl) -> None) stores the entry with no expiry: it never
+        // expires, matching TtlSortedCache's set_with(..).ttl(..) overflow behavior.
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.set_ttl(Duration::MAX);
+        assert_eq!(c.cache_set(1, 42), None);
+        assert_eq!(c.cache_get(&1), Some(&42));
+        // Never-expiring: CacheValue's expires_at() metadata must be None.
+        let ordered = c.iter_order();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(*ordered[0].1, 42);
+        assert_eq!(ordered[0].1.expires_at(), None);
+    }
+
+    #[test]
     fn cache_set_over_existing_key_promotes_to_mru() {
         let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
             .max_size(3)

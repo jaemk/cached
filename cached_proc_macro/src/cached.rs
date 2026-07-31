@@ -604,8 +604,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // The generated cache internals `.clone()` the value on `cache_set` and
     // `.to_owned()` it on a cache hit; without a `Clone` bound on the cached
     // value type those calls fail deep inside macro-generated code with an
-    // opaque trait-bound error. Emit a clear, precisely-spanned assertion
-    // instead (see `clone_return_assertion`).
+    // opaque trait-bound error. Emit a clear, precisely-spanned assertion ahead
+    // of those internals so it appears first (see `clone_return_assertion`);
+    // the opaque errors below still follow it.
     let clone_type_assertion = clone_return_assertion(&cache_value_ty, output_span);
 
     // make the cache identifier

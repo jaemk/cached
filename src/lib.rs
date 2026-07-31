@@ -2333,16 +2333,16 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// (`AsyncRedisCache` implements the async counterpart,
     /// [`async_cache_contains`](ConcurrentCachedAsync::async_cache_contains).)
     ///
-    /// The `where Self: Sized` bound keeps this generic method out of the vtable, so it is
-    /// not callable through `dyn ConcurrentCached`; use the concrete type, the inherent
-    /// `contains` on the sharded stores, or a generic bound instead.
+    /// This method is object-safe: it takes no generic parameters and does not require
+    /// `Self: Sized`, so it is part of the vtable and callable through
+    /// `dyn ConcurrentCached` (e.g. `Box<dyn ConcurrentCached<K, V, Error = _>>`), not only on
+    /// the concrete type. The inherent `contains` on the sharded stores remains available for
+    /// the same check without a trait import.
     ///
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails.
-    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>
-    where
-        Self: Sized;
+    fn cache_contains(&self, k: &K) -> Result<bool, Self::Error>;
 
     /// Remove all cached entries while preserving capacity allocation and metrics.
     ///

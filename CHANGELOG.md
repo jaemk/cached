@@ -51,6 +51,21 @@
   caller queues for the lock is judged live: `cache_set` returns `Some(old)` with no eviction
   and no `on_evict`, where previously the clock was re-read under the lock. This stays within
   the documented lazy-expiry contract, which makes no promise of prompt removal.
+- The default shard count of the LRU-bounded sharded stores (`ShardedLruCache`,
+  `ShardedLruTtlCache`, `ShardedExpiringLruCache`) is now capped by the requested `max_size`
+  instead of derived solely from `available_parallelism()`. On the default path (no explicit
+  `.shards(n)`) with a total `max_size`, the count is
+  `next_power_of_two(max_size / 16).clamp(1, default_shard_count())`. This changes the observable
+  `capacity()`, `shards()`, and `shard_sizes()` for small caches on high-core-count hosts
+  (`ShardedLruCache::new(100)` resolves to 8 shards / capacity 128, where a 64-core box previously
+  produced 256 shards / capacity 4096), and makes per-shard LRU eviction coarser-grained since
+  each shard holds a larger fraction of the entries. An explicit `.shards(n)` is authoritative and
+  unaffected; the `per_shard_max_size` path and the unbounded stores (`ShardedUnboundCache`, and
+  `ShardedTtlCache` / `ShardedExpiringCache` without a `max_size`) keep `default_shard_count()`.
+- `ConcurrentCached::cache_contains` drops its `where Self: Sized` bound and is now part of the
+  vtable, so it is callable through `dyn ConcurrentCached<K, V, Error = E>`. Breaking only for rc
+  adopters whose out-of-crate `ConcurrentCached` impls repeated the `where Self: Sized` clause on
+  their `cache_contains`: drop it to match the trait.
 
 ### Added
 
@@ -100,18 +115,19 @@
   beyond the behavior changes listed under Breaking Changes above. The sharded stores resolve
   a read hit in one hash lookup instead of two, count evictions per shard rather than through a
   shared striped counter, and cache the host's CPU topology instead of probing it on every
-  construction. The LRU-family and expiry-aware stores sweep in one pass instead of collecting
-  keys first, and the TTL stores sample the clock once per operation instead of once per entry
-  examined. `ExpiringCache` is 48 bytes plus two heap buffers smaller per instance.
+  construction. The topology is sampled once per process (memoized in a `OnceLock`), so a later
+  CPU-quota or cgroup change does not affect the shard count of subsequently built caches. The
+  LRU-family and expiry-aware stores sweep in one pass instead of collecting keys first, and the
+  TTL stores sample the clock once per operation instead of once per entry examined.
+  `ExpiringCache` is smaller per instance (one flattened map and two fewer heap buffers).
 
 ### Fixed
 
 - docs.rs feature annotation (`doc(cfg)`) on `AsyncRedisCacheBuilder::client_side_caching`,
   which previously rendered as unconditionally available.
 - `ConcurrentCached::cache_contains` docs no longer list `AsyncRedisCache` as an implementor
-  (it implements the async counterpart) and note the `dyn` limitation of the
-  `where Self: Sized` bound; the rc.9 changelog entry and `specs/traits-concurrent.md` are
-  corrected to match.
+  (it implements the async counterpart); the rc.9 changelog entry and
+  `specs/traits-concurrent.md` are corrected to match.
 - Macro docs note the `Arc<T>` return pattern for expensive-to-clone values ([#64]): the
   cache stores the `Arc`, hits clone only the pointer.
 - docs.rs feature badges on the `async_core`-gated `CachedGetOrSetAsync` and
