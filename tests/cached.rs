@@ -91,6 +91,17 @@ fn compile_fail_cached_with_cached_flag_return_type_requires_clone() {
     t.compile_fail("tests/ui/cached_with_cached_flag_return_type_requires_clone.rs");
 }
 
+// Companion to `compile_fail_cached_return_type_requires_clone` for `#[once]`:
+// `#[once]` has the identical `.clone()` failure mode (on cache-set and on a
+// cache hit) as `#[cached]`, so it gets the same return-type `Clone`
+// assertion and must produce the same clear, precisely-spanned diagnostic.
+#[test]
+#[cfg(feature = "proc_macro")]
+fn compile_fail_once_return_type_requires_clone() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/once_return_type_requires_clone.rs");
+}
+
 // One negative trybuild case per *semantic* compile error the macros raise
 // (i.e. errors we define for invalid attribute/signature states). Pure
 // syn-parser pass-through messages for malformed user strings (bad `ty` /
@@ -8859,27 +8870,37 @@ fn redb_default_cache_contains_is_expiry_aware() {
     use cached::time::Duration;
     use cached::{ConcurrentCached, RedbCache};
 
-    // Very short TTL: after it lapses, cache_get returns None for the entry,
-    // so the default cache_contains must report false.
-    let cache = RedbCache::<String, u32>::builder("redb_default_contains_expiry")
-        .ttl(Duration::from_millis(50))
+    // The live and expired halves use separate caches so neither assertion can
+    // race the clock. A disk round-trip on a loaded CI runner can take longer
+    // than a short TTL, so the live half gets a TTL nothing realistic outruns;
+    // the expired half keeps a short TTL, where being slow only helps.
+    let live = RedbCache::<String, u32>::builder("redb_default_contains_live")
+        .ttl(Duration::from_secs(60))
         .build()
         .expect("build redb cache");
-    ConcurrentCached::cache_clear(&cache).expect("clear");
+    ConcurrentCached::cache_clear(&live).expect("clear");
 
-    ConcurrentCached::cache_set(&cache, "k".to_string(), 1).expect("set");
+    ConcurrentCached::cache_set(&live, "k".to_string(), 1).expect("set");
     assert!(
-        ConcurrentCached::cache_contains(&cache, &"k".to_string()).expect("live contains"),
+        ConcurrentCached::cache_contains(&live, &"k".to_string()).expect("live contains"),
         "freshly-set redb entry must be contained"
     );
 
+    let expiring = RedbCache::<String, u32>::builder("redb_default_contains_expiry")
+        .ttl(Duration::from_millis(50))
+        .build()
+        .expect("build redb cache");
+    ConcurrentCached::cache_clear(&expiring).expect("clear");
+
+    ConcurrentCached::cache_set(&expiring, "k".to_string(), 1).expect("set");
     std::thread::sleep(std::time::Duration::from_millis(80));
     assert!(
-        !ConcurrentCached::cache_contains(&cache, &"k".to_string()).expect("expired contains"),
+        !ConcurrentCached::cache_contains(&expiring, &"k".to_string()).expect("expired contains"),
         "expired redb entry must NOT be contained (default path follows cache_get)"
     );
 
-    ConcurrentCached::cache_clear(&cache).expect("clean up");
+    ConcurrentCached::cache_clear(&live).expect("clean up");
+    ConcurrentCached::cache_clear(&expiring).expect("clean up");
 }
 
 // ── Certification gap-fill: peek_with_expiry_status aliases on EXPIRED entries. ─

@@ -443,6 +443,22 @@ where
     /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
     /// not yet visited will have that entry filtered by the same in-flight `retain`.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+        if self.inner.on_evict.is_none() {
+            // No callback: only the removed *count* is observable, so drop the filtered-out
+            // entries in place via `retain` and take the length delta -- no key clones, no
+            // `Vec` (matching `evict`'s no-callback fast path).
+            for shard in self.inner.shards.iter() {
+                let mut guard = shard.lock.write();
+                let before = guard.len();
+                guard.retain(|k, v| !v.is_expired() && keep(k, v));
+                let removed = before - guard.len();
+                drop(guard);
+                if removed > 0 {
+                    shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
+                }
+            }
+            return;
+        }
         for shard in self.inner.shards.iter() {
             // Collect under the write lock, fire callbacks after releasing it.
             let removed: Vec<(K, V)> = {
@@ -588,10 +604,12 @@ where
             // A displaced expired value is filtered from the return (matching cache_remove and
             // the single-owner expiring stores); fire on_evict and count an eviction for it.
             Some((key, old_v, true)) => {
+                // Count BEFORE notifying: a panicking callback must never leave an
+                // entry removed-but-uncounted.
+                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
                     cb(key, &old_v);
                 }
-                shard.evictions.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
             Some((_, old_v, false)) => Ok(Some(old_v)),

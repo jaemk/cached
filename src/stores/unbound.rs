@@ -1083,7 +1083,7 @@ mod tests {
         assert_eq!(c.cache_hits(), Some(2));
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "async_core")]
     #[tokio::test]
     async fn async_get_or_set_with_hits_and_misses_are_counted() {
         use crate::CachedGetOrSetAsync;

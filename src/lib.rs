@@ -1313,6 +1313,11 @@ pub trait CachedExt<K, V>: Cached<K, V> {
 
     /// Return the cache's capacity bound, if it has one. Delegates to
     /// [`cache_capacity`](Cached::cache_capacity).
+    ///
+    /// Note: the always-bounded LRU-family stores (`LruCache`, `LruTtlCache`,
+    /// `ExpiringLruCache`) also expose an inherent `capacity` returning a plain
+    /// `usize`, which takes call-site priority over this alias on those concrete
+    /// types; the alias applies in generic `Cached`-bounded code.
     #[must_use]
     fn capacity(&self) -> Option<usize>;
 
@@ -2552,6 +2557,12 @@ pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
 
     /// Return the cache's capacity bound, if it has one. Delegates to
     /// [`cache_capacity`](ConcurrentCacheBase::cache_capacity).
+    ///
+    /// Note: the always-bounded sharded LRU-family stores (`ShardedLruCache`,
+    /// `ShardedLruTtlCache`, `ShardedExpiringLruCache`) also expose an inherent
+    /// `capacity` returning a plain `usize`, which takes call-site priority over
+    /// this alias on those concrete types; the alias applies in generic
+    /// `ConcurrentCached`-bounded code.
     #[must_use]
     fn capacity(&self) -> Option<usize>;
 

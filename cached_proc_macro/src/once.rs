@@ -454,6 +454,15 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // The generated cache internals `.clone()` the value on every cache-set
+    // (`set_cache_block` above) and on a cache hit (`return_cache_block`);
+    // without a `Clone` bound on the cached value type those calls fail deep
+    // inside macro-generated code with an opaque trait-bound error. Emit a
+    // clear, precisely-spanned assertion ahead of those internals so it
+    // appears first (see `clone_return_assertion`); the opaque errors below
+    // still follow it.
+    let clone_type_assertion = clone_return_assertion(&cache_value_ty, output_span);
+
     // G1: Reject a generic `#[once]` whose cache value type names one of the
     // function's own type or const parameters. The cache static is
     // monomorphic, so it cannot contain a bare type/const param in its type.
@@ -969,6 +978,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         #(#attributes)*
         #visibility #signature_no_muts {
             #body_static
+            #clone_type_assertion
             #now_block
             #do_set_return_block
         }
