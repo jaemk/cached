@@ -71,9 +71,10 @@ jobs:
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
     - name: Tag and create GitHub releases
-      # Tags every publishable workspace crate that lacks a tag or release yet,
-      # including backfilling crates published in earlier runs; idempotent
-      # (skips tags and releases that already exist on the remote).
+      # Tags and releases every publishable workspace crate whose CURRENT
+      # version lacks a tag or release; idempotent (skips whichever of the two
+      # already exists on the remote). It does not backfill historical
+      # versions - see the comment in bin/tag-release.sh.
       #
       # Runs whenever publishing did not fail, so a re-run of a release that
       # published but died before tagging still gets its tags and releases.
