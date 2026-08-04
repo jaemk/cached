@@ -673,15 +673,21 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// matching [`Cached::cache_remove`] semantics. The LRU recency order of the surviving
     /// entries is unchanged.
     ///
+    /// Returns the number of entries removed, i.e. the number of times `keep` returned `false`.
+    /// `retain` is deliberately not `#[must_use]`: discarding the count is a legitimate and
+    /// common use, matching existing bare `cache.retain(...);` call sites.
+    ///
     /// The expiry-aware LRU stores also have `retain`, with one difference: their expired
-    /// entries are removed regardless of the predicate. See
+    /// entries are removed regardless of the predicate, so their returned count folds together
+    /// predicate rejections and expired sweeps. See
     /// [`LruTtlCache::retain`](crate::LruTtlCache::retain) and
     /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain).
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         // Collect doomed *slot indices*, not cloned keys: `remove_index` then removes
         // each entry without a key clone or an `Eq` probe. Indices stay valid because
         // nothing is inserted between the scan and the removals.
         let doomed = self.doomed_indices(&mut keep);
+        let removed = doomed.len();
         for index in doomed {
             let (key, value) = self.remove_index(index);
             // Count BEFORE notifying: a panicking callback must never leave an
@@ -691,6 +697,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
                 on_evict(&key, &value);
             }
         }
+        removed
     }
 
     /// Slot indices (MRU -> LRU) of the entries for which `keep` returns `false`.
@@ -709,11 +716,15 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// Removes entries for which `keep` returns `false` without firing `on_evict` or
     /// incrementing `evictions`. Used internally by TTL/expiring wrapper stores to avoid
     /// double-counting when those wrappers handle eviction side effects themselves.
-    pub(super) fn retain_silent<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    /// Returns the number of entries removed, so callers can use it as their own removed
+    /// count instead of tracking a separate counter.
+    pub(super) fn retain_silent<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         let doomed = self.doomed_indices(&mut keep);
+        let removed = doomed.len();
         for index in doomed {
             let _ = self.remove_index(index);
         }
+        removed
     }
 
     /// Insert or replace a cache entry, returning the **stored** key and value of the displaced
@@ -1383,8 +1394,9 @@ mod tests {
             c.set(i, i * 10);
         }
         assert_eq!(c.cache_size(), 5);
-        c.retain(|k, _v| k % 2 == 0);
+        let removed = c.retain(|k, _v| k % 2 == 0);
         assert_eq!(c.cache_size(), 3); // 0, 2, 4
+        assert_eq!(removed, 2);
         assert!(c.get(&0).is_some());
         assert!(c.get(&1).is_none());
         assert!(c.get(&2).is_some());
@@ -2432,7 +2444,7 @@ mod tests {
         }
         // Promote the two entries that will be removed to the extremes of the chain.
         assert_eq!(c.cache_get(&1), Some(&10)); // MRU -> LRU: 1, 5, 4, 3, 2
-        c.retain(|k, _v| *k != 1 && *k != 2);
+        let removed = c.retain(|k, _v| *k != 1 && *k != 2);
         assert_eq!(
             *seen.lock().unwrap(),
             vec![(1, 10), (2, 20)],
@@ -2440,7 +2452,40 @@ mod tests {
         );
         assert_eq!(c.key_order(), vec![5, 4, 3]);
         assert_eq!(c.cache_evictions(), Some(2));
+        assert_eq!(
+            removed, 2,
+            "retain must return the number of entries removed"
+        );
         assert_store_and_order_agree(&c);
+    }
+
+    #[test]
+    fn retain_returns_count_of_removed_entries() {
+        // The return value must equal the number of entries actually removed, and that
+        // must agree with both the `cache_size()` delta and the number of `on_evict`
+        // invocations. `LruCache` has no expiry dimension, so the count is exactly the
+        // number of predicate rejections.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c = LruCache::builder()
+            .max_size(10)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        for i in 0..6u32 {
+            c.cache_set(i, i * 10);
+        }
+        let size_before = c.cache_size();
+        let removed = c.retain(|k, _v| k % 2 == 0);
+        let size_after = c.cache_size();
+
+        assert_eq!(removed, 3, "keys 1, 3, 5 rejected by the predicate");
+        assert_eq!(size_before - size_after, removed);
+        assert_eq!(fired.load(AOrdering::Relaxed), removed);
     }
 
     #[test]
@@ -2456,11 +2501,12 @@ mod tests {
         for i in 0..4u32 {
             c.cache_set(i, i * 10);
         }
-        c.retain(|_k, _v| false);
+        let removed = c.retain(|_k, _v| false);
         assert_eq!(c.cache_size(), 0);
         assert!(c.key_order().is_empty());
         assert_eq!(*seen.lock().unwrap(), vec![3, 2, 1, 0]);
         assert_eq!(c.cache_evictions(), Some(4));
+        assert_eq!(removed, 4, "all four entries were removed");
         assert_store_and_order_agree(&c);
 
         // Reusable: every slot was freed, and refilling past capacity still evicts LRU.
@@ -2490,7 +2536,7 @@ mod tests {
             c.cache_set(i, i * 10);
         }
         let before = c.key_order();
-        c.retain(|_k, _v| true);
+        let removed = c.retain(|_k, _v| true);
         assert_eq!(
             c.key_order(),
             before,
@@ -2499,6 +2545,7 @@ mod tests {
         assert_eq!(c.cache_size(), 3);
         assert_eq!(count.load(AOrdering::Relaxed), 0);
         assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(removed, 0, "nothing was removed");
         assert_store_and_order_agree(&c);
     }
 
@@ -2506,21 +2553,23 @@ mod tests {
     fn retain_on_empty_cache_never_calls_the_predicate() {
         let mut c: LruCache<u32, u32> = LruCache::new(4);
         let mut calls = 0usize;
-        c.retain(|_k, _v| {
+        let removed = c.retain(|_k, _v| {
             calls += 1;
             false
         });
         assert_eq!(calls, 0);
         assert_eq!(c.cache_size(), 0);
         assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(removed, 0);
 
         // Same for `retain_silent`.
         let mut calls = 0usize;
-        c.retain_silent(|_k, _v| {
+        let removed = c.retain_silent(|_k, _v| {
             calls += 1;
             false
         });
         assert_eq!(calls, 0);
+        assert_eq!(removed, 0);
         assert_store_and_order_agree(&c);
     }
 
@@ -2531,13 +2580,15 @@ mod tests {
             c.cache_set(i, i * 10);
         }
         let (hits, misses) = (c.cache_hits(), c.cache_misses());
-        c.retain(|k, _v| *k >= 2);
+        let removed = c.retain(|k, _v| *k >= 2);
         assert_eq!(c.cache_evictions(), Some(2));
         assert_eq!(c.key_order(), vec![3, 2]);
+        assert_eq!(removed, 2);
         // The removal path must not look like a lookup: hit/miss counters are untouched.
         assert_eq!(c.cache_hits(), hits);
         assert_eq!(c.cache_misses(), misses);
-        c.retain_silent(|k, _v| *k >= 3);
+        let removed_silent = c.retain_silent(|k, _v| *k >= 3);
+        assert_eq!(removed_silent, 1);
         assert_eq!(c.cache_hits(), hits);
         assert_eq!(c.cache_misses(), misses);
         assert_store_and_order_agree(&c);
@@ -2559,11 +2610,13 @@ mod tests {
         for i in 0..4u32 {
             c.cache_set(i, i * 10);
         }
-        c.retain_silent(|_k, _v| true);
+        let removed = c.retain_silent(|_k, _v| true);
+        assert_eq!(removed, 0);
         assert_eq!(c.key_order(), vec![3, 2, 1, 0]);
         assert_store_and_order_agree(&c);
 
-        c.retain_silent(|_k, _v| false);
+        let removed = c.retain_silent(|_k, _v| false);
+        assert_eq!(removed, 4);
         assert_eq!(c.cache_size(), 0);
         assert!(c.key_order().is_empty());
         assert_eq!(count.load(AOrdering::Relaxed), 0);
@@ -3010,8 +3063,12 @@ mod tests {
                 5 => {
                     let _ = c.cache_remove(&key);
                 }
-                6 => c.retain(|k, _v| k % 3 != 0),
-                7 => c.retain_silent(|k, _v| *k != key),
+                6 => {
+                    c.retain(|k, _v| k % 3 != 0);
+                }
+                7 => {
+                    c.retain_silent(|k, _v| *k != key);
+                }
                 8 => {
                     if c.cache_size() > 0 {
                         let _ = c.remove_index(c.order.back());

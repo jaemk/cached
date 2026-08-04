@@ -651,20 +651,26 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// `on_evict` is called and the eviction counter incremented for each removed
     /// entry. Entries stored with no expiry (a zero or overflowing TTL, see
     /// [`set_with`](Self::set_with)) never expire, so they are removed only when
-    /// `keep` returns `false`. Returns `()`; use [`evict`](Self::evict) or
-    /// [`retain_latest`](Self::retain_latest) when a dropped count is needed.
+    /// `keep` returns `false`.
+    ///
+    /// Returns the number of entries removed: the count folds together entries `keep`
+    /// rejected and entries swept for having already expired, since expiry removal is
+    /// unconditional regardless of what `keep` returns. `retain` is deliberately not
+    /// `#[must_use]`: discarding the count is a legitimate and common use, matching
+    /// existing bare `cache.retain(...);` call sites.
     ///
     /// Not to be confused with [`retain_latest`](Self::retain_latest), which is a
     /// *size trim*: it drops the next-to-expire entries until at most `count` remain
     /// (optionally also sweeping expired ones) and returns how many it dropped. This
     /// method is a *predicate filter plus an expiry sweep*: it consults `keep` for
-    /// every live entry, ignores `size_limit`, and does not reorder the expiry index.
+    /// every live entry, ignores [`max_size`](TtlSortedCacheBuilder::max_size), and
+    /// does not reorder the expiry index.
     ///
     /// This matches [`TtlCache::retain`](crate::TtlCache::retain) and
     /// [`LruTtlCache::retain`](crate::LruTtlCache::retain); the plain
     /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
     /// removes solely on the predicate.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         // Sample the clock once so every entry is judged against the same instant.
         let now = Instant::now();
         // Disjoint field borrows: `map.retain` takes `&mut self.map` while the closure
@@ -689,13 +695,15 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
                 }
             })
             .collect();
+        let count = removed.len();
         self.evictions
-            .fetch_add(removed.len() as u64, AtomicOrdering::Relaxed);
+            .fetch_add(count as u64, AtomicOrdering::Relaxed);
         if let Some(on_evict) = &self.on_evict {
             for (key, entry) in &removed {
                 on_evict(key, &entry.value);
             }
         }
+        count
     }
 
     /// Retain only the latest `count` values, dropping the next values to expire.
@@ -705,7 +713,8 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// This is a *size trim*, not a predicate filter: entries are chosen purely by
     /// expiry order until at most `count` remain. Use [`retain`](Self::retain) to keep
     /// entries by a `FnMut(&K, &V) -> bool` predicate (which also sweeps expired entries
-    /// regardless of the predicate, but ignores `size_limit` and returns `()`).
+    /// regardless of the predicate, but ignores [`max_size`](TtlSortedCacheBuilder::max_size)
+    /// and returns a `usize` count of its own).
     pub fn retain_latest(&mut self, count: usize, evict: bool) -> usize {
         self.retain_latest_at(count, evict.then(Instant::now))
     }
@@ -760,13 +769,13 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
 
     /// Set k/v pair without running eviction logic, using the cache's default TTL.
     ///
-    /// The entry is inserted first. If a `size_limit` was configured and the insertion
-    /// pushes the map over it, the soonest-to-expire entry is trimmed to restore the
-    /// bound; this size-limit enforcement runs on every `set`, independent of the
-    /// `.evict()` opt-in. The `.set_with(..).evict()` opt-in controls only the separate
-    /// expiry sweep (dropping entries already past their TTL), not size-limit
-    /// enforcement; see [`set_with`](Self::set_with) for per-entry TTL overrides and the
-    /// opt-in sweep.
+    /// The entry is inserted first. If [`max_size`](TtlSortedCacheBuilder::max_size) was
+    /// configured and the insertion pushes the map over it, the soonest-to-expire entry is
+    /// trimmed to restore the bound; this size-limit enforcement runs on every `set`,
+    /// independent of the `.evict()` opt-in. The `.set_with(..).evict()` opt-in controls
+    /// only the separate expiry sweep (dropping entries already past their TTL), not
+    /// size-limit enforcement; see [`set_with`](Self::set_with) for per-entry TTL
+    /// overrides and the opt-in sweep.
     ///
     /// If computing the expiry instant overflows (a TTL on the order of hundreds of
     /// years), the entry is stored with no expiry (never expires), matching
@@ -778,10 +787,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// Start building a `set` call with an optional per-entry TTL override and/or
     /// opt-in eviction, e.g. `cache.set_with(k, v).ttl(Duration::from_secs(5)).evict().set()`.
     ///
-    /// The entry is inserted first. If a `size_limit` was specified and capacity is exceeded,
-    /// the next-to-expire entry is dropped after insertion. The eviction callback fires after
-    /// insertion, not before. The terminal [`.set()`](TtlSortedSetBuilder::set) returns any
-    /// existing unexpired value that was replaced.
+    /// The entry is inserted first. If [`max_size`](TtlSortedCacheBuilder::max_size) was
+    /// specified and capacity is exceeded, the next-to-expire entry is dropped after
+    /// insertion. The eviction callback fires after insertion, not before. The terminal
+    /// [`.set()`](TtlSortedSetBuilder::set) returns any existing unexpired value that was
+    /// replaced.
     ///
     /// If computing the expiry instant overflows (a TTL on the order of hundreds of
     /// years), the entry is stored with no expiry (never expires), matching
@@ -912,8 +922,8 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
 
     /// Insert `key`/`value` and return a mutable reference to the stored value.
     ///
-    /// When a `size_limit` is configured the just-inserted entry is
-    /// protected from eviction: other entries are evicted in TTL order to restore
+    /// When [`max_size`](TtlSortedCacheBuilder::max_size) is configured the just-inserted
+    /// entry is protected from eviction: other entries are evicted in TTL order to restore
     /// capacity. Used by the `cache_get_or_set_with_mut` family.
     fn set_and_get_mut(&mut self, key: K, value: V) -> &mut V {
         // `skip_size_eviction = true` defers size enforcement to the block below,
@@ -1014,16 +1024,34 @@ impl<'a, K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedSetBuilder<'a, 
     /// [`cache_set`](crate::Cached::cache_set) on the other TTL stores. A `Duration::ZERO`
     /// TTL also means "never expires" for this entry, matching the store's zero-TTL
     /// convention.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
     }
 
+    /// Override the store's default TTL for this entry only, in whole seconds.
+    /// Equivalent to `ttl(Duration::from_secs(secs))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    pub fn ttl_secs(self, secs: u64) -> Self {
+        self.ttl(Duration::from_secs(secs))
+    }
+
+    /// Override the store's default TTL for this entry only, in milliseconds.
+    /// Equivalent to `ttl(Duration::from_millis(millis))`.
+    ///
+    /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
+    pub fn ttl_millis(self, millis: u64) -> Self {
+        self.ttl(Duration::from_millis(millis))
+    }
+
     /// Opt into running eviction logic after this insertion.
     ///
-    /// The entry is inserted first. If a `size_limit` was specified and capacity is
-    /// exceeded, the next-to-expire entry is dropped after insertion, firing `on_evict`
-    /// and counting an eviction.
+    /// The entry is inserted first. If [`max_size`](TtlSortedCacheBuilder::max_size) was
+    /// specified and capacity is exceeded, the next-to-expire entry is dropped after
+    /// insertion, firing `on_evict` and counting an eviction.
     pub fn evict(mut self) -> Self {
         self.evict = true;
         self

@@ -399,7 +399,7 @@ fn lru_ttl_cache_retain_keeps_never_expire_entries() {
     std::thread::sleep(SLEEP);
 
     // retain by even keys.
-    c.retain(|k, _v| k % 2 == 0);
+    let removed = c.retain(|k, _v| k % 2 == 0);
     let mut kept: Vec<u32> = c.iter().map(|(k, _)| *k).collect();
     kept.sort_unstable();
     assert_eq!(
@@ -407,6 +407,7 @@ fn lru_ttl_cache_retain_keeps_never_expire_entries() {
         vec![0, 2, 4],
         "retain must keep live never-expire entries matching the predicate"
     );
+    assert_eq!(removed, 2, "keys 1 and 3 rejected by the predicate");
 }
 
 #[test]

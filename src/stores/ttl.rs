@@ -377,9 +377,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
     /// [`ExpiringLruCache::retain`](crate::ExpiringLruCache::retain); the plain
     /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
     /// removes solely on the predicate.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    ///
+    /// Returns the number of entries removed: the count folds together entries `keep`
+    /// rejected and entries swept for having already expired, since expiry removal is
+    /// unconditional regardless of what `keep` returns. `retain` is deliberately not
+    /// `#[must_use]`: discarding the count is a legitimate and common use, matching
+    /// existing bare `cache.retain(...);` call sites.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
+        let mut removed = 0usize;
         // Sample the clock once for the whole eager sweep, as `evict` does above --
         // one `now` shared across every entry instead of a clock read per entry.
         let now = Instant::now();
@@ -392,11 +399,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, &entry.value);
                 }
+                removed += 1;
                 false
             } else {
                 true
             }
         });
+        removed
     }
 }
 
@@ -1813,6 +1822,48 @@ mod tests {
             Some(&20),
             "live entry kept by the predicate must survive"
         );
+    }
+
+    #[test]
+    fn retain_returns_count_folding_expired_and_predicate_rejections() {
+        // The returned count must fold together BOTH predicate-rejected entries and
+        // entries removed because they had already expired, and must agree with the
+        // `cache_size()` delta and the number of `on_evict` invocations.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: TtlCache<u32, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(30))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        // Key 1: will expire before the sweep, regardless of the predicate.
+        c.cache_set(1, 10);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        // Keys 2-4: inserted after the sleep, still live relative to `retain`'s
+        // hoisted `now`. Key 3 is rejected by the predicate, keys 2 and 4 are kept.
+        c.cache_set(2, 20);
+        c.cache_set(3, 31);
+        c.cache_set(4, 40);
+
+        let size_before = c.cache_size();
+        let removed = c.retain(|_, v| v % 2 == 0);
+        let size_after = c.cache_size();
+
+        assert_eq!(
+            removed, 2,
+            "one expired sweep (key 1) + one predicate rejection (key 3)"
+        );
+        assert_eq!(size_before - size_after, removed);
+        assert_eq!(fired.load(Ordering::Relaxed), removed);
+        assert_eq!(c.cache_peek(&2), Some(&20));
+        assert_eq!(c.cache_peek(&3), None);
+        assert_eq!(c.cache_peek(&4), Some(&40));
     }
 
     #[test]

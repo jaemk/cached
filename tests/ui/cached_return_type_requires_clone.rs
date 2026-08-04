@@ -1,10 +1,12 @@
 use cached::macros::cached;
 
-// `#[cached]` clones the cached value on every cache hit (`.to_owned()`) and
-// on insert (`.clone()` into the store), so the return type must implement
-// `Clone`. The dedicated assertion emits a clear diagnostic spanned at the
-// return type ahead of the opaque errors that still follow from deep inside
-// macro-generated internals.
+// `#[cached]` clones the cached value on insert into the store and on every
+// cache hit, so the return type must implement `Clone`. Each of those clones is
+// a `<Ret as Clone>::clone` call spanned at the return type, which is the
+// `Clone` assertion and the clone at once: the golden pins ONE precisely-spanned
+// error. It used to be three - the assertion plus an E0308/E0599 cascade from
+// the `.clone()` / `.to_owned()` method calls the body used to emit, both
+// spanned at the `#[cached]` attribute (0043a).
 struct NotClone {
     _value: u32,
 }

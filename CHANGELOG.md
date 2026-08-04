@@ -72,6 +72,22 @@
   vtable, so it is callable through `dyn ConcurrentCached<K, V, Error = E>`. Breaking only for rc
   adopters whose out-of-crate `ConcurrentCached` impls repeated the `where Self: Sized` clause on
   their `cache_contains`: drop it to match the trait.
+- `retain` returns `usize` (the number of entries removed) instead of `()`, on all 13 stores that
+  have it: `UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`,
+  `ExpiringLruCache`, and the six sharded stores. The count includes both entries the predicate
+  rejected and, on the expiry-aware stores, entries removed for having expired regardless of the
+  predicate. This is a deliberate divergence from `HashMap::retain`, justified because this
+  `retain` does strictly more than filter (it fires `on_evict` and counts an eviction per removed
+  entry, and on the expiry-aware stores it removes entries the predicate never rejected), unlike
+  std's version where the caller already knows the count. Matches the existing precedent of
+  `TtlSortedCache::retain_latest(count, evict) -> usize`. There is deliberately no `#[must_use]`,
+  so existing `cache.retain(...);` statements keep compiling; only call sites that bound the
+  result as `()` need a trailing discard.
+- MSRV raised from 1.89 to 1.92. The `async_core` feature (and `async`, which enables it) does not
+  compile before 1.92: the two `CachedGetOrSetAsync` RPIT default bodies hit a rustc borrowck
+  limitation ([rust-lang/rust#100013]). Verified by bisection: fails on 1.89.0, 1.90.0, and 1.91.0,
+  builds clean on 1.92.0. Non-async feature sets did build on 1.89, but `rust-version` is a single
+  crate-level value describing the whole crate, so the floor moves for every feature set.
 
 ### Added
 
@@ -114,6 +130,37 @@
   trait method) -- see `specs/traits-concurrent.md`.
 - `TtlSortedCache::capacity() -> Option<usize>`: the configured size bound (`None` when
   unbounded), plus the missing `doc(alias = "capacity")` on `TtlSortedCacheBuilder::max_size`.
+- `ConcurrentCachePeekAsync<K, V>`, the async mirror of `ConcurrentCachePeek`: a required
+  `async_cache_peek` plus a defaulted `async_peek` alias, with deliberately no default body so
+  the peek contract (no recency/TTL refresh, no hit/miss metrics, no lazy removal of expired
+  entries) holds for every implementor. Implemented by the six sharded stores
+  (`Self::Error = Infallible`), delegating to their sync `cache_peek`. In `cached::prelude`.
+  `RedisCache`, `RedbCache`, and `AsyncRedisCache` implement neither peek trait: peek is an
+  in-memory concept, and for an IO-backed store there is no client-side recency or TTL state to
+  skip while the operation remains a full round trip.
+- `TtlSortedSetBuilder` (the `set_with` entry-setter builder) gains `.ttl_secs(n)` and
+  `.ttl_millis(n)` alongside `.ttl(Duration)`, matching the sibling TTL builders.
+- `Display` for `CacheValue<V, M>` where `V: Display`, forwarding to the wrapped value's
+  `Display` impl (metadata is not rendered), plus `IntoValues::into_values()` to bulk-unwrap the
+  `CacheValue` wrapper out of an `iter_order()` / `value_order()` result into a plain `Vec<V>`.
+  Note the documented limitation that the reverse comparison `bare_value == wrapped` cannot be
+  implemented because coherence forbids the blanket impl.
+- Documentation of the sharded inherent-vs-trait return-shape split on all six sharded store
+  types: the inherent `set`/`get`/`len`/`contains`/`peek` return unwrapped values and take
+  call-site priority over the `ConcurrentCached*` trait methods, which return
+  `Result<_, Self::Error>`. `s.set(k, v).unwrap()` therefore compiles as `Option::unwrap` and
+  panics on a first insert; the note gives the UFCS disambiguation. Signatures unchanged.
+  `#[must_use]` on inherent `set`/`remove` was rejected: it cannot fire on `.unwrap()` (which
+  consumes the value) and would fire on correct fire-and-forget calls. Inherent `contains` gained
+  `#[must_use]`, matching `get`/`peek`.
+- `#[doc(alias = "max_size")]` on `capacity()` for the three LRU-bounded sharded stores
+  (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`), matching the single-owner
+  bounded stores.
+- Compile-time missing-feature guards for `#[concurrent_cached(disk = true)]` and
+  `(redis = true)`, mirroring the existing `time_stores` and `async` guards. Previously
+  `disk = true` without `redb_store` produced raw "cannot find `RedbCache` in `cached`" errors,
+  and `redis = true` without a redis feature leaked a doc-hidden internal while pointing at the
+  wrong feature (`async_core` instead of a redis runtime feature).
 
 ### Changed
 
@@ -142,8 +189,30 @@
 - `#[cached]` and `#[once]` on a function whose return type does not implement `Clone` now emit
   a clear `Clone`-bound error spanned at the return type, ahead of the opaque errors from the
   generated internals.
+- `RedbCacheError`, `RedbCacheBuildError`, `RedisCacheError`, and `RedisCacheBuildError` `Display`
+  output now includes the underlying cause. Previously `{e}` rendered as a bare label such as
+  "Storage error" while the cause was reachable only through `Debug`, and since the source type is
+  documented as not-public-API the cause was effectively unreachable. `Display` text is not
+  semver-guarded, so this is not an API change.
+- `#[cached]` and `#[once]` on a function whose return type is not `Clone` now emit exactly one
+  error (the precisely-spanned `Clone`-bound assertion) instead of 3 and 5 respectively; the
+  generated body is gated on the assertion so the follow-on cascade no longer fires.
+- Macro attribute errors (the `size` -> `max_size` rename, mutually-exclusive TTL spellings, and
+  generic-function-without-`key`/`convert`) now span the offending attribute rather than the
+  function name. Message text unchanged.
+- Crate docs corrected: the sharded shard-count rule was documented as
+  `available_parallelism() x 4` clamped to 8-1024, which has not been true for the LRU-bounded
+  sharded stores since the count began deriving from `max_size` as
+  `next_power_of_two(max_size / 16).clamp(1, default_shard_count())`.
+- Crate docs now cover `set_with`, `iter_order`, `value_order`, `key_order`, `CacheValue`,
+  `cache_contains`, and `retain`, none of which were mentioned before.
+- `KeyedCache` moved under a `#[doc(hidden)] pub mod __private` so it no longer appears as a
+  suggested import when a user references a removed legacy store name.
+- Rustdoc on `TtlSortedCache` no longer refers to the private field `size_limit` as though it
+  were public API; the public spelling is `TtlSortedCacheBuilder::max_size`.
 
 [#64]: https://github.com/jaemk/cached/issues/64
+[rust-lang/rust#100013]: https://github.com/rust-lang/rust/issues/100013
 
 ## [3.0.0-rc.9] - 2026-07-19
 

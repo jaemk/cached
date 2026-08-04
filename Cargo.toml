@@ -10,7 +10,7 @@ categories = ["caching", "data-structures"]
 keywords = ["cache", "memoize", "lru", "redis", "disk"]
 license = "MIT"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 # Internal dev tooling and process docs that should not ship in the published crate.
 exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "specs/", "local/", ".cursorrules", "AGENTS.md", "CLAUDE.md", "Makefile"]
 

@@ -1,5 +1,5 @@
 error: `expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait; `ttl` applies a uniform time-based TTL to all entries
- --> tests/ui/cached_expires_ttl_exclusive.rs:4:4
+ --> tests/ui/cached_expires_ttl_exclusive.rs:3:26
   |
-4 | fn my_fn(x: u32) -> u32 {
-  |    ^^^^^
+3 | #[cached(expires = true, ttl = "core::time::Duration::from_secs(60)")]
+  |                          ^^^

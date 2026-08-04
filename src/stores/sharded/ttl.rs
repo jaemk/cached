@@ -9,13 +9,13 @@ use std::collections::hash_map::RandomState;
 
 use std::collections::HashMap;
 
-#[cfg(feature = "async_core")]
-use crate::ConcurrentCachedAsync;
 use crate::time::{Duration, Instant};
 use crate::{
     CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
     ConcurrentCacheTtl, ConcurrentCached, ConcurrentCloneCached,
 };
+#[cfg(feature = "async_core")]
+use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
 #[cfg(feature = "async_core")]
 use core::future::Future;
 
@@ -77,6 +77,16 @@ fn expired_at<V>(entry: &TimedEntry<V>, now: Instant) -> bool {
 /// To use a custom shard hasher, call [`ShardedTtlCache::builder()`] and then
 /// [`hasher`](ShardedTtlCacheBuilder::hasher), which yields a `ShardedTtlCacheBase<K, V, H>`
 /// over your hasher.
+///
+/// **Note**: this type's inherent methods (`get`, `set`, `remove`, `remove_entry`, `delete`,
+/// `contains`, `peek`) return unwrapped values (`Option<V>`, `bool`, ...) and take call-site
+/// priority over the same-named [`ConcurrentCached`] trait methods, which return
+/// `Result<_, Self::Error>` instead. A `.unwrap()` chained onto one of these inherent calls is
+/// therefore `Option::unwrap`, not `Result::unwrap`: `cache.set(k, v).unwrap()` panics on a
+/// **fresh insert**, because there is no previous value to unwrap, not because the operation
+/// failed. To reach the fallible trait form instead (which never panics on a fresh insert), name
+/// it explicitly through the trait, e.g. `ConcurrentCached::cache_set(&cache, k, v)` or
+/// `ConcurrentCachedExt::set(&cache, k, v)`.
 pub type ShardedTtlCache<K, V> = ShardedTtlCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedTtlCache`] with a generic shard hasher `H`.
@@ -294,6 +304,7 @@ where
     }
 
     /// Return true if a live (not expired) value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
+    #[must_use]
     pub fn contains(&self, k: &K) -> bool {
         ConcurrentCached::cache_contains(self, k).unwrap()
     }
@@ -481,6 +492,11 @@ where
     /// Expiry is judged against a single instant sampled once at the start of the call, so
     /// every entry in every shard is compared against the same instant.
     ///
+    /// Returns the total number of entries removed across all shards for this call, folding
+    /// together predicate-rejected entries and entries swept for having already expired -- the
+    /// two are not distinguished in the count. Not `#[must_use]`: discarding the count is a
+    /// legitimate and common use.
+    ///
     /// **Not atomic across shards**: shards are locked and swept **one at a time**, never all
     /// at once (matching [`evict`](Self::evict) and
     /// [`cache_clear_with_on_evict`](Self::cache_clear_with_on_evict)). A concurrent writer
@@ -491,12 +507,16 @@ where
     /// **after** the shard lock is released, once per removed entry, in shard order. Because
     /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
     /// not yet visited will have that entry filtered by the same in-flight `retain`.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
         let now = Instant::now();
+        let mut total_removed = 0usize;
         let Some(cb) = &self.inner.on_evict else {
             // No callback: only the removed *count* is observable, so drop the filtered-out
             // entries in place via `retain` and take the length delta -- no key clones, no
-            // `Vec` (matching `evict`'s no-callback fast path).
+            // `Vec` (matching `evict`'s no-callback fast path). The length delta itself is
+            // computed under the shard's write lock (`before` and `guard.len()` are both read
+            // while `guard` is held), but the atomic `evictions` counter is incremented only
+            // after the block ends and `guard` has already been dropped.
             for shard in self.inner.shards.iter() {
                 let removed = {
                     let mut guard = shard.lock.write();
@@ -504,11 +524,12 @@ where
                     guard.retain(|k, entry| !expired_at(entry, now) && keep(k, &entry.value));
                     before - guard.len()
                 };
+                total_removed += removed;
                 if removed > 0 {
                     shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
                 }
             }
-            return;
+            return total_removed;
         };
         for shard in self.inner.shards.iter() {
             // Collect under the write lock, fire callbacks after releasing it.
@@ -518,6 +539,7 @@ where
                     .extract_if(|k, entry| expired_at(entry, now) || !keep(k, &entry.value))
                     .collect()
             };
+            total_removed += removed.len();
             if !removed.is_empty() {
                 shard
                     .evictions
@@ -527,6 +549,7 @@ where
                 }
             }
         }
+        total_removed
     }
 }
 
@@ -836,6 +859,21 @@ where
 {
     fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
         Ok(self.peek(k))
+    }
+}
+
+#[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
+impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedTtlCacheBase<K, V, H>
+where
+    K: Hash + Eq + Send + Sync,
+    V: Clone + Send + Sync,
+    H: ShardHasher<K>,
+{
+    /// Delegates to the side-effect-free sync [`cache_peek`](ConcurrentCachePeek::cache_peek);
+    /// this store never blocks on IO, so there is nothing to await.
+    async fn async_cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        ConcurrentCachePeek::cache_peek(self, k)
     }
 }
 

@@ -52,7 +52,8 @@ implementing stores expose these only through the trait, with no inherent duplic
 genuinely side-effect-free read (no recency, TTL refresh, hit/miss metrics, or lazy expiry
 removal). It is implemented only by the six sharded stores (`Self::Error = Infallible`);
 `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately do not implement it. It is in
-`cached::prelude`.
+`cached::prelude`. It now has an async mirror, `ConcurrentCachePeekAsync`, with the same six-store
+implementor set and the same deliberate omission on the IO stores; see CTRAIT-5.
 
 ## CTRAIT-4
 
@@ -62,3 +63,32 @@ serialized values (redis, redb), adding `cache_set_ref(&self, &K, &V) -> Result<
 per-write read+decode; callers that need the old value must call `cache_get` first. Implemented
 per [design/0022-serialize-cached-set-ref-return.md](design/0022-serialize-cached-set-ref-return.md)
 (DEC-1=A).
+
+## CTRAIT-5
+
+`ConcurrentCachePeekAsync<K, V>: ConcurrentCacheBase` is the async mirror of
+`ConcurrentCachePeek`. It declares a required
+`async_cache_peek(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>>` carrying
+the identical side-effect-free contract: no recency/LRU promotion, no TTL refresh, no hit/miss
+metrics, and no lazy removal of expired entries; an expired entry reads as `None`. Unlike
+`ConcurrentCachePeek::cache_peek`, `async_cache_peek` has deliberately **no default body** --
+generic code bounded on the trait depends on the contract holding for *every* implementor, and a
+defaulted body built on an ordinary read could not verify that for an arbitrary external type, so
+it would open a contract hole. Mirroring `ConcurrentCachePeek`'s defaulted `peek` alias, the trait
+also provides a defaulted `async_peek` alias delegating to `async_cache_peek`; it is named with the
+`async_` prefix (not a bare `peek`) so it does not collide with the sync inherent
+`peek(&self, &K) -> Option<V>` already exposed by the six sharded concrete types.
+
+`ConcurrentCachePeekAsync` is implemented by exactly the six sharded stores (`Self::Error =
+Infallible`), delegating to their existing side-effect-free sync `cache_peek`. It is added to
+`cached::prelude`. This closes the gap where calling `async_cache_peek` on a sharded store
+previously produced an E0599 whose rustc suggestion was actively wrong: it proposed appending
+`.await` to the non-future sync `cache_peek`.
+
+`RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately implement neither
+`ConcurrentCachePeek` nor `ConcurrentCachePeekAsync`. This affirms the existing rustdoc rather than
+reversing it: peek is an in-memory concept. For an IO-backed store there is no client-side recency
+or TTL state to skip, the metrics distinction is meaningless, and a "peek" would still be a full
+network or disk round trip, so it would advertise a cheapness the store cannot deliver. See
+[design/0040-peek-is-an-in-memory-concept.md](design/0040-peek-is-an-in-memory-concept.md) for
+the unified rationale.

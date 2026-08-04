@@ -1,5 +1,5 @@
 error: `size` was renamed to `max_size`; use `max_size = ...`
- --> tests/ui/cached_size_attr_removed.rs:6:4
+ --> tests/ui/cached_size_attr_removed.rs:5:10
   |
-6 | fn my_fn(x: u32) -> u32 {
-  |    ^^^^^
+5 | #[cached(size = 2)]
+  |          ^^^^

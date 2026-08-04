@@ -33,3 +33,12 @@ after build).
 Builder-side resolved-path introspection and a configurable temp-dir fallback remain open
 ([design/0025-redb-disk-path-introspection.md](design/0025-redb-disk-path-introspection.md)). See
 [traits-concurrent.md](traits-concurrent.md).
+
+## REDB-5
+
+`RedbCacheError` and `RedbCacheBuildError` `Display` interpolates the underlying source (e.g.
+`#[error("storage error: {source}")]`) instead of discarding it, so the cause is readable from
+`Display` even though the source type itself is not public API (per
+[design/0005-store-error-consistency.md](design/0005-store-error-consistency.md)). Previously
+`{e}` rendered only the bare variant string (e.g. "Storage error"); `Debug` already showed the
+cause. `Display` text is not semver-guarded, so this is a non-breaking change.

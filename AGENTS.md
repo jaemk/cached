@@ -36,10 +36,10 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 ---
 
 ## Toolchain & Edition
-- **Rust edition: 2024.** MSRV is **1.89** (raised from the edition-2024 floor of 1.85 by redb 4.x), declared via `rust-version` in `Cargo.toml`, `cached_proc_macro/Cargo.toml`, and `cached_proc_macro_types/Cargo.toml`.
+- **Rust edition: 2024.** MSRV is **1.92**, declared via `rust-version` in `Cargo.toml`, `cached_proc_macro/Cargo.toml`, and `cached_proc_macro_types/Cargo.toml`. The `async_core` feature (and `async`, which enables it) does not compile before 1.92: rustc issue #100013, a borrowck limitation on the `CachedGetOrSetAsync` RPIT default bodies, fails on 1.89-1.91 and first builds clean on 1.92.
 - **`rust-toolchain.toml` pins the toolchain to `1.96.0`** (latest stable) for local development and CI. Always build/format/test with this toolchain — it is what keeps `cargo fmt` deterministic.
 - **If `cargo fmt --check` or `make ci` reports formatting diffs in files you did not touch, you are on the wrong rustfmt** — confirm `cargo --version` shows `1.96.0` (run `rustup toolchain install 1.96.0` if missing) instead of reformatting the whole tree.
-- The pin is dev/CI-only: it is not published and does not affect downstream consumers, who only need Rust ≥ 1.89.
+- The pin is dev/CI-only: it is not published and does not affect downstream consumers, who only need Rust ≥ 1.92.
 
 ---
 

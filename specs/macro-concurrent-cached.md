@@ -38,3 +38,24 @@ multiple `From` impls). Store errors are named per
 [design/0005-store-error-consistency.md](design/0005-store-error-consistency.md); unifying
 single-variant argument errors is an open direction
 ([design/0020-argument-error-unification.md](design/0020-argument-error-unification.md)).
+
+## CONC-4
+
+`#[concurrent_cached]` gains compile-time missing-feature guards for the disk and redis backends,
+mirroring the existing `time_stores` guard (CONC-1) and the `async` feature guard. Without the
+`redb_store` feature, `#[concurrent_cached(disk = true, ...)]` now emits one `compile_error!`
+naming `redb_store`, in place of raw E0433/E0425 errors ("cannot find `RedbCache` in `cached`").
+Without a redis feature, `#[concurrent_cached(redis = true, ...)]` now emits one `compile_error!`
+naming the redis features (`redis_tokio` / `redis_smol` and their TLS variants), in place of the
+async feature guard firing instead: previously that guard both named the wrong feature
+(`async_core`) and leaked the doc-hidden internal `__set_dispatch_async` path into the error. The
+async guard is ordered so it cannot pre-empt the redis guard. See
+[design/0042-macro-feature-guard-errors.md](design/0042-macro-feature-guard-errors.md) and
+[cargo-features.md](cargo-features.md) FEAT-8.
+
+## CONC-5
+
+The `size` -> `max_size` rename error, the mutually-exclusive-TTL error, and the
+generic-function-without-`key`/`convert` error (shared with `#[cached]`, see
+[macro-cached.md](macro-cached.md) CACHED-7) now span the offending attribute rather than the
+function name; the message text is unchanged. See [design/0043-macro-error-precision.md](design/0043-macro-error-precision.md).

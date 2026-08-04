@@ -6424,13 +6424,14 @@ fn test_lru_ttl_cache_retain() {
     cache.cache_set(4, 40); // even
 
     // Keep only even values
-    cache.retain(|_, v| v % 2 == 0);
+    let removed = cache.retain(|_, v| v % 2 == 0);
 
     assert!(cache.cache_get(&1).is_none()); // 11 is odd, removed
     assert!(cache.cache_get(&2).is_some()); // 20 is even, kept
     assert!(cache.cache_get(&3).is_none()); // 31 is odd, removed
     assert!(cache.cache_get(&4).is_some()); // 40 is even, kept
     assert_eq!(cache.cache_size(), 2);
+    assert_eq!(removed, 2); // keys 1 and 3 removed by the predicate
 }
 
 #[test]
@@ -6455,11 +6456,12 @@ fn test_lru_retain_fires_on_evict_and_increments_evictions() {
     cache.cache_set(4u32, 40u32);
 
     // Remove odd keys via retain
-    cache.retain(|k, _v| k % 2 == 0);
+    let removed = cache.retain(|k, _v| k % 2 == 0);
 
     assert_eq!(fired.load(Ordering::Relaxed), 2); // keys 1 and 3 removed
     assert_eq!(cache.cache_evictions(), Some(2));
     assert_eq!(cache.cache_size(), 2);
+    assert_eq!(removed, 2);
     assert!(cache.cache_get(&1u32).is_none());
     assert!(cache.cache_get(&2u32).is_some());
     assert!(cache.cache_get(&3u32).is_none());
@@ -6506,7 +6508,9 @@ fn test_expiring_lru_cache_retain() {
     cache.cache_set(4, live(40)); // even -> kept
 
     // Keep only even values; expired entries go regardless of the predicate.
-    cache.retain(|_, v| v.n % 2 == 0);
+    // Key 1 is a predicate rejection (odd); key 3 is an expired sweep (predicate would
+    // have kept it, since 30 is even) -- the returned count folds both together.
+    let removed = cache.retain(|_, v| v.n % 2 == 0);
 
     assert!(cache.cache_get(&1).is_none());
     assert!(cache.cache_get(&2).is_some());
@@ -6515,6 +6519,7 @@ fn test_expiring_lru_cache_retain() {
     assert_eq!(cache.cache_size(), 2);
     assert_eq!(fired.load(Ordering::Relaxed), 2); // on_evict fired for keys 1 and 3
     assert_eq!(cache.cache_evictions(), Some(2));
+    assert_eq!(removed, 2); // one predicate rejection + one expired sweep
 
     // LRU recency order of survivors is unchanged (most-recently-set first).
     let keys: Vec<u32> = cache.iter().map(|(k, _)| *k).collect();

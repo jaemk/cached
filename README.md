@@ -9,7 +9,10 @@
 `cached` provides implementations of several caching structures as well as macros
 for defining memoized functions.
 
-Requires Rust >= 1.89.
+Requires Rust >= 1.92. (The `async_core` / `async` features do not compile before 1.92: the
+`CachedGetOrSetAsync` default bodies hit a borrowck limitation rustc attributes to
+[rust-lang/rust#100013](https://github.com/rust-lang/rust/issues/100013). `rust-version` is a
+single crate-level value, so the floor applies to every feature set.)
 
 Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe with the backing
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
@@ -200,7 +203,14 @@ For `disk` and `redis` stores, `Result<T, E>` is required. `map_error` is option
 
 `TtlCache`/`LruTtlCache`/`TtlSortedCache`/`ShardedTtlCache`/`ShardedLruTtlCache` require the `time_stores` feature.
 
-`ShardedUnboundCache` and its variants are partitioned across power-of-two shards (default: `available_parallelism() × 4`, clamped to 8–1024; the 8–1024 clamp applies only to this computed default — an explicit `shards = N` is rounded up to a power of two but never clamped) each protected by a `parking_lot::RwLock`. Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
+`ShardedUnboundCache` and its variants are partitioned across power-of-two shards, each protected by a `parking_lot::RwLock`. The default shard count is derived in two steps:
+
+- The host default is `available_parallelism() × 4`, clamped to 8–1024 and rounded up to a power of two. It is sampled once per process and reused by every cache built afterward.
+- On the default path, the three LRU-bounded sharded stores (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`) scale that down to match a total `max_size`: the count is `next_power_of_two(max_size / 16)`, clamped into `[1, host_default]`. This keeps each shard holding roughly 16 entries instead of preallocating an oversized shard array for a small cache — e.g. `ShardedLruCache::new(100)` builds 8 shards (`100 / 16 = 6` → `8`) with a total capacity of 128 (the 16-per-shard floor below), rather than one shard per host default.
+
+Everything else keeps the plain host default: the unbounded stores (`ShardedUnboundCache`, and `ShardedTtlCache` / `ShardedExpiringCache` built without a `max_size`), the builder's `per_shard_max_size` path, and any explicit `shards = N` / `.shards(n)`. An explicit shard count is rounded up to a power of two but never clamped.
+
+Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
 Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
@@ -239,7 +249,9 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   inherent shims: `c.set`/`c.get`/`c.len` need the `CachedExt` extension trait in scope
   (`use cached::CachedExt;`, or the prelude). This mirrors each family's ownership model (sharded
   stores are self-synchronized and infallible; single-owner stores are `&mut self`) and is not an
-  oversight.
+  oversight. **Sharp edge:** because inherent methods win over trait methods at the call site, a
+  `.unwrap()` you write on a sharded store does not mean what it means on the trait — see the
+  warning below this list.
 - **`len` / `size` vs `iter` vs `evict` contract for timed and expiring stores:**
   `len()` (and `cache_size()`, `is_empty()`) return the raw stored entry count without
   scanning for expiry. On lazy-eviction stores (`TtlCache`, `LruTtlCache`,
@@ -287,12 +299,129 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   is generic over `CachedIter<K, V>` or uses `.iter()` must use a non-sharded store. They do,
   however, provide a side-effect-free read via the [`ConcurrentCachePeek`] trait (`cache_peek`,
   returning an owned `Option<V>`), with the inherent `peek` shim taking call-site priority on the
-  concrete sharded types.
+  concrete sharded types. `ConcurrentCachePeekAsync` is the async mirror of that trait
+  (`async_cache_peek`, with an `async_peek` alias); it carries the identical no-recency,
+  no-TTL-refresh, no-metrics, no-lazy-expiry contract and is deliberately not implemented by the
+  IO stores.
   The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
   counting, LRU promotion, or TTL renewal).
+
+**Sharded stores: inherent methods shadow the trait methods**
+
+The six sharded stores expose inherent `set` / `get` / `len` / `contains` / `peek` that return
+unwrapped values (`Option<V>`, `usize`, `bool`), and inherent methods take call-site priority over
+the `ConcurrentCached` / `ConcurrentCachedExt` trait methods of the same name, which return
+`Result<_, Self::Error>`. That priority is deliberate — the sharded stores are infallible, so the
+bare spelling is the useful one — but it has one sharp edge worth stating plainly:
+
+`s.set(k, v).unwrap()` compiles. It resolves to `Option::unwrap` on the *displaced value*, not to
+`Result::unwrap` on a store error, so it **panics on the first insert for a key**, where there is
+no displaced value to return. The same trap applies to `s.get(&k).unwrap()` and
+`s.peek(&k).unwrap()` on a miss.
+
+Drop the `.unwrap()` to use the inherent method; use fully-qualified syntax to reach the trait
+method:
+
+```rust
+use cached::{ConcurrentCachedExt, ShardedUnboundCache};
+
+let s: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::new();
+
+// Inherent, infallible: returns the displaced value, so `None` on a first insert.
+assert_eq!(s.set(1, 10), None);
+assert_eq!(s.get(&1), Some(10));
+
+// Trait, fallible: `Result<Option<V>, Infallible>` — the `unwrap` is on the Result.
+assert_eq!(ConcurrentCachedExt::set(&s, 2, 20).unwrap(), None);
+assert_eq!(ConcurrentCachedExt::get(&s, &2).unwrap(), Some(20));
+```
+
+**Inspection and maintenance APIs**
+
+`retain` filters a cache in place and returns the number of entries removed. It is inherent on all
+seven single-owner stores (`&mut self`) and all six sharded stores (`&self`). On the expiry-aware
+stores it also drops entries that are already expired, regardless of what the predicate returned,
+so the count is information only the store has. Every removal fires `on_evict` and counts as an
+eviction. On the sharded stores the sweep locks one shard at a time and is not atomic across
+shards.
+
+```rust
+use cached::{CachedExt, LruCache};
+
+let mut c: LruCache<u32, u32> = LruCache::new(10);
+c.set(1, 10);
+c.set(2, 21);
+c.set(3, 30);
+let removed = c.retain(|_k, v| v % 2 == 0); // keep even values
+assert_eq!(removed, 1);
+assert_eq!(c.len(), 2);
+```
+
+`contains` answers "is there a live entry for this key?" without cloning the value. It is
+`Cached::cache_contains` / `CachedExt::contains` on the single-owner side (`&mut self`, accepts any
+borrowed key form) and `ConcurrentCached::cache_contains` / `ConcurrentCachedExt::contains` on the
+concurrent side (`&self`, `Result<bool, Self::Error>`). Neither carries a `V: Clone` bound, and the
+concurrent one is object-safe, so it is callable through `dyn ConcurrentCached`. The built-in
+stores implement it peek-based: no hit/miss metrics, no LRU promotion, no TTL refresh, and an
+expired entry reports `false`.
+
+```rust
+use cached::{CachedExt, LruCache};
+
+let mut c: LruCache<&str, u32> = LruCache::new(10);
+c.set("a", 1);
+assert!(c.contains("a"));
+assert!(!c.contains("b"));
+assert_eq!(c.metrics().hits, Some(0), "contains does not count a hit");
+```
+
+The LRU-family stores (`LruCache`, `LruTtlCache`, `ExpiringLruCache`) expose recency-ordered
+snapshots: `key_order()`, `value_order()`, and `iter_order()`, each most-recently-used first.
+The value-bearing two return [`CacheValue`]`<V, M>`, a wrapper that `Deref`s to `V` and carries
+per-entry metadata — `M = ()` for `LruCache` / `ExpiringLruCache`, and `M = Option<Instant>` for
+`LruTtlCache`, whose entries expose `expires_at()`. When you only want the values, the
+[`IntoValues`] extension trait unwraps either shape in one call: `.into_values()` turns
+`Vec<CacheValue<V, M>>` or `Vec<(K, CacheValue<V, M>)>` into a plain `Vec<V>`, order preserved.
+
+```rust
+use cached::{CacheValue, CachedExt, IntoValues, LruCache};
+
+let mut c: LruCache<&str, u32> = LruCache::new(10);
+c.set("a", 1);
+c.set("b", 2);
+let _ = c.get("a"); // promote "a"
+
+assert_eq!(c.key_order(), vec!["a", "b"]);
+// `CacheValue` derefs to `V` and compares against a bare value.
+let values: Vec<CacheValue<u32>> = c.value_order();
+assert_eq!(*values[0], 1);
+assert_eq!(values[0], 1);
+assert_eq!(c.iter_order().len(), 2);
+
+// Bulk-unwrap either shape into plain values.
+assert_eq!(c.value_order().into_values(), vec![1, 2]);
+assert_eq!(c.iter_order().into_values(), vec![1, 2]);
+```
+
+[`TtlSortedCache::set_with`] starts a builder-style insert with a per-entry TTL override and an
+opt-in expiry sweep, terminated by `.set()`. Plain `set` uses the cache's default TTL and never
+runs the sweep (size-limit enforcement is unaffected by either).
+
+```rust
+use cached::{CachedExt, TtlSortedCache};
+use cached::time::Duration;
+
+let mut c: TtlSortedCache<&str, u32> =
+    TtlSortedCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
+c.set("default-ttl", 1);
+// Per-entry TTL override plus an expiry sweep on the way in.
+let displaced = c.set_with("short", 2).ttl(Duration::from_millis(1)).evict().set();
+assert_eq!(displaced, None);
+assert_eq!(c.len(), 2);
+```
 
 **Performance**
 

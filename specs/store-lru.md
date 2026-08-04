@@ -94,3 +94,17 @@ in-place overwrite described below.
 Before 3.0 an overwrite replaced the value in place and left recency untouched (an artifact of
 the original `SizedCache` implementation, where `LRUList::set` in place was the cheap path).
 See [design/0038-cache-set-promotes-on-overwrite.md](design/0038-cache-set-promotes-on-overwrite.md).
+
+## LRU-8
+
+`retain(keep)` now returns `usize` (the count of entries removed) instead of `()`. This is a
+BREAKING change from 2.x and applies to every single-owner store that has `retain`
+(`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`,
+`ExpiringLruCache`, per LRU-4) and to the six sharded stores' inherent `retain`
+(see [store-sharded.md](store-sharded.md) SHARD-9). On the expiry-aware stores the returned
+count folds together BOTH predicate-rejected entries and entries swept for having already
+expired, since expiry removal is unconditional regardless of what `keep` returns (LRU-4), so a
+caller cannot recover the removed count from the predicate's return values alone. On
+`UnboundCache` (no eviction dimension), the count is exactly the number of entries `keep`
+rejected. This mirrors the sibling `TtlSortedCache::retain_latest(count, evict) -> usize`, which
+already returned a count.

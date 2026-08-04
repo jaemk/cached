@@ -218,9 +218,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     // `Duration`. These need only presence (`is_some()`), not a parsed value, and
     // surfacing "mutually exclusive" is more relevant than a `ttl` parse error
     // when `expires` is also set.
+    // Each of these is spanned at the conflicting TTL attribute rather than at the
+    // function name (0043b).
     if args.expires && args.ttl_secs.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl_secs"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl_secs` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl_secs` applies a uniform time-based TTL",
@@ -230,7 +232,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     if args.expires && args.ttl_millis.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl_millis"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl_millis` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl_millis` applies a uniform millisecond TTL to all entries",
@@ -240,7 +242,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     if args.expires && args.ttl.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl` applies a uniform time-based TTL",
@@ -257,6 +259,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         args.ttl_secs,
         args.ttl_millis,
         fn_ident.span(),
+        last_named_attr_span(&attr_args, &["ttl", "ttl_secs", "ttl_millis"])
+            .unwrap_or_else(attr_list_span),
     ) {
         Ok(v) => v,
         Err(e) => return e.to_compile_error().into(),
@@ -454,15 +458,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
-    // The generated cache internals `.clone()` the value on every cache-set
-    // (`set_cache_block` above) and on a cache hit (`return_cache_block`);
-    // without a `Clone` bound on the cached value type those calls fail deep
-    // inside macro-generated code with an opaque trait-bound error. Emit a
-    // clear, precisely-spanned assertion ahead of those internals so it
-    // appears first (see `clone_return_assertion`); the opaque errors below
-    // still follow it.
-    let clone_type_assertion = clone_return_assertion(&cache_value_ty, output_span);
-
     // G1: Reject a generic `#[once]` whose cache value type names one of the
     // function's own type or const parameters. The cache static is
     // monomorphic, so it cannot contain a bare type/const param in its type.
@@ -599,22 +594,34 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the set cache and return cache blocks
+    //
+    // The generated cache internals clone the value on every cache-set
+    // (`set_cache_block` below) and on a cache hit (`return_cache_block`). Both go
+    // through `<#cache_value_ty as Clone>::clone(...)`, spanned at the user's
+    // return type, rather than through a `.clone()` method call: that is the
+    // `Clone` assertion AND the clone, so a non-`Clone` value type produces
+    // exactly one precisely-spanned error instead of that error plus an
+    // E0308/E0599 cascade spanned at the attribute (0043).
+    let clone_owned = clone_cached_value(&cache_value_ty, output_span, quote! { &__cached_result });
+    let clone_borrowed =
+        clone_cached_value(&cache_value_ty, output_span, quote! { __cached_result });
+    let clone_inner = clone_cached_value(&cache_value_ty, output_span, quote! { __cached_inner });
     let (set_cache_block, return_cache_block) = match (is_smart_result, is_smart_option) {
         (false, false) => {
             let set_cache_block = if has_ttl {
                 quote! {
-                    *__cached_cached = Some((#krate::time::Instant::now(), __cached_result.clone()));
+                    *__cached_cached = Some((#krate::time::Instant::now(), #clone_owned));
                 }
             } else {
                 quote! {
-                    *__cached_cached = Some(__cached_result.clone());
+                    *__cached_cached = Some(#clone_owned);
                 }
             };
 
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.set_was_cached(true); return __cached_r }
+                quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return __cached_r }
             } else {
-                quote! { return __cached_result.clone() }
+                quote! { return #clone_borrowed }
             };
             let return_cache_block = gen_return_cache_block(
                 &krate,
@@ -628,21 +635,21 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             let set_cache_block = if has_ttl {
                 quote! {
                     if let Ok(__cached_inner) = &__cached_result {
-                        *__cached_cached = Some((#krate::time::Instant::now(), __cached_inner.clone()));
+                        *__cached_cached = Some((#krate::time::Instant::now(), #clone_inner));
                     }
                 }
             } else {
                 quote! {
                     if let Ok(__cached_inner) = &__cached_result {
-                        *__cached_cached = Some(__cached_inner.clone());
+                        *__cached_cached = Some(#clone_inner);
                     }
                 }
             };
 
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.set_was_cached(true); return Ok(__cached_r) }
+                quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return Ok(__cached_r) }
             } else {
-                quote! { return Ok(__cached_result.clone()) }
+                quote! { return Ok(#clone_borrowed) }
             };
             let return_cache_block = gen_return_cache_block(
                 &krate,
@@ -656,21 +663,21 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             let set_cache_block = if has_ttl {
                 quote! {
                     if let Some(__cached_inner) = &__cached_result {
-                        *__cached_cached = Some((#krate::time::Instant::now(), __cached_inner.clone()));
+                        *__cached_cached = Some((#krate::time::Instant::now(), #clone_inner));
                     }
                 }
             } else {
                 quote! {
                     if let Some(__cached_inner) = &__cached_result {
-                        *__cached_cached = Some(__cached_inner.clone());
+                        *__cached_cached = Some(#clone_inner);
                     }
                 }
             };
 
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.clone(); __cached_r.set_was_cached(true); return Some(__cached_r) }
+                quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return Some(__cached_r) }
             } else {
-                quote! { return Some(__cached_result.clone()) }
+                quote! { return Some(#clone_borrowed) }
             };
             let return_cache_block = gen_return_cache_block(
                 &krate,
@@ -978,7 +985,6 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
         #(#attributes)*
         #visibility #signature_no_muts {
             #body_static
-            #clone_type_assertion
             #now_block
             #do_set_return_block
         }

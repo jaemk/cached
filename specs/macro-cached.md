@@ -52,3 +52,18 @@ must be pinned via `key` + `convert` + `ty`. Companion naming is an open directi
 ([design/0024-generated-companion-naming.md](design/0024-generated-companion-naming.md)); quoted
 string attributes were retained
 ([design/0006-macro-quoted-attributes.md](design/0006-macro-quoted-attributes.md), declined).
+
+## CACHED-6
+
+`#[cached]` on a function whose return type is not `Clone` now emits one clear error: a
+precisely-spanned `Clone`-bound assertion. The generated body is gated on that assertion, so the
+follow-on E0308/E0599 cascade (previously 3 errors) no longer fires. Same change applies to
+`#[once]`, see [macro-once.md](macro-once.md) ONCE-5. See [design/0043-macro-error-precision.md](design/0043-macro-error-precision.md).
+
+## CACHED-7
+
+The `size` -> `max_size` rename error (CACHED-2), the mutually-exclusive-TTL error, and the
+generic-function-without-`key`/`convert` error (CACHED-1) now span the offending attribute rather
+than the function name; the message text is unchanged, only the caret position improves. Shared
+with `#[concurrent_cached]`, see [macro-concurrent-cached.md](macro-concurrent-cached.md) CONC-5.
+See [design/0043-macro-error-precision.md](design/0043-macro-error-precision.md).

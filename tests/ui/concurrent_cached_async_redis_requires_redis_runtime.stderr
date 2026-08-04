@@ -1,0 +1,7 @@
+error: #[concurrent_cached(redis = true)] on an async function requires a redis runtime feature of the `cached` crate: `redis_tokio`, `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or `redis_smol_rustls` (each implies `redis_store` and `async`)
+  --> tests/ui/concurrent_cached_async_redis_requires_redis_runtime.rs:21:1
+   |
+21 | #[concurrent_cached(redis = true, ttl_secs = 1, map_error = r#"|e| format!("{:?}", e)"#)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `::cached::__require_redis_feature` which comes from the expansion of the attribute macro `concurrent_cached` (in Nightly builds, run with -Z macro-backtrace for more info)

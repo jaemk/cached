@@ -26,3 +26,17 @@ Emits `foo_prime_cache(..)` keeping the function's own arguments (the body runs 
 single stored value; arguments do not affect the key). The prime companion runs the body before
 taking the lock, per
 [design/0034-prime-companion-body-before-lock.md](design/0034-prime-companion-body-before-lock.md).
+
+## ONCE-5
+
+`#[once]` on a function whose return type is not `Clone` now emits one clear error: a
+precisely-spanned `Clone`-bound assertion. The generated body is gated on that assertion, so the
+follow-on E0308/E0599 cascade (previously 5 errors) no longer fires. Same change applies to
+`#[cached]`, see [macro-cached.md](macro-cached.md) CACHED-6. See [design/0043-macro-error-precision.md](design/0043-macro-error-precision.md).
+
+## ONCE-6
+
+The mutually-exclusive-TTL error (shared with `#[cached]`/`#[concurrent_cached]` via the same
+resolution helper) now spans the offending attribute rather than the function name; the message
+text is unchanged. `#[once]` has no `max_size` or generic-`key`/`convert` errors to re-span (see
+ONCE-1). See [design/0043-macro-error-precision.md](design/0043-macro-error-precision.md).

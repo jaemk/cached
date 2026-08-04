@@ -6,7 +6,8 @@ Status: Implemented
 
 `sync_writes = "by_key"` on `#[cached]` serializes concurrent calls for the same cache key
 through a bucketed per-key lock. Each `by_key` static is wrapped in a `KeyedCache<C, B>` that
-holds a fixed-size array of bucket locks and a `RandomState` hasher (`src/lib.rs:785-812`):
+holds a fixed-size array of bucket locks and a `RandomState` hasher (`src/lib.rs`, in the
+`__private` module):
 
 ```rust
 pub struct KeyedCache<C, B> {
@@ -32,17 +33,21 @@ determined by a fixed seed, an attacker who knows the key space could craft inpu
 to the same bucket, collapsing N-bucket parallelism to serial execution. The process-random seed
 makes the bucket assignment unpredictable across process restarts and between processes.
 
-**`KeyedCache` is `#[doc(hidden)]` and not a stable public API.** The only stable surface is
+**`KeyedCache` lives in `#[doc(hidden)] pub mod __private` and is not a stable public API.**
+It was moved there from the crate root because, as a `pub` root item, rustc offered it as the
+nearest match when a user imported a removed legacy store name (for example
+`use cached::TimedCache;`). The generated code emits `::cached::__private::KeyedCache`. The only
+stable surface is
 that it `Deref`s to the inner cache lock `C`, so a named `by_key` static (`FN_CACHE.read()`,
 `FN_CACHE.write()`, `.lock()`) works the same as any other generated static. The bucket vector
 and hasher are private fields; callers cannot observe or influence bucket assignment.
 
 **`bucket_for` uses `BuildHasher::hash_one`.** This avoids constructing a `Hasher` manually and
-is the idiomatic way to hash a single value with a `BuildHasher` (`src/lib.rs:807-811`).
+is the idiomatic way to hash a single value with a `BuildHasher`.
 
 ## Notes
 
-- `src/lib.rs:785-812` contains the full `KeyedCache` implementation.
+- The `__private` module in `src/lib.rs` contains the full `KeyedCache` implementation.
 - The CHANGELOG `[3.0.0-rc.4]` section notes: "`sync_writes = "by_key"` bucket selection seeds
   from a per-static `RandomState` instead of a fixed seed."
 - The number of buckets is controlled by `sync_writes_buckets` on `#[cached]` (default: the

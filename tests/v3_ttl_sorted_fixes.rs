@@ -12,9 +12,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use cached::Cached;
 use cached::stores::TtlSortedCache;
 use cached::time::Duration;
+use cached::{CacheEvict, Cached};
 
 /// C2: when the factory returns `Err` on an expired entry, the entry must remain and `on_evict`
 /// must NOT fire. A subsequent successful call then replaces it and fires `on_evict` exactly once.
@@ -164,6 +164,51 @@ fn set_max_size_shrink_evicts_immediately() {
         Some(3),
         "eviction counter reflects the immediate shrink"
     );
+}
+
+/// Coverage gap: `cache_get_or_set_with_mut` inserts through the same `set_inner` shared with
+/// `set_with(..).ttl(Duration::MAX)` (covered in-crate by
+/// `set_with_ttl_overflow_stores_never_expiring_entry` in `src/stores/ttl_sorted.rs`), but no
+/// test previously drove this specific insert path with a TTL-overflowing `Duration` to confirm
+/// the never-expires policy on it. A cache-level TTL of `Duration::MAX` overflows
+/// `Instant::now().checked_add`, so a miss handled by `cache_get_or_set_with_mut` must store the
+/// entry as never-expiring, exactly like the `set_with` path.
+#[test]
+fn get_or_set_with_mut_with_overflowing_ttl_never_expires() {
+    let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+        .ttl(Duration::MAX)
+        .build()
+        .unwrap();
+
+    let v = cache.cache_get_or_set_with_mut(1u32, || 42u32);
+    assert_eq!(*v, 42);
+    assert_eq!(cache.cache_size(), 1);
+
+    // The entry must survive an explicit eviction sweep: it never expires.
+    assert_eq!(CacheEvict::evict(&mut cache), 0);
+    assert_eq!(cache.cache_get(&1u32), Some(&42u32));
+    // And a TTL sweep with no size trim (count == current len) must not reap it either.
+    assert_eq!(cache.retain_latest(1, true), 0);
+    assert_eq!(cache.cache_get(&1u32), Some(&42u32));
+}
+
+/// Same coverage gap for `cache_try_get_or_set_with_mut`, the fallible sibling of
+/// `cache_get_or_set_with_mut`, which shares the identical `set_inner` insert path.
+#[test]
+fn try_get_or_set_with_mut_with_overflowing_ttl_never_expires() {
+    let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+        .ttl(Duration::MAX)
+        .build()
+        .unwrap();
+
+    let v: Result<&mut u32, &'static str> = cache.cache_try_get_or_set_with_mut(1u32, || Ok(42u32));
+    assert_eq!(v, Ok(&mut 42));
+    assert_eq!(cache.cache_size(), 1);
+
+    assert_eq!(CacheEvict::evict(&mut cache), 0);
+    assert_eq!(cache.cache_get(&1u32), Some(&42u32));
+    assert_eq!(cache.retain_latest(1, true), 0);
+    assert_eq!(cache.cache_get(&1u32), Some(&42u32));
 }
 
 /// C3: growing or setting a bound at/above the current size must not evict anything.

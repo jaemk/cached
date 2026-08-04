@@ -10,6 +10,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: dtolnay/rust-toolchain@1.92.0
+
+    - name: Cache cargo dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-cargo-dir
+      with:
+        path: ~/.cargo
+        key: ${{ runner.os }}-msrv-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-msrv-${{ env.cache-name }}-
+          ${{ runner.os }}-msrv-
+          ${{ runner.os }}-
+
+    - name: Cache target dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-target-dir
+      with:
+        path: ./target
+        key: ${{ runner.os }}-msrv-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-msrv-${{ env.cache-name }}-
+          ${{ runner.os }}-msrv-
+          ${{ runner.os }}-
+
+    - run: cargo check --all-features
+      name: 'Checking MSRV (1.92.0) builds with --all-features'
+
   build:
 
     runs-on: ubuntu-latest

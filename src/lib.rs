@@ -8,7 +8,10 @@
 `cached` provides implementations of several caching structures as well as macros
 for defining memoized functions.
 
-Requires Rust >= 1.89.
+Requires Rust >= 1.92. (The `async_core` / `async` features do not compile before 1.92: the
+`CachedGetOrSetAsync` default bodies hit a borrowck limitation rustc attributes to
+[rust-lang/rust#100013](https://github.com/rust-lang/rust/issues/100013). `rust-version` is a
+single crate-level value, so the floor applies to every feature set.)
 
 Memoized functions defined using `#[cached]`/`#[once]` macros are thread-safe with the backing
 function-cache wrapped in a mutex/rwlock. `#[concurrent_cached]` functions are thread-safe via the
@@ -199,7 +202,14 @@ For `disk` and `redis` stores, `Result<T, E>` is required. `map_error` is option
 
 `TtlCache`/`LruTtlCache`/`TtlSortedCache`/`ShardedTtlCache`/`ShardedLruTtlCache` require the `time_stores` feature.
 
-`ShardedUnboundCache` and its variants are partitioned across power-of-two shards (default: `available_parallelism() × 4`, clamped to 8–1024; the 8–1024 clamp applies only to this computed default — an explicit `shards = N` is rounded up to a power of two but never clamped) each protected by a `parking_lot::RwLock`. Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
+`ShardedUnboundCache` and its variants are partitioned across power-of-two shards, each protected by a `parking_lot::RwLock`. The default shard count is derived in two steps:
+
+- The host default is `available_parallelism() × 4`, clamped to 8–1024 and rounded up to a power of two. It is sampled once per process and reused by every cache built afterward.
+- On the default path, the three LRU-bounded sharded stores (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`) scale that down to match a total `max_size`: the count is `next_power_of_two(max_size / 16)`, clamped into `[1, host_default]`. This keeps each shard holding roughly 16 entries instead of preallocating an oversized shard array for a small cache — e.g. `ShardedLruCache::new(100)` builds 8 shards (`100 / 16 = 6` → `8`) with a total capacity of 128 (the 16-per-shard floor below), rather than one shard per host default.
+
+Everything else keeps the plain host default: the unbounded stores (`ShardedUnboundCache`, and `ShardedTtlCache` / `ShardedExpiringCache` built without a `max_size`), the builder's `per_shard_max_size` path, and any explicit `shards = N` / `.shards(n)`. An explicit shard count is rounded up to a power of two but never clamped.
+
+Shard structs are padded to 128-byte alignment (covering Intel adjacent-line prefetch and Apple Silicon 128-byte L1 lines) to eliminate false sharing; on a 64-shard deployment this amounts to ~8 KB of padding overhead per cache array. The outer type is an `Arc` — cloning is a reference share, not a deep copy (use `deep_clone()` for an independent copy; note that `deep_clone()` is an inherent method on each concrete sharded type, not part of any trait). They implement `ConcurrentCached`/`ConcurrentCachedAsync` and are the default store selected by `#[concurrent_cached]`.
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
 Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
@@ -238,7 +248,9 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   inherent shims: `c.set`/`c.get`/`c.len` need the `CachedExt` extension trait in scope
   (`use cached::CachedExt;`, or the prelude). This mirrors each family's ownership model (sharded
   stores are self-synchronized and infallible; single-owner stores are `&mut self`) and is not an
-  oversight.
+  oversight. **Sharp edge:** because inherent methods win over trait methods at the call site, a
+  `.unwrap()` you write on a sharded store does not mean what it means on the trait — see the
+  warning below this list.
 - **`len` / `size` vs `iter` vs `evict` contract for timed and expiring stores:**
   `len()` (and `cache_size()`, `is_empty()`) return the raw stored entry count without
   scanning for expiry. On lazy-eviction stores (`TtlCache`, `LruTtlCache`,
@@ -286,12 +298,132 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   is generic over `CachedIter<K, V>` or uses `.iter()` must use a non-sharded store. They do,
   however, provide a side-effect-free read via the [`ConcurrentCachePeek`] trait (`cache_peek`,
   returning an owned `Option<V>`), with the inherent `peek` shim taking call-site priority on the
-  concrete sharded types.
+  concrete sharded types. `ConcurrentCachePeekAsync` is the async mirror of that trait
+  (`async_cache_peek`, with an `async_peek` alias); it carries the identical no-recency,
+  no-TTL-refresh, no-metrics, no-lazy-expiry contract and is deliberately not implemented by the
+  IO stores.
   The four expiry-capable sharded stores ([`ShardedTtlCache`], [`ShardedLruTtlCache`],
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
   counting, LRU promotion, or TTL renewal).
+
+**Sharded stores: inherent methods shadow the trait methods**
+
+The six sharded stores expose inherent `set` / `get` / `len` / `contains` / `peek` that return
+unwrapped values (`Option<V>`, `usize`, `bool`), and inherent methods take call-site priority over
+the `ConcurrentCached` / `ConcurrentCachedExt` trait methods of the same name, which return
+`Result<_, Self::Error>`. That priority is deliberate — the sharded stores are infallible, so the
+bare spelling is the useful one — but it has one sharp edge worth stating plainly:
+
+`s.set(k, v).unwrap()` compiles. It resolves to `Option::unwrap` on the *displaced value*, not to
+`Result::unwrap` on a store error, so it **panics on the first insert for a key**, where there is
+no displaced value to return. The same trap applies to `s.get(&k).unwrap()` and
+`s.peek(&k).unwrap()` on a miss.
+
+Drop the `.unwrap()` to use the inherent method; use fully-qualified syntax to reach the trait
+method:
+
+```rust
+use cached::{ConcurrentCachedExt, ShardedUnboundCache};
+
+let s: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::new();
+
+// Inherent, infallible: returns the displaced value, so `None` on a first insert.
+assert_eq!(s.set(1, 10), None);
+assert_eq!(s.get(&1), Some(10));
+
+// Trait, fallible: `Result<Option<V>, Infallible>` — the `unwrap` is on the Result.
+assert_eq!(ConcurrentCachedExt::set(&s, 2, 20).unwrap(), None);
+assert_eq!(ConcurrentCachedExt::get(&s, &2).unwrap(), Some(20));
+```
+
+**Inspection and maintenance APIs**
+
+`retain` filters a cache in place and returns the number of entries removed. It is inherent on all
+seven single-owner stores (`&mut self`) and all six sharded stores (`&self`). On the expiry-aware
+stores it also drops entries that are already expired, regardless of what the predicate returned,
+so the count is information only the store has. Every removal fires `on_evict` and counts as an
+eviction. On the sharded stores the sweep locks one shard at a time and is not atomic across
+shards.
+
+```rust
+use cached::{CachedExt, LruCache};
+
+let mut c: LruCache<u32, u32> = LruCache::new(10);
+c.set(1, 10);
+c.set(2, 21);
+c.set(3, 30);
+let removed = c.retain(|_k, v| v % 2 == 0); // keep even values
+assert_eq!(removed, 1);
+assert_eq!(c.len(), 2);
+```
+
+`contains` answers "is there a live entry for this key?" without cloning the value. It is
+`Cached::cache_contains` / `CachedExt::contains` on the single-owner side (`&mut self`, accepts any
+borrowed key form) and `ConcurrentCached::cache_contains` / `ConcurrentCachedExt::contains` on the
+concurrent side (`&self`, `Result<bool, Self::Error>`). Neither carries a `V: Clone` bound, and the
+concurrent one is object-safe, so it is callable through `dyn ConcurrentCached`. The built-in
+stores implement it peek-based: no hit/miss metrics, no LRU promotion, no TTL refresh, and an
+expired entry reports `false`.
+
+```rust
+use cached::{CachedExt, LruCache};
+
+let mut c: LruCache<&str, u32> = LruCache::new(10);
+c.set("a", 1);
+assert!(c.contains("a"));
+assert!(!c.contains("b"));
+assert_eq!(c.metrics().hits, Some(0), "contains does not count a hit");
+```
+
+The LRU-family stores (`LruCache`, `LruTtlCache`, `ExpiringLruCache`) expose recency-ordered
+snapshots: `key_order()`, `value_order()`, and `iter_order()`, each most-recently-used first.
+The value-bearing two return [`CacheValue`]`<V, M>`, a wrapper that `Deref`s to `V` and carries
+per-entry metadata — `M = ()` for `LruCache` / `ExpiringLruCache`, and `M = Option<Instant>` for
+`LruTtlCache`, whose entries expose `expires_at()`. When you only want the values, the
+[`IntoValues`] extension trait unwraps either shape in one call: `.into_values()` turns
+`Vec<CacheValue<V, M>>` or `Vec<(K, CacheValue<V, M>)>` into a plain `Vec<V>`, order preserved.
+
+```rust
+use cached::{CacheValue, CachedExt, IntoValues, LruCache};
+
+let mut c: LruCache<&str, u32> = LruCache::new(10);
+c.set("a", 1);
+c.set("b", 2);
+let _ = c.get("a"); // promote "a"
+
+assert_eq!(c.key_order(), vec!["a", "b"]);
+// `CacheValue` derefs to `V` and compares against a bare value.
+let values: Vec<CacheValue<u32>> = c.value_order();
+assert_eq!(*values[0], 1);
+assert_eq!(values[0], 1);
+assert_eq!(c.iter_order().len(), 2);
+
+// Bulk-unwrap either shape into plain values.
+assert_eq!(c.value_order().into_values(), vec![1, 2]);
+assert_eq!(c.iter_order().into_values(), vec![1, 2]);
+```
+
+[`TtlSortedCache::set_with`] starts a builder-style insert with a per-entry TTL override and an
+opt-in expiry sweep, terminated by `.set()`. Plain `set` uses the cache's default TTL and never
+runs the sweep (size-limit enforcement is unaffected by either).
+
+```rust
+# #[cfg(feature = "time_stores")]
+# {
+use cached::{CachedExt, TtlSortedCache};
+use cached::time::Duration;
+
+let mut c: TtlSortedCache<&str, u32> =
+    TtlSortedCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
+c.set("default-ttl", 1);
+// Per-entry TTL override plus an expiry sweep on the way in.
+let displaced = c.set_with("short", 2).ttl(Duration::from_millis(1)).evict().set();
+assert_eq!(displaced, None);
+assert_eq!(c.len(), 2);
+# }
+```
 
 **Performance**
 
@@ -705,8 +837,8 @@ pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 pub use stores::{
     BuildError, CacheEvict, CacheValue, ConcurrentCacheEvict, DefaultHashBuilder,
     DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
-    ExpiringLruCacheBuilder, LruCache, LruCacheBuilder, SetMaxSizeError, SetTtlError, ShardHasher,
-    ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
+    ExpiringLruCacheBuilder, IntoValues, LruCache, LruCacheBuilder, SetMaxSizeError, SetTtlError,
+    ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
     ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
     ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder, ShardedUnboundCache,
     ShardedUnboundCacheBase, ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
@@ -806,47 +938,193 @@ macro_rules! __require_time_stores_feature {
     };
 }
 
-/// Support type backing `sync_writes = "by_key"` named statics generated by `#[cached]`.
+/// Guard macro emitted by `#[concurrent_cached(disk = true)]`. When the `redb_store` feature is
+/// enabled this expands to nothing; when it is disabled it expands to a `compile_error!` naming
+/// `redb_store`, a clearer diagnostic than the raw "cannot find `RedbCache` in `cached`"
+/// (E0433/E0425) pair that would otherwise appear from the generated code.
 ///
-/// Doc-hidden and generic over the cache lock `C` (e.g. `RwLock<Cache>`) and the per-key bucket
-/// lock `B` (e.g. `RwLock<()>`). It [`Deref`](std::ops::Deref)s to the inner cache lock, so a
-/// named `by_key` static is inspected with exactly the same `.read()`/`.write()` (or `.lock()`,
-/// sync or async) calls as any other generated static; the bucket vector and the per-static
-/// randomly-seeded hasher are private. The only stable surface is that `Deref` to `C`.
+/// Invoked as `cached::__require_redb_store_feature!{}`.
+///
+/// This is an internal implementation detail; do not call it from user code.
+#[cfg(feature = "redb_store")]
 #[doc(hidden)]
-pub struct KeyedCache<C, B> {
-    cache: C,
-    buckets: std::boxed::Box<[std::sync::Arc<B>]>,
-    hasher: std::collections::hash_map::RandomState,
+#[macro_export]
+macro_rules! __require_redb_store_feature {
+    () => {};
 }
 
-impl<C, B> KeyedCache<C, B> {
-    /// Construct from the cache lock and the pre-built bucket locks. Called by generated code.
+#[cfg(not(feature = "redb_store"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __require_redb_store_feature {
+    () => {
+        compile_error!(
+            "#[concurrent_cached(disk = true)] requires the `redb_store` feature \
+             of the `cached` crate"
+        );
+    };
+}
+
+/// Guard macro emitted by `#[concurrent_cached(redis = true)]`. Two call shapes:
+///
+/// - `cached::__require_redis_feature!{}` — the synchronous path, which builds a `RedisCache`
+///   and is satisfied by the `redis_store` feature (every redis runtime feature implies it).
+/// - `cached::__require_redis_feature!{async}` — the async path, which builds an
+///   `AsyncRedisCache` and needs a redis *runtime* feature (`redis_tokio` / `redis_smol` or one
+///   of their TLS variants). `redis_store` alone is not enough there.
+///
+/// Each shape expands to nothing when its requirement is met and to a `compile_error!` naming
+/// the needed feature otherwise. The macro must be emitted *before* the
+/// [`__require_async_feature`] guard on an async redis function, so that a build with no redis
+/// feature reports the missing redis feature rather than the missing `async` feature: the redis
+/// runtime features imply `async`, so enabling `async` alone would not fix the build.
+///
+/// This is an internal implementation detail; do not call it from user code.
+#[cfg(all(
+    feature = "redis_store",
+    any(
+        feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
+        feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+    )
+))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __require_redis_feature {
+    () => {};
+    (async) => {};
+}
+
+#[cfg(all(
+    feature = "redis_store",
+    not(any(
+        feature = "redis_smol",
+        feature = "redis_smol_native_tls",
+        feature = "redis_smol_rustls",
+        feature = "redis_tokio",
+        feature = "redis_tokio_native_tls",
+        feature = "redis_tokio_rustls",
+    ))
+))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __require_redis_feature {
+    () => {};
+    (async) => {
+        compile_error!(
+            "#[concurrent_cached(redis = true)] on an async function requires a redis \
+             runtime feature of the `cached` crate: `redis_tokio`, `redis_tokio_native_tls`, \
+             `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or \
+             `redis_smol_rustls` (each implies `redis_store` and `async`)"
+        );
+    };
+}
+
+#[cfg(not(feature = "redis_store"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __require_redis_feature {
+    () => {
+        compile_error!(
+            "#[concurrent_cached(redis = true)] requires a redis feature of the `cached` \
+             crate: `redis_store` for a synchronous function, or one of the redis runtime \
+             features `redis_tokio`, `redis_tokio_native_tls`, `redis_tokio_rustls`, \
+             `redis_smol`, `redis_smol_native_tls`, `redis_smol_rustls` for an async function"
+        );
+    };
+    (async) => {
+        compile_error!(
+            "#[concurrent_cached(redis = true)] on an async function requires a redis \
+             runtime feature of the `cached` crate: `redis_tokio`, `redis_tokio_native_tls`, \
+             `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or \
+             `redis_smol_rustls` (each implies `redis_store` and `async`)"
+        );
+    };
+}
+
+/// Internal support types used by macro-generated code.
+///
+/// Doc-hidden and **not** a stable public API: the contents may change in any release. It lives
+/// in its own module rather than at the crate root so that its items do not participate in
+/// name resolution against `cached::*` — a `#[doc(hidden)] pub` item at the root is still
+/// offered by rustc as a "did you mean" suggestion for an unrelated mistyped import (e.g.
+/// `use cached::TimedCache;`, a store name removed in 1.0, used to be answered with "did you
+/// mean `KeyedCache`?").
+///
+/// `KeyedCache` therefore resolves here:
+///
+/// ```rust
+/// use cached::__private::KeyedCache;
+/// let _ = std::marker::PhantomData::<KeyedCache<(), ()>>;
+/// ```
+///
+/// and **not** at the crate root:
+///
+/// ```compile_fail
+/// use cached::KeyedCache;
+/// let _ = std::marker::PhantomData::<KeyedCache<(), ()>>;
+/// ```
+///
+/// nor through a glob of the crate root:
+///
+/// ```compile_fail
+/// use cached::*;
+/// let _ = std::marker::PhantomData::<KeyedCache<(), ()>>;
+/// ```
+#[doc(hidden)]
+pub mod __private {
+    /// Support type backing `sync_writes = "by_key"` named statics generated by `#[cached]`.
+    ///
+    /// Doc-hidden and generic over the cache lock `C` (e.g. `RwLock<Cache>`) and the per-key
+    /// bucket lock `B` (e.g. `RwLock<()>`). It [`Deref`](std::ops::Deref)s to the inner cache
+    /// lock, so a named `by_key` static is inspected with exactly the same `.read()`/`.write()`
+    /// (or `.lock()`, sync or async) calls as any other generated static; the bucket vector and
+    /// the per-static randomly-seeded hasher are private. The only stable surface is that
+    /// `Deref` to `C`.
+    ///
+    /// Reachable only as `cached::__private::KeyedCache`. It was previously exported at the
+    /// crate root, where rustc offered it as the nearest-match suggestion for unrelated
+    /// mistyped imports such as `use cached::TimedCache;` (a name removed in 1.0).
     #[doc(hidden)]
-    pub fn new(cache: C, buckets: std::vec::Vec<std::sync::Arc<B>>) -> Self {
-        Self {
-            cache,
-            buckets: buckets.into_boxed_slice(),
-            hasher: std::collections::hash_map::RandomState::new(),
+    pub struct KeyedCache<C, B> {
+        cache: C,
+        buckets: std::boxed::Box<[std::sync::Arc<B>]>,
+        hasher: std::collections::hash_map::RandomState,
+    }
+
+    impl<C, B> KeyedCache<C, B> {
+        /// Construct from the cache lock and the pre-built bucket locks. Called by generated
+        /// code.
+        #[doc(hidden)]
+        pub fn new(cache: C, buckets: std::vec::Vec<std::sync::Arc<B>>) -> Self {
+            Self {
+                cache,
+                buckets: buckets.into_boxed_slice(),
+                hasher: std::collections::hash_map::RandomState::new(),
+            }
+        }
+
+        /// Select the per-key bucket lock for `key`. The hasher is seeded once per static from a
+        /// process-random source
+        /// ([`RandomState::new`](std::collections::hash_map::RandomState::new)), so an attacker
+        /// who knows the key space cannot force every key into one bucket (a fixed-seed hasher
+        /// could be collapsed that way). Called by generated code.
+        #[doc(hidden)]
+        pub fn bucket_for<Q: std::hash::Hash + ?Sized>(&self, key: &Q) -> &std::sync::Arc<B> {
+            use std::hash::BuildHasher;
+            let idx = (self.hasher.hash_one(key) as usize) % self.buckets.len();
+            &self.buckets[idx]
         }
     }
 
-    /// Select the per-key bucket lock for `key`. The hasher is seeded once per static from a
-    /// process-random source ([`RandomState::new`](std::collections::hash_map::RandomState::new)),
-    /// so an attacker who knows the key space cannot force every key into one bucket (a
-    /// fixed-seed hasher could be collapsed that way). Called by generated code.
-    #[doc(hidden)]
-    pub fn bucket_for<Q: std::hash::Hash + ?Sized>(&self, key: &Q) -> &std::sync::Arc<B> {
-        use std::hash::BuildHasher;
-        let idx = (self.hasher.hash_one(key) as usize) % self.buckets.len();
-        &self.buckets[idx]
-    }
-}
-
-impl<C, B> std::ops::Deref for KeyedCache<C, B> {
-    type Target = C;
-    fn deref(&self) -> &C {
-        &self.cache
+    impl<C, B> std::ops::Deref for KeyedCache<C, B> {
+        type Target = C;
+        fn deref(&self) -> &C {
+            &self.cache
+        }
     }
 }
 
@@ -865,7 +1143,7 @@ pub mod prelude {
         CacheEvict, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek, CachedRead,
         CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
         ConcurrentCacheTtl, ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires,
-        SerializeCached,
+        IntoValues, SerializeCached,
     };
 
     // Unconditional, like `ConcurrentCacheTtl` above: the trait itself is not
@@ -876,7 +1154,9 @@ pub mod prelude {
 
     #[cfg(feature = "async_core")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-    pub use crate::{CachedGetOrSetAsync, ConcurrentCachedAsync, SerializeCachedAsync};
+    pub use crate::{
+        CachedGetOrSetAsync, ConcurrentCachePeekAsync, ConcurrentCachedAsync, SerializeCachedAsync,
+    };
 }
 
 /// Core cache operations for single-owner (non-concurrent) stores.
@@ -2148,6 +2428,81 @@ pub trait ConcurrentCachePeek<K, V>: ConcurrentCacheBase {
     /// Should return `Self::Error` if the operation fails.
     fn peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
         self.cache_peek(k)
+    }
+}
+
+/// Async mirror of [`ConcurrentCachePeek`]: a side-effect-free cache lookup for concurrent
+/// stores that can expose a value cheaply.
+///
+/// [`async_cache_peek`](Self::async_cache_peek) carries the identical contract to the
+/// synchronous [`cache_peek`](ConcurrentCachePeek::cache_peek): no recency / LRU promotion,
+/// no TTL refresh, no hit/miss metrics accounting, and no lazy removal of expired entries. An
+/// entry whose TTL or per-value expiry has elapsed reads as `None` and is left in place for a
+/// later `async_cache_get`, an explicit removal, or an `evict()` to reap.
+///
+/// **`async_cache_peek` is a required method with no default body, deliberately.** A default
+/// body could only be written in terms of an ordinary `async_cache_get`, which violates every
+/// guarantee above — it promotes on an LRU store, extends the entry's life on a
+/// refresh-on-hit TTL store, and moves the hit/miss counters on any store. Generic code bounded
+/// on this trait would then be able to rely on none of the contract, leaving the bound
+/// decorative. Requiring the method means satisfying the bound implies the behavior.
+///
+/// Implemented by exactly the six in-memory sharded stores (`ShardedUnboundCache`,
+/// `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`,
+/// `ShardedExpiringLruCache`), each with `Self::Error = Infallible`, delegating to its
+/// side-effect-free sync `cache_peek`. Those stores never block on IO, so there is nothing to
+/// await; the async method exists so generic *async* code can name a peek bound.
+///
+/// The IO stores (`RedisCache`, `RedbCache`, `AsyncRedisCache`) deliberately implement neither
+/// peek trait. Peek is an in-memory concept: an IO-backed store has no client-side recency or
+/// TTL state to skip, so every negative guarantee is vacuous, while the cost is still a full
+/// network round trip or a disk read transaction. Implementing it would let generic code
+/// written for a cheap, side-effect-free read silently become IO-bound.
+///
+/// The alias [`async_peek`](Self::async_peek) keeps the `async_` prefix rather than being a
+/// bare `peek`, so it does not collide with the synchronous inherent
+/// `peek(&self, &K) -> Option<V>` the six sharded concrete types already expose.
+///
+/// This trait is **not** gated on `time_stores` (like [`ConcurrentCachePeek`]); only the
+/// built-in expiry-capable implementors require it.
+#[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
+pub trait ConcurrentCachePeekAsync<K, V>: ConcurrentCacheBase {
+    /// Retrieve a clone of the cached value for `k` without any observable side effect.
+    ///
+    /// No recency/LRU promotion, no TTL refresh, no hit/miss metrics, and no lazy removal of
+    /// expired entries; an expired entry reads as `None`.
+    ///
+    /// There is intentionally **no default body**: see the trait docs.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails. The sharded implementors are
+    /// infallible (`Self::Error = Infallible`), so the outer `Result` is always `Ok`.
+    #[must_use = "async_cache_peek returns the peeked value; ignoring it discards the result"]
+    #[doc(alias = "cache_peek")]
+    #[doc(alias = "async_peek")]
+    fn async_cache_peek(
+        &self,
+        k: &K,
+    ) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+
+    /// Ergonomic alias for [`async_cache_peek`](Self::async_cache_peek), mirroring
+    /// [`ConcurrentCachePeek::peek`].
+    ///
+    /// Named `async_peek` rather than `peek` so it does not collide with the synchronous
+    /// inherent `peek(&self, &K) -> Option<V>` on the concrete sharded types.
+    ///
+    /// # Errors
+    ///
+    /// Should return `Self::Error` if the operation fails.
+    #[must_use = "async_peek returns the peeked value; ignoring it discards the result"]
+    fn async_peek(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Sync,
+    {
+        async move { self.async_cache_peek(k).await }
     }
 }
 

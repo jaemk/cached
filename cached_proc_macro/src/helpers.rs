@@ -62,6 +62,44 @@ pub(super) fn reject_concurrent_only_attrs(
     Ok(())
 }
 
+/// Span of the LAST attribute in the macro's own attribute list whose name is one
+/// of `names` - e.g. the `ttl_millis = 10` in
+/// `#[cached(ttl_secs = 1, ttl_millis = 10)]`.
+///
+/// Attribute validations report the *attribute* that is wrong, not the function
+/// it is attached to (0043b). The parsed `FromMeta` struct has already thrown the
+/// spans away, so the lookup runs over the raw `NestedMeta` list the macro was
+/// invoked with. The last match is the useful one for mutual-exclusion errors:
+/// it is the attribute that conflicts with an earlier one, i.e. the one the user
+/// most likely wants to delete.
+///
+/// Returns `None` when no such attribute was written (the caller then falls back
+/// to [`attr_list_span`]).
+pub(super) fn last_named_attr_span(attr_args: &[NestedMeta], names: &[&str]) -> Option<Span> {
+    attr_args
+        .iter()
+        .filter_map(|arg| match arg {
+            NestedMeta::Meta(meta) => Some(meta),
+            NestedMeta::Lit(_) => None,
+        })
+        .rfind(|meta| {
+            meta.path()
+                .get_ident()
+                .is_some_and(|ident| names.iter().any(|name| ident == name))
+        })
+        .map(Spanned::span)
+}
+
+/// Span covering the macro attribute itself (`#[cached(...)]`), for attribute
+/// errors that are about the attribute list as a whole rather than one entry -
+/// and as the fallback when [`last_named_attr_span`] finds nothing.
+///
+/// `Span::call_site()` inside an attribute proc macro is the attribute, which is
+/// exactly the caret position wanted here.
+pub(super) fn attr_list_span() -> Span {
+    Span::call_site()
+}
+
 /// Resolve the path to the `cached` crate for use in generated code.
 ///
 /// Generated code that referred to `::cached::...` broke for downstream crates
@@ -167,19 +205,23 @@ impl FromMeta for TtlExpr {
 /// Returns `Ok((has_ttl, ttl_duration))` where `ttl_duration` is `Some` when any
 /// TTL is set. Performs the 3-way mutual-exclusion check, the `ttl_secs >= 1` /
 /// `ttl_millis >= 1` validation, and parses the `ttl` expression string.
+///
+/// `exclusive_span` spans the mutual-exclusion error at the conflicting TTL
+/// attribute (0043b); `span` covers the remaining validations.
 pub(super) fn resolve_ttl_duration(
     krate: &TokenStream2,
     ttl: &Option<TtlExpr>,
     ttl_secs: Option<u64>,
     ttl_millis: Option<u64>,
     span: Span,
+    exclusive_span: Span,
 ) -> Result<(bool, Option<TokenStream2>), syn::Error> {
     let set_count = usize::from(ttl.is_some())
         + usize::from(ttl_secs.is_some())
         + usize::from(ttl_millis.is_some());
     if set_count > 1 {
         return Err(syn::Error::new(
-            span,
+            exclusive_span,
             "`ttl`, `ttl_secs`, and `ttl_millis` are mutually exclusive - \
              `ttl` takes a `Duration` expression, `ttl_secs` whole seconds, \
              `ttl_millis` milliseconds; use exactly one",
@@ -372,42 +414,55 @@ pub(super) fn find_value_type(
     }
 }
 
-/// Emits a compile-time assertion that `value_ty` (the type actually stored/
-/// returned by the generated cache - the unwrapped `T` of a `Result<T, E>`/
-/// `Option<T>` return, or the `cached::Return<T>` wrapper under
-/// `with_cached_flag`) implements `Clone`.
+/// Emits every clone the generated cache performs on the cached value as a
+/// `Clone`-bound assertion spanned at the user's return type:
+/// `<#value_ty as ::std::clone::Clone>::clone(#value)`.
 ///
-/// Without this, a non-`Clone` return type only fails deep inside the
-/// generated cache internals (the `.clone()` call in the `cache_set` block, or
-/// the `.to_owned()` call on a cache hit), producing a trait-bound error that
-/// points at macro-generated code rather than at the user's return type. This
-/// assertion is emitted ahead of those internals, so its clear,
-/// precisely-spanned error appears first; the opaque ones still follow it.
+/// `value_ty` is the type actually stored/returned by the generated cache - the
+/// unwrapped `T` of a `Result<T, E>`/`Option<T>` return, or the
+/// `cached::Return<T>` wrapper under `with_cached_flag`. `value` is the
+/// expression to clone: `&owned` on the `cache_set` path, an already-borrowed
+/// binding on the cache-hit path.
 ///
-/// The assertion is a local, non-generic-over-`value_ty` helper fn plus a
-/// call that names `value_ty` as its turbofish argument, e.g.
-/// `fn __cached_assert_return_type_implements_clone<T: Clone>() {}` followed
-/// by `__cached_assert_return_type_implements_clone::<#value_ty>();`. This
-/// works even when `value_ty` names a generic parameter of the enclosing
-/// function (or, for `in_impl` methods, of the enclosing `impl` block):
-/// naming an in-scope generic parameter as a type argument to another
-/// generic call is ordinary code, not a new item definition, so it does not
-/// hit E0401 ("can't use generic parameters from outer item"). Rust checks
-/// the `Clone` bound against the enclosing generic's own declared bounds at
+/// The generated body is *gated* on the assertion in the sense that the
+/// assertion and the clone are the same expression - the body contains no other
+/// way to require `Clone`. Previously the body cloned with `.clone()` /
+/// `.to_owned()` method calls and a separate, precisely-spanned assertion was
+/// emitted ahead of them; the assertion fired *alongside* the method calls'
+/// E0308/E0599 cascade rather than in place of it, so a non-`Clone` return type
+/// produced 3 errors on `#[cached]` and 3 on `#[once]`, two of which were
+/// spanned at the attribute and named macro-internal expressions the user never
+/// wrote. Naming the bound explicitly in a qualified path removes those: there
+/// is no method to resolve and no `&T`-vs-`T` mismatch to report, only the
+/// `#value_ty: Clone` obligation. Every clone site renders the identical
+/// diagnostic (same message, same span), and rustc deduplicates identical
+/// diagnostics, so exactly one error remains no matter how many clone sites the
+/// expansion contains or how many generated bodies (the cached fn and its
+/// `_prime_cache` companion) contain them.
+///
+/// Naming `value_ty` as the self type of a qualified path works even when it is
+/// a generic parameter of the enclosing function (or, for `in_impl` methods, of
+/// the enclosing `impl` block): referring to an in-scope generic parameter in an
+/// expression is ordinary code, not a new item definition, so it does not hit
+/// E0401 ("can't use generic parameters from outer item"). Rust checks the
+/// `Clone` bound against the enclosing generic's own declared bounds at
 /// definition time, so a generic function whose signature already requires
 /// `T: Clone` continues to compile, while one that does not gets a precise
 /// diagnostic.
 ///
 /// `value_ty`'s tokens carry their original source spans (they are threaded
-/// through unmodified from the parsed return type), so the turbofish
-/// argument alone is enough to underline the user's return type in the
-/// resulting error; `span` (the return type's span) additionally covers the
-/// surrounding generated syntax so the whole assertion is attributed to the
-/// return type rather than macro-internal call-site code.
-pub(super) fn clone_return_assertion(value_ty: &TokenStream2, span: Span) -> TokenStream2 {
+/// through unmodified from the parsed return type), so they alone underline the
+/// user's return type in the resulting error; `span` (the return type's span)
+/// additionally covers the surrounding generated syntax so the whole expression
+/// is attributed to the return type rather than to macro-internal call-site
+/// code.
+pub(super) fn clone_cached_value(
+    value_ty: &TokenStream2,
+    span: Span,
+    value: TokenStream2,
+) -> TokenStream2 {
     quote_spanned! {span=>
-        fn __cached_assert_return_type_implements_clone<__CachedAssertClone: ::std::clone::Clone>() {}
-        __cached_assert_return_type_implements_clone::<#value_ty>();
+        <#value_ty as ::std::clone::Clone>::clone(#value)
     }
 }
 

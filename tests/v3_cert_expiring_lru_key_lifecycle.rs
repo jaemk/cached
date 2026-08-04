@@ -261,9 +261,13 @@ fn evict_and_retain_clone_no_key() {
     c.cache_set(CountedKey::new(1, "a", &counters), Val::stale());
     c.cache_set(CountedKey::new(2, "b", &counters), Val::live());
     assert_eq!(CacheEvict::evict(&mut c), 1);
-    c.retain(|_, _| false);
+    let removed = c.retain(|_, _| false);
     assert_eq!(counters.clones(), 0, "sweeps must not clone keys");
     assert_eq!(c.cache_size(), 0);
+    assert_eq!(
+        removed, 1,
+        "the one surviving live entry was rejected by keep"
+    );
 }
 
 #[test]
@@ -385,7 +389,7 @@ fn every_key_is_dropped_exactly_once_over_a_mixed_workload() {
     }
 
     let _ = CacheEvict::evict(&mut c);
-    c.retain(|_, _| true);
+    let _ = c.retain(|_, _| true);
     drop(c);
 
     assert_eq!(counters.clones(), 0, "no path may clone a key");

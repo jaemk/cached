@@ -308,9 +308,16 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     /// [`LruTtlCache::retain`](crate::LruTtlCache::retain); the plain
     /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
     /// removes solely on the predicate.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    ///
+    /// Returns the number of entries removed: the count folds together entries `keep`
+    /// rejected and entries swept for having already expired, since expiry removal is
+    /// unconditional regardless of what `keep` returns. `retain` is deliberately not
+    /// `#[must_use]`: discarding the count is a legitimate and common use, matching
+    /// existing bare `cache.retain(...);` call sites.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
+        let mut removed = 0usize;
         self.store.retain(|key, value| {
             if value.is_expired() || !keep(key, value) {
                 // Count BEFORE notifying: a panicking callback must never leave
@@ -319,11 +326,13 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, value);
                 }
+                removed += 1;
                 false
             } else {
                 true
             }
         });
+        removed
     }
 }
 
@@ -1260,6 +1269,43 @@ mod tests {
             Some(1),
             "eviction must be counted even though on_evict panicked"
         );
+    }
+
+    #[test]
+    fn retain_returns_count_folding_expired_and_predicate_rejections() {
+        // The returned count must fold together BOTH predicate-rejected entries and
+        // entries removed for having already expired, and must agree with the
+        // `cache_size()` delta and the number of `on_evict` invocations.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder()
+            .on_evict(move |_k: &u8, _v: &ExpiredU8| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        c.cache_set(1, ExpiredU8(11)); // expired (n > 10): swept regardless of predicate
+        c.cache_set(2, ExpiredU8(2)); // even, live: kept
+        c.cache_set(3, ExpiredU8(3)); // odd, live: rejected by predicate
+        c.cache_set(4, ExpiredU8(4)); // even, live: kept
+
+        let size_before = c.cache_size();
+        let removed = c.retain(|_, v| v.0 % 2 == 0);
+        let size_after = c.cache_size();
+
+        assert_eq!(
+            removed, 2,
+            "one expired sweep (key 1) + one predicate rejection (key 3)"
+        );
+        assert_eq!(size_before - size_after, removed);
+        assert_eq!(fired.load(Ordering::Relaxed), removed);
+        assert!(c.cache_get(&2).is_some());
+        assert!(c.cache_get(&3).is_none());
+        assert!(c.cache_get(&4).is_some());
     }
 
     #[test]

@@ -10,6 +10,6 @@ categories = ["caching"]
 keywords = ["caching", "cache", "memoize", "cached"]
 license = "MIT"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 
 [dependencies]

@@ -432,7 +432,7 @@ fn evict_and_retain_under_hash_collisions_remove_only_the_right_entries() {
     assert_eq!(fired, vec![(1, 10), (2, 20)]);
     assert_eq!(c.key_order(), vec![5, 4, 3]);
 
-    c.retain(|k, _v| *k != 4);
+    let removed = c.retain(|k, _v| *k != 4);
     assert_eq!(
         c.key_order(),
         vec![5, 3],
@@ -441,6 +441,7 @@ fn evict_and_retain_under_hash_collisions_remove_only_the_right_entries() {
     assert_eq!(c.cache_get(&3), Some(&30));
     assert_eq!(c.cache_get(&5), Some(&50));
     assert_eq!(c.cache_get(&4), None);
+    assert_eq!(removed, 1, "only key 4 was rejected by the predicate");
 }
 
 // Capacity eviction under collisions still picks the LRU victim.
@@ -739,7 +740,7 @@ fn retain_never_consults_the_predicate_for_expired_entries() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen2 = seen.clone();
-    c.retain(move |k, v| {
+    let removed = c.retain(move |k, v| {
         seen2.lock().expect("predicate log poisoned").push((*k, *v));
         *k != 4
     });
@@ -760,6 +761,10 @@ fn retain_never_consults_the_predicate_for_expired_entries() {
         Some(3),
         "2 expired + 1 predicate reject"
     );
+    assert_eq!(
+        removed, 3,
+        "the returned count folds the 2 expired sweeps and the 1 predicate reject together"
+    );
 }
 
 // Zero-removed and all-removed sweeps: the pre-sized collectors must produce the
@@ -777,15 +782,16 @@ fn evict_and_retain_at_the_zero_and_all_extremes() {
     assert_eq!(c.key_order(), vec![4, 3, 2, 1], "order untouched");
     assert_eq!(c.cache_evictions(), Some(0));
 
-    c.retain(|_k, _v| true);
+    let removed = c.retain(|_k, _v| true);
     assert_eq!(
         c.key_order(),
         vec![4, 3, 2, 1],
         "retain-all removes nothing"
     );
     assert_eq!(c.cache_evictions(), Some(0));
+    assert_eq!(removed, 0);
 
-    c.retain(|_k, _v| false);
+    let removed = c.retain(|_k, _v| false);
     assert_eq!(
         drain(&l),
         vec![(4, 40), (3, 30), (2, 20), (1, 10)],
@@ -793,6 +799,7 @@ fn evict_and_retain_at_the_zero_and_all_extremes() {
     );
     assert_eq!(c.cache_size(), 0);
     assert_eq!(c.cache_evictions(), Some(4));
+    assert_eq!(removed, 4);
     assert_eq!(c.evict(), 0, "an empty cache sweeps nothing");
 
     // Still usable, and the collectors agree on the empty cache.

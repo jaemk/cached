@@ -216,26 +216,39 @@ fn parity_retain_predicate_and_expiry_limbs() {
     let (mut e, elog) = expiring(8);
     e.cache_set(TagKey::new(1, "by_pred"), Val::live());
     e.cache_set(TagKey::new(2, "keep"), Val::live());
-    e.retain(|k, _| k.id != 1);
+    let e_removed = e.retain(|k, _| k.id != 1);
 
     let (mut t, tlog) = timed(8);
     t.cache_set(TagKey::new(1, "by_pred"), 1);
     t.cache_set(TagKey::new(2, "keep"), 2);
-    t.retain(|k, _| k.id != 1);
+    let t_removed = t.retain(|k, _| k.id != 1);
 
     assert_parity(&elog, &tlog, &["by_pred"]);
+    assert_eq!(e_removed, 1, "one predicate rejection");
+    assert_eq!(
+        e_removed, t_removed,
+        "both stores must return the same removed count"
+    );
 
     // Now the expiry limb: an expired entry is removed WITHOUT consulting the predicate.
     let (mut e2, elog2) = expiring(8);
     e2.cache_set(TagKey::new(1, "stale"), Val::stale());
-    e2.retain(|_, _| true);
+    let e2_removed = e2.retain(|_, _| true);
 
     let (mut t2, tlog2) = timed(8);
     t2.cache_set(TagKey::new(1, "stale"), 1);
     std::thread::sleep(LAPSE);
-    t2.retain(|_, _| true);
+    let t2_removed = t2.retain(|_, _| true);
 
     assert_parity(&elog2, &tlog2, &["stale"]);
+    assert_eq!(
+        e2_removed, 1,
+        "one expired sweep despite a keep-everything predicate"
+    );
+    assert_eq!(
+        e2_removed, t2_removed,
+        "both stores must return the same removed count"
+    );
 }
 
 #[test]

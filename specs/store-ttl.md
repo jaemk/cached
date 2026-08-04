@@ -61,3 +61,19 @@ rule for keys that compare equal. Every removal path counts an eviction (increme
 `evictions` counter) before invoking `on_evict` for that entry, so a panicking `on_evict`
 callback still leaves the eviction counted; this is the crate-wide ordering, see
 [metrics.md](metrics.md) METRIC-4.
+
+## TTL-8
+
+`retain(keep)` on `TtlCache`, `LruTtlCache`, and `TtlSortedCache` now returns `usize` (the count
+of entries removed) instead of `()`, matching every other single-owner and sharded store; see
+[store-lru.md](store-lru.md) LRU-8 for the crate-wide contract. As described in TTL-4, the count
+folds together predicate-rejected entries and entries swept for having already expired, so it
+cannot be recovered from the predicate's return values alone.
+
+## TTL-9
+
+`TtlSortedCache::set_with(k, v) -> TtlSortedSetBuilder` gains `.ttl_secs(u64)` and
+`.ttl_millis(u64)` alongside its existing `.ttl(Duration)`, matching the whole-cache TTL setters
+already on `TtlCacheBuilder`, `TtlSortedCacheBuilder`, and `ShardedLruTtlCacheBuilder`. All three
+spellings set the same per-entry TTL override described in TTL-4. See
+[builders.md](builders.md) BUILD-5.

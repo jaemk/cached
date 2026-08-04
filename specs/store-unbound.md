@@ -25,3 +25,9 @@ Metrics track `hits`/`misses`; `evictions` is `None` (the store never evicts on 
 [metrics.md](metrics.md). Iteration and size/evict semantics follow
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md); custom
 hasher support follows [design/0001-non-sharded-custom-hasher.md](design/0001-non-sharded-custom-hasher.md).
+
+## UNBOUND-5
+
+`retain(keep)` (documented in full at [store-lru.md](store-lru.md) LRU-4) now returns `usize`
+(the count of entries removed) instead of `()`. `UnboundCache` has no eviction dimension, so the
+count is exactly the number of entries `keep` rejected. See LRU-8 for the crate-wide change.

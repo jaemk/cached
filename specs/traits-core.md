@@ -27,7 +27,10 @@ blanket extension trait providing deduplicated short-name methods (`get`, `get_m
 and a `peek` alias. `CachedRead<K, V>: CachedPeek` adds `cache_get_read` for shared-ref reads
 (backs `unsync_reads`). A `CachedPeek` / `CachedRead` merge was considered and declined; they stay
 distinct on purpose (`CachedRead` is a compile-time capability marker), per
-[design/0023-peek-read-trait-merge.md](design/0023-peek-read-trait-merge.md).
+[design/0023-peek-read-trait-merge.md](design/0023-peek-read-trait-merge.md). The concurrent
+family's sync peek trait, `ConcurrentCachePeek`, now also has an async mirror,
+`ConcurrentCachePeekAsync`; see
+[traits-concurrent.md](traits-concurrent.md) CTRAIT-5.
 
 ## TRAIT-3
 

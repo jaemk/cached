@@ -1,5 +1,5 @@
 error: `ttl`, `ttl_secs`, and `ttl_millis` are mutually exclusive - `ttl` takes a `Duration` expression, `ttl_secs` whole seconds, `ttl_millis` milliseconds; use exactly one
- --> tests/ui/cached_ttl_ttl_secs_exclusive.rs:4:4
+ --> tests/ui/cached_ttl_ttl_secs_exclusive.rs:3:54
   |
-4 | fn f(x: i32) -> i32 {
-  |    ^
+3 | #[cached(ttl = "core::time::Duration::from_secs(1)", ttl_secs = 1)]
+  |                                                      ^^^^^^^^
