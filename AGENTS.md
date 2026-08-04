@@ -96,8 +96,31 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ConcurrentCacheBase` | Shared base of both concurrent traits: owns `type Error` + `cache_size`/`len`/`is_empty` |
 | `ConcurrentCached<K,V>` | Self-synchronizing cache with a shared `&self` API (Redis, Disk); supertrait `ConcurrentCacheBase` |
 | `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache; supertrait `ConcurrentCacheBase` |
+| `ConcurrentCachePeek<K,V>` | `&self` side-effect-free `cache_peek` (plus a defaulted `peek` alias) on concurrent stores |
+| `ConcurrentCachePeekAsync<K,V>` | Async mirror of `ConcurrentCachePeek`: required `async_cache_peek`, defaulted `async_peek` alias |
 | `ConcurrentCacheTtl` | `&self` `ttl()`/`set_ttl()`/`unset_ttl()`/`try_set_ttl()`/`refresh_on_hit()` on concurrent TTL stores |
 | `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on single-owner timed stores |
+
+**Peek is an in-memory concept.** Both peek traits are implemented by the six sharded stores only
+(`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately
+implement neither: an IO-backed store has no client-side recency or TTL state to skip and the
+hit/miss-metrics distinction is meaningless, while the read remains a full round trip. Generic
+code bounded on either peek trait therefore accepts only the sharded stores. See
+`specs/design/0040-peek-is-an-in-memory-concept.md`.
+
+**`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
+expiry-aware stores the count folds predicate rejections together with expired entries swept
+regardless of the predicate. Inherent-only on both store families, not a trait method.
+
+**`CacheValue<V, M>`**: value-plus-metadata wrapper returned by the LRU-family order methods
+(`iter_order` / `value_order`; `key_order` is unchanged). `M` is `()` for `LruCache` /
+`ExpiringLruCache` and `Option<Instant>` for `LruTtlCache` (via `expires_at()`). Derefs to `V`,
+implements `Display` where `V: Display`, and compares against a bare `V`. Note the comparison is
+one-directional: `wrapped == bare` compiles, `bare == wrapped` does not, because coherence forbids
+the blanket impl. `IntoValues::into_values()` collects an order-method result as plain `V`s.
+
+**`KeyedCache`**: lives in `#[doc(hidden)] pub mod __private`, not at the crate root. It backs
+`sync_writes = "by_key"`; the generated code emits `::cached::__private::KeyedCache`.
 
 **`CacheMetrics`**: `#[non_exhaustive]` snapshot struct (derives `Default`) returned by `cache.metrics()` on any `Cached` store. Fields: `hits`, `misses`, `evictions` (all `Option<u64>`), `entry_count: Option<usize>` (`None` when the store cannot report a count, e.g. redis/redb), `capacity: Option<usize>`. Has a `hit_ratio() -> Option<f64>` method.
 
@@ -273,9 +296,10 @@ directions, indexed in `specs/design/README.md`.
   (agreed or declined; the file says which), **Needs research** (do not build until scoped).
 - When you add or change a feature, update its feature doc (append a new stable ID, never reuse
   one) and add or amend the design record. Document-first: write the spec before the code.
-- The table is maintained by `.claude/skills/spec` -> `resources/spec.py` (also `~/.mind/store/skill/spec/resources/spec.py`):
+- The table is maintained by `~/.mind/store/skill/k:spec/resources/spec.py`:
   `add`/`set`/`todo`/`sync` against `. --dir specs`. Do not hand-edit the table. Run
-  `spec.py sync . --dir specs` after changes to catch missing/orphan docs.
+  `python3 ~/.mind/store/skill/k:spec/resources/spec.py sync . --dir specs` from the repo root
+  after changes to catch missing/orphan docs.
 
 ---
 
