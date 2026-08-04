@@ -228,12 +228,19 @@ impl<K: Hash + Eq, V, S: BuildHasher> UnboundCache<K, V, S> {
     /// plain predicate filter over the stored entries: an entry survives exactly
     /// when `keep` returns `true`.
     ///
+    /// Returns the number of entries removed, i.e. the number of times `keep`
+    /// returned `false`. `retain` is deliberately not `#[must_use]`: discarding
+    /// the count is a legitimate and common use, matching existing bare
+    /// `cache.retain(...);` call sites.
+    ///
     /// The expiry-aware stores also have `retain`, with one difference: their
-    /// expired entries are removed regardless of the predicate. See
-    /// [`TtlCache::retain`](crate::TtlCache::retain) and
+    /// expired entries are removed regardless of the predicate, so their
+    /// returned count folds together predicate rejections and expired sweeps.
+    /// See [`TtlCache::retain`](crate::TtlCache::retain) and
     /// [`ExpiringCache::retain`](crate::ExpiringCache::retain).
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         let on_evict = &self.on_evict;
+        let mut removed = 0usize;
         self.store.retain(|key, value| {
             if keep(key, value) {
                 true
@@ -241,9 +248,11 @@ impl<K: Hash + Eq, V, S: BuildHasher> UnboundCache<K, V, S> {
                 if let Some(on_evict) = on_evict {
                     on_evict(key, value);
                 }
+                removed += 1;
                 false
             }
         });
+        removed
     }
 }
 
@@ -1081,6 +1090,40 @@ mod tests {
         assert_eq!(c.cache_try_get_or_set_with(2, || ok(99)).unwrap(), &2);
         assert_eq!(c.cache_misses(), Some(3));
         assert_eq!(c.cache_hits(), Some(2));
+    }
+
+    #[test]
+    fn retain_returns_count_of_removed_entries() {
+        // `UnboundCache` has no eviction dimension, so the returned count must be exactly
+        // the number of entries `keep` rejected, and it must agree with both the
+        // `cache_size()` delta and the number of `on_evict` invocations.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: UnboundCache<u32, u32> = UnboundCache::builder()
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        for i in 0..6u32 {
+            c.cache_set(i, i * 10);
+        }
+        let size_before = c.cache_size();
+
+        let removed = c.retain(|k, _v| k % 2 == 0);
+
+        let size_after = c.cache_size();
+        assert_eq!(removed, 3, "keys 1, 3, 5 rejected by the predicate");
+        assert_eq!(size_before - size_after, removed);
+        assert_eq!(fired.load(Ordering::Relaxed), removed);
+
+        // A keep-everything predicate removes and fires nothing.
+        let removed = c.retain(|_k, _v| true);
+        assert_eq!(removed, 0);
+        assert_eq!(fired.load(Ordering::Relaxed), 3);
     }
 
     #[cfg(feature = "async_core")]

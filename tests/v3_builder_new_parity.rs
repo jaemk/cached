@@ -10,10 +10,10 @@
 //! applicable, shards() for sharded stores) and on basic set/get behavior.
 //!
 //! Sharded LRU-family stores built with `max_size` and no explicit `.shards(n)`
-//! have a default shard count that is being changed (capacity-derived) by a
-//! concurrent shard of work; to stay correct regardless of that change, every
-//! sharded assertion below sets `.shards(n)` explicitly rather than relying on
-//! (or hardcoding) the default.
+//! derive a capacity-scaled default shard count (see
+//! `specs/design/0037-sharded-lru-default-shard-cap.md`); to stay correct regardless of
+//! the host's CPU count, every sharded assertion below sets `.shards(n)` explicitly
+//! rather than relying on (or hardcoding) the default.
 
 #[cfg(feature = "time_stores")]
 use cached::time::Duration;
@@ -313,6 +313,28 @@ fn sharded_lru_cache_new_matches_builder() {
     assert_eq!(a.get(&1), None);
     assert_eq!(a.get(&2), b.get(&2));
     assert_eq!(a.get(&3), b.get(&3));
+}
+
+/// Pins the exact SHARD-7 / spec 0037 outcome for `ShardedLruCache::new(100)`: 8 shards and
+/// an effective capacity of 128 (8 x 16), documented in `specs/store-sharded.md` SHARD-7 and
+/// `AGENTS.md`. `make check/readme` cannot catch a false claim like this -- it only checks that
+/// the README text matches `src/lib.rs`'s doc comments, not that either matches runtime
+/// behavior -- so this pins the actual numbers directly.
+///
+/// This assumes the host's CPU-derived `default_shard_count()` is at least 8 (its documented
+/// minimum), so the capacity-derived cap (8) is what actually applies here, not the CPU-derived
+/// ceiling.
+#[test]
+fn sharded_lru_cache_new_100_yields_8_shards_and_128_capacity() {
+    use cached::ShardedLruCache;
+
+    let c: ShardedLruCache<u32, u32> = ShardedLruCache::new(100);
+    assert_eq!(c.shards(), 8, "max_size=100 must derive to 8 shards");
+    assert_eq!(
+        c.capacity(),
+        128,
+        "8 shards x 16-per-shard floor must yield capacity 128"
+    );
 }
 
 #[cfg(feature = "time_stores")]

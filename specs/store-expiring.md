@@ -47,3 +47,10 @@ itself via `Expires`). See [store-lru.md](store-lru.md) LRU-5.
 fire, it passes the **stored** key of the displaced entry, not the caller's key, matching
 `LruTtlCache`. The two keys compare equal (same `Hash`/`Eq`) but can differ in fields outside
 `Hash`/`Eq`; observable only for key types with such fields. See [store-lru.md](store-lru.md) LRU-6.
+
+## EXPIRE-8
+
+`retain(keep)` on `ExpiringCache` and `ExpiringLruCache` now returns `usize` (the count of
+entries removed) instead of `()`, matching every other store; see
+[store-lru.md](store-lru.md) LRU-8. As with the other expiry-aware stores, the count folds
+together predicate-rejected entries and entries swept for having already expired.

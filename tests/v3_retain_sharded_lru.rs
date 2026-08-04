@@ -72,8 +72,7 @@ mod sharded_lru_cache {
         (cache, events)
     }
 
-    /// `retain` returns the unit type: the irrefutable `let ()` pattern is a
-    /// compile-time assertion of that signature.
+    /// `retain` returns the number of entries removed (`usize`), not `()`.
     #[test]
     fn removes_entries_failing_the_predicate() {
         let (cache, events) = events_cache(1, 64);
@@ -82,7 +81,8 @@ mod sharded_lru_cache {
         }
 
         let before = cache.metrics().evictions.unwrap();
-        let () = cache.retain(|k, _v| k % 2 == 0);
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+        assert_eq!(removed, 3, "retain must return the removed count");
 
         let mut survivors: Vec<u32> = (0..6u32).filter(|k| cache.contains(k)).collect();
         survivors.sort_unstable();
@@ -389,7 +389,8 @@ mod sharded_expiring_lru_cache {
         }
 
         let before = cache.metrics().evictions.unwrap();
-        let () = cache.retain(|k, _v| k % 2 == 0);
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+        assert_eq!(removed, 3, "retain must return the removed count");
 
         let mut survivors: Vec<u32> = (0..6u32).filter(|k| cache.contains(k)).collect();
         survivors.sort_unstable();
@@ -429,6 +430,65 @@ mod sharded_expiring_lru_cache {
         fired.sort_unstable();
         assert_eq!(fired, vec![2, 4]);
         assert_eq!(cache.metrics().evictions.unwrap() - before, 2);
+    }
+
+    /// Callback path (an `on_evict` is configured): the returned count must fold together
+    /// entries removed for having already expired AND entries the predicate itself rejected,
+    /// in the same call. Neither cohort alone (3 predicate-rejected, 2 expired) equals the
+    /// total (5), so this certifies `retain` isn't just returning one of the two categories.
+    #[test]
+    fn retain_callback_return_count_includes_both_expired_and_predicate_rejected() {
+        let (cache, events) = events_cache(1, 64);
+        cache.set(0, live(0));
+        cache.set(1, live(10));
+        cache.set(2, expired(20));
+        cache.set(3, live(30));
+        cache.set(4, expired(40));
+        cache.set(5, live(50));
+
+        let before = cache.metrics().evictions.unwrap();
+        // Keep only even keys: rejects the odd LIVE keys (1, 3, 5) via the predicate; the
+        // already-expired keys (2, 4) are removed regardless of what the predicate would
+        // have said about them (both are even, so the predicate itself would keep them).
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+
+        assert_eq!(
+            removed, 5,
+            "retain's return must equal expired + predicate-rejected, not just one or the other"
+        );
+        assert_eq!(cache.len(), 1, "only key 0 (even, live) survives");
+        assert!(cache.contains(&0));
+        assert_eq!(cache.metrics().evictions.unwrap() - before, 5);
+        assert_eq!(
+            events.lock().unwrap().len(),
+            5,
+            "on_evict fires exactly once per removal"
+        );
+    }
+
+    /// Same mixed scenario as above but with no `on_evict` configured.
+    #[test]
+    fn retain_no_callback_return_count_includes_both_expired_and_predicate_rejected() {
+        let cache = ShardedExpiringLruCache::<u32, Token>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        cache.set(0, live(0));
+        cache.set(1, live(10));
+        cache.set(2, expired(20));
+        cache.set(3, live(30));
+        cache.set(4, expired(40));
+        cache.set(5, live(50));
+
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+
+        assert_eq!(
+            removed, 5,
+            "retain's return must equal expired + predicate-rejected, not just one or the other"
+        );
+        assert_eq!(cache.len(), 1, "only key 0 (even, live) survives");
+        assert!(cache.contains(&0));
     }
 
     #[test]
@@ -690,7 +750,8 @@ mod sharded_lru_ttl_cache {
         }
 
         let before = cache.metrics().evictions.unwrap();
-        let () = cache.retain(|k, _v| k % 2 == 0);
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+        assert_eq!(removed, 3, "retain must return the removed count");
 
         let mut survivors: Vec<u32> = (0..6u32).filter(|k| cache.contains(k)).collect();
         survivors.sort_unstable();
@@ -725,6 +786,71 @@ mod sharded_lru_ttl_cache {
         fired.sort_unstable();
         assert_eq!(fired, vec![1, 2]);
         assert_eq!(cache.metrics().evictions.unwrap() - before, 2);
+    }
+
+    /// Callback path (an `on_evict` is configured): the returned count must fold together
+    /// entries removed for having already expired AND entries the predicate itself rejected,
+    /// in the same call. Keys 1, 2 expire regardless of the predicate; keys 3, 5 are live but
+    /// predicate-rejected. Neither cohort alone (2 expired, 2 predicate-rejected) equals the
+    /// total (4) by coincidence of overlap -- they're disjoint key ranges here, so the total
+    /// genuinely requires both.
+    #[test]
+    fn retain_callback_return_count_includes_both_expired_and_predicate_rejected() {
+        let (cache, events) = events_cache(1, 64, Duration::from_millis(30));
+        // Keys 1, 2 will expire.
+        cache.set(1, 10);
+        cache.set(2, 20);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        // Fresh keys with a live TTL; the predicate rejects the odd ones (3, 5).
+        cache.set(3, 30);
+        cache.set(4, 40);
+        cache.set(5, 50);
+        cache.set(6, 60);
+
+        let before = cache.metrics().evictions.unwrap();
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+
+        assert_eq!(
+            removed, 4,
+            "retain's return must equal expired + predicate-rejected, not just one or the other"
+        );
+        let mut survivors: Vec<u32> = (1..=6u32).filter(|k| cache.contains(k)).collect();
+        survivors.sort_unstable();
+        assert_eq!(survivors, vec![4, 6]);
+        assert_eq!(cache.metrics().evictions.unwrap() - before, 4);
+        assert_eq!(
+            events.lock().unwrap().len(),
+            4,
+            "on_evict fires exactly once per removal"
+        );
+    }
+
+    /// Same mixed scenario as above but with no `on_evict` configured.
+    #[test]
+    fn retain_no_callback_return_count_includes_both_expired_and_predicate_rejected() {
+        let cache = ShardedLruTtlCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .ttl(Duration::from_millis(30))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        cache.set(3, 30);
+        cache.set(4, 40);
+        cache.set(5, 50);
+        cache.set(6, 60);
+
+        let removed: usize = cache.retain(|k, _v| k % 2 == 0);
+
+        assert_eq!(
+            removed, 4,
+            "retain's return must equal expired + predicate-rejected, not just one or the other"
+        );
+        let mut survivors: Vec<u32> = (1..=6u32).filter(|k| cache.contains(k)).collect();
+        survivors.sort_unstable();
+        assert_eq!(survivors, vec![4, 6]);
     }
 
     #[test]
@@ -964,5 +1090,135 @@ mod sharded_lru_ttl_cache {
 
         cache.set(100, 100);
         assert_eq!(cache.get(&100), Some(100));
+    }
+}
+
+// ── ConcurrentCachePeekAsync on the LRU-family stores (specs/traits-concurrent.md CTRAIT-5,
+// specs/design/0040-peek-is-an-in-memory-concept.md) ────────────────────────────────────────
+//
+// `tests/v3_concurrent_peek_async.rs` certifies the trait definition itself (no default body,
+// the `async_peek` alias, the prelude re-export, `Send`) against a local store. This module
+// certifies the concrete delegation on `ShardedLruCache`, `ShardedLruTtlCache`, and
+// `ShardedExpiringLruCache`: `async_cache_peek` must agree with the sync `cache_peek` / inherent
+// `peek` (in particular: no LRU recency promotion), with `Self::Error = Infallible`, and must
+// not move the hit/miss metrics.
+#[cfg(feature = "async_core")]
+mod concurrent_peek_async {
+    use super::*;
+    use cached::{ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCachePeekAsync};
+
+    #[tokio::test]
+    async fn sharded_lru_async_peek_matches_sync_peek_and_does_not_promote() {
+        let cache = ShardedLruCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(2)
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        cache.set(2, 20);
+
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &1)
+                .await
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &1)
+                .await
+                .unwrap(),
+            ConcurrentCachePeek::cache_peek(&cache, &1).unwrap()
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &99)
+                .await
+                .unwrap(),
+            None,
+            "missing key peeks as None"
+        );
+
+        // A capacity eviction must still pick key 1 as the LRU victim: repeatedly peeking
+        // (sync or async) key 1 must not have promoted it over key 2.
+        cache.set(3, 30);
+        assert_eq!(cache.get(&1), None, "peek must not have promoted key 1");
+        assert_eq!(cache.get(&2), Some(20));
+
+        assert_eq!(ConcurrentCacheBase::cache_hits(&cache), Some(1));
+        assert_eq!(ConcurrentCacheBase::cache_misses(&cache), Some(1));
+    }
+
+    #[cfg(feature = "time_stores")]
+    #[tokio::test]
+    async fn sharded_lru_ttl_async_peek_matches_sync_peek_and_skips_expired() {
+        use cached::ShardedLruTtlCache;
+        use cached::time::Duration;
+
+        let cache = ShardedLruTtlCache::<u32, u32>::builder()
+            .shards(1)
+            .max_size(64)
+            .ttl(Duration::from_millis(30))
+            .build()
+            .unwrap();
+        cache.set(1, 10);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &1)
+                .await
+                .unwrap(),
+            None,
+            "an expired entry peeks as None, not a stale value"
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &1)
+                .await
+                .unwrap(),
+            ConcurrentCachePeek::cache_peek(&cache, &1).unwrap()
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "peeking (sync or async) must not lazily remove the expired entry"
+        );
+        assert_eq!(ConcurrentCacheBase::cache_hits(&cache), Some(0));
+        assert_eq!(ConcurrentCacheBase::cache_misses(&cache), Some(0));
+    }
+
+    #[tokio::test]
+    async fn sharded_expiring_lru_async_peek_matches_sync_peek_and_skips_expired() {
+        let cache = ShardedExpiringLruCache::<u32, Token>::builder()
+            .shards(1)
+            .max_size(64)
+            .build()
+            .unwrap();
+        cache.set(1, live(10));
+        cache.set(2, expired(20));
+
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &1)
+                .await
+                .unwrap(),
+            Some(live(10))
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &2)
+                .await
+                .unwrap(),
+            None,
+            "an already-expired value peeks as None"
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&cache, &1)
+                .await
+                .unwrap(),
+            ConcurrentCachePeek::cache_peek(&cache, &1).unwrap()
+        );
+        assert_eq!(
+            cache.len(),
+            2,
+            "peeking (sync or async) must not lazily remove the expired entry"
+        );
+        assert_eq!(ConcurrentCacheBase::cache_hits(&cache), Some(0));
+        assert_eq!(ConcurrentCacheBase::cache_misses(&cache), Some(0));
     }
 }

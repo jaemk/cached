@@ -1,0 +1,7 @@
+error: #[concurrent_cached(disk = true)] requires the `redb_store` feature of the `cached` crate
+  --> tests/ui/concurrent_cached_disk_requires_redb_store.rs:14:1
+   |
+14 | #[concurrent_cached(disk = true, map_error = r#"|e| format!("{:?}", e)"#)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `::cached::__require_redb_store_feature` which comes from the expansion of the attribute macro `concurrent_cached` (in Nightly builds, run with -Z macro-backtrace for more info)

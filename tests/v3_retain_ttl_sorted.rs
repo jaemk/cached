@@ -60,7 +60,8 @@ fn sorted_keys(cache: &TtlSortedCache<u32, u32>) -> Vec<u32> {
     keys
 }
 
-/// The predicate decides which live entries survive; `retain` returns `()`.
+/// The predicate decides which live entries survive; `retain` returns the number of
+/// entries removed (design/0041-retain-returns-removed-count.md).
 #[test]
 fn retain_removes_entries_failing_the_predicate() {
     let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
@@ -71,14 +72,76 @@ fn retain_removes_entries_failing_the_predicate() {
         cache.cache_set(k, k * 10);
     }
 
-    // `retain` returns the unit type: the irrefutable `let ()` pattern below is a
-    // compile-time assertion of that signature.
-    let () = cache.retain(|k, _v| k % 2 == 0);
+    // `retain` returns a `usize` count of removed entries: the explicit type annotation
+    // below is a compile-time assertion of that signature.
+    let removed: usize = cache.retain(|k, _v| k % 2 == 0);
 
+    assert_eq!(removed, 3, "keys 1, 3, 5 were rejected by the predicate");
     assert_eq!(sorted_keys(&cache), vec![0, 2, 4]);
     assert_eq!(cache.cache_size(), 3);
     assert_eq!(cache.cache_get(&3u32), None);
     assert_eq!(cache.cache_get(&4u32), Some(&40u32));
+}
+
+/// The returned count folds together predicate-rejected entries AND entries swept for
+/// having already expired -- the two categories are not distinguished, so the count
+/// provably differs from a caller's own tally of the predicate's `false` returns.
+/// The count must agree with the `cache_size()` delta and with how many times
+/// `on_evict` actually fired.
+#[test]
+fn retain_return_value_mixes_expired_sweeps_and_predicate_rejections() {
+    let (mut cache, events) = events_cache(Duration::from_millis(20));
+    // Two short-TTL entries: they expire during the sleep below and are swept
+    // unconditionally, without ever reaching the predicate.
+    cache.cache_set(1u32, 11u32);
+    cache.cache_set(2u32, 22u32);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    // Three long-lived entries inserted after the sleep, so they are still live when
+    // `retain` runs. The predicate rejects two of them (3, 4) and keeps one (5).
+    cache
+        .set_with(3u32, 33u32)
+        .ttl(Duration::from_secs(60))
+        .set();
+    cache
+        .set_with(4u32, 44u32)
+        .ttl(Duration::from_secs(60))
+        .set();
+    cache
+        .set_with(5u32, 55u32)
+        .ttl(Duration::from_secs(60))
+        .set();
+
+    let before = cache.cache_size();
+    let mut predicate_rejections = 0usize;
+    let removed = cache.retain(|k, _v| {
+        let keep = *k == 5;
+        if !keep {
+            predicate_rejections += 1;
+        }
+        keep
+    });
+    let after = cache.cache_size();
+
+    // 2 expired (1, 2) + 2 predicate-rejected (3, 4) = 4, strictly more than the 2 the
+    // predicate itself rejected -- proving the count is not recoverable from the
+    // predicate's own return values alone.
+    assert_eq!(removed, 4);
+    assert_eq!(predicate_rejections, 2);
+    assert_ne!(
+        removed, predicate_rejections,
+        "the returned count must differ from a tally of the predicate's own rejections"
+    );
+    assert_eq!(
+        before - after,
+        removed,
+        "the returned count must agree with the cache_size() delta"
+    );
+    assert_eq!(
+        events.lock().unwrap().len(),
+        removed,
+        "on_evict must fire exactly once per entry counted in the return value"
+    );
+    assert_eq!(sorted_keys(&cache), vec![5]);
 }
 
 /// The predicate sees the stored value, not just the key.

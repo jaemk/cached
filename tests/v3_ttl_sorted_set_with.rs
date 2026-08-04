@@ -95,6 +95,81 @@ fn set_with_default_path_matches_plain_set_via_public_api() {
     assert_eq!(cache.cache_get(&2u32), None);
 }
 
+/// `.ttl_millis(n)` on the entry-setter builder is equivalent to `.ttl(Duration::from_millis(n))`:
+/// two entries inserted with the two spellings, under a cache default TTL long enough that
+/// only the per-entry override governs, expire at the same time.
+#[test]
+fn ttl_millis_builder_setter_matches_ttl_duration_from_millis() {
+    let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+        .ttl(Duration::from_secs(60))
+        .build()
+        .unwrap();
+
+    cache
+        .set_with(1u32, 10u32)
+        .ttl(Duration::from_millis(30))
+        .set();
+    cache.set_with(2u32, 20u32).ttl_millis(30).set();
+
+    assert_eq!(cache.cache_get(&1u32), Some(&10u32));
+    assert_eq!(cache.cache_get(&2u32), Some(&20u32));
+
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    assert_eq!(
+        cache.cache_get(&1u32),
+        None,
+        "the .ttl(Duration::from_millis(30)) entry must have expired"
+    );
+    assert_eq!(
+        cache.cache_get(&2u32),
+        None,
+        ".ttl_millis(30) must set the identical expiry as .ttl(Duration::from_millis(30))"
+    );
+}
+
+/// `.ttl_secs(n)` on the entry-setter builder is equivalent to `.ttl(Duration::from_secs(n))`.
+/// Using `u64::MAX` seconds drives both spellings through the documented TTL-overflow path
+/// (the computed expiry instant overflows, so the entry is stored as never-expiring) --
+/// a fast, deterministic way to prove the two spellings compute the identical `Duration`
+/// without a real multi-second sleep.
+#[test]
+fn ttl_secs_builder_setter_matches_ttl_duration_from_secs() {
+    let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+        .ttl(Duration::from_millis(10))
+        .build()
+        .unwrap();
+
+    cache
+        .set_with(1u32, 10u32)
+        .ttl(Duration::from_secs(u64::MAX))
+        .set();
+    cache.set_with(2u32, 20u32).ttl_secs(u64::MAX).set();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // The cache's own 10ms default TTL would have expired both by now if the per-entry
+    // override hadn't taken effect; both survive identically because ttl_secs(u64::MAX)
+    // computes the same overflowing (never-expires) instant as
+    // ttl(Duration::from_secs(u64::MAX)).
+    assert_eq!(
+        cache.cache_get(&1u32),
+        Some(&10u32),
+        "the .ttl(Duration::from_secs(u64::MAX)) entry must never expire"
+    );
+    assert_eq!(
+        cache.cache_get(&2u32),
+        Some(&20u32),
+        ".ttl_secs(u64::MAX) must set the identical (overflowing / never-expiring) instant as \
+         .ttl(Duration::from_secs(u64::MAX))"
+    );
+    assert_eq!(
+        CacheEvict::evict(&mut cache),
+        0,
+        "neither entry ever expires"
+    );
+}
+
 /// `set_with(..).evict()` with no size limit configured runs a plain TTL sweep as part of
 /// `.set()`, observable through the `CacheEvict`-independent `cache_evictions()` counter from
 /// the public API (mirrors the in-crate `set_with_evict_triggers_eviction` case 1, exercised

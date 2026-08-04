@@ -1,5 +1,5 @@
 error: `expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait
- --> tests/ui/concurrent_cached_expires_malformed_ttl.rs:8:4
+ --> tests/ui/concurrent_cached_expires_malformed_ttl.rs:7:37
   |
-8 | fn my_fn(x: u32) -> Result<u32, String> {
-  |    ^^^^^
+7 | #[concurrent_cached(expires = true, ttl = "core::time::Duration::from_secs(")]
+  |                                     ^^^

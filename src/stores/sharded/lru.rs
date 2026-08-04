@@ -2,9 +2,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-#[cfg(feature = "async_core")]
-use crate::ConcurrentCachedAsync;
 use crate::{CacheMetrics, CachedIter, ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCached};
+#[cfg(feature = "async_core")]
+use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
 #[cfg(feature = "async_core")]
 use core::future::Future;
 
@@ -36,6 +36,16 @@ struct LruInner<K, V, H> {
 /// To use a custom shard hasher, call [`ShardedLruCache::builder()`] and then
 /// [`hasher`](ShardedLruCacheBuilder::hasher), which yields a `ShardedLruCacheBase<K, V, H>`
 /// over your hasher.
+///
+/// **Note**: this type's inherent methods (`get`, `set`, `remove`, `remove_entry`, `delete`,
+/// `contains`, `peek`) return unwrapped values (`Option<V>`, `bool`, ...) and take call-site
+/// priority over the same-named [`ConcurrentCached`] trait methods, which return
+/// `Result<_, Self::Error>` instead. A `.unwrap()` chained onto one of these inherent calls is
+/// therefore `Option::unwrap`, not `Result::unwrap`: `cache.set(k, v).unwrap()` panics on a
+/// **fresh insert**, because there is no previous value to unwrap, not because the operation
+/// failed. To reach the fallible trait form instead (which never panics on a fresh insert), name
+/// it explicitly through the trait, e.g. `ConcurrentCached::cache_set(&cache, k, v)` or
+/// `ConcurrentCachedExt::set(&cache, k, v)`.
 ///
 /// **Note**: LRU promotion requires mutable access to the per-shard store, so
 /// `cache_get` acquires a **write** lock (unlike `ShardedUnboundCache` which only needs a read lock).
@@ -237,6 +247,7 @@ where
     }
 
     /// Return true if a live value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
+    #[must_use]
     pub fn contains(&self, k: &K) -> bool {
         ConcurrentCached::cache_contains(self, k).unwrap()
     }
@@ -377,6 +388,9 @@ where
     /// [`LruCache::retain`](crate::LruCache::retain) semantics. The LRU recency order of the
     /// surviving entries in each shard is unchanged.
     ///
+    /// Returns the total number of entries removed across all shards for this call. Not
+    /// `#[must_use]`: discarding the count is a legitimate and common use.
+    ///
     /// Shards are processed one at a time under their own write lock, so this is **not atomic**
     /// across shards: a concurrent reader may observe some shards already filtered and others not
     /// yet touched. `keep` runs while the affected shard's write lock is held — do not call
@@ -385,7 +399,8 @@ where
     /// entry, in shard order (and in each shard's iteration order for that shard's removals).
     /// Because callbacks run between shard sweeps, an `on_evict` that inserts into a shard this
     /// call has not yet visited will have that entry filtered by the same in-flight `retain`.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
+        let mut total_removed = 0usize;
         for shard in self.inner.shards.iter() {
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
@@ -406,12 +421,14 @@ where
                 }
                 removed
             };
+            total_removed += removed.len();
             if let Some(on_evict) = &self.inner.on_evict {
                 for (k, v) in &removed {
                     on_evict(k, v);
                 }
             }
         }
+        total_removed
     }
 
     /// Effective total capacity across all shards.
@@ -419,6 +436,7 @@ where
     /// When constructed with [`max_size`](ShardedLruCacheBuilder::max_size), this may
     /// be larger than the requested size because per-shard capacity is rounded
     /// up with ceiling division.
+    #[doc(alias = "max_size")]
     #[must_use]
     pub fn capacity(&self) -> usize {
         // Acquire pairs with the Release swap in `set_max_size`: observing a new
@@ -646,6 +664,21 @@ where
 {
     fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
         Ok(self.peek(k))
+    }
+}
+
+#[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
+impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedLruCacheBase<K, V, H>
+where
+    K: Hash + Eq + Clone + Send + Sync,
+    V: Clone + Send + Sync,
+    H: ShardHasher<K>,
+{
+    /// Delegates to the side-effect-free sync [`cache_peek`](ConcurrentCachePeek::cache_peek);
+    /// this store never blocks on IO, so there is nothing to await.
+    async fn async_cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        ConcurrentCachePeek::cache_peek(self, k)
     }
 }
 
@@ -1057,23 +1090,41 @@ mod tests {
 
     #[test]
     fn spec_0037_formula_holds_end_to_end() {
-        // Independent re-derivation of the spec 0037 contract: a bounded default-path store's
-        // shards() must equal next_power_of_two(max_size / 16).clamp(1, default_shard_count()).
-        // Computed here from first principles (not via default_shard_count_for_capacity) so a
-        // regression in the helper cannot mask a regression in the builder and vice versa.
-        use crate::stores::sharded::default_shard_count;
-        let d = default_shard_count();
-        // Include a size that forces the upper clamp: 64 * d makes max_size/16 == 4*d, whose
-        // next_power_of_two is 4*d (d is already a power of two) -- well above the clamp ceiling.
-        for &n in &[1usize, 16, 100, d * 16, d * 64] {
+        // Hand-computed expected shard counts for several concrete max_size inputs -- NOT a
+        // re-derivation of the production formula `(max_size / 16).next_power_of_two().clamp(1,
+        // default_shard_count())`. Re-typing that same expression here (as an earlier version of
+        // this test did) is byte-for-byte identical to the production code, so a shared
+        // arithmetic bug would sail through both sides unnoticed; hardcoded expectations don't
+        // have that blind spot.
+        //
+        // Every expected value below is <= 8, which is safe to hardcode regardless of the host's
+        // `default_shard_count()` (documented minimum is 8, see `default_shard_count()`): the
+        // upper clamp bound can only ever raise these results, never lower them, so it never
+        // enters into the numbers below. The upper-clamp behavior itself is covered separately by
+        // `default_shard_count_clamps_at_upper_bound_end_to_end`.
+        let cases: [(usize, usize); 9] = [
+            (1, 1),   // 1 / 16 == 0, next_power_of_two(0) == 1
+            (15, 1),  // 15 / 16 == 0 (truncating division)
+            (16, 1),  // 16 / 16 == 1, next_power_of_two(1) == 1
+            (17, 1),  // 17 / 16 == 1 (truncating division)
+            (32, 2),  // 32 / 16 == 2, next_power_of_two(2) == 2
+            (48, 4),  // 48 / 16 == 3, next_power_of_two(3) == 4
+            (64, 4),  // 64 / 16 == 4, next_power_of_two(4) == 4
+            (100, 8), // 100 / 16 == 6, next_power_of_two(6) == 8
+            (128, 8), // 128 / 16 == 8, next_power_of_two(8) == 8
+        ];
+        for (n, expected) in cases {
             let c = ShardedLruCache::<u32, u32>::builder()
                 .max_size(n)
                 .build()
                 .unwrap();
-            let expected = (n / 16).next_power_of_two().clamp(1, d);
             assert_eq!(c.shards(), expected, "max_size={n}");
             // `new(n)` must route through the identical default path.
-            assert_eq!(ShardedLruCache::<u32, u32>::new(n).shards(), expected);
+            assert_eq!(
+                ShardedLruCache::<u32, u32>::new(n).shards(),
+                expected,
+                "max_size={n}"
+            );
         }
     }
 

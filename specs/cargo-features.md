@@ -30,7 +30,7 @@ build otherwise). Orthogonal runtime x TLS axes are an open direction
 ## FEAT-4
 
 Disk: `redb_store` (disk-backed cache via `redb`; see [store-redb.md](store-redb.md)). The crate
-MSRV is 1.89 (set unconditionally in `Cargo.toml`; historically required by redb 4.x).
+MSRV is **1.92** (raised from 1.89; see [FEAT-6](#feat-6)).
 
 ## FEAT-5
 
@@ -39,3 +39,41 @@ MSRV is 1.89 (set unconditionally in `Cargo.toml`; historically required by redb
 `serde = ["dep:serde", "dep:rmp-serde"]` feature shipped (DEC-6=A per
 [design/0026-serde-feature.md](design/0026-serde-feature.md)); `redis_store` and `redb_store`
 depend on it transitively.
+
+## FEAT-6
+
+MSRV is **1.92** (raised from 1.89). The `async_core` feature (and `async`, which enables it)
+does not compile before 1.92: the two RPIT default bodies on `CachedGetOrSetAsync`
+(`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`) hit a borrowck limitation that
+rustc itself attributes to [rust-lang/rust#100013](https://github.com/rust-lang/rust/issues/100013),
+producing 11 "does not live long enough" / "lifetime bound not satisfied" errors. Verified by
+bisection: fails on 1.89.0, 1.90.0, 1.91.0; builds on 1.92.0. Non-async feature sets did build on
+1.89, but `rust-version` is a single crate-level value and must describe the whole crate honestly,
+so the floor moves for every feature set, not just the async ones. See
+[trait-get-or-set-async.md](trait-get-or-set-async.md). CI now runs a dedicated MSRV job pinned to
+1.92 so this cannot regress silently; previously CI only ever ran the pinned 1.96.0 dev toolchain
+(see `AGENTS.md`'s Toolchain & Edition section), which is why nine release candidates shipped a
+false 1.89 floor.
+
+## FEAT-7
+
+`redis_connection_manager` and `redis_async_cache` are capability features that are
+runtime-agnostic: **enabling either alone is a hard dead end.** It fails to compile with four
+errors emitted from inside the `redis` crate (starting with
+`compile_error!("tokio-comp or smol-comp features required for aio feature")`), none of which name
+a `cached` feature. Each must be paired with a runtime feature (`redis_tokio*` or `redis_smol*`).
+This cannot be pre-empted by a `cached`-side `compile_error!` because `redis` compiles first, so
+the mitigation is documentation only: the pairing requirement is stated as a prominent warning in
+the crate's feature table (`AGENTS.md`'s Key Cargo Features table and the `Cargo.toml` feature
+comments), not as a mid-paragraph aside. Folding the capability features into
+runtime-specific variants (e.g. `redis_tokio_connection_manager`) was considered and declined for
+3.0; see [design/0017-redis-feature-axes.md](design/0017-redis-feature-axes.md). See
+[store-redis.md](store-redis.md).
+
+## FEAT-8
+
+`#[concurrent_cached(disk = true)]` and `#[concurrent_cached(redis = true)]` emit clear
+missing-feature errors naming `redb_store` and the redis runtime features respectively when the
+corresponding Cargo feature isn't enabled. The macro-side implementation is documented in
+[macro-concurrent-cached.md](macro-concurrent-cached.md); see the decision record at
+`specs/design/0042`.

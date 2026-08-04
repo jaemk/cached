@@ -1,5 +1,7 @@
 error: #[concurrent_cached] on a generic function requires `key` + `convert` to pin the cache key to a concrete type: the cache is a single monomorphic static shared across all instantiations and cannot name the function's type parameters. Provide `key`/`convert` (and a concrete `ty`/`create`), or wrap the generic function in a non-generic `#[concurrent_cached]` function per concrete type.
-  --> tests/ui/concurrent_cached_in_impl_generic_requires_convert.rs:10:8
-   |
-10 |     fn f<T: std::fmt::Debug>(&self, x: T) -> usize {
-   |        ^
+ --> tests/ui/concurrent_cached_in_impl_generic_requires_convert.rs:9:5
+  |
+9 |     #[concurrent_cached(in_impl = true)]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `concurrent_cached` (in Nightly builds, run with -Z macro-backtrace for more info)

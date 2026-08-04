@@ -281,8 +281,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         || signature.generics.const_params().next().is_some())
         && args.convert.is_none()
     {
+        // Spanned at the attribute, not the function name: the fix is to add
+        // `key`/`convert` to the attribute list (0043b).
         return syn::Error::new(
-            fn_ident.span(),
+            attr_list_span(),
             "#[concurrent_cached] on a generic function requires `key` + `convert` to pin the cache \
              key to a concrete type: the cache is a single monomorphic static shared across all \
              instantiations and cannot name the function's type parameters. \
@@ -313,8 +315,9 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     if args.size.is_some() {
+        // Spanned at the `size = ...` attribute, not the function name (0043b).
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["size"]).unwrap_or_else(attr_list_span),
             "`size` was renamed to `max_size`; use `max_size = ...`",
         )
         .to_compile_error()
@@ -325,9 +328,11 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // `Duration`. These need only presence (`is_some()`), not a parsed value, and
     // surfacing "mutually exclusive" is more relevant than a `ttl` parse error
     // when `expires` is also set.
+    // Each of these is spanned at the conflicting TTL attribute rather than at the
+    // function name (0043b).
     if args.expires && args.ttl_secs.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl_secs"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl_secs` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait",
         )
@@ -336,7 +341,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     if args.expires && args.ttl_millis.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl_millis"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl_millis` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl_millis` applies a uniform millisecond TTL to all entries",
@@ -346,7 +351,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     if args.expires && args.ttl.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait",
         )
         .to_compile_error()
@@ -362,6 +367,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         args.ttl_secs,
         args.ttl_millis,
         fn_ident.span(),
+        last_named_attr_span(&attr_args, &["ttl", "ttl_secs", "ttl_millis"])
+            .unwrap_or_else(attr_list_span),
     ) {
         Ok(v) => v,
         Err(e) => return e.to_compile_error().into(),
@@ -1397,9 +1404,41 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // 0042: the `disk = true` / `redis = true` selectors get the same guard treatment as
+    // the async and TTL paths. Without them, a missing backend feature surfaced as a raw
+    // "cannot find `RedbCache` in `cached`" (E0433/E0425) pair naming no `cached` feature.
+    // A custom `ty` opts out: the generated code then names the user's store type instead
+    // of `RedbCache`/`RedisCache`/`AsyncRedisCache` (a `ty` without `create` is already
+    // rejected up front), so the backend feature is not necessarily required.
+    let redb_store_guard = if args.disk && args.ty.is_none() {
+        quote! { #krate::__require_redb_store_feature!{} }
+    } else {
+        quote! {}
+    };
+
+    // The sync redis path builds a `RedisCache`, satisfied by `redis_store` alone; the async
+    // path builds an `AsyncRedisCache` and additionally needs a redis *runtime* feature, so
+    // it uses the `{async}` arm. This guard is emitted BEFORE `__require_async_feature!{}`
+    // (see the emission order below): on an async redis fn with no redis feature the async
+    // guard would otherwise report `async`/`async_core`, which is the wrong feature -
+    // enabling it does not fix the build, whereas `redis_tokio`/`redis_smol` imply `async`.
+    let redis_feature_guard = if args.redis && args.ty.is_none() {
+        if asyncness.is_some() {
+            quote! { #krate::__require_redis_feature!{async} }
+        } else {
+            quote! { #krate::__require_redis_feature!{} }
+        }
+    } else {
+        quote! {}
+    };
+
     // put it all together
     let expanded = if asyncness.is_some() {
         quote! {
+            // Backend guards first: the redis guard must not be pre-empted by the async
+            // guard on an async redis fn (0042).
+            #redb_store_guard
+            #redis_feature_guard
             #async_feature_guard
             #time_stores_guard
             // Cached static (module scope unless `in_impl`)
@@ -1419,6 +1458,8 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
+            #redb_store_guard
+            #redis_feature_guard
             #async_feature_guard
             #time_stores_guard
             // Cached static (module scope unless `in_impl`)

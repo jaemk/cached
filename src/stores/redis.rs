@@ -787,12 +787,12 @@ pub enum RedisCacheBuildError {
     /// The `source` is always a *sanitized* synthetic error — no raw connection
     /// URL or credential ever reaches this field. See the build-path comment in
     /// `create_pool` / `create_multiplexed_connection` for details.
-    #[error("redis connection error")]
+    #[error("redis connection error: {source}")]
     Connection {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
-    #[error("redis pool error")]
+    #[error("redis pool error: {source}")]
     Pool {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -1323,12 +1323,12 @@ where
 #[non_exhaustive]
 #[derive(Error)]
 pub enum RedisCacheError {
-    #[error("redis error")]
+    #[error("redis error: {source}")]
     Redis {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
-    #[error("redis pool error")]
+    #[error("redis pool error: {source}")]
     Pool {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -1336,13 +1336,13 @@ pub enum RedisCacheError {
     /// **Security note:** `cached_value` may contain sensitive application data
     /// (it is the raw bytes retrieved from Redis). Do not log this variant or
     /// expose `cached_value` in error messages or observability pipelines.
-    #[error("Error deserializing cached value")]
+    #[error("error deserializing cached value: {source}")]
     CacheDeserialization {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
         cached_value: Vec<u8>,
     },
-    #[error("Error serializing cached value")]
+    #[error("error serializing cached value: {source}")]
     CacheSerialization {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,

@@ -361,7 +361,7 @@ fn retain_reports_stored_keys_on_both_the_predicate_and_expiry_limbs() {
     // The predicate must also observe the stored key instances.
     let predicate_saw: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let probe = Arc::clone(&predicate_saw);
-    c.retain(|k, _v| {
+    let removed = c.retain(|k, _v| {
         probe.lock().unwrap().push(k.tag);
         k.id != 1
     });
@@ -379,6 +379,10 @@ fn retain_reports_stored_keys_on_both_the_predicate_and_expiry_limbs() {
     );
     assert_eq!(c.cache_size(), 1);
     assert_eq!(c.cache_evictions(), Some(2));
+    assert_eq!(
+        removed, 2,
+        "the returned count folds the expired sweep and the predicate rejection together"
+    );
 }
 
 #[test]
@@ -386,9 +390,10 @@ fn retain_keeping_everything_fires_nothing() {
     let (mut c, log) = cache_with_log(8);
     c.cache_set(TagKey::new(1, "k1"), Val::live("v1"));
     c.cache_set(TagKey::new(2, "k2"), Val::live("v2"));
-    c.retain(|_, _| true);
+    let removed = c.retain(|_, _| true);
     assert!(seen(&log).is_empty());
     assert_eq!(c.cache_size(), 2);
+    assert_eq!(removed, 0);
 }
 
 #[test]
@@ -396,9 +401,10 @@ fn retain_dropping_everything_reports_every_stored_key() {
     let (mut c, log) = cache_with_log(8);
     c.cache_set(TagKey::new(1, "k1"), Val::live("v1"));
     c.cache_set(TagKey::new(2, "k2"), Val::live("v2"));
-    c.retain(|_, _| false);
+    let removed = c.retain(|_, _| false);
     assert_eq!(seen(&log), vec![("k2", "v2"), ("k1", "v1")]);
     assert_eq!(c.cache_size(), 0);
+    assert_eq!(removed, 2);
 }
 
 // --- cache_clear_with_on_evict / cache_clear ------------------------------------------

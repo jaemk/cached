@@ -35,3 +35,11 @@ TLS feature axes and namespace/key escaping are open directions
 ([design/0017-redis-feature-axes.md](design/0017-redis-feature-axes.md),
 [design/0018-redis-key-escaping.md](design/0018-redis-key-escaping.md)). See
 [cargo-features.md](cargo-features.md).
+
+## REDIS-5
+
+`RedisCacheError` and `RedisCacheBuildError` `Display` interpolates the underlying source (e.g.
+`#[error("storage error: {source}")]`) instead of discarding it, matching the same fix applied to
+`RedbCacheError` / `RedbCacheBuildError` ([REDB-5](store-redb.md#redb-5)), per
+[design/0005-store-error-consistency.md](design/0005-store-error-consistency.md). `Display` text
+is not semver-guarded, so this is a non-breaking change.

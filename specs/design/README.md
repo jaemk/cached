@@ -57,3 +57,8 @@ the item stays here for history.
 | [0036](0036-in-impl-static-placement.md) | `in_impl` static placement | Implemented |
 | [0037](0037-sharded-lru-default-shard-cap.md) | Sharded LRU default shard count bounded by `max_size` | Implemented |
 | [0038](0038-cache-set-promotes-on-overwrite.md) | `cache_set` over an existing key promotes to MRU | Implemented |
+| [0039](0039-sharded-iteration-snapshot-api.md) | Iteration / snapshot API on the sharded stores | Not implemented (declined) |
+| [0040](0040-peek-is-an-in-memory-concept.md) | `ConcurrentCachePeekAsync`; no peek on the IO stores | Implemented |
+| [0041](0041-retain-returns-removed-count.md) | `retain` returns the removed count | Implemented |
+| [0042](0042-macro-feature-guard-errors.md) | Macro missing-feature guards for disk and redis | Implemented |
+| [0043](0043-macro-error-precision.md) | Macro error precision: single `Clone` error, attribute spans | Implemented |

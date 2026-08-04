@@ -2248,6 +2248,45 @@ mod extension_trait_blanket_impls {
             Some(99)
         );
     }
+
+    // `IntoValues` is exported through the prelude, so `.into_values()` on the LRU-family
+    // order-method results needs no separate `use cached::IntoValues;`. It must also stay
+    // unambiguous alongside the rest of the glob (no E0034/E0034-style collision).
+    #[test]
+    fn into_values_reachable_via_prelude() {
+        use cached::LruCache;
+        use cached::prelude::*;
+
+        let mut c: LruCache<u32, u32> = LruCache::new(10);
+        c.set(1, 100);
+        c.set(2, 200);
+
+        // `value_order()` shape: Vec<CacheValue<V>> -> Vec<V>, most-recently-used first.
+        assert_eq!(c.value_order().into_values(), vec![200, 100]);
+        // `iter_order()` shape: Vec<(K, CacheValue<V>)> -> Vec<V>, keys dropped.
+        assert_eq!(c.iter_order().into_values(), vec![200, 100]);
+    }
+
+    // `ConcurrentCachePeekAsync` is exported through the prelude. Its methods must not collide
+    // with the synchronous `ConcurrentCachePeek::cache_peek`/`peek` (also in the prelude) nor
+    // with the sharded stores' inherent sync `peek` -- which is exactly why the alias is named
+    // `async_peek` rather than a bare `peek`.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn concurrent_peek_async_reachable_via_prelude_without_collision() {
+        use cached::ShardedUnboundCache;
+        use cached::prelude::*;
+
+        let c: ShardedUnboundCache<u32, u32> = ShardedUnboundCache::new();
+        c.set(1, 10);
+
+        // Inherent sync `peek` still wins on method-call syntax and returns a bare Option.
+        assert_eq!(c.peek(&1), Some(10));
+        // The async trait methods resolve unambiguously under the same glob.
+        assert_eq!(c.async_cache_peek(&1).await.expect("infallible"), Some(10));
+        assert_eq!(c.async_peek(&1).await.expect("infallible"), Some(10));
+        assert_eq!(c.async_peek(&2).await.expect("infallible"), None);
+    }
 }
 
 // ── CacheTtl trait is available without the time_stores feature (API-9) ───────

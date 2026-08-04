@@ -9,9 +9,9 @@ use std::collections::hash_map::RandomState;
 
 use std::collections::HashMap;
 
-#[cfg(feature = "async_core")]
-use crate::ConcurrentCachedAsync;
 use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCached};
+#[cfg(feature = "async_core")]
+use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
 #[cfg(feature = "async_core")]
 use core::future::Future;
 
@@ -42,6 +42,16 @@ struct UnboundInner<K, V, H> {
 /// To use a custom shard hasher, call [`ShardedUnboundCache::builder()`] and then
 /// [`hasher`](ShardedUnboundCacheBuilder::hasher), which yields a `ShardedUnboundCacheBase<K, V, H>`
 /// over your hasher.
+///
+/// **Note**: this type's inherent methods (`get`, `set`, `remove`, `remove_entry`, `delete`,
+/// `contains`, `peek`) return unwrapped values (`Option<V>`, `bool`, ...) and take call-site
+/// priority over the same-named [`ConcurrentCached`] trait methods, which return
+/// `Result<_, Self::Error>` instead. A `.unwrap()` chained onto one of these inherent calls is
+/// therefore `Option::unwrap`, not `Result::unwrap`: `cache.set(k, v).unwrap()` panics on a
+/// **fresh insert**, because there is no previous value to unwrap, not because the operation
+/// failed. To reach the fallible trait form instead (which never panics on a fresh insert), name
+/// it explicitly through the trait, e.g. `ConcurrentCached::cache_set(&cache, k, v)` or
+/// `ConcurrentCachedExt::set(&cache, k, v)`.
 pub type ShardedUnboundCache<K, V> = ShardedUnboundCacheBase<K, V, DefaultShardHasher>;
 
 /// Backing type for [`ShardedUnboundCache`] with a generic shard hasher `H`.
@@ -246,6 +256,7 @@ where
     }
 
     /// Return true if a live value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
+    #[must_use]
     pub fn contains(&self, k: &K) -> bool {
         ConcurrentCached::cache_contains(self, k).unwrap()
     }
@@ -364,6 +375,10 @@ where
     /// [`ShardedExpiringCache`](crate::ShardedExpiringCache) — have `retain` too, with one
     /// difference: their expired entries are removed regardless of the predicate.
     ///
+    /// Returns the total number of entries removed across all shards for this call -- on this
+    /// store that is exactly the number of `keep` rejections, since there is no expiry dimension
+    /// to fold in. Not `#[must_use]`: discarding the count is a legitimate and common use.
+    ///
     /// **Not atomic across shards**: shards are locked and swept **one at a time**, never all
     /// at once (matching [`clear`](Self::clear) and
     /// [`cache_clear_with_on_evict`](Self::cache_clear_with_on_evict)). A concurrent writer can
@@ -374,19 +389,22 @@ where
     /// **after** the shard lock is released, once per removed entry, in shard order. Because
     /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
     /// not yet visited will have that entry filtered by the same in-flight `retain`.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) {
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
+        let mut total_removed = 0usize;
         for shard in self.inner.shards.iter() {
             // Collect under the write lock, fire callbacks after releasing it.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
                 guard.extract_if(|k, v| !keep(k, v)).collect()
             };
+            total_removed += removed.len();
             if let Some(on_evict) = &self.inner.on_evict {
                 for (k, v) in &removed {
                     on_evict(k, v);
                 }
             }
         }
+        total_removed
     }
 }
 
@@ -500,6 +518,21 @@ where
 {
     fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
         Ok(self.peek(k))
+    }
+}
+
+#[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
+impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedUnboundCacheBase<K, V, H>
+where
+    K: Hash + Eq + Send + Sync,
+    V: Clone + Send + Sync,
+    H: ShardHasher<K>,
+{
+    /// Delegates to the side-effect-free sync [`cache_peek`](ConcurrentCachePeek::cache_peek);
+    /// this store never blocks on IO, so there is nothing to await.
+    async fn async_cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
+        ConcurrentCachePeek::cache_peek(self, k)
     }
 }
 

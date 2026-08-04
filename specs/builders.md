@@ -35,3 +35,10 @@ Builders take a custom hasher `S` (defaulting to `DefaultHashBuilder`; `DefaultS
 sharded stores), per
 [design/0001-non-sharded-custom-hasher.md](design/0001-non-sharded-custom-hasher.md). `BuildError`
 and the per-setter errors (`SetMaxSizeError`, `SetTtlError`) are re-exported at the crate root.
+
+## BUILD-5
+
+`TtlSortedSetBuilder` (the entry-setter returned by `TtlSortedCache::set_with(k, v)`, see
+[store-ttl.md](store-ttl.md) TTL-4) gains `.ttl_secs(u64)` and `.ttl_millis(u64)` alongside its
+existing `.ttl(Duration)`, matching the whole-cache TTL setters already on `TtlCacheBuilder`,
+`TtlSortedCacheBuilder`, and `ShardedLruTtlCacheBuilder`. See [store-ttl.md](store-ttl.md) TTL-9.

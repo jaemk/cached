@@ -5,6 +5,8 @@
 //! - `ConcurrentCached::cache_try_get_or_set_with` (+ async counterpart)
 //! - `retain` on `UnboundCache` / `TtlCache` / `ExpiringCache`
 //! - `TtlSortedCache::capacity`
+//! - `ConcurrentCachePeekAsync` (CTRAIT-5), the async mirror of `ConcurrentCachePeek`
+//! - the `__require_redb_store_feature!` / `__require_redis_feature!` macro guards (FEAT-8)
 
 use cached::{ShardedLruCache, ShardedUnboundCache, UnboundCache};
 use std::sync::Arc;
@@ -374,6 +376,127 @@ fn concurrent_peek_trait_expired_reads_none() {
         peek_via_trait(&c, 1),
         None,
         "expired entry must peek as None through the trait"
+    );
+}
+
+// ── ConcurrentCachePeekAsync trait (CTRAIT-5) ────────────────────────────────
+//
+// The async mirror of `ConcurrentCachePeek`, carrying the identical no-recency /
+// no-TTL-refresh / no-metrics / no-lazy-expiry contract. Before it existed, calling
+// `async_cache_peek` on a sharded store was an E0599 whose rustc suggestion was actively
+// wrong (it proposed `.await`-ing the non-future sync `cache_peek`).
+
+// Generic over the async trait: only compiles for stores that implement it.
+#[cfg(feature = "async_core")]
+async fn peek_async_via_trait<V, S>(s: &S, k: u32) -> Option<V>
+where
+    S: cached::ConcurrentCachePeekAsync<u32, V> + Sync,
+    S::Error: std::fmt::Debug,
+{
+    s.async_cache_peek(&k)
+        .await
+        .expect("sharded async peek is infallible")
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn concurrent_peek_async_returns_value_and_ignores_metrics() {
+    let c: ShardedUnboundCache<u32, String> = ShardedUnboundCache::new();
+    c.set(1, "ten".to_string());
+    let hits_before = c.metrics().hits;
+    let misses_before = c.metrics().misses;
+
+    assert_eq!(
+        peek_async_via_trait(&c, 1).await,
+        Some("ten".to_string()),
+        "async peek must return the live value"
+    );
+    assert_eq!(
+        peek_async_via_trait::<String, _>(&c, 2).await,
+        None,
+        "missing key async-peeks as None"
+    );
+
+    let m = c.metrics();
+    assert_eq!(m.hits, hits_before, "async peek must not count a hit");
+    assert_eq!(m.misses, misses_before, "async peek must not count a miss");
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn concurrent_peek_async_does_not_promote_lru_recency() {
+    // shards = 1 so all keys share one LRU order.
+    let c: ShardedLruCache<u32, String> = ShardedLruCache::builder()
+        .max_size(2)
+        .shards(1)
+        .build()
+        .unwrap();
+    c.set(1, "ten".to_string());
+    c.set(2, "twenty".to_string());
+    // An async peek of key 1 must NOT promote it; inserting key 3 evicts key 1.
+    assert_eq!(peek_async_via_trait(&c, 1).await, Some("ten".to_string()));
+    c.set(3, "thirty".to_string());
+    assert_eq!(
+        peek_async_via_trait::<String, _>(&c, 1).await,
+        None,
+        "async-peeked key must still be evicted first"
+    );
+    assert_eq!(
+        peek_async_via_trait(&c, 2).await,
+        Some("twenty".to_string())
+    );
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn concurrent_peek_async_alias_matches_async_cache_peek() {
+    use cached::ConcurrentCachePeekAsync;
+    let c: ShardedUnboundCache<u32, String> = ShardedUnboundCache::new();
+    c.set(1, "ten".to_string());
+
+    // `async_peek` is the defaulted alias; unlike the sync `peek` it is NOT shadowed by an
+    // inherent method, so plain method-call syntax reaches the trait.
+    let via_alias = c.async_peek(&1).await.unwrap();
+    let via_core = ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+        .await
+        .unwrap();
+    assert_eq!(via_alias, via_core);
+    assert_eq!(via_alias, Some("ten".to_string()));
+    assert_eq!(c.async_peek(&2).await.unwrap(), None);
+}
+
+#[cfg(all(feature = "async", feature = "time_stores"))]
+#[tokio::test]
+async fn concurrent_peek_async_expired_reads_none_without_removing() {
+    use cached::{ConcurrentCacheBase, ShardedTtlCache};
+    let c: ShardedTtlCache<u32, String> = ShardedTtlCache::new(Duration::from_millis(20));
+    c.set(1, "ten".to_string());
+    assert_eq!(peek_async_via_trait(&c, 1).await, Some("ten".to_string()));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        peek_async_via_trait::<String, _>(&c, 1).await,
+        None,
+        "expired entry must async-peek as None"
+    );
+    // No lazy removal: the expired entry is still stored.
+    assert_eq!(
+        c.cache_size().unwrap(),
+        Some(1),
+        "async peek must not lazily remove the expired entry"
+    );
+}
+
+// The sync and async peek traits are separate; a store implementing both must satisfy both
+// bounds, and a `ConcurrentCachePeek`-only bound must not be enough for the async one.
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn sync_and_async_peek_agree_on_the_same_store() {
+    let c: ShardedUnboundCache<u32, String> = ShardedUnboundCache::new();
+    c.set(1, "ten".to_string());
+    assert_eq!(
+        peek_via_trait(&c, 1),
+        peek_async_via_trait(&c, 1).await,
+        "sync and async peek must agree"
     );
 }
 
@@ -777,4 +900,51 @@ fn ttl_sorted_capacity_reflects_bound() {
         .build()
         .unwrap();
     assert_eq!(bounded.capacity(), Some(3));
+}
+
+// ── missing-feature guard macros (FEAT-8, design/0042) ───────────────────────
+//
+// `#[concurrent_cached(disk = true)]` and `#[concurrent_cached(redis = true)]` always expand a
+// guard-macro invocation, because a proc macro cannot see the downstream crate's feature flags.
+// The declarative guard in `cached` is `cfg`'d and decides: a no-op when the required feature is
+// on, a `compile_error!` naming it when off.
+//
+// This file is built with the features on, so it pins the *call shapes* and asserts they expand
+// to nothing. The `compile_error!` arms need feature-off builds and are covered by the trybuild
+// golden files under `tests/ui/`.
+
+#[cfg(feature = "redb_store")]
+#[test]
+fn require_redb_store_feature_guard_is_a_noop_when_enabled() {
+    // Statement position, exactly as the macro emits it.
+    cached::__require_redb_store_feature! {}
+
+    // Item position too: the generated code places the guard beside the cache static.
+    mod item_position {
+        cached::__require_redb_store_feature! {}
+        pub const REACHED: bool = true;
+    }
+    const { assert!(item_position::REACHED) };
+}
+
+#[cfg(feature = "redis_store")]
+#[test]
+fn require_redis_feature_guard_sync_shape_is_a_noop_when_redis_store_enabled() {
+    // The synchronous `redis = true` path builds a `RedisCache`, satisfied by `redis_store`.
+    cached::__require_redis_feature! {}
+}
+
+#[cfg(any(
+    feature = "redis_smol",
+    feature = "redis_smol_native_tls",
+    feature = "redis_smol_rustls",
+    feature = "redis_tokio",
+    feature = "redis_tokio_native_tls",
+    feature = "redis_tokio_rustls",
+))]
+#[test]
+fn require_redis_feature_guard_async_shape_is_a_noop_when_a_runtime_is_enabled() {
+    // The async `redis = true` path builds an `AsyncRedisCache`, which needs a redis *runtime*
+    // feature; `redis_store` alone is not enough, hence the distinct `{async}` call shape.
+    cached::__require_redis_feature! {async}
 }

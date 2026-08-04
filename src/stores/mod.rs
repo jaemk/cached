@@ -247,6 +247,22 @@ impl std::error::Error for SetTtlError {}
 /// [`Deref`](std::ops::Deref)s to `V`, so read access is transparent; metadata is
 /// exposed through typed accessors (e.g.
 /// [`expires_at`](CacheValue::expires_at)) that exist only for the carrying `M`.
+/// [`Display`](std::fmt::Display) forwards to the wrapped value, so `println!("{v}")`
+/// works directly on an order-method result.
+///
+/// # Comparing against a bare value
+///
+/// `CacheValue` implements `PartialEq<V>`, so `wrapped == bare` compiles. The reverse,
+/// `bare == wrapped`, does **not** compile: it would require
+/// `impl<V, M> PartialEq<CacheValue<V, M>> for V`, a blanket impl over the foreign type
+/// parameter `V` that Rust's coherence rules forbid. Put the `CacheValue` on the left
+/// (`cv == bare`) or deref it explicitly (`*cv == bare`) instead.
+///
+/// # Bulk-unwrapping a collection
+///
+/// Use the [`IntoValues`] extension trait to turn `Vec<CacheValue<V, M>>` (from
+/// `value_order()`) or `Vec<(K, CacheValue<V, M>)>` (from `iter_order()`) into a plain
+/// `Vec<V>` without a manual `.into_iter().map(CacheValue::into_value).collect()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheValue<V, M = ()> {
     value: V,
@@ -288,9 +304,68 @@ impl<V, M> std::ops::Deref for CacheValue<V, M> {
 
 /// Compare directly against a bare value, ignoring metadata:
 /// `CacheValue::new(1, meta) == 1`.
+///
+/// This impl is intentionally one-directional: `wrapped == bare` compiles, but
+/// `bare == wrapped` does not. A blanket `impl<V, M> PartialEq<CacheValue<V, M>> for V`
+/// would implement a foreign trait (`PartialEq`) for a foreign type parameter `V`,
+/// which Rust's coherence rules forbid (`V` is not a local type and `CacheValue` does
+/// not appear in `V`'s position). To compare the other way round, put the
+/// [`CacheValue`] on the left (`cv == bare`) or deref it explicitly (`*cv == bare`).
 impl<V: PartialEq, M> PartialEq<V> for CacheValue<V, M> {
     fn eq(&self, other: &V) -> bool {
         self.value == *other
+    }
+}
+
+impl<V: std::fmt::Display, M> std::fmt::Display for CacheValue<V, M> {
+    /// Forwards to the wrapped value's `Display` impl; metadata is not rendered.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.value, f)
+    }
+}
+
+/// Bulk-unwrap the [`CacheValue`] wrapper out of the collections returned by the
+/// LRU-family order methods ([`LruCache::iter_order`], [`LruCache::value_order`],
+/// and their `LruTtlCache` / `ExpiringLruCache` counterparts), so collecting plain
+/// `V`s does not require `.into_iter().map(CacheValue::into_value).collect()`.
+///
+/// Implemented for `Vec<CacheValue<V, M>>` (the `value_order()` shape) and for
+/// `Vec<(K, CacheValue<V, M>)>` (the `iter_order()` shape; keys are discarded, since
+/// the result is a plain `Vec<V>`). Order is preserved in both cases.
+///
+/// # Example
+///
+/// ```rust
+/// use cached::stores::{IntoValues, LruCache};
+/// use cached::Cached;
+///
+/// let mut cache: LruCache<u32, u32> = LruCache::new(10);
+/// cache.cache_set(1, 100);
+/// cache.cache_set(2, 200);
+///
+/// // `value_order()` shape: `Vec<CacheValue<V>>` -> `Vec<V>` (most-recently-used first).
+/// let vals: Vec<u32> = cache.value_order().into_values();
+/// assert_eq!(vals, vec![200, 100]);
+///
+/// // `iter_order()` shape: `Vec<(K, CacheValue<V>)>` -> `Vec<V>` (keys dropped).
+/// let vals: Vec<u32> = cache.iter_order().into_values();
+/// assert_eq!(vals, vec![200, 100]);
+/// ```
+pub trait IntoValues<V> {
+    /// Consume `self`, unwrapping every [`CacheValue`] into its inner value while
+    /// preserving order.
+    fn into_values(self) -> Vec<V>;
+}
+
+impl<V, M> IntoValues<V> for Vec<CacheValue<V, M>> {
+    fn into_values(self) -> Vec<V> {
+        self.into_iter().map(CacheValue::into_value).collect()
+    }
+}
+
+impl<K, V, M> IntoValues<V> for Vec<(K, CacheValue<V, M>)> {
+    fn into_values(self) -> Vec<V> {
+        self.into_iter().map(|(_, v)| v.into_value()).collect()
     }
 }
 

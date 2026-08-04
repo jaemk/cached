@@ -301,8 +301,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         || signature.generics.const_params().next().is_some())
         && args.convert.is_none()
     {
+        // Spanned at the attribute, not the function name: the fix is to add
+        // `key`/`convert` to the attribute list (0043b).
         return syn::Error::new(
-            fn_ident.span(),
+            attr_list_span(),
             "#[cached] on a generic function requires `key` + `convert` to pin the cache key to a \
              concrete type: the cache is a single monomorphic static shared across all \
              instantiations and cannot name the function's type parameters. \
@@ -324,9 +326,11 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // `Duration`. These need only presence (`is_some()`), not a parsed value, and
     // surfacing "mutually exclusive" is more relevant than a `ttl` parse error
     // when `expires` is also set.
+    // Each of these is spanned at the conflicting TTL attribute rather than at the
+    // function name (0043b).
     if args.expires && args.ttl_secs.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl_secs"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl_secs` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl_secs` applies a uniform time-based TTL to all entries",
@@ -336,7 +340,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     if args.expires && args.ttl_millis.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl_millis"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl_millis` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl_millis` applies a uniform millisecond TTL to all entries",
@@ -346,7 +350,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     if args.expires && args.ttl.is_some() {
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["ttl"]).unwrap_or_else(attr_list_span),
             "`expires` and `ttl` are mutually exclusive - \
              `expires` delegates expiry to the value via the `Expires` trait; \
              `ttl` applies a uniform time-based TTL to all entries",
@@ -363,6 +367,8 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         args.ttl_secs,
         args.ttl_millis,
         fn_ident.span(),
+        last_named_attr_span(&attr_args, &["ttl", "ttl_secs", "ttl_millis"])
+            .unwrap_or_else(attr_list_span),
     ) {
         Ok(v) => v,
         Err(e) => return e.to_compile_error().into(),
@@ -398,8 +404,9 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     if args.size.is_some() {
+        // Spanned at the `size = ...` attribute, not the function name (0043b).
         return syn::Error::new(
-            fn_ident.span(),
+            last_named_attr_span(&attr_args, &["size"]).unwrap_or_else(attr_list_span),
             "`size` was renamed to `max_size`; use `max_size = ...`",
         )
         .to_compile_error()
@@ -601,14 +608,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
-    // The generated cache internals `.clone()` the value on `cache_set` and
-    // `.to_owned()` it on a cache hit; without a `Clone` bound on the cached
-    // value type those calls fail deep inside macro-generated code with an
-    // opaque trait-bound error. Emit a clear, precisely-spanned assertion ahead
-    // of those internals so it appears first (see `clone_return_assertion`);
-    // the opaque errors below still follow it.
-    let clone_type_assertion = clone_return_assertion(&cache_value_ty, output_span);
-
     // make the cache identifier
     let cache_ident = match args.name {
         Some(ref name) => {
@@ -740,40 +739,51 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // make the set cache and return cache blocks
+    //
+    // The generated cache internals clone the value into the store on `cache_set`
+    // and clone it back out on a cache hit. Both go through
+    // `<#cache_value_ty as Clone>::clone(...)`, spanned at the user's return type,
+    // rather than through a `.clone()` / `.to_owned()` method call: that is the
+    // `Clone` assertion AND the clone, so a non-`Clone` value type produces
+    // exactly one precisely-spanned error instead of that error plus an
+    // E0308/E0599 cascade spanned at the attribute (0043).
+    let clone_owned = clone_cached_value(&cache_value_ty, output_span, quote! { &__cached_result });
+    let clone_borrowed =
+        clone_cached_value(&cache_value_ty, output_span, quote! { __cached_result });
+    let clone_inner = clone_cached_value(&cache_value_ty, output_span, quote! { __cached_inner });
     let (set_cache_block, return_cache_block) = match (is_smart_result, is_smart_option) {
         (false, false) => {
-            let set_cache_block =
-                quote! { __cached_cache.cache_set(__cached_key, __cached_result.clone()); };
+            let set_cache_block = quote! { __cached_cache.cache_set(__cached_key, #clone_owned); };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.set_was_cached(true); return __cached_r }
+                quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return __cached_r }
             } else {
-                quote! { return __cached_result.to_owned() }
+                quote! { return #clone_borrowed }
             };
             (set_cache_block, return_cache_block)
         }
         (true, false) => {
             let set_cache_block = quote! {
                 if let Ok(__cached_inner) = &__cached_result {
-                    __cached_cache.cache_set(__cached_key, __cached_inner.clone());
+                    __cached_cache.cache_set(__cached_key, #clone_inner);
                 }
             };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.set_was_cached(true); return Ok(__cached_r) }
+                quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return Ok(__cached_r) }
             } else {
-                quote! { return Ok(__cached_result.to_owned()) }
+                quote! { return Ok(#clone_borrowed) }
             };
             (set_cache_block, return_cache_block)
         }
         (false, true) => {
             let set_cache_block = quote! {
                 if let Some(__cached_inner) = &__cached_result {
-                    __cached_cache.cache_set(__cached_key, __cached_inner.clone());
+                    __cached_cache.cache_set(__cached_key, #clone_inner);
                 }
             };
             let return_cache_block = if args.with_cached_flag {
-                quote! { let mut __cached_r = __cached_result.to_owned(); __cached_r.set_was_cached(true); return Some(__cached_r) }
+                quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return Some(__cached_r) }
             } else {
-                quote! { return Some(__cached_result.to_owned()) }
+                quote! { return Some(#clone_borrowed) }
             };
             (set_cache_block, return_cache_block)
         }
@@ -929,7 +939,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // function-local item is meaningless and trips `unreachable_pub` (#7).
     let make_static = |vis: &proc_macro2::TokenStream| match sync_writes {
         SyncWriteMode::ByKey => quote! {
-            #vis static #cache_ident: ::std::sync::LazyLock<#krate::KeyedCache<#lock_type<#cache_ty>, #lock_type<()>>> = ::std::sync::LazyLock::new(|| #krate::KeyedCache::new(#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| ::std::sync::Arc::new(#lock_type::new(()))).collect()));
+            #vis static #cache_ident: ::std::sync::LazyLock<#krate::__private::KeyedCache<#lock_type<#cache_ty>, #lock_type<()>>> = ::std::sync::LazyLock::new(|| #krate::__private::KeyedCache::new(#lock_type::new(#cache_create), (0..#sync_writes_buckets).map(|_| ::std::sync::Arc::new(#lock_type::new(()))).collect()));
         },
         _ => quote! {
             #vis static #cache_ident: ::std::sync::LazyLock<#lock_type<#cache_ty>> = ::std::sync::LazyLock::new(|| #lock_type::new(#cache_create));
@@ -1341,7 +1351,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #body_static
             use #krate::Cached;
             #clone_cached_import
-            #clone_type_assertion
             let __cached_key = #key_convert_block;
             #do_set_return_block
         }

@@ -349,7 +349,6 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     pub fn evict(&mut self) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
-        let mut removed = 0;
         self.store.retain_silent(|key, value| {
             if value.is_expired() {
                 // Count BEFORE notifying: a panicking callback must never leave
@@ -358,13 +357,11 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
                 if let Some(on_evict) = on_evict {
                     on_evict(key, value);
                 }
-                removed += 1;
                 false
             } else {
                 true
             }
-        });
-        removed
+        })
     }
 
     /// Retain only entries that are unexpired and satisfy `keep`.
@@ -379,7 +376,13 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     /// This matches [`LruTtlCache::retain`](crate::LruTtlCache::retain); the plain
     /// [`LruCache::retain`](crate::LruCache::retain) has no expiry dimension and
     /// removes solely on the predicate.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
+    ///
+    /// Returns the number of entries removed: the count folds together entries `keep`
+    /// rejected and entries swept for having already expired, since expiry removal is
+    /// unconditional regardless of what `keep` returns. `retain` is deliberately not
+    /// `#[must_use]`: discarding the count is a legitimate and common use, matching
+    /// existing bare `cache.retain(...);` call sites.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         let on_evict = &self.on_evict;
         let evictions = &self.evictions;
         self.store.retain_silent(|key, value| {
@@ -394,7 +397,7 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
             } else {
                 true
             }
-        });
+        })
     }
 
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
@@ -1945,7 +1948,7 @@ mod tests {
         c.cache_set(2, 4); // live, removed by the predicate
         c.cache_set(3, 20); // expired, removed despite the predicate matching it
 
-        c.retain(|_, v| *v == 1 || *v == 20);
+        let removed = c.retain(|_, v| *v == 1 || *v == 20);
         assert_eq!(c.cache_size(), 1);
         assert_eq!(c.cache_get(&1), Some(&1));
 
@@ -1955,6 +1958,47 @@ mod tests {
         assert_eq!(c.evictions.load(Ordering::Relaxed), 2);
         assert_eq!(c.store.cache_evictions(), Some(0));
         assert_eq!(c.cache_evictions(), Some(2));
+        // The returned count folds together the one predicate rejection (key 2) and
+        // the one expired sweep (key 3).
+        assert_eq!(removed, 2);
+    }
+
+    #[test]
+    fn retain_returns_count_folding_expired_and_predicate_rejections() {
+        // The returned count must fold together BOTH predicate-rejected entries and
+        // entries removed for having already expired, and must agree with the
+        // `cache_size()` delta and the number of `on_evict` invocations.
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(10)
+            .on_evict(move |_k: &u8, _v: &ExpiredU8| {
+                fired2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+
+        c.cache_set(1, 20); // expired (>10): swept regardless of predicate
+        c.cache_set(2, 2); // even, live: kept
+        c.cache_set(3, 3); // odd, live: rejected by predicate
+        c.cache_set(4, 4); // even, live: kept
+
+        let size_before = c.cache_size();
+        let removed = c.retain(|_, v| v % 2 == 0);
+        let size_after = c.cache_size();
+
+        assert_eq!(
+            removed, 2,
+            "one expired sweep (key 1) + one predicate rejection (key 3)"
+        );
+        assert_eq!(size_before - size_after, removed);
+        assert_eq!(fired.load(Ordering::Relaxed), removed);
+        assert_eq!(c.cache_get(&2), Some(&2));
+        assert_eq!(c.cache_get(&3), None);
+        assert_eq!(c.cache_get(&4), Some(&4));
     }
 
     #[test]

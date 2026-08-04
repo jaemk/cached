@@ -108,3 +108,42 @@ already held in `cache_set`, so a value that crosses its own expiry boundary whi
 queued for the lock is judged expired, not live, for that operation. In that case `cache_set`
 returns `None` and fires `on_evict` for the displaced entry, the opposite of the TTL-family
 outcome above.
+
+## SHARD-9
+
+The inherent `retain` from [SHARD-6](#shard-6) now returns `usize` (the count of entries removed
+across all shards) instead of `()`, matching the single-owner stores (see
+[store-lru.md](store-lru.md) LRU-8). On the four expiry-aware sharded stores the count folds
+together predicate-rejected entries and entries swept for having already expired; on
+`ShardedUnboundCache` (no eviction dimension) the count is exactly the number of entries `keep`
+rejected. This is a BREAKING change.
+
+## SHARD-10
+
+The inherent-vs-trait return-shape split (see [SHARD-3](#shard-3)) is documented as a sharp edge
+on all six sharded store types. The inherent shims return unwrapped values (`Option<V>`, `()`,
+`bool`) and take call-site priority over the `ConcurrentCached*` trait methods, which return
+`Result<_, Self::Error>`. The consequence worth stating plainly: `s.set(k, v).unwrap()` compiles
+and resolves to `Option::unwrap`, so it panics on a first insert (there is no displaced value).
+The rustdoc note gives the UFCS disambiguation (`ConcurrentCached::cache_set` /
+`ConcurrentCachedExt::set`). Signatures are unchanged; this is a documentation change only.
+
+`#[must_use]` on the inherent `set`/`remove` was considered and rejected. It cannot fire on the
+hazard it would target, because `s.set(k, v).unwrap()` consumes the return value, and it fires
+instead on fire-and-forget `s.set(k, v);`, which is the common correct call. The attribute was
+added only to inherent `contains`, matching the existing bare `#[must_use]` on `get`/`peek`.
+
+See [design/0015-sharded-base-alias-collapse.md](design/0015-sharded-base-alias-collapse.md) for
+the `*Base` structure these inherent shims live on.
+
+## SHARD-11
+
+The three LRU-bounded sharded stores' `capacity()` getter (see [SHARD-7](#shard-7)) gains
+`#[doc(alias = "max_size")]`, matching the four single-owner bounded stores (`LruCache`,
+`LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache`).
+
+## SHARD-12
+
+Sharded stores implement no iteration or snapshot capability: no `iter`/`keys`/`values`, unlike
+every single-owner store, which implements `CachedIter`. This is a deliberate limitation. See
+[design/0039-sharded-iteration-snapshot-api.md](design/0039-sharded-iteration-snapshot-api.md).

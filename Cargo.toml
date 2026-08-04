@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "3.0.0-rc.9"
+version = "3.0.0-rc.10"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -10,7 +10,7 @@ categories = ["caching", "data-structures"]
 keywords = ["cache", "memoize", "lru", "redis", "disk"]
 license = "MIT"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 # Internal dev tooling and process docs that should not ship in the published crate.
 exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "specs/", "local/", ".cursorrules", "AGENTS.md", "CLAUDE.md", "Makefile"]
 
@@ -76,12 +76,12 @@ redb_store = ["serde", "dep:redb", "dep:directories", "dep:blocking"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
-version = "3.0.0-rc.8"
+version = "3.0.0-rc.10"
 path = "cached_proc_macro"
 optional = true
 
 [dependencies.cached_proc_macro_types]
-version = "3.0.0-rc.8"
+version = "3.0.0-rc.10"
 path = "cached_proc_macro_types"
 optional = true
 

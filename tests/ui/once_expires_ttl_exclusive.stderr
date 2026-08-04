@@ -1,5 +1,5 @@
 error: `expires` and `ttl` are mutually exclusive - `expires` delegates expiry to the value via the `Expires` trait; `ttl` applies a uniform time-based TTL
- --> tests/ui/once_expires_ttl_exclusive.rs:4:4
+ --> tests/ui/once_expires_ttl_exclusive.rs:3:8
   |
-4 | fn my_fn() -> String {
-  |    ^^^^^
+3 | #[once(ttl = "core::time::Duration::from_secs(60)", expires = true)]
+  |        ^^^

@@ -135,4 +135,59 @@ fn compile_fail_v3_macros() {
     // `time_stores` feature; covered by the time_stores/default/async CI targets.
     #[cfg(feature = "time_stores")]
     t.pass("tests/ui/cached_result_fallback_sync_writes_disabled.rs");
+    // 0043a (non-`Clone` return type -> exactly ONE error) and 0043b (the three
+    // attribute errors respanned at the offending attribute) are pinned by the
+    // goldens of fixtures already registered above and in `tests/cached.rs`:
+    // `cached_return_type_requires_clone`,
+    // `cached_with_cached_flag_return_type_requires_clone`,
+    // `once_return_type_requires_clone` (error count), `cached_size_attr_removed`,
+    // `concurrent_cached_size_attr_removed`, `cached_ttl_ttl_secs_exclusive` (and
+    // the other `ttl*_exclusive` files above), `cached_generic_requires_convert`,
+    // `concurrent_cached_generic_requires_convert` (caret position). They are not
+    // re-registered here: trybuild would compile each fixture a second time for no
+    // added coverage.
+}
+
+/// 0042: the missing-feature guards for the `disk = true` / `redis = true` store
+/// selectors on `#[concurrent_cached]`.
+///
+/// Each guard is a `compile_error!` only when its feature is OFF; with the feature
+/// on it expands to nothing and the fixture compiles, which would make
+/// `compile_fail` report a false failure. Every fixture below is therefore gated
+/// on the absence of the feature it is about, the same way
+/// `tests/v3_ui_async_guard.rs` gates the `async` guard. Consequences:
+///
+/// - the `redb_store` and `redis_store` fixtures run on every target that leaves
+///   those features off (`default`, `time-stores`, `async`, `proc-macro`, ...);
+/// - the async-redis fixtures split by the `async` feature, because the `async`
+///   guard fires alongside the redis guard when `async` is off and changes the
+///   expected stderr. The `async`-on target isolates the redis guard (one error);
+///   the `async`-off target is where the two guards' relative ORDER is
+///   observable, and is the regression guard for the mis-ordering.
+///
+/// Regenerate these goldens once per configuration:
+/// `TRYBUILD=overwrite cargo test --features "proc_macro,time_stores"` and
+/// `TRYBUILD=overwrite cargo test --features "proc_macro,time_stores,async"`.
+#[test]
+fn compile_fail_backend_feature_guards() {
+    let t = trybuild::TestCases::new();
+    // `disk = true` without `redb_store`: names `redb_store`.
+    #[cfg(not(feature = "redb_store"))]
+    t.compile_fail("tests/ui/concurrent_cached_disk_requires_redb_store.rs");
+    // `redis = true` on a sync fn without any redis feature: names `redis_store`
+    // (plus the runtime features, for the async case).
+    #[cfg(not(feature = "redis_store"))]
+    t.compile_fail("tests/ui/concurrent_cached_redis_requires_redis_store.rs");
+    // `redis = true` on an async fn: names the redis runtime features. With
+    // `async` ON this is the only diagnostic - no `async` / `async_core` anywhere.
+    #[cfg(all(feature = "async", not(feature = "redis_store")))]
+    t.compile_fail("tests/ui/concurrent_cached_async_redis_requires_redis_runtime.rs");
+    // Same program with `async` OFF: both guards fire, and the golden pins the
+    // redis guard FIRST.
+    #[cfg(all(not(feature = "async"), not(feature = "redis_store")))]
+    t.compile_fail("tests/ui/concurrent_cached_async_redis_guard_order.rs");
+    // `TestCases` runs its queue on drop; with every fixture cfg'd out (an
+    // all-features build) the queue is empty, the test is a no-op, and the
+    // explicit `drop` keeps `t` from tripping `unused_variables`.
+    drop(t);
 }

@@ -51,14 +51,14 @@ use thiserror::Error;
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RedbCacheBuildError {
-    #[error("Storage error")]
+    #[error("storage error: {source}")]
     Storage {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
     #[error(transparent)]
     Build(#[from] super::BuildError),
-    #[error("I/O error preparing the disk cache directory")]
+    #[error("I/O error preparing the disk cache directory: {source}")]
     Io {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -691,7 +691,7 @@ pub enum RedbCacheError {
     /// **Semver note:** the concrete source type is NOT part of the public API
     /// and may change without a major version bump. Inspect via
     /// [`std::error::Error::source`] and downcast if needed.
-    #[error("Storage error")]
+    #[error("storage error: {source}")]
     Storage {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -704,7 +704,7 @@ pub enum RedbCacheError {
     /// redacting or omitting the `cached_value` field.
     ///
     /// **Semver note:** the concrete source type is NOT part of the public API.
-    #[error("Error deserializing cached value")]
+    #[error("error deserializing cached value: {source}")]
     CacheDeserialization {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -713,7 +713,7 @@ pub enum RedbCacheError {
     /// A value failed to serialize before writing.
     ///
     /// **Semver note:** the concrete source type is NOT part of the public API.
-    #[error("Error serializing cached value")]
+    #[error("error serializing cached value: {source}")]
     CacheSerialization {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,

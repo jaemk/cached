@@ -95,13 +95,16 @@ fn sharded_unbound_retain_filters_across_shards_and_fires_on_evict_once_per_entr
     // The predicate must see every stored entry with its stored key and value.
     let seen = Arc::new(Mutex::new(Vec::<(u32, u32)>::new()));
     let seen2 = seen.clone();
-    c.retain(move |k, v| {
+    let removed: usize = c.retain(move |k, v| {
         seen2
             .lock()
             .expect("predicate recorder poisoned")
             .push((*k, *v));
         k % 2 == 0
     });
+    // ShardedUnboundCache has no expiry dimension, so the returned count is exactly the
+    // number of predicate rejections (the 16 odd keys).
+    assert_eq!(removed, 16, "retain must return the removed count");
     let mut observed = seen.lock().expect("predicate recorder poisoned").clone();
     observed.sort_unstable();
     let all: Vec<(u32, u32)> = (0..32u32).map(|i| (i, i * 10)).collect();
@@ -328,6 +331,57 @@ fn sharded_ttl_retain_predicate_removal_fires_on_evict_and_counts_evictions() {
     assert_eq!(fired.len(), 16, "on_evict fires exactly once per removal");
 }
 
+/// Callback path (an `on_evict` is configured, so this exercises the collect-under-lock /
+/// fire-after-release branch, not the no-callback fast path): the returned count must fold
+/// together entries removed for having already expired AND entries the predicate itself
+/// rejected, in the same call. Neither cohort alone equals the total, so this is a genuine
+/// check that `retain` isn't just returning one of the two categories.
+#[cfg(feature = "time_stores")]
+#[test]
+fn sharded_ttl_retain_callback_return_count_includes_both_expired_and_predicate_rejected() {
+    let fired = Fired::new();
+    let fired2 = fired.clone();
+    let c = ShardedTtlCache::<u32, u32>::builder()
+        .shards(4)
+        .ttl(Duration::from_millis(30))
+        .on_evict(move |k: &u32, v: &u32| {
+            fired2
+                .0
+                .lock()
+                .expect("on_evict recorder poisoned")
+                .push((*k, *v));
+        })
+        .build()
+        .expect("build ShardedTtlCache");
+
+    // 16 keys that will expire.
+    for i in 0..16u32 {
+        c.set(i, i * 10);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert!(
+        populated_shards(&c.shard_sizes()) >= 2,
+        "cross-shard precondition: expired entries must span at least two shards, got {:?}",
+        c.shard_sizes()
+    );
+
+    // Long TTL for a second cohort, of which the predicate will reject the odd keys.
+    c.set_ttl(Duration::from_secs(3600));
+    for i in 100..116u32 {
+        c.set(i, i * 10);
+    }
+
+    // 16 expired removals + 8 predicate-rejected removals (odd keys in 100..116) = 24 total,
+    // which is neither 16 nor 8 alone.
+    let removed: usize = c.retain(|k, _v| k % 2 == 0);
+    assert_eq!(
+        removed, 24,
+        "retain's return must equal expired + predicate-rejected, not just one or the other"
+    );
+    assert_eq!(c.len(), 8, "expired entries swept, odd live keys filtered");
+    assert_eq!(fired.len(), 24, "on_evict fires exactly once per removal");
+}
+
 #[cfg(feature = "time_stores")]
 #[test]
 fn sharded_ttl_retain_keeps_never_expiring_entries() {
@@ -422,7 +476,7 @@ fn sharded_ttl_retain_no_callback_fast_path_filters_and_removes_expired() {
         .evictions
         .expect("ShardedTtlCache tracks evictions");
 
-    c.retain(|k, _v| k % 2 == 0);
+    let removed: usize = c.retain(|k, _v| k % 2 == 0);
 
     // The 16 expired entries are gone regardless of the predicate; among the 16 live
     // entries (100..116), only the even keys survive the predicate.
@@ -441,6 +495,13 @@ fn sharded_ttl_retain_no_callback_fast_path_filters_and_removes_expired() {
             - before,
         24,
         "16 expired + 8 predicate-filtered removals all count as evictions"
+    );
+    // The returned count folds together the 16 expired sweeps and the 8 predicate
+    // rejections -- provably more than the predicate-rejection count alone (8), which
+    // certifies the no-callback fast path's `usize` return, not just the eviction metric.
+    assert_eq!(
+        removed, 24,
+        "retain's return must equal expired + predicate-rejected, not just one or the other"
     );
 }
 
@@ -575,6 +636,55 @@ fn sharded_expiring_retain_predicate_removal_fires_on_evict_and_counts_evictions
     assert_eq!(fired.sorted(), expected);
 }
 
+/// Callback path (an `on_evict` is configured, so this exercises the collect-under-lock /
+/// fire-after-release branch, not the no-callback fast path): the returned count must fold
+/// together entries removed for having already expired AND entries the predicate itself
+/// rejected, in the same call. Neither cohort alone equals the total, so this is a genuine
+/// check that `retain` isn't just returning one of the two categories.
+#[test]
+fn sharded_expiring_retain_callback_return_count_includes_both_expired_and_predicate_rejected() {
+    let fired = Fired::new();
+    let fired2 = fired.clone();
+    let c = ShardedExpiringCache::<u32, Val>::builder()
+        .shards(4)
+        .on_evict(move |k: &u32, v: &Val| {
+            fired2
+                .0
+                .lock()
+                .expect("on_evict recorder poisoned")
+                .push((*k, v.v));
+        })
+        .build()
+        .expect("build ShardedExpiringCache");
+
+    // Even keys expired, odd keys live — both cohorts spread over the shards.
+    for i in 0..32u32 {
+        if i % 2 == 0 {
+            c.set(i, dead(i * 10));
+        } else {
+            c.set(i, live(i * 10));
+        }
+    }
+    assert!(populated_shards(&c.shard_sizes()) >= 2);
+
+    // Predicate additionally rejects live keys below value 100 (i.e. i < 10, odd).
+    let removed: usize = c.retain(|_k, v| v.v >= 100);
+
+    // 16 expired (even) removals + 5 predicate-rejected live removals (odd i in 1,3,5,7,9) = 21.
+    let expected_survivors = (0..32u32).filter(|i| i % 2 != 0 && i * 10 >= 100).count();
+    let expected_removed = 32 - expected_survivors;
+    assert_eq!(
+        removed, expected_removed,
+        "retain's return must equal expired + predicate-rejected, not just one or the other"
+    );
+    assert_eq!(c.len(), expected_survivors);
+    assert_eq!(
+        fired.len(),
+        expected_removed,
+        "on_evict fires exactly once per removal"
+    );
+}
+
 #[test]
 fn sharded_expiring_retain_keep_everything_keeps_live_entries() {
     let fired = Fired::new();
@@ -661,7 +771,7 @@ fn sharded_expiring_retain_no_callback_fast_path_filters_and_removes_expired() {
         .expect("ShardedExpiringCache tracks evictions");
 
     // Predicate additionally filters out live keys below 100 (i.e. i < 10).
-    c.retain(|_k, v| v.v >= 100);
+    let removed: usize = c.retain(|_k, v| v.v >= 100);
 
     // Expired (even) keys are gone regardless of the predicate; among the 16 live (odd)
     // keys, only those with value >= 100 (i >= 11, odd) survive the predicate.
@@ -683,6 +793,14 @@ fn sharded_expiring_retain_no_callback_fast_path_filters_and_removes_expired() {
             - before,
         expected_removed as u64,
         "expired + predicate-filtered removals all count as evictions"
+    );
+    // The returned count folds together the expired sweeps (even keys) and the
+    // predicate-rejected live keys below value 100 -- provably more than the
+    // predicate-rejection count alone, certifying the no-callback fast path's `usize`
+    // return.
+    assert_eq!(
+        removed, expected_removed,
+        "retain's return must equal expired + predicate-rejected, not just one or the other"
     );
 }
 
@@ -1460,8 +1578,10 @@ fn sharded_expiring_retain_races_concurrent_set_get_evict_without_double_fire() 
 // The two race tests above build the cache WITH an `on_evict`, so they only exercise the
 // callback branch of `retain` (collect-under-lock, fire-after-release). The no-callback
 // fast path is a *different* code path: it drops filtered entries in place via
-// `HashMap::retain` and counts the length delta (`before - after`) under the same write
-// lock, with no `Vec` collection and no callback. These tests drive that path under the
+// `HashMap::retain` and computes the length delta (`before - after`) under the shard's
+// write lock, with no `Vec` collection and no callback -- but the `evictions` counter
+// itself is only incremented with `fetch_add` *after* that lock has been released, not
+// while it is held. These tests drive that path under the
 // same contention (concurrent set/get/evict) and certify:
 //   * no torn shard / no lost entries -- `shard_sizes().sum() == len()` post-race, and
 //   * exact eviction counting with no double-count -- a final, uncontended drain removes
@@ -1752,4 +1872,125 @@ fn sharded_ttl_retain_uses_each_entrys_stored_expires_at_not_the_current_ttl_set
         None,
         "key 2 (new short ttl) must have expired and been swept"
     );
+}
+
+// ── ConcurrentCachePeekAsync on the map-backed stores (specs/traits-concurrent.md CTRAIT-5,
+// specs/design/0040-peek-is-an-in-memory-concept.md) ────────────────────────────────────────
+//
+// `tests/v3_concurrent_peek_async.rs` certifies the trait definition itself (no default body,
+// the `async_peek` alias, the prelude re-export, `Send`) against a local store. This module
+// certifies the concrete delegation on `ShardedUnboundCache`, `ShardedTtlCache`, and
+// `ShardedExpiringCache`: `async_cache_peek` must agree with the sync `cache_peek` / inherent
+// `peek`, with `Self::Error = Infallible`, and must not move the hit/miss metrics.
+
+#[cfg(feature = "async_core")]
+mod concurrent_peek_async {
+    use super::*;
+    use cached::{ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCachePeekAsync};
+
+    #[tokio::test]
+    async fn sharded_unbound_async_peek_matches_sync_peek_and_has_no_metrics_effect() {
+        let c = ShardedUnboundCache::<u32, u32>::builder().build().unwrap();
+        c.set(1, 10);
+
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+                .await
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &2)
+                .await
+                .unwrap(),
+            None,
+            "missing key peeks as None"
+        );
+        // Agrees with the sync side-effect-free peek.
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+                .await
+                .unwrap(),
+            ConcurrentCachePeek::cache_peek(&c, &1).unwrap()
+        );
+        assert_eq!(
+            ConcurrentCacheBase::cache_hits(&c),
+            Some(0),
+            "async peek must not record a hit"
+        );
+        assert_eq!(
+            ConcurrentCacheBase::cache_misses(&c),
+            Some(0),
+            "async peek must not record a miss"
+        );
+    }
+
+    #[cfg(feature = "time_stores")]
+    #[tokio::test]
+    async fn sharded_ttl_async_peek_matches_sync_peek_and_skips_expired() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(30))
+            .build()
+            .expect("build ShardedTtlCache");
+        c.set(1, 10);
+        c.set(2, 20);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+                .await
+                .unwrap(),
+            None,
+            "an expired entry peeks as None, not a stale value"
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+                .await
+                .unwrap(),
+            ConcurrentCachePeek::cache_peek(&c, &1).unwrap()
+        );
+        assert_eq!(
+            c.len(),
+            2,
+            "peeking (sync or async) must not lazily remove the expired entry"
+        );
+        assert_eq!(ConcurrentCacheBase::cache_hits(&c), Some(0));
+        assert_eq!(ConcurrentCacheBase::cache_misses(&c), Some(0));
+    }
+
+    #[tokio::test]
+    async fn sharded_expiring_async_peek_matches_sync_peek_and_skips_expired() {
+        let c = ShardedExpiringCache::<u32, Val>::builder()
+            .build()
+            .expect("build ShardedExpiringCache");
+        c.set(1, live(10));
+        c.set(2, dead(20));
+
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+                .await
+                .unwrap(),
+            Some(live(10))
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &2)
+                .await
+                .unwrap(),
+            None,
+            "an already-expired value peeks as None"
+        );
+        assert_eq!(
+            ConcurrentCachePeekAsync::async_cache_peek(&c, &1)
+                .await
+                .unwrap(),
+            ConcurrentCachePeek::cache_peek(&c, &1).unwrap()
+        );
+        assert_eq!(
+            c.len(),
+            2,
+            "peeking (sync or async) must not lazily remove the expired entry"
+        );
+        assert_eq!(ConcurrentCacheBase::cache_hits(&c), Some(0));
+        assert_eq!(ConcurrentCacheBase::cache_misses(&c), Some(0));
+    }
 }
