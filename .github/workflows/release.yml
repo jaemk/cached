@@ -6,10 +6,54 @@ on:
       - main
   workflow_dispatch:
 jobs:
+  # Decide whether there is anything to release, from the actual signal: the
+  # root crate's version is not on crates.io yet.
+  #
+  # This deliberately does NOT key off the commit message. The previous guard
+  # required the head commit message to start with "release:", which
+  # squash-merging a release PR silently defeats: the squash replaces the commit
+  # message with the PR title, the prefix is lost, and the workflow skips while
+  # still reporting success. A version that is not on the index is the condition
+  # that actually means "publish", and it cannot be lost by a merge strategy.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.decide.outputs.should_publish }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Check whether the root crate version is already published
+      id: decide
+      run: |
+        set -euo pipefail
+        version=$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "cached") | .version')
+        if [ -z "$version" ]; then
+          echo "Could not determine the root crate version." >&2
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+        # A network or API failure must fail loudly rather than silently
+        # resolving to "nothing to publish", which would skip a real release.
+        body=$(curl -sS --fail-with-body \
+          -H "User-Agent: jaemk-cached-release-workflow" \
+          "https://crates.io/api/v1/crates/cached/versions")
+
+        if jq -e --arg v "$version" '.versions[] | select(.num == $v)' >/dev/null <<<"$body"; then
+          echo "cached $version is already on crates.io - nothing to release."
+          echo "should_publish=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "cached $version is not on crates.io - releasing."
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+        fi
+
   publish:
-    # Only request release-environment approval for actual release commits
-    # (or a manual dispatch); other merges to master skip the job entirely.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release:')
+    needs: check
+    # Only request release-environment approval when there is actually a new
+    # version to publish (or on a manual dispatch, the escape hatch for
+    # re-running a release whose earlier attempt failed partway).
+    if: github.event_name == 'workflow_dispatch' || needs.check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     environment: release  # Optional: for enhanced security
     permissions:
@@ -30,8 +74,12 @@ jobs:
       # Tags every publishable workspace crate that lacks a tag or release yet,
       # including backfilling crates published in earlier runs; idempotent
       # (skips tags and releases that already exist on the remote).
-      if: steps.publish.outcome == 'success'
+      #
+      # Runs whenever publishing did not fail, so a re-run of a release that
+      # published but died before tagging still gets its tags and releases.
+      # `publish.sh` treats an already-published version as a benign skip, so
+      # this is reached on a re-run.
+      if: success()
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: bash bin/tag-release.sh
-

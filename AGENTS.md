@@ -21,6 +21,33 @@ Follow with a one-sentence summary (e.g. "Pushing 2 commits touching src/lib.rs 
 
 ---
 
+## Releasing
+
+`.github/workflows/release.yml` publishes when the root crate's version in `Cargo.toml` is not
+yet on crates.io. The commit message is irrelevant, and so is the merge strategy: bump the
+version, land it on master, and the release runs.
+
+Two consequences worth knowing:
+
+- **Merging a version bump releases it.** There is no separate confirmation beyond the
+  `environment: release` approval gate. Do not land a version bump you are not ready to publish.
+- **Re-running is safe.** `bin/publish.sh` treats a version already on the index as a benign
+  skip, and `bin/tag-release.sh` skips tags and releases that already exist, so a release that
+  died partway can be re-run with `gh workflow run release.yml --ref master`.
+
+`bin/publish.sh` publishes in dependency order (`cached_proc_macro_types` ->
+`cached_proc_macro` -> `cached`) and fails the release if any crate fails for a reason other
+than "already published". Do not relax that: publishing the root crate while a bumped subcrate
+failed would put `cached` on the index depending on a `cached_proc_macro*` version that does not
+exist.
+
+This guard used to require the head commit message to start with `release:`. That is fragile and
+was dropped: squash-merging a release PR replaces the commit message with the PR title, silently
+losing the prefix, and the workflow then skips while still reporting success. Do not reintroduce
+a message-based trigger.
+
+---
+
 ## Temp Files
 Write any scratch files, research dumps, or intermediate agent outputs to `local/` — it is gitignored and always safe to write to. Do not create temp files elsewhere in the repo.
 
