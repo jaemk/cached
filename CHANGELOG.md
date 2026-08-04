@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.0.0-rc.10 / cached_proc_macro 3.0.0-rc.10 / cached_proc_macro_types 3.0.0-rc.10] - 2026-08-03
+
 ### Breaking Changes
 
 - `CacheSetError` is removed. A TTL that would overflow `Instant` bounds (hundreds of years)
