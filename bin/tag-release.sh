@@ -1,12 +1,19 @@
 #!/bin/bash
 
-# Create a git tag and GitHub release for every workspace crate whose current
-# version is not yet tagged on the remote.
+# Create a git tag and GitHub release for every workspace crate whose CURRENT
+# version is not yet tagged and released on the remote.
 #
-# Idempotent: a crate whose tag/release already exists is skipped. The script
-# tags every publishable workspace crate that lacks a tag or release, which
-# includes backfilling crates published in earlier runs as well as those just
-# published. It leaves crates that are already fully tagged and released alone.
+# Idempotent: a crate with both a tag and a release is skipped, and a crate with
+# one but not the other gets only the missing half. That covers a run that
+# published but died before tagging: re-running creates the tag and release for
+# whatever version is in Cargo.toml now.
+#
+# It does NOT backfill historical versions. Only the version currently in each
+# Cargo.toml is considered, so a release from an earlier version that never got
+# a GitHub release stays missing however many times this runs. Create those by
+# hand, keeping the newest release flagged latest:
+#
+#   gh release create <tag> --title "<tag>" --notes-file <notes> --latest=false
 #
 # Tag naming:
 #   - root crate `cached`  -> vX.Y.Z          (bare, kept for back-compat)
