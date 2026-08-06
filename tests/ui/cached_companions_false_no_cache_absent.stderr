@@ -1,0 +1,5 @@
+error[E0425]: cannot find function `my_fn_no_cache` in this scope
+  --> tests/ui/cached_companions_false_no_cache_absent.rs:10:13
+   |
+10 |     let _ = my_fn_no_cache(1);
+   |             ^^^^^^^^^^^^^^ not found in this scope

@@ -1,0 +1,5 @@
+error: `shards` is not supported on `#[cached]`; `shards` sets the shard count of the concurrent in-memory sharded stores, and `#[cached]` stores every entry behind a single lock. Use `#[concurrent_cached(shards = ...)]` instead.
+ --> tests/ui/cached_shards_concurrent_only.rs:5:10
+  |
+5 | #[cached(shards = 4)]
+  |          ^^^^^^

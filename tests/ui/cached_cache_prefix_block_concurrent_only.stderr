@@ -1,0 +1,5 @@
+error: `cache_prefix_block` is not supported on `#[cached]`; `cache_prefix_block` sets the key prefix of the Redis-backed concurrent store. Use `#[concurrent_cached(redis = true, cache_prefix_block = ...)]` instead.
+ --> tests/ui/cached_cache_prefix_block_concurrent_only.rs:4:10
+  |
+4 | #[cached(cache_prefix_block = "{ \"my-prefix\" }")]
+  |          ^^^^^^^^^^^^^^^^^^

@@ -1,5 +1,7 @@
 use crate::time::Duration;
-use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCached};
+use crate::{
+    ConcurrentCacheBase, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached,
+};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -69,38 +71,115 @@ fn ttl_millis_i64(ttl: Duration) -> Result<i64, RedisCacheError> {
     Ok(ttl_millis(ttl)? as i64)
 }
 
-/// Build the Redis key: `{namespace}:{prefix}:{key}`, colon-joined with empty
-/// segments skipped and the namespace's trailing `:` trimmed.
+/// Separator between the namespace, prefix and key fields of a generated Redis key.
+const KEY_FIELD_SEPARATOR: char = ':';
+
+/// Escape character introduced by [`escape_key_field`].
+const KEY_FIELD_ESCAPE: char = '%';
+
+/// Percent-escape the two characters that would otherwise make a key field
+/// ambiguous: the field separator `:` (`%3A`) and the escape character `%`
+/// itself (`%25`).
 ///
-/// **Data-impacting in 1.0** (see migration §8): pre-1.0 used raw
-/// concatenation. Single source of truth shared by the sync and async stores
-/// so the two formats cannot drift.
-fn generate_redis_key(namespace: &str, prefix: &str, key: &str) -> String {
-    let namespace = namespace.trim_end_matches(':');
-    let cap = namespace.len()
-        + if !namespace.is_empty() { 1 } else { 0 }
-        + prefix.len()
-        + if !prefix.is_empty() { 1 } else { 0 }
-        + key.len();
-    let mut out = String::with_capacity(cap);
-    if !namespace.is_empty() {
-        out.push_str(namespace);
-        out.push(':');
+/// A field containing neither is returned borrowed and unchanged, so a key built
+/// from ordinary namespace/prefix/key fields is byte-identical to a plain colon
+/// join and stays readable in `redis-cli`. Percent-escaping is used rather than
+/// backslash-escaping because `%` is not a glob metacharacter, so the escaped
+/// field needs no further quoting to be embedded in the `SCAN MATCH` pattern
+/// built by [`clear_match_pattern`].
+fn escape_key_field(field: &str) -> std::borrow::Cow<'_, str> {
+    if !field.contains([KEY_FIELD_SEPARATOR, KEY_FIELD_ESCAPE]) {
+        return std::borrow::Cow::Borrowed(field);
     }
-    if !prefix.is_empty() {
-        out.push_str(prefix);
-        out.push(':');
+    let mut out = String::with_capacity(field.len() + 4);
+    for c in field.chars() {
+        match c {
+            KEY_FIELD_SEPARATOR => out.push_str("%3A"),
+            KEY_FIELD_ESCAPE => out.push_str("%25"),
+            _ => out.push(c),
+        }
     }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Canonical form of a namespace: trailing separators are trimmed, so `"ns"`,
+/// `"ns:"` and `"ns::"` all name the same namespace. This is what lets the
+/// default namespace be written with its separator included
+/// (`cached-redis-store:`) while still producing `cached-redis-store:<prefix>:<key>`.
+fn canonical_namespace(namespace: &str) -> &str {
+    namespace.trim_end_matches(KEY_FIELD_SEPARATOR)
+}
+
+/// Frame three already-escaped fields into the final key layout:
+/// `{namespace}:{prefix}:{key}`. The arity is fixed: every field contributes a
+/// field and a separator, so a key always carries exactly two separators, and an
+/// empty namespace or prefix shows up as an empty field (`:{prefix}:{key}`,
+/// `{namespace}::{key}`).
+///
+/// Shared by [`generate_redis_key`] and [`clear_match_pattern`] so the key
+/// layout has exactly one definition and `cache_clear` cannot drift out of sync
+/// with the keys the store writes.
+fn join_key_fields(namespace: &str, prefix: &str, key: &str) -> String {
+    let mut out = String::with_capacity(namespace.len() + prefix.len() + key.len() + 2);
+    out.push_str(namespace);
+    out.push(KEY_FIELD_SEPARATOR);
+    out.push_str(prefix);
+    out.push(KEY_FIELD_SEPARATOR);
     out.push_str(key);
     out
 }
 
+/// Build the Redis key: `{namespace}:{prefix}:{key}`, with every field
+/// percent-escaped by [`escape_key_field`] and the fixed arity of
+/// [`join_key_fields`].
+///
+/// Distinct `(canonical namespace, prefix, key)` triples always produce distinct
+/// keys. Escaping removes `:` from the namespace and prefix fields, so the first
+/// two `:` in the result are always the separators written here: splitting there
+/// recovers the three escaped fields verbatim, and percent-unescaping recovers
+/// the fields themselves, so the whole triple is reconstructible from the key.
+/// Namespaces differing only in trailing separators are deliberately identified
+/// by [`canonical_namespace`] and are the same namespace, not a collision.
+///
+/// The fixed arity is what keeps the *scopes* disjoint as well as the keys: an
+/// empty namespace writes `:{prefix}:{key}`, which no cache with a non-empty
+/// namespace can produce, so [`clear_match_pattern`] for a namespace-less cache
+/// cannot reach a cache whose namespace happens to equal that prefix.
+///
+/// **Data-impacting in 3.0**: field escaping and the fixed arity are new, so a
+/// cache with an empty namespace, or whose namespace, prefix or keys contain `:`
+/// or `%`, writes at a different key than it did before. The value envelope's
+/// `version` field does not cover the key layout: old keys are simply not found
+/// after upgrading and the values are recomputed and rewritten at the new key.
+/// (The 1.0 change from raw concatenation to this colon join was data-impacting
+/// in the same way; see migration §8.) Single source of truth shared by the sync
+/// and async stores so the two formats cannot drift.
+fn generate_redis_key(namespace: &str, prefix: &str, key: &str) -> String {
+    join_key_fields(
+        &escape_key_field(canonical_namespace(namespace)),
+        &escape_key_field(prefix),
+        &escape_key_field(key),
+    )
+}
+
 /// `SCAN MATCH` glob covering every key a cache with this `namespace`/`prefix`
-/// writes: the [`generate_redis_key`] scope with a trailing `*`. Glob
-/// metacharacters (`*`, `?`, `[`, `]`) and `\` in the namespace/prefix are
-/// escaped so they match literally — otherwise a prefix like `cache[v2]` would
-/// scan (and `cache_clear` would delete) keys outside this cache's scope.
-/// Single source of truth shared by the sync and async stores.
+/// writes: the [`generate_redis_key`] scope with a trailing `*`.
+///
+/// The fields are percent-escaped exactly as [`generate_redis_key`] escapes them
+/// (so the pattern's literal part is the byte-for-byte scope of this cache's
+/// keys), and only then glob-escaped: glob metacharacters (`*`, `?`, `[`, `]`)
+/// and `\` are backslash-escaped so they match literally. Otherwise a prefix
+/// like `cache[v2]` would scan (and `cache_clear` would delete) keys outside
+/// this cache's scope. The two escapes do not interfere: percent-escaping only
+/// ever emits `%` and hex digits (never a glob metacharacter), and glob-escaping
+/// only ever inserts `\` (never a `:` or `%`).
+///
+/// Because escaping strips `:` out of the namespace and prefix fields, the
+/// pattern also stops matching a *neighbouring* cache whose fields split the
+/// same characters differently: `namespace = "a:b"` now scans `a%3Ab:p:*` and
+/// leaves `namespace = "a", prefix = "b:p"` (`a:b%3Ap:*`) untouched. The fixed
+/// arity closes the same overlap for an empty namespace: the scope is `:p:*`,
+/// not `p:*`, so it cannot reach a cache whose namespace is `p`.
 fn clear_match_pattern(namespace: &str, prefix: &str) -> String {
     fn escape_glob(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
@@ -112,19 +191,25 @@ fn clear_match_pattern(namespace: &str, prefix: &str) -> String {
         }
         out
     }
-    generate_redis_key(&escape_glob(namespace), &escape_glob(prefix), "*")
+    join_key_fields(
+        &escape_glob(&escape_key_field(canonical_namespace(namespace))),
+        &escape_glob(&escape_key_field(prefix)),
+        "*",
+    )
 }
 
 #[cfg(test)]
 mod clear_pattern_tests {
     // No Redis server needed — pins the `SCAN MATCH` pattern used by `cache_clear`.
-    use super::clear_match_pattern;
+    use super::{clear_match_pattern, escape_key_field, generate_redis_key};
 
     #[test]
     fn plain_segments_get_scope_and_trailing_star() {
         assert_eq!(clear_match_pattern("ns", "p"), "ns:p:*");
-        assert_eq!(clear_match_pattern("", "p"), "p:*");
-        assert_eq!(clear_match_pattern("ns", ""), "ns:*");
+        // Fixed arity: an empty field still contributes its separator, so the
+        // scope keeps both separators and matches the keys such a cache writes.
+        assert_eq!(clear_match_pattern("", "p"), ":p:*");
+        assert_eq!(clear_match_pattern("ns", ""), "ns::*");
     }
 
     #[test]
@@ -135,11 +220,114 @@ mod clear_pattern_tests {
         assert_eq!(clear_match_pattern("n*s", "p?x"), "n\\*s:p\\?x:*");
         assert_eq!(clear_match_pattern("back\\slash", "p"), "back\\\\slash:p:*");
     }
+
+    #[test]
+    fn separator_and_escape_characters_are_percent_escaped_in_the_pattern() {
+        assert_eq!(clear_match_pattern("a:b", "p"), "a%3Ab:p:*");
+        assert_eq!(clear_match_pattern("ns", "a:b"), "ns:a%3Ab:*");
+        assert_eq!(clear_match_pattern("100%", "p"), "100%25:p:*");
+    }
+
+    #[test]
+    fn percent_escaping_and_glob_escaping_do_not_interfere() {
+        // Percent-escaping runs first (it defines the literal bytes of the key
+        // scope), glob-escaping second (it quotes those bytes for `SCAN MATCH`).
+        // `%` is not a glob metacharacter and `\` is not percent-escaped, so the
+        // two passes touch disjoint characters.
+        assert_eq!(clear_match_pattern("a:b*", "p"), "a%3Ab\\*:p:*");
+        assert_eq!(clear_match_pattern("ns", "[v2]:%"), "ns:\\[v2\\]%3A%25:*");
+    }
+
+    /// The literal part of the pattern (everything before the trailing `*`, with
+    /// glob escapes removed) must be exactly the scope shared by every key this
+    /// cache writes: `cache_clear` matches all of its own entries and nothing more.
+    fn assert_pattern_scopes_keys(namespace: &str, prefix: &str, key: &str) {
+        fn unescape_glob(pattern: &str) -> String {
+            let mut out = String::with_capacity(pattern.len());
+            let mut chars = pattern.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    out.extend(chars.next());
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        let pattern = clear_match_pattern(namespace, prefix);
+        let literal = unescape_glob(
+            pattern
+                .strip_suffix('*')
+                .expect("the clear pattern always ends with the key wildcard"),
+        );
+        let generated = generate_redis_key(namespace, prefix, key);
+        assert!(
+            generated.starts_with(&literal),
+            "clear pattern {pattern:?} (literal scope {literal:?}) must cover key {generated:?}"
+        );
+        assert_eq!(
+            &generated[literal.len()..],
+            escape_key_field(key).as_ref(),
+            "the wildcard must stand for exactly the escaped key field"
+        );
+    }
+
+    #[test]
+    fn pattern_scope_and_generated_keys_agree() {
+        assert_pattern_scopes_keys("ns", "p", "k");
+        assert_pattern_scopes_keys("", "p", "k");
+        assert_pattern_scopes_keys("ns", "", "k");
+        assert_pattern_scopes_keys("cached-redis-store:", "p", "k");
+        assert_pattern_scopes_keys("a:b", "p", "k");
+        assert_pattern_scopes_keys("ns", "a:b", "k:with:colons");
+        assert_pattern_scopes_keys("100%", "p%", "50%:k");
+        assert_pattern_scopes_keys("n*s", "cache[v2]", "k?");
+        assert_pattern_scopes_keys("back\\slash", "p", "k\\");
+    }
+
+    #[test]
+    fn pattern_no_longer_covers_a_neighbouring_cache() {
+        // Before field escaping, `namespace = "a:b", prefix = "p"` scanned `a:b:p:*`,
+        // which also matched every key of `namespace = "a", prefix = "b:p"`, so
+        // clearing one cache silently deleted the other's entries.
+        let scope = clear_match_pattern("a:b", "p");
+        let literal = scope
+            .strip_suffix('*')
+            .expect("the clear pattern always ends with the key wildcard");
+        let neighbour = generate_redis_key("a", "b:p", "k");
+        assert!(
+            !neighbour.starts_with(literal),
+            "clear pattern {scope:?} must not cover the neighbouring key {neighbour:?}"
+        );
+    }
+
+    #[test]
+    fn empty_namespace_scope_does_not_cover_a_cache_named_after_its_prefix() {
+        // When an empty namespace dropped its field, `namespace = "", prefix = "p"`
+        // scanned `p:*`, which covered every key of any cache with
+        // `namespace = "p"`, whatever that cache's own prefix was. Under the fixed
+        // arity the scope is `:p:*`, which no non-empty namespace can produce.
+        let scope = clear_match_pattern("", "p");
+        assert_eq!(scope, ":p:*");
+        let literal = scope
+            .strip_suffix('*')
+            .expect("the clear pattern always ends with the key wildcard");
+        for neighbour_prefix in ["q", "p", ""] {
+            let neighbour = generate_redis_key("p", neighbour_prefix, "k");
+            assert!(
+                !neighbour.starts_with(literal),
+                "clear pattern {scope:?} must not cover the key {neighbour:?} of a cache \
+                 whose namespace equals this cache's prefix"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod generate_key_tests {
-    // No Redis server needed — pins the data-impacting 1.0 key format (§8).
+    // No Redis server needed: pins the data-impacting key format (1.0 §8, field
+    // escaping in 3.0).
     use super::{DEFAULT_NAMESPACE, generate_redis_key};
 
     #[test]
@@ -154,33 +342,121 @@ mod generate_key_tests {
     }
 
     #[test]
-    fn empty_segments_are_skipped() {
-        assert_eq!(generate_redis_key("", "p", "k"), "p:k");
-        assert_eq!(generate_redis_key("ns", "", "k"), "ns:k");
-        assert_eq!(generate_redis_key("", "", "k"), "k");
-        assert_eq!(generate_redis_key(":", "", "k"), "k"); // ":" trims to empty
+    fn empty_fields_keep_their_separators() {
+        // Fixed arity: every key carries exactly two separators, so an empty
+        // field is an empty field rather than a missing one. Dropping the
+        // separator of an empty field would make `("", "p", "k")` and
+        // `("p", "", "k")` collide, and would let a namespace-less cache's clear
+        // scope reach a cache whose namespace equals its prefix.
+        assert_eq!(generate_redis_key("", "p", "k"), ":p:k");
+        assert_eq!(generate_redis_key("ns", "", "k"), "ns::k");
+        assert_eq!(generate_redis_key("", "", "k"), "::k");
+        assert_eq!(generate_redis_key(":", "", "k"), "::k"); // ":" trims to empty
     }
 
     #[test]
     fn full_form_and_multiple_trailing_colons() {
         assert_eq!(generate_redis_key("ns", "p", "k"), "ns:p:k");
-        // `trim_end_matches(':')` strips *all* trailing colons.
+        // `canonical_namespace` strips *all* trailing colons.
         assert_eq!(generate_redis_key("ns:::", "p", "k"), "ns:p:k");
-        // Interior colons in segments are preserved.
-        assert_eq!(generate_redis_key("a:b", "p", "k"), "a:b:p:k");
     }
 
     #[test]
-    fn interior_colon_collision() {
-        // Documents the known limitation: a namespace containing an interior colon
-        // produces the same key as a shorter namespace with the remainder as a prefix.
-        // See `namespace()` / `prefix()` doc notes on the builders.
+    fn interior_separators_and_escape_characters_are_escaped() {
+        assert_eq!(generate_redis_key("a:b", "p", "k"), "a%3Ab:p:k");
+        assert_eq!(generate_redis_key("ns", "a:b", "k"), "ns:a%3Ab:k");
+        assert_eq!(generate_redis_key("ns", "p", "a:b"), "ns:p:a%3Ab");
+        // The escape character itself is escaped, so an already-percent-looking
+        // field cannot be confused with an escaped separator.
+        assert_eq!(generate_redis_key("a%3Ab", "p", "k"), "a%253Ab:p:k");
+        assert_eq!(generate_redis_key("100%", "p", "k"), "100%25:p:k");
+    }
+
+    #[test]
+    fn interior_separators_no_longer_collide() {
+        // A namespace containing an interior separator used to produce the same
+        // key as a shorter namespace carrying the remainder as its prefix.
         let with_interior = generate_redis_key("ns:evil", "", "k");
         let split_across = generate_redis_key("ns", "evil", "k");
-        assert_eq!(
+        assert_ne!(
             with_interior, split_across,
-            "interior colons can cause key collisions"
+            "an interior separator must not alias a differently-split namespace/prefix pair"
         );
+        assert_eq!(with_interior, "ns%3Aevil::k");
+        assert_eq!(split_across, "ns:evil:k");
+    }
+
+    /// Distinct `(canonical namespace, prefix, key)` triples must map to distinct
+    /// keys. The triples below are pairwise distinct after namespace
+    /// canonicalization and include every splitting of the same characters
+    /// across the three fields that previously aliased.
+    #[test]
+    fn distinct_triples_map_to_distinct_keys() {
+        let triples = [
+            ("", "p", "k"),
+            ("p", "", "k"),
+            ("", "", "p:k"),
+            ("a", "b", "c"),
+            ("a:b", "c", "d"),
+            ("a", "b:c", "d"),
+            ("a", "b", "c:d"),
+            ("a:b:c", "", "d"),
+            ("a%3Ab", "c", "d"),
+            ("a", "%", "d"),
+            ("a", "%25", "d"),
+            ("ns", "p", ""),
+            ("ns", "", "p"),
+        ];
+        let mut seen = std::collections::HashMap::new();
+        for (namespace, prefix, key) in triples {
+            let generated = generate_redis_key(namespace, prefix, key);
+            if let Some(previous) = seen.insert(generated.clone(), (namespace, prefix, key)) {
+                panic!(
+                    "{:?} and {:?} both map to {generated:?}",
+                    previous,
+                    (namespace, prefix, key)
+                );
+            }
+        }
+    }
+
+    /// Every field is recoverable from the generated key, which is the property
+    /// that makes the mapping injective: escaping removes `:` from the namespace
+    /// and prefix fields, and the arity is fixed, so the first two `:` in a key
+    /// are always its separators.
+    #[test]
+    fn every_field_is_recoverable_from_the_key() {
+        fn unescape_field(field: &str) -> String {
+            field.replace("%3A", ":").replace("%25", "%")
+        }
+        fn decode(generated: &str) -> (String, String, String) {
+            let fields: Vec<&str> = generated.splitn(3, ':').collect();
+            match fields.as_slice() {
+                [namespace, prefix, key] => (
+                    unescape_field(namespace),
+                    unescape_field(prefix),
+                    unescape_field(key),
+                ),
+                other => panic!("unexpected key layout: {other:?}"),
+            }
+        }
+
+        for (namespace, prefix, key) in [
+            ("ns", "p", "k"),
+            ("", "p", "k"),
+            ("ns", "", "k"),
+            ("", "", ""),
+            ("a:b", "c:d", "e:f"),
+            ("100%", "%3A", "%25"),
+            ("cached-redis-store", "my_prefix", "my_key"),
+        ] {
+            let generated = generate_redis_key(namespace, prefix, key);
+            assert_eq!(
+                decode(&generated),
+                (namespace.to_string(), prefix.to_string(), key.to_string()),
+                "key {generated:?} must decode back to its fields"
+            );
+        }
     }
 }
 
@@ -964,11 +1240,15 @@ where
 
     /// Set the namespace for cache keys. Defaults to `cached-redis-store:`.
     /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
-    /// Empty namespace values are omitted from the generated key.
+    /// Trailing colons are trimmed, so `"ns"` and `"ns:"` name the same
+    /// namespace. An empty namespace still contributes its (empty) field, so a
+    /// namespace-less cache writes `:{prefix}:{key}`.
     ///
-    /// **Note:** colons in the namespace are not escaped. A namespace containing
-    /// an interior colon (e.g. `"a:b"`) can produce keys that collide with a
-    /// shorter namespace combined with a prefix (e.g. namespace `"a"`, prefix `"b"`).
+    /// **Note:** colons in the namespace are percent-escaped (`:` becomes `%3A`,
+    /// and `%` itself becomes `%25`), so a namespace containing an interior colon
+    /// (e.g. `"a:b"`) cannot collide with a shorter namespace combined with a
+    /// prefix (e.g. namespace `"a"`, prefix `"b"`). Escaping applies to the key
+    /// layout only; the namespace is stored and reported unescaped.
     #[must_use]
     pub fn namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
         self.namespace = namespace.as_ref().to_string();
@@ -978,14 +1258,16 @@ where
     /// Set the prefix for cache keys (required, non-empty).
     /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
     ///
-    /// **Note:** colons in the prefix are not escaped and can cause key collisions
-    /// with differently-split namespace/prefix combinations sharing the same segments.
+    /// **Note:** colons in the prefix are percent-escaped, so a prefix containing
+    /// a colon cannot collide with a differently-split namespace/prefix pair over
+    /// the same characters.
     ///
-    /// **Note:** the prefix is what scopes `cache_clear` to this logical cache, so
-    /// give each logical cache a distinct prefix. An empty prefix is rejected by
-    /// [`build`](Self::build) with `BuildError::InvalidValue`: it would make
-    /// `cache_clear` match `<namespace>:*` and delete entries belonging to every
-    /// cache that shares the same namespace.
+    /// **Note:** the prefix is what distinguishes logical caches sharing a
+    /// namespace, so give each of them a distinct prefix. An empty prefix is
+    /// rejected by [`build`](Self::build) with `BuildError::InvalidValue`: two
+    /// caches under the same namespace that both leave it empty would share one
+    /// keyspace and one `cache_clear` scope (`<namespace>::*`), so each would
+    /// read, overwrite and delete the other's entries.
     #[must_use]
     pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
         self.prefix = Some(prefix.as_ref().to_string());
@@ -1145,9 +1427,9 @@ where
     /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
     /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: an explicitly-set TTL is zero.
     /// - `Build(BuildError::InvalidValue { field: "prefix", .. })`: the prefix is
-    ///   empty. The prefix scopes `cache_clear` to this cache; with an empty
-    ///   prefix, `cache_clear` would issue `SCAN MATCH <namespace>:*` and delete
-    ///   the entries of every cache sharing the namespace.
+    ///   empty. The prefix is what distinguishes logical caches sharing a
+    ///   namespace; two that both leave it empty would share one keyspace and one
+    ///   `cache_clear` scope (`SCAN MATCH <namespace>::*`).
     /// - `MissingConnectionString`: no connection string was set and the
     ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
     /// - `Connection` / `Pool`: the Redis client or connection pool could not
@@ -1171,10 +1453,10 @@ where
             }
             None => Duration::ZERO,
         };
-        // The prefix is what scopes `cache_clear` to this logical cache: with an
-        // empty prefix, `cache_clear` matches `<namespace>:*` and deletes the
-        // entries of every cache sharing the namespace (all of them, under the
-        // shared default namespace). Reject it outright.
+        // The prefix is what distinguishes logical caches sharing a namespace:
+        // two that both leave it empty share one keyspace and one `cache_clear`
+        // scope (`<namespace>::*`), so each reads, overwrites and deletes the
+        // other's entries. Reject it outright.
         if self.prefix.as_deref().is_some_and(str::is_empty) {
             return Err(super::BuildError::InvalidValue {
                 field: "prefix",
@@ -1207,12 +1489,30 @@ where
 ///
 /// # Format stability
 ///
-/// The on-wire value encoding (MessagePack with named `value`/`version` fields) is
-/// stable for the 3.x series: entries written by any 3.x release remain readable by
-/// every later 3.x release. A schema change bumps the embedded version, keeps a
-/// backward-read path within the same major version, and is otherwise reserved for
-/// a major release. [`AsyncRedisCache`](crate::stores::AsyncRedisCache) uses the
-/// same encoding.
+/// Values are encoded with MessagePack in its compact (non-named) form: the
+/// envelope is written as a **positional array** of `value` then `version`, with
+/// the field names absent from the wire. **Field order is part of the frozen
+/// layout**: reordering, inserting or removing a field of the stored envelope
+/// changes how existing bytes decode and must bump the embedded version, exactly
+/// as a type change would.
+///
+/// That layout is stable for the 3.x series: entries written by any 3.x release
+/// remain readable by every later 3.x release. A schema change bumps the embedded
+/// version, keeps a backward-read path within the same major version, and is
+/// otherwise reserved for a major release.
+/// [`AsyncRedisCache`](crate::stores::AsyncRedisCache) uses the same encoding.
+///
+/// The **key** layout (`{namespace}:{prefix}:{key}`, fixed arity with
+/// percent-escaped fields, see `generate_redis_key`) is *not* covered by the
+/// envelope's `version` field: the version lives inside the value, so it can only
+/// be read once the key has been found. A key-layout change is therefore
+/// invisible to a reader: entries written under the old layout are simply never
+/// looked up. 3.0 escapes `:` and `%` in the key fields and always writes both
+/// separators, so a cache with an empty namespace, or whose namespace, prefix or
+/// keys contain either character, misses its pre-3.0 entries after upgrading and
+/// recomputes them at the new key. The stale entries are not deleted by the
+/// upgrade; they expire with their TTL, or persist until removed by hand if the
+/// cache has none.
 pub struct RedisCache<K, V> {
     pub(super) ttl: Mutex<Duration>,
     pub(super) refresh: AtomicBool,
@@ -1283,17 +1583,19 @@ where
     }
 
     fn generate_key(&self, key: &K) -> String {
-        // Format `{namespace}:{prefix}:{key}` — see `generate_redis_key`.
-        // Changed from raw concatenation in 1.0 (migration §8): existing
-        // pre-1.0 keys will not be hit after upgrading.
+        // Format `{namespace}:{prefix}:{key}`, fixed arity with percent-escaped
+        // fields, see `generate_redis_key`. Changed from raw concatenation in 1.0
+        // (migration §8) and from a variable-arity unescaped join in 3.0: keys
+        // written by an older release under an empty namespace, or with `:` or
+        // `%` in a field, are not hit after upgrading.
         generate_redis_key(&self.namespace, &self.prefix, &key.to_string())
     }
 
     /// `SCAN MATCH` glob covering every key this cache writes: the same
     /// `{namespace}:{prefix}:` scope as [`generate_key`](Self::generate_key) with a
-    /// trailing `*`, with glob metacharacters in the segments escaped (see
-    /// [`clear_match_pattern`]). Used by `cache_clear` to delete only this
-    /// cache's entries.
+    /// trailing `*`, with the fields percent-escaped exactly as the keys are and
+    /// glob metacharacters escaped (see [`clear_match_pattern`]). Used by
+    /// `cache_clear` to delete only this cache's entries.
     fn clear_match_pattern(&self) -> String {
         clear_match_pattern(&self.namespace, &self.prefix)
     }
@@ -1412,13 +1714,21 @@ impl RedisCacheError {
 /// Shared by [`CachedRedisValue::new`] and [`CachedRedisValueRef::new`] so the
 /// two constructors cannot drift. The field type is `Option<u64>`.
 ///
-/// Stability: the on-wire encoding (MessagePack, named fields `value`/`version`)
-/// is stable for the 3.x series — entries written by any 3.x release remain
-/// readable by every later 3.x release. Any schema change bumps this version,
-/// keeps a backward-read path within the same major version, and is otherwise
-/// reserved for a major release.
+/// Stability: the on-wire encoding is MessagePack in its compact (non-named)
+/// form: every write goes through `rmp_serde::to_vec`, never `to_vec_named`, so
+/// [`CachedRedisValue`] is written as a **positional array** of `value` then
+/// `version` and the field names never reach the wire. **The field order is part
+/// of the frozen layout**: reordering the fields silently reinterprets every
+/// stored entry, so it is a format change and must bump this version like any
+/// other. The layout is stable for the 3.x series: entries written by any 3.x
+/// release remain readable by every later 3.x release. Any schema change bumps
+/// this version, keeps a backward-read path within the same major version, and is
+/// otherwise reserved for a major release.
 const REDIS_VALUE_VERSION: Option<u64> = Some(1);
 
+/// Stored value envelope. Serialized positionally (see [`REDIS_VALUE_VERSION`]):
+/// the wire form is a 2-element MessagePack array of `value` then `version`.
+/// Field order is frozen for 3.x.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedRedisValue<V> {
     value: V,
@@ -1434,8 +1744,9 @@ impl<V> CachedRedisValue<V> {
 }
 
 /// Borrowed counterpart of [`CachedRedisValue`] used by `cache_set_ref` to
-/// serialize from a `&V` without cloning. Produces the same MessagePack bytes
-/// as `CachedRedisValue::new(value)` (same field names and order).
+/// serialize from a `&V` without cloning. Produces the same MessagePack bytes as
+/// `CachedRedisValue::new(value)`: the encoding is positional, so the two structs
+/// must keep the same fields in the same order.
 #[derive(serde::Serialize)]
 struct CachedRedisValueRef<'a, V> {
     value: &'a V,
@@ -1506,9 +1817,9 @@ impl<K, V> ConcurrentCacheTtl for RedisCache<K, V> {
     /// if expiry was disabled). This call does not rewrite existing Redis keys; they retain
     /// whatever TTL was applied when they were originally inserted.
     ///
-    /// With [`refresh_on_hit`](crate::ConcurrentCacheTtl::refresh_on_hit) enabled, however, a
-    /// `cache_get` hit re-applies the current TTL to the key it touched (via `PEXPIRE`), so a
-    /// changed TTL does reach an existing key on its next hit.
+    /// With [`refresh_on_hit`](crate::ConcurrentCacheRefreshOnHit::refresh_on_hit) enabled,
+    /// however, a `cache_get` hit re-applies the current TTL to the key it touched (via
+    /// `PEXPIRE`), so a changed TTL does reach an existing key on its next hit.
     ///
     /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
     /// Subsequent `cache_set` writes use a plain `SET` (no expiry), so the keys persist
@@ -1529,7 +1840,9 @@ impl<K, V> ConcurrentCacheTtl for RedisCache<K, V> {
         *guard = Duration::ZERO;
         if old.is_zero() { None } else { Some(old) }
     }
+}
 
+impl<K, V> ConcurrentCacheRefreshOnHit for RedisCache<K, V> {
     fn refresh_on_hit(&self) -> bool {
         self.refresh.load(Ordering::Relaxed)
     }
@@ -1674,11 +1987,11 @@ where
     /// is heavier than the in-memory `cache_clear`. New keys inserted concurrently
     /// during the scan may or may not be removed (standard `SCAN` semantics).
     ///
-    /// **Note:** the `prefix` is what scopes a clear to a single logical cache. A
-    /// cache built with an empty prefix but a non-empty namespace will match every
-    /// key under that namespace on `cache_clear` (pattern `<namespace>:*`), which
-    /// includes entries written by every other cache that shares the same namespace.
-    /// Set a unique prefix per logical cache to avoid this.
+    /// **Note:** the `prefix` is what scopes a clear to a single logical cache.
+    /// Two caches sharing a namespace *and* a prefix share one keyspace and one
+    /// clear scope, so each clears the other's entries. Set a unique prefix per
+    /// logical cache to avoid this. An empty prefix is rejected at build time for
+    /// the same reason.
     fn cache_clear(&self) -> Result<(), RedisCacheError> {
         let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let pattern = self.clear_match_pattern();
@@ -1782,7 +2095,9 @@ mod async_redis {
         DeserializeOwned, Display, ENV_KEY, PhantomData, RedisCacheBuildError, RedisCacheError,
         Serialize,
     };
-    use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCachedAsync};
+    use crate::{
+        ConcurrentCacheBase, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCachedAsync,
+    };
     #[cfg(feature = "redis_async_cache")]
     use redis::IntoConnectionInfo;
 
@@ -1970,11 +2285,16 @@ mod async_redis {
 
         /// Set the namespace for cache keys. Defaults to `cached-redis-store:`.
         /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
-        /// Empty namespace values are omitted from the generated key.
+        /// Trailing colons are trimmed, so `"ns"` and `"ns:"` name the same
+        /// namespace. An empty namespace still contributes its (empty) field, so
+        /// a namespace-less cache writes `:{prefix}:{key}`.
         ///
-        /// **Note:** colons in the namespace are not escaped. A namespace containing
-        /// an interior colon (e.g. `"a:b"`) can produce keys that collide with a
-        /// shorter namespace combined with a prefix (e.g. namespace `"a"`, prefix `"b"`).
+        /// **Note:** colons in the namespace are percent-escaped (`:` becomes
+        /// `%3A`, and `%` itself becomes `%25`), so a namespace containing an
+        /// interior colon (e.g. `"a:b"`) cannot collide with a shorter namespace
+        /// combined with a prefix (e.g. namespace `"a"`, prefix `"b"`). Escaping
+        /// applies to the key layout only; the namespace is stored and reported
+        /// unescaped.
         #[must_use]
         pub fn namespace<S: AsRef<str>>(mut self, namespace: S) -> Self {
             self.namespace = namespace.as_ref().to_string();
@@ -1984,14 +2304,17 @@ mod async_redis {
         /// Set the prefix for cache keys (required, non-empty).
         /// Used to generate keys formatted as: `{namespace}:{prefix}:{key}`.
         ///
-        /// **Note:** colons in the prefix are not escaped and can cause key collisions
-        /// with differently-split namespace/prefix combinations sharing the same segments.
+        /// **Note:** colons in the prefix are percent-escaped, so a prefix
+        /// containing a colon cannot collide with a differently-split
+        /// namespace/prefix pair over the same characters.
         ///
-        /// **Note:** the prefix is what scopes `async_cache_clear` to this logical
-        /// cache, so give each logical cache a distinct prefix. An empty prefix is
-        /// rejected by [`build`](Self::build) with `BuildError::InvalidValue`: it
-        /// would make `async_cache_clear` match `<namespace>:*` and delete entries
-        /// belonging to every cache that shares the same namespace.
+        /// **Note:** the prefix is what distinguishes logical caches sharing a
+        /// namespace, so give each of them a distinct prefix. An empty prefix is
+        /// rejected by [`build`](Self::build) with `BuildError::InvalidValue`:
+        /// two caches under the same namespace that both leave it empty would
+        /// share one keyspace and one `async_cache_clear` scope
+        /// (`<namespace>::*`), so each would read, overwrite and delete the
+        /// other's entries.
         #[must_use]
         pub fn prefix<S: AsRef<str>>(mut self, prefix: S) -> Self {
             self.prefix = Some(prefix.as_ref().to_string());
@@ -2272,9 +2595,9 @@ mod async_redis {
         /// - `Build(BuildError::MissingRequired("prefix"))`: no key prefix was set.
         /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: an explicitly-set TTL is zero.
         /// - `Build(BuildError::InvalidValue { field: "prefix", .. })`: the prefix
-        ///   is empty. The prefix scopes `async_cache_clear` to this cache; with an
-        ///   empty prefix, `async_cache_clear` would issue `SCAN MATCH <namespace>:*`
-        ///   and delete the entries of every cache sharing the namespace.
+        ///   is empty. The prefix is what distinguishes logical caches sharing a
+        ///   namespace; two that both leave it empty would share one keyspace and
+        ///   one `async_cache_clear` scope (`SCAN MATCH <namespace>::*`).
         /// - `MissingConnectionString`: no connection string was set and the
         ///   `CACHED_REDIS_CONNECTION_STRING` env var is absent or invalid.
         /// - `Connection`: the Redis client or the selected connection (multiplexed,
@@ -2298,10 +2621,10 @@ mod async_redis {
                 }
                 None => Duration::ZERO,
             };
-            // The prefix is what scopes `async_cache_clear` to this logical cache:
-            // with an empty prefix it matches `<namespace>:*` and deletes the
-            // entries of every cache sharing the namespace (all of them, under the
-            // shared default namespace). Reject it outright.
+            // The prefix is what distinguishes logical caches sharing a namespace:
+            // two that both leave it empty share one keyspace and one
+            // `async_cache_clear` scope (`<namespace>::*`), so each reads,
+            // overwrites and deletes the other's entries. Reject it outright.
             if self.prefix.as_deref().is_some_and(str::is_empty) {
                 return Err(super::super::BuildError::InvalidValue {
                     field: "prefix",
@@ -2337,8 +2660,9 @@ mod async_redis {
     /// (requires the `redis_connection_manager` feature). Enabling that feature
     /// only makes the option available; it does not change the default.
     ///
-    /// Values use the same on-wire encoding as [`RedisCache`](crate::stores::RedisCache);
-    /// see its "Format stability" section.
+    /// Values use the same on-wire encoding, and keys the same escaped layout, as
+    /// [`RedisCache`](crate::stores::RedisCache); see its "Format stability"
+    /// section.
     ///
     /// **Feature:** requires an async runtime feature: one of `redis_tokio`,
     /// `redis_tokio_native_tls`, `redis_tokio_rustls`, `redis_smol`, `redis_smol_native_tls`, or
@@ -2433,10 +2757,10 @@ mod async_redis {
         }
 
         /// `SCAN MATCH` glob covering every key this cache writes — the same
-        /// `{namespace}:{prefix}:` scope with a trailing `*`, with glob
-        /// metacharacters in the segments escaped (see
-        /// [`clear_match_pattern`](super::clear_match_pattern)). Used by
-        /// `async_cache_clear`.
+        /// `{namespace}:{prefix}:` scope with a trailing `*`, with the fields
+        /// percent-escaped exactly as the keys are and glob metacharacters
+        /// escaped (see [`clear_match_pattern`](super::clear_match_pattern)).
+        /// Used by `async_cache_clear`.
         fn clear_match_pattern(&self) -> String {
             super::clear_match_pattern(&self.namespace, &self.prefix)
         }
@@ -2468,9 +2792,9 @@ mod async_redis {
         /// if expiry was disabled). This call does not rewrite existing Redis keys; they retain
         /// whatever TTL was applied when they were originally inserted.
         ///
-        /// With [`refresh_on_hit`](crate::ConcurrentCacheTtl::refresh_on_hit) enabled, however, a
-        /// `cache_get` hit re-applies the current TTL to the key it touched (via `PEXPIRE`), so a
-        /// changed TTL does reach an existing key on its next hit.
+        /// With [`refresh_on_hit`](crate::ConcurrentCacheRefreshOnHit::refresh_on_hit) enabled,
+        /// however, a `cache_get` hit re-applies the current TTL to the key it touched (via
+        /// `PEXPIRE`), so a changed TTL does reach an existing key on its next hit.
         ///
         /// A zero `ttl` disables expiry — exactly equivalent to `unset_ttl`.
         /// Subsequent `async_cache_set` writes use a plain `SET` (no expiry), so the keys
@@ -2491,7 +2815,9 @@ mod async_redis {
             *guard = Duration::ZERO;
             if old.is_zero() { None } else { Some(old) }
         }
+    }
 
+    impl<K, V> ConcurrentCacheRefreshOnHit for AsyncRedisCache<K, V> {
         fn refresh_on_hit(&self) -> bool {
             self.refresh.load(Ordering::Relaxed)
         }
@@ -2645,11 +2971,11 @@ mod async_redis {
         /// outside this namespace/prefix untouched. Cost is **O(n)** in the number of
         /// matching keys (a cursored `SCAN`).
         ///
-        /// **Note:** the `prefix` is what scopes a clear to a single logical cache. A
-        /// cache built with an empty prefix but a non-empty namespace will match every
-        /// key under that namespace on `async_cache_clear` (pattern `<namespace>:*`),
-        /// which includes entries written by every other cache that shares the same
-        /// namespace. Set a unique prefix per logical cache to avoid this.
+        /// **Note:** the `prefix` is what scopes a clear to a single logical
+        /// cache. Two caches sharing a namespace *and* a prefix share one
+        /// keyspace and one clear scope, so each clears the other's entries. Set
+        /// a unique prefix per logical cache to avoid this. An empty prefix is
+        /// rejected at build time for the same reason.
         async fn async_cache_clear(&self) -> Result<(), Self::Error> {
             let mut conn = self.connection.clone();
             let pattern = self.clear_match_pattern();
@@ -2772,6 +3098,13 @@ mod async_redis {
                 .duration_since(crate::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis()
+        }
+
+        /// The raw Redis key a default-namespace cache with `prefix` writes for
+        /// `key`. Built through the store's own key builder because the test
+        /// prefixes carry a separator, which the key layout escapes.
+        fn raw_key(prefix: &str, key: &str) -> String {
+            super::super::generate_redis_key(super::super::DEFAULT_NAMESPACE, prefix, key)
         }
 
         // No Redis server needed -- verifies the empty-prefix guard in async `build()`.
@@ -2984,7 +3317,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_get_self_heals_and_recomputes_to_hit() {
             let prefix = format!("{}:async-selfheal", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3020,7 +3353,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_get_strict_mode_errors_and_keeps_corrupt_entry() {
             let prefix = format!("{}:async-strict", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3052,7 +3385,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_set_displaced_corrupt_previous_returns_ok_none() {
             let prefix = format!("{}:async-redis10-set", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3084,7 +3417,7 @@ mod async_redis {
         async fn async_cache_set_ref_over_corrupt_previous_returns_ok_unit() {
             use crate::SerializeCachedAsync;
             let prefix = format!("{}:async-redis10-setref", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3158,7 +3491,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_corrupt_default_mode_returns_ok_none() {
             let prefix = format!("{}:async-remove-corrupt-default", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3192,7 +3525,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_corrupt_strict_mode_returns_error_and_key_is_gone() {
             let prefix = format!("{}:async-remove-corrupt-strict", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3284,7 +3617,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_valid_value_returns_some_and_deletes_key() {
             let prefix = format!("{}:async-remove-valid", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
@@ -3337,7 +3670,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_entry_valid_returns_key_and_value() {
             let prefix = format!("{}:async-remove-entry-valid", now_millis());
-            let key = format!("cached-redis-store:{}:7", prefix);
+            let key = raw_key(&prefix, "7");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
                 .ttl(Duration::from_secs(3600))
@@ -3365,7 +3698,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_entry_corrupt_default_mode_returns_ok_none() {
             let prefix = format!("{}:async-remove-entry-corrupt-default", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3398,7 +3731,7 @@ mod async_redis {
         #[tokio::test]
         async fn async_cache_remove_entry_corrupt_strict_mode_returns_error_and_key_is_gone() {
             let prefix = format!("{}:async-remove-entry-corrupt-strict", now_millis());
-            let key = format!("cached-redis-store:{}:1", prefix);
+            let key = raw_key(&prefix, "1");
             plant_raw(&key, b"\xff\xfe\xfd");
 
             let c: AsyncRedisCache<u32, u32> = AsyncRedisCache::builder(prefix)
@@ -3770,6 +4103,43 @@ mod error_source_tests {
         assert_eq!(recovered.value, original);
     }
 
+    /// The stored envelope is MessagePack in its compact form: a positional
+    /// 2-element array of `value` then `version`. The field names are not on the
+    /// wire, so the field ORDER is what a reader depends on. Reordering the
+    /// fields of `CachedRedisValue`, or switching a write site to
+    /// `rmp_serde::to_vec_named`, changes these bytes and breaks every entry
+    /// written by an earlier 3.x release.
+    #[test]
+    fn cached_redis_value_is_a_positional_array_of_value_then_version() {
+        use super::{CachedRedisValue, CachedRedisValueRef};
+
+        let bytes =
+            rmp_serde::to_vec(&CachedRedisValue::new("hello".to_string())).expect("serialize");
+        // 0x92: 2-element fixarray (a named encoding would start 0x82, fixmap).
+        // 0xa5 "hello": 5-byte fixstr. 0x01: version 1 (`Some(1)` is written as
+        // the bare payload).
+        assert_eq!(
+            bytes,
+            vec![0x92, 0xa5, b'h', b'e', b'l', b'l', b'o', 0x01],
+            "the frozen 3.x envelope is a positional array of `value` then `version`"
+        );
+
+        // The same bytes decode as a positional tuple in that order.
+        let (value, version): (String, Option<u64>) =
+            rmp_serde::from_slice(&bytes).expect("positional decode");
+        assert_eq!(value, "hello");
+        assert_eq!(version, super::REDIS_VALUE_VERSION);
+
+        // The borrowed envelope used by `cache_set_ref` must be byte-identical,
+        // which requires it to keep the same fields in the same order.
+        let borrowed = "hello".to_string();
+        assert_eq!(
+            rmp_serde::to_vec(&CachedRedisValueRef::new(&borrowed)).expect("serialize borrowed"),
+            bytes,
+            "`cache_set_ref` must write the same positional layout as `cache_set`"
+        );
+    }
+
     /// The shared backward-read helper round-trips the current MessagePack format.
     #[test]
     fn deserialize_helper_reads_msgpack() {
@@ -4026,6 +4396,13 @@ mod tests {
             .as_millis()
     }
 
+    /// The raw Redis key a default-namespace cache with `prefix` writes for
+    /// `key`. Built through the store's own key builder because the test
+    /// prefixes carry a separator, which the key layout escapes.
+    fn raw_key(prefix: &str, key: &str) -> String {
+        super::generate_redis_key(super::DEFAULT_NAMESPACE, prefix, key)
+    }
+
     #[test]
     fn redis_cache() {
         let c: RedisCache<u32, u32> =
@@ -4082,7 +4459,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:selfheal-default", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         // Write garbage bytes so deserialization will fail.
         let _: () = redis::cmd("SET")
             .arg(&key)
@@ -4116,7 +4493,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:selfheal-strict", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(b"\xff\xfe\xfd".as_ref())
@@ -4155,7 +4532,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:redis10-test", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         // Plant a corrupt value so the GET in the SET pipeline will see garbage.
         let _: () = redis::cmd("SET")
             .arg(&key)
@@ -4191,7 +4568,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:selfheal-recompute", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(b"\xff\xfe\xfd".as_ref())
@@ -4235,7 +4612,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:redis10-setref", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(b"\xff\xfe\xfd".as_ref())
@@ -4269,7 +4646,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:remove-corrupt-default", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         // Plant garbage bytes so deserialization will fail.
         let _: () = redis::cmd("SET")
             .arg(&key)
@@ -4311,7 +4688,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:remove-corrupt-strict", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(b"\xff\xfe\xfd".as_ref())
@@ -4353,7 +4730,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:remove-valid", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
 
         let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
@@ -4409,7 +4786,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:remove-entry-valid", now_millis());
-        let key = format!("cached-redis-store:{}:7", prefix);
+        let key = raw_key(&prefix, "7");
 
         let c: RedisCache<u32, u32> = RedisCache::builder(prefix)
             .ttl(Duration::from_secs(3600))
@@ -4437,7 +4814,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:remove-entry-corrupt-default", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(b"\xff\xfe\xfd".as_ref())
@@ -4477,7 +4854,7 @@ mod tests {
             .get_connection()
             .unwrap();
         let prefix = format!("{}:remove-entry-corrupt-strict", now_millis());
-        let key = format!("cached-redis-store:{}:1", prefix);
+        let key = raw_key(&prefix, "1");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(b"\xff\xfe\xfd".as_ref())

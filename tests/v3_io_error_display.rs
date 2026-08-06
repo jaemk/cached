@@ -468,7 +468,7 @@ mod redis_tests {
         cache.cache_clear().expect("clear");
 
         let corrupt: &[u8] = b"\xff\xff not a valid cached value \x00\x01\x02";
-        let full_key = format!("{prefix}:k");
+        let full_key = format!(":{prefix}:k");
         let mut raw = redis::Client::open(cache.connection_string().reveal())
             .expect("open raw client")
             .get_connection()

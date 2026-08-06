@@ -919,7 +919,7 @@ mod tests {
     //      macro wires it for `unsync_reads = true`; `unsync_reads` is rejected at macro
     //      expansion time when paired with `sync_lock = "mutex"`, and no sharded wrapper or
     //      `Arc`-without-a-lock path exposes `UnboundCache` directly - see
-    //      `ShardedUnboundCacheBase`, which owns its own per-shard `RwLock<HashMap<..>>` and
+    //      `ShardedUnboundCache`, which owns its own per-shard `RwLock<HashMap<..>>` and
     //      never wraps `UnboundCache`), and
     //   2. the aggregate stays exact when the two increment paths are interleaved.
 

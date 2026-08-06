@@ -45,12 +45,12 @@ impl cached::Expires for ExpVal {
 
 mod lru {
     use super::*;
-    use cached::ShardedLruCacheBase;
+    use cached::ShardedLruCache;
 
     #[test]
     fn grow_keeps_entries_returns_previous_total() {
         // shards(1): per_shard_cap = max_size (no floor), so capacity == max_size exactly.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -72,7 +72,7 @@ mod lru {
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
 
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .on_evict(move |_, _| {
@@ -117,7 +117,7 @@ mod lru {
     #[test]
     #[should_panic(expected = "max_size must be greater than zero")]
     fn zero_set_max_size_panics() {
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -127,7 +127,7 @@ mod lru {
 
     #[test]
     fn zero_try_set_max_size_returns_error() {
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -146,7 +146,7 @@ mod lru {
     #[test]
     fn min_per_shard_clamp_applied_and_capacity_reflects_clamped_total() {
         // 4 shards, total = 4 → per_shard = max(4.div_ceil(4)=1, 16) = 16 → total = 64.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(4)
             .max_size(1024)
             .build()
@@ -189,7 +189,7 @@ mod lru {
     #[test]
     fn resize_cache_built_with_per_shard_max_size_switches_to_total_policy() {
         // Built with per_shard_max_size = 10, 4 shards → total = 40.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(4)
             .per_shard_max_size(10)
             .build()
@@ -206,7 +206,7 @@ mod lru {
     #[test]
     fn single_shard_exact_capacity_no_clamp() {
         // shards=1: no minimum clamp, capacity == max_size exactly.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(3)
             .build()
@@ -229,7 +229,7 @@ mod lru {
         // survives, no on_evict fires, and the returned prev equals the current cap.
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .on_evict(move |_, _| {
@@ -269,7 +269,7 @@ mod lru {
     fn repeated_resizes_grow_shrink_grow_track_capacity_and_survival() {
         // Capacity and entry survival must be correct at each step of a
         // grow -> shrink -> grow sequence. Grow never resurrects evicted entries.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -306,7 +306,7 @@ mod lru {
         // touch nothing: no eviction, no on_evict, all entries survive.
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .on_evict(move |_, _| {
@@ -327,7 +327,7 @@ mod lru {
     fn trait_cache_capacity_reflects_resize() {
         // The ConcurrentCacheBase::cache_capacity trait method (not just the
         // inherent capacity()) must report the post-resize total.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -356,7 +356,7 @@ mod lru {
         // every shard goes from cap 32 down to cap 16.
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(8)
             .per_shard_max_size(32)
             .on_evict(move |_, _| {
@@ -400,7 +400,7 @@ mod lru {
         // A shards=1 cache built via per_shard_max_size must grow correctly:
         // capacity becomes the new max_size exactly (no floor at shards=1) and
         // entries survive.
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(1)
             .per_shard_max_size(4)
             .build()
@@ -425,7 +425,7 @@ mod lru {
         // at a time, so this must never deadlock or panic, and once the resizer
         // finishes the observed capacity must be one of the two target totals.
         use std::thread;
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(8)
             .max_size(1024)
             .build()
@@ -478,9 +478,9 @@ mod lru {
         // there is no data race or lost entry, capacity() reports whichever
         // total was published last, and a subsequent single-threaded resize
         // restores one consistent target. The same resize code is shared by
-        // ShardedLruTtlCacheBase and ShardedExpiringLruCacheBase.
+        // ShardedLruTtlCache and ShardedExpiringLruCache.
         use std::thread;
-        let c = ShardedLruCacheBase::<u32, u32>::builder()
+        let c = ShardedLruCache::<u32, u32>::builder()
             .shards(8)
             .max_size(1024)
             .build()
@@ -546,12 +546,12 @@ mod lru {
 #[cfg(feature = "time_stores")]
 mod lru_ttl {
     use super::*;
-    use cached::ShardedLruTtlCacheBase;
+    use cached::ShardedLruTtlCache;
     use cached::time::Duration;
 
     #[test]
     fn grow_keeps_entries_returns_previous_total() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -572,7 +572,7 @@ mod lru_ttl {
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
 
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -615,7 +615,7 @@ mod lru_ttl {
     #[test]
     #[should_panic(expected = "max_size must be greater than zero")]
     fn zero_set_max_size_panics() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -626,7 +626,7 @@ mod lru_ttl {
 
     #[test]
     fn zero_try_set_max_size_returns_error() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -640,7 +640,7 @@ mod lru_ttl {
 
     #[test]
     fn min_per_shard_clamp_applied_and_capacity_reflects_clamped_total() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(4)
             .max_size(1024)
             .ttl(Duration::from_secs(60))
@@ -654,7 +654,7 @@ mod lru_ttl {
 
     #[test]
     fn resize_cache_built_with_per_shard_max_size_switches_to_total_policy() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(4)
             .per_shard_max_size(10)
             .ttl(Duration::from_secs(60))
@@ -668,7 +668,7 @@ mod lru_ttl {
 
     #[test]
     fn single_shard_exact_capacity_no_clamp() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(3)
             .ttl(Duration::from_secs(60))
@@ -689,7 +689,7 @@ mod lru_ttl {
         // Built via the NoEvict typestate (no .on_evict). Shrink must still evict
         // in LRU order and count those evictions in metrics (the LRU capacity
         // counter fires whether or not a callback is attached).
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -721,7 +721,7 @@ mod lru_ttl {
         // the callback for each evicted entry.
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -744,7 +744,7 @@ mod lru_ttl {
 
     #[test]
     fn trait_cache_capacity_reflects_resize() {
-        let c = ShardedLruTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(4)
             .ttl(Duration::from_secs(60))
@@ -762,7 +762,7 @@ mod lru_ttl {
         // path (HasEvict/on_evict wiring) must not deadlock the per-shard
         // write locks taken by the resize.
         use std::thread;
-        let c = ShardedLruTtlCacheBase::<u64, u64>::builder()
+        let c = ShardedLruTtlCache::<u64, u64>::builder()
             .shards(8)
             .max_size(1024)
             .ttl(Duration::from_secs(60))
@@ -816,11 +816,11 @@ mod lru_ttl {
 
 mod expiring_lru {
     use super::*;
-    use cached::ShardedExpiringLruCacheBase;
+    use cached::ShardedExpiringLruCache;
 
     #[test]
     fn grow_keeps_entries_returns_previous_total() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -847,7 +847,7 @@ mod expiring_lru {
         let evicted = Arc::new(AtomicU64::new(0));
         let evicted2 = evicted.clone();
 
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(1)
             .max_size(4)
             .on_evict(move |_, _| {
@@ -889,7 +889,7 @@ mod expiring_lru {
     #[test]
     #[should_panic(expected = "max_size must be greater than zero")]
     fn zero_set_max_size_panics() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -899,7 +899,7 @@ mod expiring_lru {
 
     #[test]
     fn zero_try_set_max_size_returns_error() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -912,7 +912,7 @@ mod expiring_lru {
 
     #[test]
     fn min_per_shard_clamp_applied_and_capacity_reflects_clamped_total() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(4)
             .max_size(1024)
             .build()
@@ -925,7 +925,7 @@ mod expiring_lru {
 
     #[test]
     fn resize_cache_built_with_per_shard_max_size_switches_to_total_policy() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(4)
             .per_shard_max_size(10)
             .build()
@@ -938,7 +938,7 @@ mod expiring_lru {
 
     #[test]
     fn single_shard_exact_capacity_no_clamp() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(1)
             .max_size(3)
             .build()
@@ -955,7 +955,7 @@ mod expiring_lru {
 
     #[test]
     fn trait_cache_capacity_reflects_resize() {
-        let c = ShardedExpiringLruCacheBase::<u32, E>::builder()
+        let c = ShardedExpiringLruCache::<u32, E>::builder()
             .shards(1)
             .max_size(4)
             .build()
@@ -980,7 +980,7 @@ mod expiring_lru {
         // leaving keys 3 (expired) and 4 (live). on_evict must fire twice.
         let evicted_keys = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
         let ek = evicted_keys.clone();
-        let c = ShardedExpiringLruCacheBase::<u32, ExpVal>::builder()
+        let c = ShardedExpiringLruCache::<u32, ExpVal>::builder()
             .shards(1)
             .max_size(4)
             .on_evict(move |k: &u32, _v: &ExpVal| {
@@ -1061,7 +1061,7 @@ mod expiring_lru {
         // Same stress contract as the ShardedLruCache test, through the
         // expiring-LRU wrapper's on_evict wiring.
         use std::thread;
-        let c = ShardedExpiringLruCacheBase::<u64, E>::builder()
+        let c = ShardedExpiringLruCache::<u64, E>::builder()
             .shards(8)
             .max_size(1024)
             .on_evict(|_, _| {})
@@ -1126,7 +1126,7 @@ fn per_shard_cap_matches_builder_for_various_sizes() {
     ];
 
     for &(shards, max_size) in cases {
-        let built = cached::ShardedLruCacheBase::<u32, u32>::builder()
+        let built = cached::ShardedLruCache::<u32, u32>::builder()
             .shards(shards)
             .max_size(max_size)
             .build()
@@ -1134,7 +1134,7 @@ fn per_shard_cap_matches_builder_for_various_sizes() {
         let built_cap = built.capacity();
 
         // Build a larger cache and resize to max_size.
-        let resized = cached::ShardedLruCacheBase::<u32, u32>::builder()
+        let resized = cached::ShardedLruCache::<u32, u32>::builder()
             .shards(shards)
             .max_size(max_size * 10 + 100)
             .build()

@@ -748,7 +748,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
 
     fn cache_get_or_set_with_mut<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &mut V {
         let ttl = self.ttl;
-        let setter = || {
+        // Count the miss the instant the setter runs, mirroring the try-path and `TtlCache`:
+        // the inner store calls the setter only when the lookup found no live entry (absent
+        // key or expired entry), so a hit never counts one, and a panicking `f` still records
+        // the miss before unwinding through `get_or_set_with_if` (EXP-2).
+        // Count the miss the instant the setter runs, mirroring the try-path and `TtlCache`:
+        // the inner store calls the setter only when the lookup found no live entry (absent
+        // key or expired entry), so a hit never counts one, and a panicking `f` still records
+        // the miss before unwinding through `get_or_set_with_if` (EXP-2).
+        let misses = &self.misses;
+        let setter = move || {
+            misses.fetch_add(1, Ordering::Relaxed);
             // Anchor the expiry AFTER the factory runs so a slow factory does
             // not eat into the fresh entry's TTL (CORE-3). This clock read is
             // deliberately NOT shared with `hit_at` below: `f()` may run arbitrarily
@@ -776,16 +786,14 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
-            if let Some((old_key, old)) = old_entry {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                self.evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = &self.on_evict {
-                    on_evict(&old_key, &old.value);
-                }
+        } else if let Some((old_key, old)) = old_entry {
+            // The miss was already counted by `setter`.
+            // Count BEFORE notifying: a panicking callback must never leave
+            // an entry removed-but-uncounted.
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(on_evict) = &self.on_evict {
+                on_evict(&old_key, &old.value);
             }
-            self.misses.fetch_add(1, Ordering::Relaxed);
         }
         &mut entry.value
     }
@@ -1011,6 +1019,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheTtl for LruTtlCache<K,
         self.ttl = Duration::ZERO;
         if old.is_zero() { None } else { Some(old) }
     }
+}
+
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheRefreshOnHit for LruTtlCache<K, V, S> {
     fn refresh_on_hit(&self) -> bool {
         self.refresh
     }
@@ -1099,7 +1110,19 @@ where
     {
         async move {
             let ttl = self.ttl;
+            // Count the miss as soon as the setter future starts running, mirroring the
+            // try-path twin below: the inner store only awaits this future when the lookup
+            // found no live entry, so a hit never counts one, and a future dropped mid-poll
+            // (or a panicking `f`) still records the miss before the outer future is torn
+            // down (EXP-2).
+            // Count the miss as soon as the setter future starts running, mirroring the
+            // try-path twin below: the inner store only awaits this future when the lookup
+            // found no live entry, so a hit never counts one, and a future dropped mid-poll
+            // (or a panicking `f`) still records the miss before the outer future is torn
+            // down (EXP-2).
+            let misses = &self.misses;
             let setter = || async move {
+                misses.fetch_add(1, Ordering::Relaxed);
                 // Anchor the expiry after the factory resolves (CORE-3); deliberately a
                 // fresh clock read, not the `hit_at` sample taken before it ran.
                 let value = f().await;
@@ -1123,16 +1146,14 @@ where
                     entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
-            } else {
-                if let Some((old_key, old)) = old_entry {
-                    // Count BEFORE notifying: a panicking callback must never leave
-                    // an entry removed-but-uncounted.
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
-                    if let Some(on_evict) = &self.on_evict {
-                        on_evict(&old_key, &old.value);
-                    }
+            } else if let Some((old_key, old)) = old_entry {
+                // The miss was already counted by `setter`.
+                // Count BEFORE notifying: a panicking callback must never leave
+                // an entry removed-but-uncounted.
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+                if let Some(on_evict) = &self.on_evict {
+                    on_evict(&old_key, &old.value);
                 }
-                self.misses.fetch_add(1, Ordering::Relaxed);
             }
             &mut entry.value
         }
@@ -2113,6 +2134,170 @@ mod tests {
             Some(1),
             "eviction must be counted even though on_evict panicked"
         );
+    }
+
+    #[test]
+    fn cache_get_or_set_with_mut_panic_then_retry_counts_miss_before_factory_runs() {
+        // Regression: the infallible get-or-set path must count the miss BEFORE
+        // invoking the factory, matching `TtlCache` and `LruTtlCache`'s own
+        // `try_*` paths. A panicking factory unwinds through the inner store
+        // call, so a miss counted only after that call returns is lost; a miss
+        // counted before the factory runs survives the unwind.
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, AtomicOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        // First call: the factory panics. Note: a caught panic prints to
+        // stderr; that is expected.
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let _ = c.cache_get_or_set_with_mut(1u32, || -> u32 { panic!("factory panic") });
+        }));
+        assert!(r.is_err(), "expected panic to be caught");
+
+        // Safety invariants that must hold regardless of the miss-timing fix:
+        // the expired entry is left in place, on_evict does not fire, and no
+        // eviction is counted for a factory that never returned.
+        assert_eq!(
+            fired.load(AtomicOrdering::Relaxed),
+            0,
+            "on_evict must not fire when factory panics"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "evictions must remain 0 when factory panics"
+        );
+        assert_eq!(c.cache_size(), 1, "expired entry must still be present");
+        // `cache_peek` filters expired entries, so use the status-reporting
+        // peek to confirm the stale VALUE itself (not just the count) survived
+        // the panic untouched.
+        assert_eq!(
+            c.cache_peek_with_expiry_status(&1u32),
+            (Some(100), true),
+            "the stale entry itself must be undisturbed by the panic"
+        );
+
+        // The miss must be counted even though the factory never returned --
+        // this is the assertion that fails against the pre-fix code, which
+        // only bumped `misses` in the unreachable code after the panicking
+        // call.
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "a panicking factory must still count a miss, matching TtlCache"
+        );
+
+        // Retry with a successful factory: this evicts the stale entry exactly
+        // once and records a second miss, so the total miss count for a
+        // panic-then-retry sequence matches TtlCache's behavior for the same
+        // sequence (2 misses).
+        let v = c.cache_get_or_set_with_mut(1u32, || 200u32);
+        assert_eq!(*v, 200);
+        assert_eq!(
+            fired.load(AtomicOrdering::Relaxed),
+            1,
+            "on_evict must fire exactly once after the successful replacement"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "evictions must be 1 after the successful replacement"
+        );
+        assert_eq!(
+            c.cache_misses(),
+            Some(2),
+            "panic-then-retry must total 2 misses, matching TtlCache"
+        );
+        assert_eq!(c.cache_hits(), Some(0), "neither call was a hit");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_cache_get_or_set_with_mut_panic_then_retry_counts_miss_before_factory_runs() {
+        // Async twin of the sync panic-then-retry regression above: the setter
+        // future's miss counter must run before polling the factory future, so
+        // a factory that panics mid-poll still counts a miss instead of losing
+        // it when the panic unwinds out of `async_cache_get_or_set_with_mut`.
+        use crate::CachedGetOrSetAsync;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                fired2.fetch_add(1, AtomicOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 100u32);
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        {
+            let mut fut = Box::pin(CachedGetOrSetAsync::async_cache_get_or_set_with_mut(
+                &mut c,
+                1u32,
+                || async { panic!("factory panic") },
+            ));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            // The factory panics synchronously on its first poll (no `.await`
+            // point before the `panic!`), so the panic unwinds out of this
+            // `poll` call. Note: a caught panic prints to stderr; that is
+            // expected.
+            let r = catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(&mut cx)));
+            assert!(r.is_err(), "expected panic to be caught");
+            // Drop `fut` before touching `c` again -- releases the borrow.
+        }
+
+        assert_eq!(
+            fired.load(AtomicOrdering::Relaxed),
+            0,
+            "on_evict must not fire when the factory future panics"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(0),
+            "evictions must remain 0 when the factory future panics"
+        );
+        assert_eq!(c.cache_size(), 1, "expired entry must still be present");
+        assert_eq!(
+            c.cache_misses(),
+            Some(1),
+            "a factory that panics mid-poll must still count a miss, matching the sync path"
+        );
+
+        let v =
+            CachedGetOrSetAsync::async_cache_get_or_set_with_mut(&mut c, 1u32, || async { 200u32 })
+                .await;
+        assert_eq!(*v, 200);
+        assert_eq!(
+            fired.load(AtomicOrdering::Relaxed),
+            1,
+            "on_evict must fire exactly once after the successful replacement"
+        );
+        assert_eq!(
+            c.cache_evictions(),
+            Some(1),
+            "evictions must be 1 after the successful replacement"
+        );
+        assert_eq!(
+            c.cache_misses(),
+            Some(2),
+            "panic-then-retry must total 2 misses on the async path too"
+        );
+        assert_eq!(c.cache_hits(), Some(0), "neither call was a hit");
     }
 
     #[test]

@@ -1,0 +1,5 @@
+error[E0425]: cannot find function `my_fn_prime_cache` in this scope
+  --> tests/ui/once_companions_false_prime_absent.rs:10:13
+   |
+10 |     let _ = my_fn_prime_cache(1);
+   |             ^^^^^^^^^^^^^^^^^ not found in this scope

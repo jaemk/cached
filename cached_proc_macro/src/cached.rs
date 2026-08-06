@@ -107,9 +107,26 @@ struct CachedMacroArgs {
     /// inherits the cached fn's visibility. `""` means private.
     #[darling(default)]
     companions_vis: Option<String>,
+    /// Suppress the generated companion free functions. `None` / `Some(true)` (the
+    /// default) emits `{fn}_no_cache` and `{fn}_prime_cache` next to the cached
+    /// function; `Some(false)` emits neither and moves the origin body into a
+    /// function-local `fn` inside the cached function instead (0024).
+    #[darling(default)]
+    companions: Option<bool>,
     /// Allow the macro on a method that takes `self` inside an `impl` block.
     /// The cache static is emitted inside the generated fn body (legal there)
     /// and the receiver is preserved/forwarded (#16/#140).
+    ///
+    /// Limitation: the enclosing `impl` must not be generic over a type or const
+    /// parameter that the key or value type names. The function-local static is a
+    /// separate item from the method, so it cannot name the `impl`'s parameters, and
+    /// the generic guard below cannot catch this: an attribute macro applied to a
+    /// method receives only the method's tokens and cannot see the `impl` header, so
+    /// `impl<T> S<T> { #[cached(in_impl = true)] fn f(&self) -> T }` has empty method
+    /// generics. rustc reports it as E0401 ("can't use generic parameters from outer
+    /// item", "a `static` is a separate item from the item that contains it") on the
+    /// return type. Move the method to a non-generic `impl`, or memoize a free
+    /// function per concrete instantiation. See design record 0036.
     #[darling(default)]
     in_impl: bool,
     // Removed attributes intercepted to provide helpful error messages
@@ -237,6 +254,22 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .iter()
         .any(|input| matches!(input, syn::FnArg::Receiver(_)));
 
+    // `companions = false` suppresses the generated companion items (0024).
+    // `{fn}_prime_cache` is dropped outright. The `{fn}_no_cache` origin still has to
+    // hold the user's body, so it moves from a module-scope free function into a
+    // function-local `fn` inside the cached function - a nested `fn` keeps `return` and
+    // `?` bound to the user's own body rather than to the wrapper, which inlining the
+    // block would silently change.
+    //
+    // Under `in_impl = true` the origin takes a `self` receiver, which a nested `fn`
+    // cannot have, so it stays a sibling `impl` method. That is not a conflict: an
+    // inherent method is namespaced by its type and cannot collide with a free function
+    // in the parent module, which is the collision `companions = false` exists to avoid.
+    // `in_impl` already suppresses `{fn}_prime_cache`, so the two compose - together they
+    // remove every companion item the macro is structurally able to omit.
+    let companions = args.companions.unwrap_or(true);
+    let nest_origin_fn = !companions && !args.in_impl;
+
     // Resolve companion fn visibility (#9). `companions_vis = None` inherits the
     // cached fn's visibility. `companions_vis = Some(s)` parses `s` as a
     // `syn::Visibility`; an empty string produces private visibility.
@@ -286,6 +319,21 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             "in_impl = true requires a method with a `self` receiver; \
              for a free function or an associated function without `self`, \
              remove in_impl.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // With `companions = false` and no `in_impl`, there is no companion item left for
+    // `companions_vis` to apply to, so the value would be silently discarded. Reject the
+    // inert pairing instead. Under `in_impl` the `{fn}_no_cache` sibling method survives
+    // and still takes the visibility, so that combination stays valid.
+    if nest_origin_fn && args.companions_vis.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`companions_vis` has no effect with `companions = false`: it sets the \
+             visibility of the `{fn}_no_cache` and `{fn}_prime_cache` companions, and \
+             `companions = false` emits neither. Remove one of the two.",
         )
         .to_compile_error()
         .into();
@@ -751,9 +799,27 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     let clone_borrowed =
         clone_cached_value(&cache_value_ty, output_span, quote! { __cached_result });
     let clone_inner = clone_cached_value(&cache_value_ty, output_span, quote! { __cached_inner });
+
+    // Every store call goes through a fully-qualified trait path rather than a method
+    // call on an imported trait. The generated wrapper body encloses user-written code -
+    // the `convert` and `force_refresh` expressions always, and the whole function body
+    // when `companions = false` nests the origin fn - so a `use ::cached::Cached;` in
+    // that block would sit in a nearer scope than the user's module and shadow a
+    // same-named item of their own (a `struct Cached` in the body then resolves to the
+    // trait, E0782). Naming the trait in the path keeps nothing in the block's namespace,
+    // matching the fully-qualified `#krate::CachedRead::cache_get_read` /
+    // `#krate::CachedPeek::cache_peek` calls the rest of the codegen already uses.
+    let cache_set_call = |key: proc_macro2::TokenStream, value: proc_macro2::TokenStream| {
+        quote! { #krate::Cached::cache_set(&mut *__cached_cache, #key, #value); }
+    };
+    let cache_get_call = quote! {
+        #krate::Cached::cache_get(&mut *__cached_cache, &__cached_key)
+    };
+
     let (set_cache_block, return_cache_block) = match (is_smart_result, is_smart_option) {
         (false, false) => {
-            let set_cache_block = quote! { __cached_cache.cache_set(__cached_key, #clone_owned); };
+            let set = cache_set_call(quote! { __cached_key }, clone_owned.clone());
+            let set_cache_block = quote! { #set };
             let return_cache_block = if args.with_cached_flag {
                 quote! { let mut __cached_r = #clone_borrowed; __cached_r.set_was_cached(true); return __cached_r }
             } else {
@@ -762,9 +828,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (set_cache_block, return_cache_block)
         }
         (true, false) => {
+            let set = cache_set_call(quote! { __cached_key }, clone_inner.clone());
             let set_cache_block = quote! {
                 if let Ok(__cached_inner) = &__cached_result {
-                    __cached_cache.cache_set(__cached_key, #clone_inner);
+                    #set
                 }
             };
             let return_cache_block = if args.with_cached_flag {
@@ -775,9 +842,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             (set_cache_block, return_cache_block)
         }
         (false, true) => {
+            let set = cache_set_call(quote! { __cached_key }, clone_inner.clone());
             let set_cache_block = quote! {
                 if let Some(__cached_inner) = &__cached_result {
-                    __cached_cache.cache_set(__cached_key, #clone_inner);
+                    #set
                 }
             };
             let return_cache_block = if args.with_cached_flag {
@@ -1016,7 +1084,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             quote! {
                 let mut __cached_cache = #cache_ident.#lock_method()#await_if_async;
                 #force_refresh_guard {
-                    if let Some(__cached_result) = __cached_cache.cache_get(&__cached_key) {
+                    if let Some(__cached_result) = #cache_get_call {
                         #return_cache_block
                     }
                 }
@@ -1036,7 +1104,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             quote! {
                 let mut __cached_cache = __cached_cache_mutex.#lock_method()#await_if_async;
                 #force_refresh_guard {
-                    if let Some(__cached_result) = __cached_cache.cache_get(&__cached_key) {
+                    if let Some(__cached_result) = #cache_get_call {
                         #return_cache_block
                     }
                 }
@@ -1107,7 +1175,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         }
                         let mut __cached_cache = #cache_ident.#lock_method()#await_if_async;
                         #read_guard {
-                            if let Some(__cached_result) = __cached_cache.cache_get(&__cached_key) {
+                            if let Some(__cached_result) = #cache_get_call {
                                 #return_cache_block
                             }
                         }
@@ -1118,7 +1186,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     quote! {
                         let mut __cached_cache = #cache_ident.#lock_method()#await_if_async;
                         #force_refresh_guard {
-                            if let Some(__cached_result) = __cached_cache.cache_get(&__cached_key) {
+                            if let Some(__cached_result) = #cache_get_call {
                                 #return_cache_block
                             }
                         }
@@ -1151,7 +1219,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                                 let (__cached_peek_val, _) = #krate::CloneCached::cache_peek_with_expiry_status(&*__cached_cache, &__cached_key);
                                 __cached_old_val = __cached_peek_val;
                             } else {
-                                let (__cached_result, __cached_has_expired) = __cached_cache.cache_get_with_expiry_status(&__cached_key);
+                                let (__cached_result, __cached_has_expired) = #krate::CloneCached::cache_get_with_expiry_status(&mut *__cached_cache, &__cached_key);
                                 if let (Some(__cached_result), false) = (&__cached_result, __cached_has_expired) {
                                     // Not bypassing (guard always taken here), so the
                                     // early-return is unconditional on a fresh hit.
@@ -1162,7 +1230,7 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         }
                     } else {
                         quote! {
-                            let (__cached_result, __cached_has_expired) = __cached_cache.cache_get_with_expiry_status(&__cached_key);
+                            let (__cached_result, __cached_has_expired) = #krate::CloneCached::cache_get_with_expiry_status(&mut *__cached_cache, &__cached_key);
                             if let (Some(__cached_result), false) = (&__cached_result, __cached_has_expired) {
                                 #force_refresh_guard {
                                     #return_cache_block
@@ -1276,7 +1344,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // between two sibling methods, so a correct prime is impossible under
     // `in_impl`; do not emit the companion at all. Calling a non-existent prime
     // fn is then a clear compile error instead of a silent no-op (#16/#140).
-    let prime_fn = if args.in_impl {
+    //
+    // `companions = false` suppresses it for the same reason a user would ask for it: to
+    // keep the parent module free of generated free functions (0024).
+    let prime_fn = if args.in_impl || !companions {
         quote! {}
     } else {
         quote! {
@@ -1287,7 +1358,6 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
             #(#attributes)*
             #companions_visibility #prime_sig {
                 #body_static
-                use #krate::Cached;
                 let __cached_key = #key_convert_block;
                 #prime_do_set_return_block
             }
@@ -1302,6 +1372,25 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! { #[doc(hidden)] }
     } else {
         quote! { #[doc = #no_cache_fn_indent_doc] }
+    };
+
+    // Place the origin fn: at module scope by default (and always under `in_impl`,
+    // where it must be a sibling method to take `self`), or nested inside the cached
+    // function's body under `companions = false`. A nested `fn` carries no visibility
+    // and no origin doc: neither is meaningful on a function-local item, and a `pub`
+    // one trips `unreachable_pub`. `#[cfg]`/`#[allow]` forwarding is kept either way so
+    // gating and lint suppression still reach the user's body.
+    let (module_origin_fn, nested_origin_fn) = if nest_origin_fn {
+        (quote! {}, quote! { #(#no_cache_attrs)* #function_no_cache })
+    } else {
+        (
+            quote! {
+                #(#no_cache_attrs)*
+                #no_cache_fn_doc
+                #companions_visibility #function_no_cache
+            },
+            quote! {},
+        )
     };
 
     // UX-1: emit a guard macro invocation for async fns so that a missing
@@ -1326,35 +1415,24 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // `CloneCached` is only needed by the `result_fallback` codegen (it calls
-    // `cache_get_with_expiry_status`); import it conditionally so it is not a dead
-    // `use` in every other expansion.
-    let clone_cached_import = if args.result_fallback {
-        quote! { use #krate::CloneCached; }
-    } else {
-        quote! {}
-    };
-
     // put it all together
     let expanded = quote! {
         #async_feature_guard
         #time_stores_guard
         // Cached static (module scope unless `in_impl`)
         #module_static
-        // No cache function (origin of the cached function)
-        #(#no_cache_attrs)*
-        #no_cache_fn_doc
-        #companions_visibility #function_no_cache
+        // No cache function (origin of the cached function); nested inside the
+        // cached function instead under `companions = false`
+        #module_origin_fn
         // Cached function
         #(#attributes)*
         #visibility #signature_no_muts {
             #body_static
-            use #krate::Cached;
-            #clone_cached_import
+            #nested_origin_fn
             let __cached_key = #key_convert_block;
             #do_set_return_block
         }
-        // Prime cached function (omitted for `in_impl` methods)
+        // Prime cached function (omitted for `in_impl` methods and `companions = false`)
         #prime_fn
     };
 

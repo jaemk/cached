@@ -1,6 +1,6 @@
 # 0014 - Infallible builders return the cache directly
 
-Status: Needs research
+Status: Declined
 
 ## Current state
 
@@ -11,15 +11,23 @@ Status: Needs research
   (`src/stores/lru.rs:186`), so the terse constructor panics while the verbose builder is the
   safe one.
 
-## Desired work
+## Decision
 
-- Make genuinely-infallible builders return the cache directly
-  (`build(self) -> UnboundCache<K,V>`), drop the Result.
-- Keep `build() -> Result` for fallible stores.
-- Consider a `try_new()` for the runtime-derived-size case.
+Declined. `build()` returns `Result<_, BuildError>` uniformly across every store, including the
+genuinely-infallible ones. The internal `.expect("infallible")` calls stay.
+
+## Rationale
+
+A single `build() -> Result<_, BuildError>` shape is one thing to learn across the whole builder
+surface, rather than two shapes a caller has to know apart per store (which one returns the cache
+directly, which one returns a `Result`). It also leaves room to add validation to any builder
+later, including one that is infallible today, without that becoming a breaking signature change:
+the `Result` is already there to carry a new error variant.
 
 ## Notes
 
-- Migration is mechanical (drop `?`/`.unwrap()` at call sites).
-- Different `build()` return shapes across stores is honest about which can fail. Decide
-  deliberately for 3.0.
+- The considered alternative (`build(self) -> UnboundCache<K, V>` for the genuinely-infallible
+  builders, dropping the `Result`) is not adopted. Migration would have been mechanical (drop
+  `?`/`.unwrap()` at call sites) but is unnecessary since the direction is declined.
+- The fallible stores' `new(max_size)` constructors panicking on a zero/oversized value while the
+  builder is `Result`-returning stays as documented behavior.

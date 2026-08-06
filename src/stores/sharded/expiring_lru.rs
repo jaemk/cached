@@ -12,8 +12,8 @@ use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
 use core::future::Future;
 
 use super::{
-    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
-    default_shard_count_for_capacity, per_shard_cap_from_total, shard_index,
+    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_per_shard_cap_from_total,
+    checked_shard_count, default_shard_count_for_capacity, per_shard_cap_from_total, shard_index,
 };
 use crate::Cached;
 use crate::ConcurrentCacheEvict;
@@ -28,7 +28,7 @@ struct ExpiringLruInner<K, V, H> {
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
     /// Total logical capacity (sum of per-shard caps). Stored as `AtomicUsize` so
-    /// [`set_max_size`](ShardedExpiringLruCacheBase::set_max_size) can update it from `&self`.
+    /// [`set_max_size`](ShardedExpiringLruCache::set_max_size) can update it from `&self`.
     total_capacity: AtomicUsize,
 }
 
@@ -39,15 +39,16 @@ struct ExpiringLruInner<K, V, H> {
 /// Eviction is also enforced independently per shard when capacity limits are hit.
 ///
 /// Wraps an `Arc` — `clone()` is an Arc-share (shared state), not a deep copy.
-/// Use [`deep_clone`](ShardedExpiringLruCacheBase::deep_clone) to get an independent copy.
+/// Use [`deep_clone`](ShardedExpiringLruCache::deep_clone) to get an independent copy.
 ///
 /// **Note**: `K` and `V` must implement `Clone` (`K` for LRU key tracking; `V` because reads
 /// return owned values cloned from under the shard lock, in addition to `V: Expires`).
 ///
-/// This is a type alias for `ShardedExpiringLruCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, call [`ShardedExpiringLruCache::builder()`] and then
-/// [`hasher`](ShardedExpiringLruCacheBuilder::hasher), which yields a
-/// `ShardedExpiringLruCacheBase<K, V, H>` over your hasher.
+/// The shard-selection hasher `H` defaults to [`DefaultShardHasher`] (ahash-backed when the
+/// `ahash` feature is enabled, otherwise `std::collections::hash_map::RandomState`), so
+/// `ShardedExpiringLruCache<K, V>` names the common case. To use a custom [`ShardHasher`], call
+/// [`ShardedExpiringLruCache::builder()`] and then
+/// [`hasher`](ShardedExpiringLruCacheBuilder::hasher), which switches `H` to your hasher.
 ///
 /// **Note**: Setting an `on_evict` callback requires the callback itself to be `'static` because
 /// the cache stores it behind an `Arc<dyn Fn(&K, &V) + Send + Sync>`. This does not add `'static`
@@ -67,14 +68,11 @@ struct ExpiringLruInner<K, V, H> {
 /// failed. To reach the fallible trait form instead (which never panics on a fresh insert), name
 /// it explicitly through the trait, e.g. `ConcurrentCached::cache_set(&cache, k, v)` or
 /// `ConcurrentCachedExt::set(&cache, k, v)`.
-pub type ShardedExpiringLruCache<K, V> = ShardedExpiringLruCacheBase<K, V, DefaultShardHasher>;
-
-/// Backing type for [`ShardedExpiringLruCache`] with a generic shard hasher `H`.
-pub struct ShardedExpiringLruCacheBase<K, V, H = DefaultShardHasher> {
+pub struct ShardedExpiringLruCache<K, V, H = DefaultShardHasher> {
     inner: Arc<ExpiringLruInner<K, V, H>>,
 }
 
-impl<K, V, H> Clone for ShardedExpiringLruCacheBase<K, V, H> {
+impl<K, V, H> Clone for ShardedExpiringLruCache<K, V, H> {
     /// Arc-share clone — both handles point to the same underlying cache.
     fn clone(&self) -> Self {
         Self {
@@ -83,10 +81,10 @@ impl<K, V, H> Clone for ShardedExpiringLruCacheBase<K, V, H> {
     }
 }
 
-impl<K, V, H> ShardedExpiringLruCacheBase<K, V, H> {
+impl<K, V, H> ShardedExpiringLruCache<K, V, H> {
     /// Sum of the per-shard counters for evictions **not** driven by LRU capacity pressure:
     /// expired entries dropped lazily on [`cache_get`](ConcurrentCached::cache_get) or swept by
-    /// [`evict`](ShardedExpiringLruCacheBase::evict) or [`retain`](Self::retain).
+    /// [`evict`](ShardedExpiringLruCache::evict) or [`retain`](Self::retain).
     ///
     /// These live in [`Shard::evictions`], one atomic per shard (like `hits`/`misses`), rather
     /// than in a single process-wide counter on `Arc<Inner>`: a thread bumping it has just held
@@ -103,7 +101,7 @@ impl<K, V, H> ShardedExpiringLruCacheBase<K, V, H> {
     }
 }
 
-impl<K, V, H> std::fmt::Debug for ShardedExpiringLruCacheBase<K, V, H> {
+impl<K, V, H> std::fmt::Debug for ShardedExpiringLruCache<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShardedExpiringLruCache")
             .field("shards", &self.inner.shards.len())
@@ -118,7 +116,7 @@ impl<K, V, H> std::fmt::Debug for ShardedExpiringLruCacheBase<K, V, H> {
     }
 }
 
-impl<K, V> ShardedExpiringLruCacheBase<K, V, DefaultShardHasher>
+impl<K, V> ShardedExpiringLruCache<K, V, DefaultShardHasher>
 where
     K: Hash + Eq + Clone,
     V: Expires,
@@ -150,17 +148,17 @@ where
     ///
     /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
     /// [`hasher`](ShardedExpiringLruCacheBuilder::hasher) on the returned builder; it switches
-    /// the builder's hasher type and `build` then yields a `ShardedExpiringLruCacheBase` over
-    /// that hasher. `new` and `builder` exist only on the default-hasher alias, so a custom
-    /// hasher is always introduced via `hasher`, never a
-    /// `ShardedExpiringLruCacheBase::<_, _, H>` turbofish.
+    /// the builder's hasher type and `build` then yields a `ShardedExpiringLruCache<K, V, H>`
+    /// over that hasher. `new` and `builder` exist only on the default-hasher instantiation
+    /// `ShardedExpiringLruCache<K, V, DefaultShardHasher>`, so a custom hasher is always
+    /// introduced via `hasher`, never a `ShardedExpiringLruCache::<_, _, H>` turbofish.
     #[must_use]
     pub fn builder() -> ShardedExpiringLruCacheBuilder<K, V, DefaultShardHasher> {
         ShardedExpiringLruCacheBuilder::default()
     }
 }
 
-impl<K, V, H> ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Expires,
@@ -173,9 +171,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
-    ShardedExpiringLruCacheBase<K, V, H>
-{
+impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>> ShardedExpiringLruCache<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
@@ -218,7 +214,7 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Clone + Expires,
@@ -307,7 +303,7 @@ where
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Expires,
@@ -547,13 +543,16 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if `max_size` is 0. Use
-    /// [`try_set_max_size`](ShardedExpiringLruCacheBase::try_set_max_size) to avoid the panic.
+    /// Panics if `max_size` is 0. Also panics if `max_size` is close enough to `usize::MAX`
+    /// that dividing it across the shard count and multiplying back overflows `usize` (only
+    /// reachable on a multi-shard cache); see
+    /// [`SetMaxSizeError::CapacityOverflow`](crate::SetMaxSizeError::CapacityOverflow). Use
+    /// [`try_set_max_size`](ShardedExpiringLruCache::try_set_max_size) to avoid either panic.
     ///
     /// # See also
     ///
-    /// [`ShardedLruCacheBase::set_max_size`](crate::ShardedLruCacheBase::set_max_size) and
-    /// [`ShardedLruTtlCacheBase::set_max_size`](crate::ShardedLruTtlCacheBase::set_max_size)
+    /// [`ShardedLruCache::set_max_size`](crate::ShardedLruCache::set_max_size) and
+    /// [`ShardedLruTtlCache::set_max_size`](crate::ShardedLruTtlCache::set_max_size)
     /// are the parallel methods on the other sharded LRU-bounded stores.
     pub fn set_max_size(&self, max_size: usize) -> Option<usize> {
         assert!(max_size > 0, "max_size must be greater than zero");
@@ -568,13 +567,16 @@ where
         Some(prev)
     }
 
-    /// Fallible counterpart of [`set_max_size`](ShardedExpiringLruCacheBase::set_max_size):
+    /// Fallible counterpart of [`set_max_size`](ShardedExpiringLruCache::set_max_size):
     /// validates that `max_size` is non-zero and then delegates to `set_max_size`.
     /// Returns the previous total capacity wrapped in `Some` on success.
     ///
     /// # Errors
     ///
     /// Returns [`SetMaxSizeError::ZeroMaxSize`](crate::SetMaxSizeError) if `max_size` is 0.
+    /// Returns [`SetMaxSizeError::CapacityOverflow`](crate::SetMaxSizeError) if `max_size` is
+    /// close enough to `usize::MAX` that dividing it across the shard count and multiplying
+    /// back overflows `usize`.
     pub fn try_set_max_size(
         &self,
         max_size: usize,
@@ -582,11 +584,12 @@ where
         if max_size == 0 {
             return Err(crate::SetMaxSizeError::ZeroMaxSize);
         }
+        checked_per_shard_cap_from_total(max_size, self.inner.shards.len())?;
         Ok(self.set_max_size(max_size))
     }
 }
 
-impl<K, V, H> ConcurrentCacheBase for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Clone + Expires,
@@ -635,7 +638,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Clone + Expires,
@@ -804,7 +807,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Clone + Expires,
@@ -817,7 +820,7 @@ where
 
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone + Send + Sync,
     V: Clone + Expires + Send + Sync,
@@ -832,7 +835,7 @@ where
 
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone + Send + Sync,
     V: Clone + Expires + Send + Sync,
@@ -878,7 +881,7 @@ where
     }
 }
 
-impl<K, V, H> ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ShardedExpiringLruCache<K, V, H>
 where
     K: Clone + Hash + Eq,
     V: Expires,
@@ -922,18 +925,18 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCacheEvict for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedExpiringLruCache<K, V, H>
 where
     K: Clone + Hash + Eq,
     V: Expires,
     H: ShardHasher<K>,
 {
     fn evict(&self) -> usize {
-        ShardedExpiringLruCacheBase::evict(self)
+        ShardedExpiringLruCache::evict(self)
     }
 }
 
-/// Builder for [`ShardedExpiringLruCacheBase`].
+/// Builder for [`ShardedExpiringLruCache`].
 ///
 /// Note: there is intentionally **no `.ttl()` setter**. A sharded expiring LRU cache has no
 /// global expiry duration — each value decides when it is expired via the [`Expires`] trait,
@@ -991,7 +994,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// An explicit [`shards`](Self::shards) count opts out of that scaling, so a large explicit
     /// count with a small `max_size` still overshoots by `shards * 16` (e.g. `max_size = 10`
     /// with an explicit 8 shards yields 128).
-    /// [`metrics()`](ShardedExpiringLruCacheBase::metrics)'s `capacity` and `entry_count` reflect
+    /// [`metrics()`](ShardedExpiringLruCache::metrics)'s `capacity` and `entry_count` reflect
     /// the actual (possibly larger) amount. Use [`per_shard_max_size`](Self::per_shard_max_size)
     /// or `shards = 1` if you need a strict small cap.
     ///
@@ -1046,18 +1049,18 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// Set a callback invoked when an entry is evicted. Fires in six situations:
     /// for LRU capacity evictions; expired-entry removal during
     /// [`cache_get`](ConcurrentCached::cache_get); explicitly via
-    /// [`evict`](ShardedExpiringLruCacheBase::evict); on explicit
+    /// [`evict`](ShardedExpiringLruCache::evict); on explicit
     /// [`cache_remove`](ConcurrentCached::cache_remove); on
     /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and on
     /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
-    /// Does **not** fire on [`clear`](ShardedExpiringLruCacheBase::clear);
-    /// use [`cache_clear_with_on_evict`](ShardedExpiringLruCacheBase::cache_clear_with_on_evict) to opt in.
-    /// [`cache_clear_with_on_evict`](ShardedExpiringLruCacheBase::cache_clear_with_on_evict) fires
+    /// Does **not** fire on [`clear`](ShardedExpiringLruCache::clear);
+    /// use [`cache_clear_with_on_evict`](ShardedExpiringLruCache::cache_clear_with_on_evict) to opt in.
+    /// [`cache_clear_with_on_evict`](ShardedExpiringLruCache::cache_clear_with_on_evict) fires
     /// callbacks after releasing the shard lock.
     ///
     /// Capacity-eviction callbacks run while the affected shard's write lock is held. Do not call
     /// methods on the same sharded cache from the callback; doing so can deadlock if the callback
-    /// re-enters the locked shard. Expiry sweeps via [`evict`](ShardedExpiringLruCacheBase::evict)
+    /// re-enters the locked shard. Expiry sweeps via [`evict`](ShardedExpiringLruCache::evict)
     /// and explicit removes via [`cache_remove`](ConcurrentCached::cache_remove) /
     /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry) fire `on_evict` after
     /// releasing the shard lock and do not have this restriction.
@@ -1159,8 +1162,8 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
-        existing: &ShardedExpiringLruCacheBase<K, V, H2>,
-    ) -> Result<ShardedExpiringLruCacheBase<K, V, H>, BuildError>
+        existing: &ShardedExpiringLruCache<K, V, H2>,
+    ) -> Result<ShardedExpiringLruCache<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone + Expires,
@@ -1185,8 +1188,8 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
 
     /// Build the cache, returning an error if required fields are missing or invalid.
     ///
-    /// Use [`ShardedExpiringLruCache::builder()`] (or [`ShardedExpiringLruCacheBase::builder()`])
-    /// to obtain a builder, set at least [`max_size`](Self::max_size), then call `.build()`.
+    /// Use [`ShardedExpiringLruCache::builder()`] to obtain a builder, set at least
+    /// [`max_size`](Self::max_size), then call `.build()`.
     ///
     /// # Errors
     ///
@@ -1194,7 +1197,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     /// or if both `max_size` and `per_shard_max_size` are set simultaneously,
     /// or if the shard count overflows.
     #[must_use = "the Result from build() must be used"]
-    pub fn build(self) -> Result<ShardedExpiringLruCacheBase<K, V, H>, BuildError>
+    pub fn build(self) -> Result<ShardedExpiringLruCache<K, V, H>, BuildError>
     where
         K: Hash + Eq + Clone,
         H: ShardHasher<K>,
@@ -1213,7 +1216,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
             })
             .collect::<Result<Vec<_>, BuildError>>()?
             .into_boxed_slice();
-        Ok(ShardedExpiringLruCacheBase {
+        Ok(ShardedExpiringLruCache {
             inner: Arc::new(ExpiringLruInner {
                 shards,
                 shard_mask: mask,
@@ -1227,7 +1230,7 @@ impl<K, V, H> ShardedExpiringLruCacheBuilder<K, V, H> {
     }
 }
 
-impl<K, V, H> ConcurrentCloneCached<K, V> for ShardedExpiringLruCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCloneCached<K, V> for ShardedExpiringLruCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     V: Clone + Expires,
@@ -1301,7 +1304,7 @@ mod tests {
     #[test]
     fn default_shard_count_scales_with_max_size() {
         use crate::stores::sharded::{default_shard_count, default_shard_count_for_capacity};
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(100)
             .build()
             .unwrap();
@@ -1314,7 +1317,7 @@ mod tests {
 
     #[test]
     fn explicit_shards_override_capacity_default() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(64)
             .max_size(100)
             .build()
@@ -1330,7 +1333,7 @@ mod tests {
         use crate::stores::sharded::default_shard_count;
         let d = default_shard_count();
         let big = d.checked_mul(16).unwrap().checked_mul(4).unwrap();
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(big)
             .build()
             .unwrap();
@@ -1340,7 +1343,7 @@ mod tests {
     #[test]
     fn per_shard_max_size_keeps_plain_default_shard_count() {
         use crate::stores::sharded::default_shard_count;
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .per_shard_max_size(4)
             .build()
             .unwrap();
@@ -1353,7 +1356,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AOrd};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(4)
             .on_evict(move |_, _| {
@@ -1501,7 +1504,7 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let new_cache = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .copy_from(&old)
             .unwrap();
@@ -1525,7 +1528,7 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let new_cache = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .copy_from(&old)
             .unwrap();
@@ -1554,7 +1557,7 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let new_cache = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(8)
             .copy_from(&old)
@@ -1574,7 +1577,7 @@ mod tests {
 
         let evict_count = Arc::new(AtomicU64::new(0));
         let ec = evict_count.clone();
-        let cache = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let cache = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(8)
             .on_evict(move |_, _| {
@@ -1660,7 +1663,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(64)
             .on_evict(move |_, _| {
@@ -1707,7 +1710,7 @@ mod tests {
     #[test]
     fn cache_clear_with_on_evict_counts_evictions_without_callback() {
         // metrics().evictions must not depend on an on_evict observer being attached.
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(64)
             .build()
@@ -1739,7 +1742,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .on_evict(move |_, _| {
                 count2.fetch_add(1, AtomicOrd::Relaxed);
@@ -1866,7 +1869,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(64)
             .on_evict(move |_, _| {
@@ -1897,7 +1900,7 @@ mod tests {
 
     #[test]
     fn cache_remove_entry_increments_eviction_counter() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .shards(1)
             .build()
@@ -1972,7 +1975,7 @@ mod tests {
 
     #[test]
     fn concurrent_clone_cached_expired_returns_stale_no_eviction() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .shards(1)
             .build()
@@ -2021,7 +2024,7 @@ mod tests {
     #[test]
     fn peek_with_expiry_status_no_side_effects() {
         // shards(1) makes counter captures exact.
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .shards(1)
             .build()
@@ -2080,7 +2083,7 @@ mod tests {
         // max_size(2) + shards(1): a single shard with 2 slots. If peek promoted
         // recency, inserting a third entry would evict key 2 (MRU before peek);
         // if it does not promote, key 1 remains LRU and is evicted instead.
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(2)
             .shards(1)
             .build()
@@ -2149,7 +2152,7 @@ mod tests {
 
     #[test]
     fn peek_with_expiry_status_stale_entry_no_side_effects() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .shards(1)
             .build()
@@ -2350,7 +2353,7 @@ mod tests {
     // metrics snapshot is consistent with the captured entry state.
     #[test]
     fn deep_clone_metrics_consistent_with_entry_snapshot() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1) // single shard: deterministic counters
             .max_size(16)
             .build()
@@ -2430,7 +2433,7 @@ mod tests {
     /// `LruCache`'s own capacity-eviction counter (`guard.evictions`).
     #[test]
     fn retain_wires_to_outer_evictions_not_inner_lru_counter() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(64)
             .build()
@@ -2484,7 +2487,7 @@ mod tests {
     }
 
     /// Raw per-shard non-capacity eviction counters, in shard order.
-    fn shard_eviction_counters<K, V, H>(c: &ShardedExpiringLruCacheBase<K, V, H>) -> Vec<u64> {
+    fn shard_eviction_counters<K, V, H>(c: &ShardedExpiringLruCache<K, V, H>) -> Vec<u64> {
         c.inner
             .shards
             .iter()
@@ -2493,16 +2496,13 @@ mod tests {
     }
 
     /// Index of the shard that owns `k`.
-    fn owning_shard<K, V, H: ShardHasher<K>>(
-        c: &ShardedExpiringLruCacheBase<K, V, H>,
-        k: &K,
-    ) -> usize {
+    fn owning_shard<K, V, H: ShardHasher<K>>(c: &ShardedExpiringLruCache<K, V, H>, k: &K) -> usize {
         shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
     }
 
     /// Keys of one shard in MRU -> LRU order.
     fn shard_key_order<K: Clone + Hash + Eq, V: Clone, H>(
-        c: &ShardedExpiringLruCacheBase<K, V, H>,
+        c: &ShardedExpiringLruCache<K, V, H>,
         shard: usize,
     ) -> Vec<K> {
         c.inner.shards[shard]
@@ -2523,7 +2523,7 @@ mod tests {
         use std::sync::Mutex;
         let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::new(Mutex::new(Vec::new()));
         let seen2 = Arc::clone(&seen);
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(8)
             .on_evict(move |k: &u32, v: &Val| seen2.lock().unwrap().push((*k, v.v)))
@@ -2590,7 +2590,7 @@ mod tests {
     /// recency chain and through the capacity eviction it decides.
     #[test]
     fn cache_get_promotes_recency_through_the_single_lookup_path() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(2)
             .build()
@@ -2622,7 +2622,7 @@ mod tests {
     /// fails if that promotion is dropped.
     #[test]
     fn cache_set_with_on_evict_promotes_overwritten_entry_to_mru() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(2)
             .on_evict(|_, _| {})
@@ -2664,7 +2664,7 @@ mod tests {
     /// Attaching a purely observational callback must not change eviction order.
     #[test]
     fn cache_set_without_on_evict_promotes_overwritten_entry() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(2)
             .build()
@@ -2695,7 +2695,7 @@ mod tests {
     #[test]
     fn cache_set_over_current_mru_keeps_it_at_the_front() {
         for with_on_evict in [false, true] {
-            let builder = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            let builder = ShardedExpiringLruCache::<u32, Val>::builder()
                 .shards(1)
                 .max_size(3);
             let c = if with_on_evict {
@@ -2730,7 +2730,7 @@ mod tests {
     #[test]
     fn cache_set_over_sole_entry_of_capacity_one_shard() {
         for with_on_evict in [false, true] {
-            let builder = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+            let builder = ShardedExpiringLruCache::<u32, Val>::builder()
                 .shards(1)
                 .max_size(1);
             let c = if with_on_evict {
@@ -2759,7 +2759,7 @@ mod tests {
     /// counters without double-counting.
     #[test]
     fn every_eviction_path_counts_on_the_owning_shard() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(8)
             .per_shard_max_size(8)
             .build()
@@ -2851,7 +2851,7 @@ mod tests {
     /// per-shard it must copy each shard's, so the clone reports the same totals.
     #[test]
     fn deep_clone_preserves_per_shard_eviction_counts() {
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(4)
             .per_shard_max_size(4)
             .build()
@@ -2931,7 +2931,7 @@ mod tests {
         use std::sync::Mutex;
         let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let seen2 = Arc::clone(&seen);
-        let c = ShardedExpiringLruCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .shards(1)
             .max_size(64)
             .on_evict(move |k: &u32, _v: &Val| seen2.lock().unwrap().push(*k))

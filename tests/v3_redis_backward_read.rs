@@ -53,8 +53,8 @@ fn redis_backward_read_legacy_json_entry() {
     cache.cache_clear().expect("clear");
 
     // The key scheme for namespace="" prefix="v3_backward_read_legacy" key="hello" is
-    // "v3_backward_read_legacy:hello" (namespace skipped when empty).
-    let raw_key = format!("{prefix}:hello");
+    // ":v3_backward_read_legacy:hello" (the empty namespace field keeps its separator).
+    let raw_key = format!(":{prefix}:hello");
     let legacy_value = r#"{"value":"world","version":1}"#;
 
     // Write the legacy JSON directly into Redis with a generous TTL.
@@ -191,7 +191,7 @@ fn redis_subsecond_ttl_precision_via_pttl() {
         .expect("raw connection");
 
     let pttl: i64 = redis::cmd("PTTL")
-        .arg(format!("{prefix}:k"))
+        .arg(format!(":{prefix}:k"))
         .query(&mut raw)
         .expect("PTTL query");
 

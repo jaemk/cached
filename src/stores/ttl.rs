@@ -745,6 +745,9 @@ impl<K: Hash + Eq, V, S: BuildHasher> crate::CacheTtl for TtlCache<K, V, S> {
         self.ttl = Duration::ZERO;
         if old.is_zero() { None } else { Some(old) }
     }
+}
+
+impl<K: Hash + Eq, V, S: BuildHasher> crate::CacheRefreshOnHit for TtlCache<K, V, S> {
     fn refresh_on_hit(&self) -> bool {
         self.refresh
     }

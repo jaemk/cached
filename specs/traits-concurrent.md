@@ -30,7 +30,8 @@ required with no `V: Clone + Send` bound (its get-based implementors are `AsyncR
 `remove_entry`, `delete`, `contains` (no `V: Clone` bound), `clear`, `reset`, `get_or_set_with`,
 `try_get_or_set_with`, `len`, `is_empty`, `hits`, `misses`, `capacity`, `evictions`); it does not
 forward `cache_reset_metrics` directly. `try_get_or_set_with` delegates to
-`ConcurrentCached::cache_try_get_or_set_with`. The six sharded concrete types also expose
+`ConcurrentCached::cache_try_get_or_set_with`. `ConcurrentCachedAsyncExt` is its async
+counterpart, see CTRAIT-7. The six sharded concrete types also expose
 inherent `contains(&self, &K) -> bool` and `peek(&self, &K) -> Option<V>` (both peek-based: no
 recency, TTL, or metrics effects; `peek` clones the live value) that take call-site priority over
 the ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `reset`).
@@ -44,9 +45,10 @@ needs it.
 
 ## CTRAIT-3
 
-`ConcurrentCacheTtl` provides `&self` TTL control (`ttl()` / `set_ttl()` / `unset_ttl()` /
-`try_set_ttl()` / `refresh_on_hit()` / `set_refresh_on_hit()`) on concurrent TTL stores; the
-implementing stores expose these only through the trait, with no inherent duplicates.
+`ConcurrentCacheTtl` provides `&self` TTL control (`ttl()` / `set_ttl()` / `try_set_ttl()` /
+`unset_ttl()`) on concurrent TTL stores; refresh-on-hit moved to `ConcurrentCacheRefreshOnHit`,
+see CTRAIT-6. The implementing stores expose these only through the traits, with no inherent
+duplicates.
 `ConcurrentCacheEvict` provides the concurrent `evict()`. `ConcurrentCachePeek` provides
 `cache_peek(&self, &K) -> Result<Option<V>, Self::Error>` (plus a defaulted `peek` alias): a
 genuinely side-effect-free read (no recency, TTL refresh, hit/miss metrics, or lazy expiry
@@ -92,3 +94,53 @@ or TTL state to skip, the metrics distinction is meaningless, and a "peek" would
 network or disk round trip, so it would advertise a cheapness the store cannot deliver. See
 [design/0040-peek-is-an-in-memory-concept.md](design/0040-peek-is-an-in-memory-concept.md) for
 the unified rationale.
+
+## CTRAIT-6
+
+`ConcurrentCacheRefreshOnHit` provides `&self` refresh-on-hit control (`refresh_on_hit()` /
+`set_refresh_on_hit()`), split out of `ConcurrentCacheTtl` as the mirror of the
+`CacheTtl` / `CacheRefreshOnHit` split on the single-owner side
+([traits-core.md](traits-core.md) TRAIT-5). Implemented by `RedisCache`, `AsyncRedisCache`,
+`RedbCache`, `ShardedTtlCache`, and `ShardedLruTtlCache`, which is every store implementing
+`ConcurrentCacheTtl`.
+
+The concurrent split discriminates nothing today: the two implementor sets are identical. It
+exists so the trait families stay symmetric, so generic code ports between them without a bound
+changing meaning, and so a future concurrent store that has a global TTL but cannot refresh on
+hit can implement `ConcurrentCacheTtl` alone. The trait is ungated (only the built-in impls are
+gated on their store's feature) and is in `cached::prelude`. See
+[design/0045-refresh-on-hit-trait-split.md](design/0045-refresh-on-hit-trait-split.md).
+
+## CTRAIT-7
+
+`ConcurrentCachedAsyncExt<K, V>: ConcurrentCachedAsync<K, V>` is the async counterpart of
+`ConcurrentCachedExt`: an alias trait providing `async_get`, `async_set`, `async_remove`,
+`async_remove_entry`, `async_delete`, `async_contains`, `async_clear`, `async_reset`,
+`async_get_or_set_with`, and `async_try_get_or_set_with`, each delegating to the
+`async_cache_`-prefixed method of the same name. It is gated on `async_core` and is in
+`cached::prelude`.
+
+Shaped like `ConcurrentCachedExt`: the aliases are **required** methods filled in by a blanket
+impl over `ConcurrentCachedAsync`, not defaulted methods. The blanket impl is therefore the only
+implementation, so a downstream type cannot override an alias and make `async_get` disagree with
+`async_cache_get`.
+
+The aliases keep the `async_` prefix instead of being bare `get` / `set`. Every store
+implementing `ConcurrentCachedAsync` also implements the synchronous `ConcurrentCached`: the six
+sharded stores and `RedbCache`. Since both alias traits are blanket implemented and both are in
+the prelude, a bare `get` would be a second applicable candidate and `store.get(&k)` would be
+`error[E0034]: multiple applicable items in scope` on `RedbCache`; on the sharded types, whose
+inherent `get` takes call-site priority, the async alias would instead be unreachable through
+method syntax. This is the same device `ConcurrentCachePeekAsync::async_peek` uses (CTRAIT-5).
+
+The get-or-set pair is aliased despite carrying closure and future generics that the alias
+signature restates verbatim: get-or-set is the operation this family exists to serve, and parity
+with `ConcurrentCachedExt::get_or_set_with` / `try_get_or_set_with` is the point of the trait.
+
+Introspection and metrics are deliberately **not** aliased here. `cache_size`, `cache_is_empty`,
+`cache_hits`, `cache_misses`, `cache_capacity`, `cache_evictions`, and `metrics()` live on
+`ConcurrentCacheBase` (CTRAIT-1), which is a supertrait of `ConcurrentCachedAsync`, so they are
+already callable on any async store with no extension trait imported. Aliasing them would mean
+`async_len` / `async_hits` names on methods that return plain values rather than futures, which
+promises a future that is not there. `async_cache_reset_metrics` is likewise not forwarded,
+matching `ConcurrentCachedExt`.

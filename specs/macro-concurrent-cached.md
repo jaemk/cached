@@ -59,3 +59,32 @@ The `size` -> `max_size` rename error, the mutually-exclusive-TTL error, and the
 generic-function-without-`key`/`convert` error (shared with `#[cached]`, see
 [macro-cached.md](macro-cached.md) CACHED-7) now span the offending attribute rather than the
 function name; the message text is unchanged. See [design/0043-macro-error-precision.md](design/0043-macro-error-precision.md).
+
+## CONC-6
+
+`companions` (bool, default `true`) suppresses the generated companions.
+`#[concurrent_cached]` already emits the `{fn}_no_cache` origin as a function-local `fn` inside
+the cached function off the `in_impl` path, so `companions = false` drops `{fn}_prime_cache`.
+It composes with `in_impl = true`, which already suppresses `{fn}_prime_cache` and keeps
+`{fn}_no_cache` as a sibling `impl` method. `companions_vis` with `companions = false` is a
+compile error off the `in_impl` path. Shared with `#[cached]`, see
+[macro-cached.md](macro-cached.md) CACHED-8. See
+[design/0024-generated-companion-naming.md](design/0024-generated-companion-naming.md).
+
+## CONC-7
+
+`result_fallback` accepts `expires = true` as well as a TTL, matching `#[cached]`. The
+requirement is entries that expire, by a uniform TTL (`ShardedTtlCache` /
+`ShardedLruTtlCache`) or per value (`ShardedExpiringCache` / `ShardedExpiringLruCache`, CONC-1);
+all four implement `ConcurrentCloneCached`, which supplies the expiry-aware reads the
+`result_fallback` codegen performs. The previous "`result_fallback` and `expires` are mutually
+exclusive" rejection is removed, and the no-expiry error now names both options. Stale-value
+semantics match `#[cached(expires = true, result_fallback = true)]`: the returned fallback is
+the expired value itself, so callers that must tell a fresh result from a stale one check the
+value's own `Expires::is_expired`. See
+[design/0030-force-refresh-result-fallback-interaction.md](design/0030-force-refresh-result-fallback-interaction.md).
+
+## CONC-8
+
+`in_impl = true` requires a non-generic enclosing `impl`; the guard cannot see the `impl`
+header. Shared with `#[cached]`, see [macro-cached.md](macro-cached.md) CACHED-9.

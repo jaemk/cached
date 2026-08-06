@@ -17,7 +17,7 @@ use {super::CachedGetOrSetAsync, std::collections::hash_map::Entry, std::future:
 ///
 /// For a size-bounded variant that also evicts by LRU, see [`ExpiringLruCache`](crate::ExpiringLruCache).
 /// When using the `#[cached]` proc macro, `expires = true` automatically selects this store
-/// (or `ExpiringLruCache` when `size` is also specified).
+/// (or `ExpiringLruCache` when `max_size` is also specified).
 ///
 /// **`cache_size` / `iter` / `evict` contract**: `cache_size()` returns the raw stored entry count
 /// and may include expired-but-not-yet-swept entries. `iter()` omits expired entries
@@ -30,7 +30,7 @@ use {super::CachedGetOrSetAsync, std::collections::hash_map::Entry, std::future:
 /// accessed again. Entries that expire and are never re-fetched stay in memory indefinitely.
 /// For high-cardinality workloads, call [`evict()`](ExpiringCache::evict) periodically to
 /// sweep and remove all expired entries, or prefer [`ExpiringLruCache`](crate::ExpiringLruCache)
-/// with a `size` bound to cap memory usage automatically.
+/// with a `max_size` bound to cap memory usage automatically.
 ///
 /// ```rust
 /// use cached::{CachedExt, Expires, ExpiringCache};

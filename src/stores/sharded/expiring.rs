@@ -44,7 +44,7 @@ struct ExpiringInner<K, V, H> {
 /// call `evict()` periodically or use [`ShardedExpiringLruCache`](crate::ShardedExpiringLruCache) with a `max_size` bound.
 ///
 /// Wraps an `Arc` — `clone()` is an Arc-share (shared state), not a deep copy.
-/// Use [`deep_clone`](ShardedExpiringCacheBase::deep_clone) to get an independent copy.
+/// Use [`deep_clone`](ShardedExpiringCache::deep_clone) to get an independent copy.
 ///
 /// **Note**: reads return owned values cloned from under the shard lock, so `V` must
 /// implement `Clone` (in addition to `Expires`).
@@ -55,10 +55,11 @@ struct ExpiringInner<K, V, H> {
 /// entries, reclaim memory, and obtain an accurate live count. Sharded stores do not implement
 /// `CachedIter`.
 ///
-/// This is a type alias for `ShardedExpiringCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, call [`ShardedExpiringCache::builder()`] and then
-/// [`hasher`](ShardedExpiringCacheBuilder::hasher), which yields a
-/// `ShardedExpiringCacheBase<K, V, H>` over your hasher.
+/// The shard-selection hasher `H` defaults to [`DefaultShardHasher`] (ahash-backed when the
+/// `ahash` feature is enabled, otherwise `std::collections::hash_map::RandomState`), so
+/// `ShardedExpiringCache<K, V>` names the common case. To use a custom [`ShardHasher`], call
+/// [`ShardedExpiringCache::builder()`] and then
+/// [`hasher`](ShardedExpiringCacheBuilder::hasher), which switches `H` to your hasher.
 ///
 /// **Note**: this type's inherent methods (`get`, `set`, `remove`, `remove_entry`, `delete`,
 /// `contains`, `peek`) return unwrapped values (`Option<V>`, `bool`, ...) and take call-site
@@ -69,14 +70,11 @@ struct ExpiringInner<K, V, H> {
 /// failed. To reach the fallible trait form instead (which never panics on a fresh insert), name
 /// it explicitly through the trait, e.g. `ConcurrentCached::cache_set(&cache, k, v)` or
 /// `ConcurrentCachedExt::set(&cache, k, v)`.
-pub type ShardedExpiringCache<K, V> = ShardedExpiringCacheBase<K, V, DefaultShardHasher>;
-
-/// Backing type for [`ShardedExpiringCache`] with a generic shard hasher `H`.
-pub struct ShardedExpiringCacheBase<K, V, H = DefaultShardHasher> {
+pub struct ShardedExpiringCache<K, V, H = DefaultShardHasher> {
     inner: Arc<ExpiringInner<K, V, H>>,
 }
 
-impl<K, V, H> Clone for ShardedExpiringCacheBase<K, V, H> {
+impl<K, V, H> Clone for ShardedExpiringCache<K, V, H> {
     /// Arc-share clone — both handles point to the same underlying cache.
     fn clone(&self) -> Self {
         Self {
@@ -85,7 +83,7 @@ impl<K, V, H> Clone for ShardedExpiringCacheBase<K, V, H> {
     }
 }
 
-impl<K, V, H> std::fmt::Debug for ShardedExpiringCacheBase<K, V, H> {
+impl<K, V, H> std::fmt::Debug for ShardedExpiringCache<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let evictions: u64 = self
             .inner
@@ -100,7 +98,7 @@ impl<K, V, H> std::fmt::Debug for ShardedExpiringCacheBase<K, V, H> {
     }
 }
 
-impl<K, V> ShardedExpiringCacheBase<K, V, DefaultShardHasher>
+impl<K, V> ShardedExpiringCache<K, V, DefaultShardHasher>
 where
     K: Hash + Eq,
     V: Expires,
@@ -121,16 +119,17 @@ where
     ///
     /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
     /// [`hasher`](ShardedExpiringCacheBuilder::hasher) on the returned builder; it switches the
-    /// builder's hasher type and `build` then yields a `ShardedExpiringCacheBase` over that
-    /// hasher. `new` and `builder` exist only on the default-hasher alias, so a custom hasher is
-    /// always introduced via `hasher`, never a `ShardedExpiringCacheBase::<_, _, H>` turbofish.
+    /// builder's hasher type and `build` then yields a `ShardedExpiringCache<K, V, H>` over that
+    /// hasher. `new` and `builder` exist only on the default-hasher instantiation
+    /// `ShardedExpiringCache<K, V, DefaultShardHasher>`, so a custom hasher is always introduced
+    /// via `hasher`, never a `ShardedExpiringCache::<_, _, H>` turbofish.
     #[must_use]
     pub fn builder() -> ShardedExpiringCacheBuilder<K, V, DefaultShardHasher> {
         ShardedExpiringCacheBuilder::default()
     }
 }
 
-impl<K, V, H> ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Expires,
@@ -155,9 +154,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
-    ShardedExpiringCacheBase<K, V, H>
-{
+impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>> ShardedExpiringCache<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
@@ -196,7 +193,7 @@ impl<K: Clone + Hash + Eq, V: Clone + Expires, H: ShardHasher<K>>
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -284,7 +281,7 @@ where
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Expires,
@@ -292,7 +289,7 @@ where
     /// Return aggregate metrics across all shards.
     ///
     /// `size` counts all stored entries, including expired ones that have not yet been
-    /// swept by a call to [`evict`](ShardedExpiringCacheBase::evict).
+    /// swept by a call to [`evict`](ShardedExpiringCache::evict).
     #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
         let mut hits = 0u64;
@@ -501,7 +498,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCacheBase for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -544,7 +541,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCached<K, V> for ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -701,7 +698,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -714,7 +711,7 @@ where
 
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq + Send + Sync,
     V: Clone + Expires + Send + Sync,
@@ -729,7 +726,7 @@ where
 
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq + Send + Sync,
     V: Clone + Expires + Send + Sync,
@@ -775,18 +772,18 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCacheEvict for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedExpiringCache<K, V, H>
 where
     K: Clone + Hash + Eq,
     V: Expires,
     H: ShardHasher<K>,
 {
     fn evict(&self) -> usize {
-        ShardedExpiringCacheBase::evict(self)
+        ShardedExpiringCache::evict(self)
     }
 }
 
-/// Builder for [`ShardedExpiringCacheBase`].
+/// Builder for [`ShardedExpiringCache`].
 ///
 /// Note: there is intentionally **no `.ttl()` setter**. A sharded expiring cache has no global
 /// expiry duration — each value decides when it is expired via the [`Expires`] trait. For a
@@ -867,13 +864,13 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
 
     /// Set a callback invoked when an entry is evicted. Fires in five situations:
     /// on expired-entry removal during [`cache_get`](ConcurrentCached::cache_get);
-    /// explicitly via [`evict`](ShardedExpiringCacheBase::evict); on explicit
+    /// explicitly via [`evict`](ShardedExpiringCache::evict); on explicit
     /// [`cache_remove`](ConcurrentCached::cache_remove); on
     /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and on
     /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
-    /// Does **not** fire on [`clear`](ShardedExpiringCacheBase::clear);
-    /// use [`cache_clear_with_on_evict`](ShardedExpiringCacheBase::cache_clear_with_on_evict) to opt in.
-    /// [`cache_clear_with_on_evict`](ShardedExpiringCacheBase::cache_clear_with_on_evict) fires
+    /// Does **not** fire on [`clear`](ShardedExpiringCache::clear);
+    /// use [`cache_clear_with_on_evict`](ShardedExpiringCache::cache_clear_with_on_evict) to opt in.
+    /// [`cache_clear_with_on_evict`](ShardedExpiringCache::cache_clear_with_on_evict) fires
     /// callbacks after releasing the shard lock.
     ///
     /// The closure must be `'static` (its captures cannot borrow from the local stack), but `K`
@@ -901,8 +898,8 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
     #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
-        existing: &ShardedExpiringCacheBase<K, V, H2>,
-    ) -> Result<ShardedExpiringCacheBase<K, V, H>, BuildError>
+        existing: &ShardedExpiringCache<K, V, H2>,
+    ) -> Result<ShardedExpiringCache<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone + Expires,
@@ -927,8 +924,8 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
 
     /// Build the cache.
     ///
-    /// Use [`ShardedExpiringCache::builder()`] (or [`ShardedExpiringCacheBase::builder()`]) to
-    /// obtain a builder, configure it, then call `.build()`.
+    /// Use [`ShardedExpiringCache::builder()`] to obtain a builder, configure it, then call
+    /// `.build()`.
     ///
     /// This builder never fails for valid inputs. Returns `Ok(cache)` on success.
     ///
@@ -937,7 +934,7 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
     /// Returns [`BuildError`] if the `shards` count is zero or overflows when rounded
     /// up to the next power of two.
     #[must_use = "the Result from build() must be used"]
-    pub fn build(self) -> Result<ShardedExpiringCacheBase<K, V, H>, BuildError>
+    pub fn build(self) -> Result<ShardedExpiringCache<K, V, H>, BuildError>
     where
         K: Hash + Eq,
         H: ShardHasher<K>,
@@ -954,7 +951,7 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Ok(ShardedExpiringCacheBase {
+        Ok(ShardedExpiringCache {
             inner: Arc::new(ExpiringInner {
                 shards,
                 shard_mask: mask,
@@ -967,7 +964,7 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
     }
 }
 
-impl<K, V, H> ConcurrentCloneCached<K, V> for ShardedExpiringCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCloneCached<K, V> for ShardedExpiringCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone + Expires,
@@ -1040,7 +1037,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AOrd};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .on_evict(move |_, _| {
                 count2.fetch_add(1, AOrd::Relaxed);
             })
@@ -1094,9 +1091,7 @@ mod tests {
     fn cache_set_over_expired_counts_eviction_without_callback() {
         // Pins that the evictions counter increments when overwriting an expired entry
         // even when no on_evict callback is configured.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
-            .build()
-            .unwrap();
+        let c = ShardedExpiringCache::<u32, Val>::builder().build().unwrap();
         SyncConcurrentCached::cache_set(
             &c,
             1,
@@ -1173,7 +1168,7 @@ mod tests {
         let handle2 = handle.clone();
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(4)
             .on_evict(move |_, _| {
                 let cache = handle2.get().expect("handle is set before retain runs");
@@ -1214,7 +1209,7 @@ mod tests {
     fn retain_sweeps_every_shard_one_at_a_time() {
         // Per-shard bookkeeping: the predicate is applied to each shard's own map, so the
         // post-retain per-shard counts equal the surviving keys routed to that shard.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(4)
             .build()
             .unwrap();
@@ -1254,7 +1249,7 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let new_cache = ShardedExpiringCache::<u32, Val>::builder()
             .copy_from(&old)
             .unwrap();
         assert_eq!(new_cache.len(), 0);
@@ -1274,7 +1269,7 @@ mod tests {
             )
             .expect("insert must succeed");
         }
-        let new_cache = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let new_cache = ShardedExpiringCache::<u32, Val>::builder()
             .copy_from(&old)
             .unwrap();
         assert_eq!(new_cache.len(), 20);
@@ -1292,7 +1287,7 @@ mod tests {
 
         let evict_count = Arc::new(AtomicU64::new(0));
         let ec = evict_count.clone();
-        let cache = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let cache = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1)
             .on_evict(move |_, _| {
                 ec.fetch_add(1, AtomicOrd::Relaxed);
@@ -1372,7 +1367,7 @@ mod tests {
 
     #[test]
     fn build_returns_err_for_zero_shards() {
-        let result = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let result = ShardedExpiringCache::<u32, Val>::builder()
             .shards(0)
             .build();
         assert!(result.is_err(), "zero shards must return Err");
@@ -1390,7 +1385,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
             })
@@ -1438,7 +1433,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
             })
@@ -1466,9 +1461,7 @@ mod tests {
     #[test]
     fn cache_clear_with_on_evict_counts_evictions_without_callback() {
         // metrics().evictions must not depend on an on_evict observer being attached.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
-            .build()
-            .unwrap();
+        let c = ShardedExpiringCache::<u32, Val>::builder().build().unwrap();
         for i in 0..20u32 {
             SyncConcurrentCached::cache_set(
                 &c,
@@ -1582,7 +1575,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1)
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
@@ -1612,7 +1605,7 @@ mod tests {
 
     #[test]
     fn cache_remove_entry_increments_eviction_counter() {
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1)
             .build()
             .unwrap();
@@ -1680,7 +1673,7 @@ mod tests {
 
     #[test]
     fn concurrent_clone_cached_expired_returns_stale_no_eviction() {
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1)
             .build()
             .unwrap();
@@ -1728,7 +1721,7 @@ mod tests {
     #[test]
     fn peek_with_expiry_status_no_side_effects() {
         // shards(1) makes counter captures exact.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1)
             .build()
             .unwrap();
@@ -1784,7 +1777,7 @@ mod tests {
     #[test]
     fn peek_with_expiry_status_stale_entry_no_side_effects() {
         // Use Val with expired=true to simulate a stale entry without sleeping.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1)
             .build()
             .unwrap();
@@ -1944,7 +1937,7 @@ mod tests {
     // operations (not a potentially newer reading from after the lock was released).
     #[test]
     fn deep_clone_metrics_consistent_with_entry_snapshot() {
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(1) // single shard: deterministic counters
             .build()
             .unwrap();
@@ -1982,7 +1975,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AOrd};
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .on_evict(move |_, _| {
                 fired2.fetch_add(1, AOrd::Relaxed);
             })
@@ -2058,7 +2051,7 @@ mod tests {
         // Force many shards so evictions land on distinct per-shard counters, then
         // confirm both metrics().evictions and the trait-level cache_evictions()
         // sum every shard exactly (no double counting, no dropped counts).
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(8)
             .build()
             .unwrap();
@@ -2107,7 +2100,7 @@ mod tests {
     fn evictions_aggregate_correctly_after_deep_clone() {
         // deep_clone must carry each shard's evictions counter into the corresponding
         // cloned shard so the aggregate reported by the clone matches the source.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(8)
             .build()
             .unwrap();
@@ -2167,7 +2160,7 @@ mod tests {
 
         let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(4)
             .on_evict(move |k, v| {
                 seen2.lock().unwrap().push((*k, v.v));
@@ -2238,7 +2231,7 @@ mod tests {
         // No on_evict configured: the single-pass retain+len-delta branch must still
         // return the correct count, physically remove the expired entries, and
         // increment the per-shard evictions counters aggregated via metrics().
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(4)
             .build()
             .unwrap();
@@ -2307,7 +2300,7 @@ mod tests {
         // it still counts every removed entry as an eviction (via the per-shard
         // counters summed in metrics()/cache_evictions()) without ever building a
         // Vec of the removed entries.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(8)
             .build()
             .unwrap();
@@ -2372,7 +2365,7 @@ mod tests {
     // double-counting an eviction.
 
     /// Raw per-shard eviction counters, in shard order.
-    fn shard_eviction_counters<K, V, H>(c: &ShardedExpiringCacheBase<K, V, H>) -> Vec<u64> {
+    fn shard_eviction_counters<K, V, H>(c: &ShardedExpiringCache<K, V, H>) -> Vec<u64> {
         c.inner
             .shards
             .iter()
@@ -2381,10 +2374,7 @@ mod tests {
     }
 
     /// Index of the shard that owns `k`.
-    fn owning_shard<K, V, H: ShardHasher<K>>(
-        c: &ShardedExpiringCacheBase<K, V, H>,
-        k: &K,
-    ) -> usize {
+    fn owning_shard<K, V, H: ShardHasher<K>>(c: &ShardedExpiringCache<K, V, H>, k: &K) -> usize {
         shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
     }
 
@@ -2404,7 +2394,7 @@ mod tests {
     /// Every stored entry as `(key, value, expired)`, sorted, for a full cross-cache
     /// state comparison.
     fn entry_snapshot<H: ShardHasher<u32>>(
-        c: &ShardedExpiringCacheBase<u32, Val, H>,
+        c: &ShardedExpiringCache<u32, Val, H>,
     ) -> Vec<(u32, u32, bool)> {
         let mut out: Vec<(u32, u32, bool)> = Vec::new();
         for shard in c.inner.shards.iter() {
@@ -2428,7 +2418,7 @@ mod tests {
         fn evict_both_ways<K: Clone + Hash + Eq, V: Clone + Expires>(
             c: &ShardedExpiringCache<K, V>,
         ) -> usize {
-            let via_inherent = ShardedExpiringCacheBase::evict(c);
+            let via_inherent = ShardedExpiringCache::evict(c);
             let via_trait = ConcurrentCacheEvict::evict(c);
             via_inherent + via_trait
         }
@@ -2454,7 +2444,7 @@ mod tests {
         // every shard's *own* counter (not just the sum) must move by exactly the right
         // amount -- a bug that bumped the wrong shard's counter would still pass an
         // aggregate-only assertion.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(8)
             .build()
             .unwrap();
@@ -2508,7 +2498,7 @@ mod tests {
         // shard's counter moves -- an aggregate-only assertion cannot catch a spurious
         // per-shard bump. FixedShardHasher pins two disjoint 4-key buckets, one per shard,
         // so shard 1 (all-live) is guaranteed to see zero evictions.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(2)
             .hasher(FixedShardHasher)
             .build()
@@ -2568,7 +2558,7 @@ mod tests {
         let fired: Arc<std::sync::Mutex<Vec<(u32, u32)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let fired2 = fired.clone();
-        let with_cb = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let with_cb = ShardedExpiringCache::<u32, Val>::builder()
             .shards(4)
             .hasher(FixedShardHasher)
             .on_evict(move |k: &u32, v: &Val| {
@@ -2576,7 +2566,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let no_cb = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let no_cb = ShardedExpiringCache::<u32, Val>::builder()
             .shards(4)
             .hasher(FixedShardHasher)
             .build()
@@ -2662,7 +2652,7 @@ mod tests {
         // evict() (sweeping a third of the entries) with cache_remove_entry (removing half
         // of what's left) before cloning, and confirm every shard's counter -- not just the
         // aggregate -- carries over exactly, and that the clone is independent afterward.
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(8)
             .build()
             .unwrap();
@@ -2734,7 +2724,7 @@ mod tests {
         let fired_count = Arc::new(AtomicU64::new(0));
         let fired_ids2 = fired_ids.clone();
         let fired_count2 = fired_count.clone();
-        let c = ShardedExpiringCacheBase::<u32, Val>::builder()
+        let c = ShardedExpiringCache::<u32, Val>::builder()
             .shards(SHARDS)
             .on_evict(move |_k: &u32, v: &Val| {
                 let mut seen = fired_ids2.lock().expect("fired recorder poisoned");

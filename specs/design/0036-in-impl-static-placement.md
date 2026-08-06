@@ -44,6 +44,28 @@ than omitting it. The macro suppresses the prime silently; calling `method_prime
 rejects `in_impl = true` without a `self` receiver symmetrically. This keeps inference-free and
 avoids surprises when a free function is renamed into a method.
 
+**A generic enclosing `impl` cannot be detected, and the limitation is documented instead.**
+All three macros reject a generic *function* whose key or value type would name one of the
+function's own parameters, by inspecting `signature.generics`. That guard cannot see a generic
+`impl`: an attribute macro applied to a method receives only the method's tokens, so
+`impl<T> S<T> { #[cached(in_impl = true)] fn f(&self) -> T {..} }` presents empty method
+generics and passes the guard. The function-local static then names `T` and rustc rejects it
+with E0401 rather than the crate's own "pin the key with `key`/`convert`" diagnostic.
+
+No detection was added, because none is sound. The macro sees a bare identifier in the return
+type and cannot tell an outer `impl` parameter from a concrete type or type alias in scope, so
+any heuristic would reject valid code such as `impl S { #[cached(in_impl = true)] fn f(&self)
+-> T {..} }` where `T` is a `type T = ...` alias. `key`/`convert`/`ty` do not rescue it either:
+the static still has to spell out a concrete value type, and a generic `impl` parameter can
+never be that.
+
+The E0401 rustc emits is precise on its own - it underlines the return type, points at the
+`impl`'s parameter as "type parameter from outer item", and notes that "a `static` is a
+separate item from the item that contains it". `tests/ui/cached_in_impl_generic_impl.rs` pins
+that output so any future improvement is visible. The workaround is to move the method to a
+non-generic `impl`, or to memoize a free function per concrete instantiation. The limitation is
+documented on the `in_impl` attribute in all three macro argument structs.
+
 ## Notes
 
 - `cached_proc_macro/src/cached.rs:259-285` contains the receiver/`in_impl` validation.

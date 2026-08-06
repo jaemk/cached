@@ -47,6 +47,17 @@ struct OnceMacroArgs {
     /// Note: `#[once]` stores a single value for *all* receivers, so an
     /// `in_impl` `#[once]` method shares one cached value across every instance
     /// (#16/#140).
+    ///
+    /// Limitation: the enclosing `impl` must not be generic over a type or const
+    /// parameter that the value type names. The function-local static is a separate
+    /// item from the method, so it cannot name the `impl`'s parameters, and the G1
+    /// guard below cannot catch this: an attribute macro applied to a method receives
+    /// only the method's tokens and cannot see the `impl` header, so
+    /// `impl<T> S<T> { #[once(in_impl = true)] fn f(&self) -> T }` has empty method
+    /// generics for G1 to inspect. rustc reports it as E0401 ("can't use generic
+    /// parameters from outer item") on the return type. Move the method to a
+    /// non-generic `impl`, or memoize a free function per concrete instantiation.
+    /// See design record 0036.
     #[darling(default)]
     in_impl: bool,
     /// Opt-in boolean expression over the fn args. Both unquoted `{ expr }` and
@@ -61,6 +72,12 @@ struct OnceMacroArgs {
     /// `{fn}_prime_cache`). `None` (default) inherits the cached fn's visibility.
     #[darling(default)]
     companions_vis: Option<String>,
+    /// Suppress the generated companion items. `None` / `Some(true)` (the default)
+    /// emits `{fn}_prime_cache`; `Some(false)` emits none. `#[once]` already nests
+    /// the `{fn}_no_cache` origin inside the cached function off the `in_impl`
+    /// path, so `{fn}_prime_cache` is the only free function it suppresses (0024).
+    #[darling(default)]
+    companions: Option<bool>,
     // Removed attributes intercepted to provide helpful error messages
     #[darling(default)]
     result: Option<bool>,
@@ -195,6 +212,30 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             "in_impl = true requires a method with a `self` receiver; \
              for a free function or an associated function without `self`, \
              remove in_impl.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // `companions = false` suppresses the generated companion items (0024). `#[once]`
+    // emits the `{fn}_no_cache` origin as a function-local `fn` inside the cached
+    // function already (off the `in_impl` path), so `{fn}_prime_cache` is the only free
+    // function it has to drop. Under `in_impl` the origin is a sibling `impl` method -
+    // it takes `self`, which a nested `fn` cannot - and `in_impl` already suppresses
+    // `{fn}_prime_cache`, so the two compose: together they remove every companion item
+    // the macro is structurally able to omit.
+    let companions = args.companions.unwrap_or(true);
+
+    // With `companions = false` and no `in_impl`, no companion item is left for
+    // `companions_vis` to apply to, so the value would be silently discarded. Reject the
+    // inert pairing. Under `in_impl` the `{fn}_no_cache` sibling method survives and
+    // still takes the visibility, so that combination stays valid.
+    if !companions && !args.in_impl && args.companions_vis.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`companions_vis` has no effect with `companions = false`: it sets the \
+             visibility of the `{fn}_no_cache` and `{fn}_prime_cache` companions, and \
+             `companions = false` emits neither. Remove one of the two.",
         )
         .to_compile_error()
         .into();
@@ -948,7 +989,10 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     // between two sibling methods, so a correct prime is impossible under
     // `in_impl`; do not emit the companion at all. Calling a non-existent prime
     // fn is then a clear compile error instead of a silent no-op (#16/#140).
-    let prime_fn = if args.in_impl {
+    //
+    // `companions = false` suppresses it for the same reason a user would ask for it: to
+    // keep the parent module free of generated free functions (0024).
+    let prime_fn = if args.in_impl || !companions {
         quote! {}
     } else {
         quote! {
@@ -988,7 +1032,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             #now_block
             #do_set_return_block
         }
-        // Prime cached function (omitted for `in_impl` methods)
+        // Prime cached function (omitted for `in_impl` methods and `companions = false`)
         #prime_fn
     };
 

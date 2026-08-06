@@ -125,8 +125,10 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ConcurrentCachedAsync<K,V>` | Async self-synchronizing cache; supertrait `ConcurrentCacheBase` |
 | `ConcurrentCachePeek<K,V>` | `&self` side-effect-free `cache_peek` (plus a defaulted `peek` alias) on concurrent stores |
 | `ConcurrentCachePeekAsync<K,V>` | Async mirror of `ConcurrentCachePeek`: required `async_cache_peek`, defaulted `async_peek` alias |
-| `ConcurrentCacheTtl` | `&self` `ttl()`/`set_ttl()`/`unset_ttl()`/`try_set_ttl()`/`refresh_on_hit()` on concurrent TTL stores |
-| `CacheTtl` | `ttl()` / `set_ttl()` / `unset_ttl()` on single-owner timed stores |
+| `ConcurrentCacheTtl` | `&self` `ttl()`/`set_ttl()`/`unset_ttl()`/`try_set_ttl()` on concurrent TTL stores |
+| `CacheTtl` | `ttl()` / `set_ttl()` / `try_set_ttl()` / `unset_ttl()` on single-owner timed stores |
+| `ConcurrentCacheRefreshOnHit` | `&self` `refresh_on_hit()`/`set_refresh_on_hit()` on concurrent TTL stores; implemented by `RedisCache`, `AsyncRedisCache`, `RedbCache`, `ShardedTtlCache`, `ShardedLruTtlCache` |
+| `CacheRefreshOnHit` | `refresh_on_hit()` / `set_refresh_on_hit()` on single-owner timed stores; implemented by `TtlCache` and `LruTtlCache`, deliberately not by `TtlSortedCache` (its deadline-ordered index cannot refresh an entry's expiry on read) |
 
 **Peek is an in-memory concept.** Both peek traits are implemented by the six sharded stores only
 (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately
@@ -176,7 +178,8 @@ The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseco
 - `result_fallback`: `bool` — on `Err`, return the last cached `Ok` value instead; requires a `Result<T, E>` return type
 - `force_refresh`: unquoted block `{ <bool expr> }` or quoted string `"{ <bool expr> }"` over the function args -- when true, bypasses the cache and recomputes unconditionally. `force_refresh = true` (bare bool) is also accepted.
 - `in_impl`: `bool` — generates a `<fn>_no_cache` sibling and a function-local cache static; suppresses the `_prime_cache` companion (the cache static is function-local and cannot be shared with a sibling)
-- `companions_vis`: string — visibility of the generated `{fn}_no_cache` and `{fn}_prime_cache` companions (e.g. `"pub(crate)"`, `""` for private); defaults to the cached function's own visibility
+- `companions`: `bool` — `false` suppresses the generated `{fn}_no_cache` / `{fn}_prime_cache` companion functions entirely (default `true`, current behavior); composes with `in_impl` rather than conflicting with it
+- `companions_vis`: string — visibility of the generated `{fn}_no_cache` and `{fn}_prime_cache` companions (e.g. `"pub(crate)"`, `""` for private); defaults to the cached function's own visibility; a compile error with `companions = false` off the `in_impl` path, since there is no companion left for it to apply to
 - `map_error` (disk/redis `#[concurrent_cached]` only): unquoted closure `|e| MyErr(e)` or quoted string `"|e| MyErr(e)"` — converts the store error into the function's error type. Optional: when omitted, `.map_err(Into::into)?` is generated, requiring `E: From<StoreError>`.
 
 **`_prime_cache` helpers**: Every macro-generated function `foo(…)` also emits `foo_prime_cache(…)` for manually refreshing cached entries (bypasses the cache and forces re-execution), except `in_impl` methods, for which the `_prime_cache` companion is not generated (the cache static is function-local). `#[once]` functions emit `foo_prime_cache(…)` keeping the cached function's own arguments (the body runs to prime the single stored value, though the arguments do not affect the cache key).
@@ -296,6 +299,7 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `time_stores` (default) | `TtlCache`, `LruTtlCache`, `TtlSortedCache` |
 | `async_core` | Async support marker (no runtime); use with custom async runtimes |
 | `async` | Async support (runtime-agnostic; pulls `async-lock`, no tokio) |
+| `serde` | `serde` + `rmp-serde` codec dependencies for `SerializeCached`/`SerializeCachedAsync` implementations and the IO stores; `redis_store` and `redb_store` enable it transitively |
 | `redis_store` | Synchronous Redis backend |
 | `redis_tokio` | Async Redis backend (Tokio, no TLS); implies `redis_store` + `async` |
 | `redis_tokio_native_tls` | `redis_tokio` + TLS via `native-tls` |

@@ -19,10 +19,15 @@ use syn::{
 /// directing the user to the correct macro. This runs before `FromMeta::from_list`
 /// so the friendly message replaces darling's generic "Unknown field" error.
 ///
-/// The concurrent-only attributes are the I/O-backed store selectors:
+/// The concurrent-only attributes are the store selectors and the store-builder
+/// knobs that only exist on the concurrent path:
 /// - `disk` - selects the redb disk-backed store
 /// - `redis` - selects the Redis-backed store
 /// - `map_error` - converts the store error; only meaningful with `disk`/`redis`
+/// - `shards` - shard count of the default in-memory sharded stores
+/// - `durable` - redb durability setting; only meaningful with `disk`
+/// - `disk_dir` - redb database directory; only meaningful with `disk`
+/// - `cache_prefix_block` - Redis key prefix; only meaningful with `redis`
 pub(super) fn reject_concurrent_only_attrs(
     macro_name: &str,
     attr_args: &[NestedMeta],
@@ -52,6 +57,27 @@ pub(super) fn reject_concurrent_only_attrs(
                 "`map_error` is not supported on `#[{macro_name}]`; \
                  `map_error` converts the store error on the `disk` or `redis` concurrent store. \
                  Use `#[concurrent_cached]` with `disk = true` or `redis = true`."
+            )),
+            "shards" => Some(format!(
+                "`shards` is not supported on `#[{macro_name}]`; \
+                 `shards` sets the shard count of the concurrent in-memory sharded stores, \
+                 and `#[{macro_name}]` stores every entry behind a single lock. \
+                 Use `#[concurrent_cached(shards = ...)]` instead."
+            )),
+            "durable" => Some(format!(
+                "`durable` is not supported on `#[{macro_name}]`; \
+                 `durable` sets the write durability of the redb disk-backed concurrent store. \
+                 Use `#[concurrent_cached(disk = true, durable = ...)]` instead."
+            )),
+            "disk_dir" => Some(format!(
+                "`disk_dir` is not supported on `#[{macro_name}]`; \
+                 `disk_dir` sets the database directory of the redb disk-backed concurrent store. \
+                 Use `#[concurrent_cached(disk = true, disk_dir = ...)]` instead."
+            )),
+            "cache_prefix_block" => Some(format!(
+                "`cache_prefix_block` is not supported on `#[{macro_name}]`; \
+                 `cache_prefix_block` sets the key prefix of the Redis-backed concurrent store. \
+                 Use `#[concurrent_cached(redis = true, cache_prefix_block = ...)]` instead."
             )),
             _ => None,
         };
@@ -832,5 +858,79 @@ pub(super) fn check_with_cache_flag(with_cached_flag: bool, output: &ReturnType)
         // `()` / no return type can never be `Return<T>`
         ReturnType::Default => true,
         ReturnType::Type(_, ty) => !type_is_cached_return(ty),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run `reject_concurrent_only_attrs` over an attribute list written the way a
+    /// user would spell it inside `#[cached(...)]`, returning the rejection message
+    /// (or `None` when the list is accepted).
+    fn rejection_message(macro_name: &str, attrs: &str) -> Option<String> {
+        let tokens: TokenStream2 = attrs.parse().expect("test attribute list must parse");
+        let attr_args = NestedMeta::parse_meta_list(tokens).expect("meta list must parse");
+        reject_concurrent_only_attrs(macro_name, &attr_args)
+            .err()
+            .map(|error| error.to_string())
+    }
+
+    #[test]
+    fn concurrent_only_store_selectors_are_rejected() {
+        for (attrs, attr_name) in [
+            ("disk = true", "disk"),
+            ("redis = true", "redis"),
+            ("map_error = \"|e| e\"", "map_error"),
+        ] {
+            let message = rejection_message("cached", attrs)
+                .unwrap_or_else(|| panic!("`{attr_name}` must be rejected on `#[cached]`"));
+            assert!(
+                message.starts_with(&format!("`{attr_name}` is not supported on `#[cached]`")),
+                "unexpected message for `{attr_name}`: {message}"
+            );
+        }
+    }
+
+    /// The store-builder knobs that only exist on `#[concurrent_cached]` are
+    /// intercepted with the same redirect as the store selectors, instead of
+    /// falling through to darling's generic "Unknown field" error.
+    #[test]
+    fn concurrent_only_store_builder_attrs_are_rejected() {
+        for (attrs, attr_name) in [
+            ("shards = 4", "shards"),
+            ("durable = true", "durable"),
+            ("disk_dir = \"/tmp/x\"", "disk_dir"),
+            (
+                "cache_prefix_block = \"{ \\\"p\\\" }\"",
+                "cache_prefix_block",
+            ),
+        ] {
+            for macro_name in ["cached", "once"] {
+                let message = rejection_message(macro_name, attrs).unwrap_or_else(|| {
+                    panic!("`{attr_name}` must be rejected on `#[{macro_name}]`")
+                });
+                assert!(
+                    message.starts_with(&format!(
+                        "`{attr_name}` is not supported on `#[{macro_name}]`"
+                    )),
+                    "unexpected message for `{attr_name}` on `#[{macro_name}]`: {message}"
+                );
+                assert!(
+                    message.contains("#[concurrent_cached"),
+                    "message for `{attr_name}` must redirect to `#[concurrent_cached]`: {message}"
+                );
+            }
+        }
+    }
+
+    /// Attributes that are legitimately shared with `#[cached]`/`#[once]` must not
+    /// be swept up by the rejection scan.
+    #[test]
+    fn shared_attrs_are_not_rejected() {
+        assert!(
+            rejection_message("cached", "name = \"MY_CACHE\", max_size = 4, ttl_secs = 1")
+                .is_none()
+        );
     }
 }

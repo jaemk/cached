@@ -2,6 +2,75 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The six sharded stores collapse from a `ShardedXBase<K, V, H>` struct plus a
+  `ShardedX<K, V>` alias into a single `ShardedX<K, V, H = DefaultShardHasher>`, mirroring
+  `HashMap<K, V, S = RandomState>`. There is no deprecated alias:
+  `ShardedUnboundCacheBase`, `ShardedLruCacheBase`, `ShardedTtlCacheBase`,
+  `ShardedLruTtlCacheBase`, `ShardedExpiringCacheBase`, and `ShardedExpiringLruCacheBase` no
+  longer exist. Migration is a mechanical rename dropping `Base`.
+- Any thread-safe `std::hash::BuildHasher` now implements `ShardHasher` through a blanket
+  impl, so `std::hash::RandomState` and `ahash::RandomState` are accepted directly by the
+  sharded builders' `.hasher(...)`. `DefaultShardHasher` no longer has its own hand-written
+  `ShardHasher` impl; it implements `BuildHasher` and reaches `ShardHasher` through the
+  blanket path, which also makes it usable with `HashMap::with_hasher` and
+  `LruCacheBuilder::hasher`. A type cannot implement both `BuildHasher` and a hand-written
+  `ShardHasher` (coherence rejects the combination as a duplicate impl); a custom
+  shard-routing hasher must not implement `BuildHasher`.
+- `refresh_on_hit` / `set_refresh_on_hit` split off `CacheTtl` into a new `CacheRefreshOnHit`
+  trait, and off `ConcurrentCacheTtl` into a new `ConcurrentCacheRefreshOnHit` trait.
+  `CacheTtl` / `ConcurrentCacheTtl` keep only `ttl`/`set_ttl`/`try_set_ttl`/`unset_ttl`.
+  `CacheRefreshOnHit` is implemented by `TtlCache` and `LruTtlCache`;
+  `ConcurrentCacheRefreshOnHit` by `RedisCache`, `AsyncRedisCache`, `RedbCache`,
+  `ShardedTtlCache`, and `ShardedLruTtlCache`. `TtlSortedCache` implements neither: its
+  deadline-ordered index cannot refresh an entry's expiry on read, and its previous
+  `set_refresh_on_hit` was a no-op that discarded its argument and always returned `false`.
+  Both new traits are in the prelude. Code calling `refresh_on_hit`/`set_refresh_on_hit`
+  through `CacheTtl`/`ConcurrentCacheTtl` UFCS paths must switch to the new trait; an
+  external store implementing the old combined trait now needs a second impl block.
+- Redis key segments are percent-escaped (`:` -> `%3A`, `%` -> `%25`) so distinct
+  `(namespace, prefix, key)` triples always map to distinct keys; previously an unescaped
+  join let `namespace="a:b", prefix=""` collide with `namespace="a", prefix="b"`. An empty
+  prefix no longer drops its separator: `("ns", "", "k")` now encodes as `ns::k` rather than
+  `ns:k`. This changes the on-wire key for any namespace, prefix, or key containing `:` or
+  `%`; the value envelope's `version` field does not cover key layout, so an old entry is
+  simply not found after upgrading, is recomputed and rewritten at the new key, and the old
+  entry is left to expire on its original TTL.
+
+### Added
+
+- `ConcurrentCachedAsyncExt`, a blanket extension trait over `ConcurrentCachedAsync` with ten
+  `async_`-prefixed aliases (`async_get`, `async_set`, `async_remove`, `async_remove_entry`,
+  `async_delete`, `async_contains`, `async_clear`, `async_reset`, `async_get_or_set_with`,
+  `async_try_get_or_set_with`), mirroring `ConcurrentCachedExt`. In the prelude.
+- `companions = false` attribute on `#[cached]`, `#[once]`, and `#[concurrent_cached]`,
+  suppressing the generated `{fn}_no_cache` / `{fn}_prime_cache` companion functions.
+- `#[concurrent_cached]` accepts `result_fallback` together with `expires`, matching
+  `#[cached]`; the rejection was based on a false premise, since `ShardedExpiringCache` and
+  `ShardedExpiringLruCache` already implement `ConcurrentCloneCached`.
+- `SetMaxSizeError::CapacityOverflow` (the enum is `#[non_exhaustive]`); `try_set_max_size`
+  on the three sharded LRU-bounded stores returns it instead of panicking when `max_size` is
+  near `usize::MAX`. The infallible `set_max_size` still panics in that case, now documented.
+- `#[cached]` / `#[once]` give a targeted redirect for the `shards`, `durable`, `disk_dir`,
+  and `cache_prefix_block` attributes instead of a generic unknown-field error.
+
+### Fixed
+
+- `TtlSortedCache::set_with(..).evict()` now performs the expiry sweep even when `max_size`
+  is configured and the map is under the bound; previously the opt-in was silently discarded
+  in that case.
+- `LruTtlCache`'s two infallible get-or-set paths now count a miss before running the
+  factory, matching `TtlCache`, so a panicking factory records the miss.
+
+### Documentation
+
+- The redis and redb on-wire encoding is documented as a positional MessagePack array (field
+  order is part of the frozen layout, field names are never written), not named fields.
+- `RedbCacheBuilder::ttl` doc corrected: `RedbCache` tracks expiry client-side, `RedisCache`
+  relies on server-side TTL commands (the framing was inverted).
+- `expiring.rs` docs say `max_size`, not the removed `size` macro attribute.
+
 ## [3.0.0-rc.10 / cached_proc_macro 3.0.0-rc.10 / cached_proc_macro_types 3.0.0-rc.10] - 2026-08-03
 
 ### Breaking Changes
