@@ -1087,12 +1087,12 @@ fn evicting_insert_over_the_cap_retains_never_expiring_entries_last() {
     assert_eq!(sorted_keys(&cache), vec![2u32]);
 }
 
-/// An evicting insert that *replaces* an existing key while the cache is at its cap: the map
-/// length never exceeds the cap, so no trim runs, but the sweep still must not be reachable
-/// through this branch (the store only sweeps when it is over the cap). Pins the documented
-/// asymmetry that `.evict()` on a size-limited cache is a no-op unless the insert overflows.
+/// An evicting insert on a size-limited cache that stays within its cap: the map length never
+/// exceeds the bound, so no capacity trim runs, but `.evict()` still sweeps entries that are
+/// already past their TTL. The opt-in drives the expiry sweep independently of size pressure;
+/// capacity enforcement is the separate, unconditional half.
 #[test]
-fn evicting_insert_at_the_cap_without_overflow_does_not_sweep() {
+fn evicting_insert_under_the_cap_sweeps_expired_entries() {
     let (mut cache, events) = events_cache_capped(Duration::from_secs(60), 3);
     cache
         .set_with(1u32, 11u32)
@@ -1104,7 +1104,7 @@ fn evicting_insert_at_the_cap_without_overflow_does_not_sweep() {
         .set();
     std::thread::sleep(std::time::Duration::from_millis(60));
 
-    // Under the cap (2 -> 3) with `.evict()`: no overflow, so the expired key 1 stays.
+    // Under the cap (2 -> 3) with `.evict()`: no overflow, but the expired key 1 is swept.
     cache
         .set_with(3u32, 33u32)
         .ttl(Duration::from_secs(60))
@@ -1112,14 +1112,14 @@ fn evicting_insert_at_the_cap_without_overflow_does_not_sweep() {
         .set();
     assert_eq!(
         cache.cache_size(),
-        3,
-        "a size-limited cache only sweeps when the insert overflows the cap"
+        2,
+        "`.evict()` sweeps expired entries whether or not the insert overflows the cap"
     );
-    assert_eq!(fired(&events), Vec::new());
-    assert_eq!(cache.cache_evictions(), Some(0));
+    assert_eq!(fired(&events), vec![(1u32, 11u32)]);
+    assert_eq!(cache.cache_evictions(), Some(1));
 
-    // An explicit `evict()` still reaps it.
-    assert_eq!(cache.evict(), 1);
+    // The sweep already reaped the only expired entry, so an explicit `evict()` finds nothing.
+    assert_eq!(cache.evict(), 0);
     assert_eq!(fired(&events), vec![(1u32, 11u32)]);
     assert_eq!(cache.cache_evictions(), Some(1));
 }

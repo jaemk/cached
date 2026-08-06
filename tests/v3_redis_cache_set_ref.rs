@@ -71,7 +71,7 @@ mod sync_tests {
             .expect("set_ref");
         assert_eq!(out, ());
 
-        let ttl = raw_ttl_secs(&cache, "v3_setref_sync_unset:k");
+        let ttl = raw_ttl_secs(&cache, ":v3_setref_sync_unset:k");
         assert_eq!(
             ttl, -1,
             "ttl-unset cache_set_ref must store the key without expiry (raw TTL -1), got {ttl}"
@@ -101,7 +101,7 @@ mod sync_tests {
             .cache_set_ref(&key, &"v".to_string())
             .expect("set_ref");
 
-        let ttl = raw_ttl_secs(&cache, "v3_setref_sync_set:k");
+        let ttl = raw_ttl_secs(&cache, ":v3_setref_sync_set:k");
         assert!(
             ttl > 0,
             "ttl-set cache_set_ref must apply a positive expiry via PSETEX, got {ttl}"
@@ -130,7 +130,7 @@ mod sync_tests {
         cache.cache_clear().expect("clear");
 
         let key = "k".to_string();
-        let full_key = "v3_setref_sync_corrupt:k";
+        let full_key = ":v3_setref_sync_corrupt:k";
         // Plant an undecodable value directly.
         let mut conn = raw_conn(&cache);
         let _: () = redis::cmd("SET")
@@ -201,7 +201,7 @@ mod async_tests {
             .expect("set_ref");
         assert_eq!(out, ());
 
-        let ttl = raw_ttl_secs(&cache, "v3_setref_async_unset:k");
+        let ttl = raw_ttl_secs(&cache, ":v3_setref_async_unset:k");
         assert_eq!(
             ttl, -1,
             "ttl-unset async_cache_set_ref must store without expiry (raw TTL -1), got {ttl}"
@@ -229,7 +229,7 @@ mod async_tests {
             .await
             .expect("set_ref");
 
-        let ttl = raw_ttl_secs(&cache, "v3_setref_async_set:k");
+        let ttl = raw_ttl_secs(&cache, ":v3_setref_async_set:k");
         assert!(
             ttl > 0,
             "ttl-set async_cache_set_ref must apply a positive expiry via PSETEX, got {ttl}"

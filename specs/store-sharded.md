@@ -9,8 +9,8 @@ configuration.
 ## SHARD-1
 
 State is split across shards keyed by a `ShardHasher`; concurrent access to different shards does
-not contend. `DefaultShardHasher` is the default. The base type (`Sharded*Base`) plus a public
-alias form the exported surface.
+not contend. `DefaultShardHasher` is the default. Superseded in part by [SHARD-13](#shard-13),
+which collapsed the original base-type-plus-alias pair into a single generic type per store.
 
 ## SHARD-2
 
@@ -41,10 +41,10 @@ See [traits-concurrent.md](traits-concurrent.md).
 
 `ShardedUnboundCache` does not track an evictions counter (it never evicts on its own); see the declined
 [design/0007-unbound-evictions-counter.md](design/0007-unbound-evictions-counter.md). Open
-directions: a read-optimized sharded LRU
-([design/0010-read-optimized-sharded-lru.md](design/0010-read-optimized-sharded-lru.md)) and
-collapsing the `*Base` alias into a defaulted type param
-([design/0015-sharded-base-alias-collapse.md](design/0015-sharded-base-alias-collapse.md)).
+direction: a read-optimized sharded LRU
+([design/0010-read-optimized-sharded-lru.md](design/0010-read-optimized-sharded-lru.md)).
+Collapsing the `*Base` type and its alias into one generic type shipped; see
+[SHARD-13](#shard-13).
 
 ## SHARD-5
 
@@ -133,8 +133,9 @@ hazard it would target, because `s.set(k, v).unwrap()` consumes the return value
 instead on fire-and-forget `s.set(k, v);`, which is the common correct call. The attribute was
 added only to inherent `contains`, matching the existing bare `#[must_use]` on `get`/`peek`.
 
-See [design/0015-sharded-base-alias-collapse.md](design/0015-sharded-base-alias-collapse.md) for
-the `*Base` structure these inherent shims live on.
+The shims are inherent methods on the one generic store type per store family; see
+[SHARD-13](#shard-13) and
+[design/0015-sharded-base-alias-collapse.md](design/0015-sharded-base-alias-collapse.md).
 
 ## SHARD-11
 
@@ -147,3 +148,42 @@ The three LRU-bounded sharded stores' `capacity()` getter (see [SHARD-7](#shard-
 Sharded stores implement no iteration or snapshot capability: no `iter`/`keys`/`values`, unlike
 every single-owner store, which implements `CachedIter`. This is a deliberate limitation. See
 [design/0039-sharded-iteration-snapshot-api.md](design/0039-sharded-iteration-snapshot-api.md).
+
+## SHARD-13
+
+Each sharded store is one generic type with a defaulted hasher parameter,
+`ShardedX<K, V, H = DefaultShardHasher>`, mirroring `std::collections::HashMap<K, V, S =
+RandomState>`. This replaces the `ShardedXBase<K, V, H>` struct plus the two-parameter
+`ShardedX<K, V>` alias described in [SHARD-1](#shard-1). The six `Sharded*Base` names are gone
+from the public API with no deprecated alias; migration is the mechanical rename
+`ShardedXBase` -> `ShardedX`. `ShardedX<K, V>` still names the default-hasher store, so code that
+never spelled a `*Base` name is unaffected. This is a BREAKING change.
+
+`new` and `builder` remain constrained to the default-hasher instantiation
+`ShardedX<K, V, DefaultShardHasher>`, so a `ShardedX::<_, _, H>::new()` turbofish that would
+silently discard `H` still fails to compile; a custom hasher is introduced only through
+`ShardedX::builder().hasher(h)`, which returns a builder whose `build` yields
+`ShardedX<K, V, H>`. Builder type names (`ShardedXBuilder<K, V, H>`) are unchanged. See
+[design/0015-sharded-base-alias-collapse.md](design/0015-sharded-base-alias-collapse.md).
+
+## SHARD-14
+
+`ShardHasher<K>` is blanket-implemented for every `std::hash::BuildHasher` that is
+`Clone + Send + Sync + 'static`, for every `K: Hash`, forwarding to `BuildHasher::hash_one`. The
+same hasher value therefore works on both cache families: `std::hash::RandomState`,
+`ahash::RandomState`, and any other thread-safe `BuildHasher` accepted by the single-owner
+builders' `hasher` method (see [store-lru.md](store-lru.md),
+[design/0001-non-sharded-custom-hasher.md](design/0001-non-sharded-custom-hasher.md)) are now
+accepted by `ShardedXBuilder::hasher` too. `DefaultShardHasher` reaches `ShardHasher` through
+that blanket impl and no longer carries its own; it implements `BuildHasher` instead, so it is
+symmetrically usable as the hash builder of a non-sharded store or a plain `HashMap`.
+
+The upper-32-bit distribution contract of [SHARD-1](#shard-1) is unchanged and is not implied by
+`BuildHasher`: `hash_one` on `std::hash::RandomState` (SipHash-1-3) and on `ahash::RandomState`
+diffuse key entropy across all 64 bits and satisfy it, but a hand-written `BuildHasher` whose
+`finish` leaves the high bits constant still routes every key to shard 0.
+
+Coherence makes the blanket impl exclusive: a type that implements `BuildHasher` can no longer
+also carry a hand-written `ShardHasher` impl. Custom shard routing belongs on a type that does
+not implement `BuildHasher`. This is a BREAKING change. See
+[design/0044-blanket-shardhasher-over-buildhasher.md](design/0044-blanket-shardhasher-over-buildhasher.md).

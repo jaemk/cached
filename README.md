@@ -81,8 +81,19 @@ concurrent stores that manage their own synchronization (the in-memory sharded s
 IO-backed redis and redb stores). `CachedGetOrSetAsync` is narrower: it
 only memoizes an async closure over a synchronous in-memory `Cached` store, via the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
-`async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
-the `async_` prefix already prevents collisions with the sync methods.
+`async_cache_try_get_or_set_with`, and their `_mut` variants).
+
+`ConcurrentCachedAsync` has its own deduplicated aliases on `ConcurrentCachedAsyncExt`
+(`async_get`, `async_set`, `async_remove`, `async_remove_entry`, `async_delete`,
+`async_contains`, `async_clear`, `async_reset`, `async_get_or_set_with`,
+`async_try_get_or_set_with`). They keep the `async_` prefix instead of being bare `get`/`set`,
+because the stores implementing `ConcurrentCachedAsync` also implement the synchronous
+`ConcurrentCached`: bare names would be a second applicable candidate alongside
+`ConcurrentCachedExt` and make `store.get(&k)` ambiguous. Size and metric introspection is not
+aliased there; it is `cache_size` / `cache_is_empty` and the metric readers on
+`ConcurrentCacheBase`, which are callable on an async store with no extension trait imported.
+`CachedGetOrSetAsync` has no alias trait; its `async_` prefix already prevents collisions with
+the sync methods.
 
 **Features**
 
@@ -109,7 +120,7 @@ the `async_` prefix already prevents collisions with the sync methods.
   Implies `async` and `redis_store`, but is runtime-agnostic (`redis/cache-aio` needs only `redis/aio`): pair it with a
   runtime feature (`redis_tokio*` or `redis_smol*`) or the build has no runtime to connect with. Does not enable TLS.
 - `redb_store`: Include disk cache store
-- `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
+- `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, or `#[concurrent_cached(ttl_millis = ...)]` on the default in-memory path. (`#[once]` has its own ungated timer, so `#[once(ttl_secs = ...)]` does NOT require this feature.)
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
 
@@ -191,12 +202,12 @@ For `disk` and `redis` stores, `Result<T, E>` is required. `map_error` is option
 | [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html) | TTL (expiry-ordered) | Optional | Global | No | Yes | No | Yes |
 | [`ExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | No | Yes |
 | [`ExpiringCache`](https://docs.rs/cached/latest/cached/struct.ExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | No | Yes |
-| [`ShardedUnboundCache`](https://docs.rs/cached/latest/cached/type.ShardedUnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
-| [`ShardedLruCache`](https://docs.rs/cached/latest/cached/type.ShardedLruCache.html) | LRU | Yes | No | N/A | Yes | Yes (`Arc`) | Yes |
-| [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes (`Arc`) | Yes |
-| [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes (†) | Yes (`Arc`) | Yes |
-| [`ShardedExpiringCache`](https://docs.rs/cached/latest/cached/type.ShardedExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
-| [`ShardedExpiringLruCache`](https://docs.rs/cached/latest/cached/type.ShardedExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedUnboundCache`](https://docs.rs/cached/latest/cached/struct.ShardedUnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
+| [`ShardedLruCache`](https://docs.rs/cached/latest/cached/struct.ShardedLruCache.html) | LRU | Yes | No | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedTtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes (`Arc`) | Yes |
+| [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedLruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes (†) | Yes (`Arc`) | Yes |
+| [`ShardedExpiringCache`](https://docs.rs/cached/latest/cached/struct.ShardedExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ShardedExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
 
 > "On explicit remove" — `on_evict` fires only on `cache_remove`; there is no capacity eviction or TTL expiry trigger for these stores.
 > † `ShardedLruTtlCacheBuilder::on_evict` requires `K: 'static + V: 'static`; see the builder docs for details.
@@ -214,7 +225,7 @@ Shard structs are padded to 128-byte alignment (covering Intel adjacent-line pre
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
 Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
-> **`*Base` types:** Each sharded store has a corresponding `*Base` generic (`ShardedUnboundCacheBase<K, V, H>`, `ShardedLruCacheBase<K, V, H>`, etc.) parameterized on a custom [`ShardHasher`]. The named aliases (`ShardedUnboundCache`, `ShardedLruCache`, …) use the default hasher and are what most users should reach for. Use the `*Base` types only when implementing a custom `ShardHasher` for non-standard shard routing. Construct a custom-hasher cache through the alias builder and its `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `*Base<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher alias, so a custom hasher is always introduced through `hasher`, never a `*Base::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
+> **Custom shard hashers:** Every sharded store carries a third, defaulted type parameter for its [`ShardHasher`] — `ShardedUnboundCache<K, V, H = DefaultShardHasher>`, `ShardedLruCache<K, V, H = DefaultShardHasher>`, and so on — mirroring `std::collections::HashMap<K, V, S = RandomState>`. Writing `ShardedLruCache<K, V>` therefore gets the default hasher, which is what most users want; name the third parameter only when routing keys through a custom `ShardHasher`. Construct such a cache through the builder's `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `ShardedLruCache<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher instantiation, so a custom hasher is always introduced through `hasher`, never a `ShardedLruCache::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
 
 **Behavioral guarantees**
 

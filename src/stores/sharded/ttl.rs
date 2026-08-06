@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::time::{Duration, Instant};
 use crate::{
     CacheMetrics, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
-    ConcurrentCacheTtl, ConcurrentCached, ConcurrentCloneCached,
+    ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached, ConcurrentCloneCached,
 };
 #[cfg(feature = "async_core")]
 use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
@@ -54,7 +54,7 @@ fn expired_at<V>(entry: &TimedEntry<V>, now: Instant) -> bool {
 /// A fully-concurrent, partitioned, TTL-bounded in-memory cache.
 ///
 /// Wraps an `Arc` — `clone()` is an Arc-share (shared state), not a deep copy.
-/// Use [`deep_clone`](ShardedTtlCacheBase::deep_clone) to get an independent copy.
+/// Use [`deep_clone`](ShardedTtlCache::deep_clone) to get an independent copy.
 ///
 /// **Note**: reads return owned values cloned from under the shard lock, so `V` must
 /// implement `Clone`.
@@ -68,15 +68,17 @@ fn expired_at<V>(entry: &TimedEntry<V>, now: Instant) -> bool {
 /// (via [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict)) to physically remove expired
 /// entries and obtain an accurate live count. Sharded stores do not implement `CachedIter`.
 ///
-/// The runtime TTL controls (`ttl` / `set_ttl` / `try_set_ttl` / `unset_ttl` /
-/// `refresh_on_hit` / `set_refresh_on_hit`) live on
-/// [`ConcurrentCacheTtl`](crate::ConcurrentCacheTtl); import it (or
+/// The runtime TTL controls (`ttl` / `set_ttl` / `try_set_ttl` / `unset_ttl`) live on
+/// [`ConcurrentCacheTtl`](crate::ConcurrentCacheTtl), and the refresh-on-hit controls
+/// (`refresh_on_hit` / `set_refresh_on_hit`) on
+/// [`ConcurrentCacheRefreshOnHit`](crate::ConcurrentCacheRefreshOnHit); import them (or
 /// `cached::prelude::*`) to call them. Builder setters are unaffected.
 ///
-/// This is a type alias for `ShardedTtlCacheBase<K, V, DefaultShardHasher>`.
-/// To use a custom shard hasher, call [`ShardedTtlCache::builder()`] and then
-/// [`hasher`](ShardedTtlCacheBuilder::hasher), which yields a `ShardedTtlCacheBase<K, V, H>`
-/// over your hasher.
+/// The shard-selection hasher `H` defaults to [`DefaultShardHasher`] (ahash-backed when the
+/// `ahash` feature is enabled, otherwise `std::collections::hash_map::RandomState`), so
+/// `ShardedTtlCache<K, V>` names the common case. To use a custom [`ShardHasher`], call
+/// [`ShardedTtlCache::builder()`] and then [`hasher`](ShardedTtlCacheBuilder::hasher), which
+/// switches `H` to your hasher.
 ///
 /// **Note**: this type's inherent methods (`get`, `set`, `remove`, `remove_entry`, `delete`,
 /// `contains`, `peek`) return unwrapped values (`Option<V>`, `bool`, ...) and take call-site
@@ -87,14 +89,11 @@ fn expired_at<V>(entry: &TimedEntry<V>, now: Instant) -> bool {
 /// failed. To reach the fallible trait form instead (which never panics on a fresh insert), name
 /// it explicitly through the trait, e.g. `ConcurrentCached::cache_set(&cache, k, v)` or
 /// `ConcurrentCachedExt::set(&cache, k, v)`.
-pub type ShardedTtlCache<K, V> = ShardedTtlCacheBase<K, V, DefaultShardHasher>;
-
-/// Backing type for [`ShardedTtlCache`] with a generic shard hasher `H`.
-pub struct ShardedTtlCacheBase<K, V, H = DefaultShardHasher> {
+pub struct ShardedTtlCache<K, V, H = DefaultShardHasher> {
     inner: Arc<TtlInner<K, V, H>>,
 }
 
-impl<K, V, H> Clone for ShardedTtlCacheBase<K, V, H> {
+impl<K, V, H> Clone for ShardedTtlCache<K, V, H> {
     /// Arc-share clone — both handles point to the same underlying cache.
     fn clone(&self) -> Self {
         Self {
@@ -103,7 +102,7 @@ impl<K, V, H> Clone for ShardedTtlCacheBase<K, V, H> {
     }
 }
 
-impl<K, V, H> std::fmt::Debug for ShardedTtlCacheBase<K, V, H> {
+impl<K, V, H> std::fmt::Debug for ShardedTtlCache<K, V, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ttl = self.ttl_duration_impl();
         f.debug_struct("ShardedTtlCache")
@@ -113,7 +112,7 @@ impl<K, V, H> std::fmt::Debug for ShardedTtlCacheBase<K, V, H> {
     }
 }
 
-impl<K, V, H> ShardedTtlCacheBase<K, V, H> {
+impl<K, V, H> ShardedTtlCache<K, V, H> {
     /// Resolve the currently configured TTL, independent of hasher bounds.
     ///
     /// Returns `None` when expiry is disabled (entries never expire), otherwise
@@ -124,7 +123,7 @@ impl<K, V, H> ShardedTtlCacheBase<K, V, H> {
     }
 }
 
-impl<K, V> ShardedTtlCacheBase<K, V, DefaultShardHasher>
+impl<K, V> ShardedTtlCache<K, V, DefaultShardHasher>
 where
     K: Hash + Eq,
 {
@@ -150,16 +149,17 @@ where
     ///
     /// The builder starts with the [`DefaultShardHasher`]. To use a custom hasher, call
     /// [`hasher`](ShardedTtlCacheBuilder::hasher) on the returned builder; it switches the
-    /// builder's hasher type and `build` then yields a `ShardedTtlCacheBase` over that hasher.
-    /// `new` and `builder` exist only on the default-hasher alias, so a custom hasher is always
-    /// introduced via `hasher`, never a `ShardedTtlCacheBase::<_, _, H>` turbofish.
+    /// builder's hasher type and `build` then yields a `ShardedTtlCache<K, V, H>` over that
+    /// hasher. `new` and `builder` exist only on the default-hasher instantiation
+    /// `ShardedTtlCache<K, V, DefaultShardHasher>`, so a custom hasher is always introduced
+    /// via `hasher`, never a `ShardedTtlCache::<_, _, H>` turbofish.
     #[must_use]
     pub fn builder() -> ShardedTtlCacheBuilder<K, V, DefaultShardHasher> {
         ShardedTtlCacheBuilder::default()
     }
 }
 
-impl<K, V, H> ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     H: ShardHasher<K>,
@@ -194,7 +194,7 @@ where
     }
 }
 
-impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedTtlCacheBase<K, V, H> {
+impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedTtlCache<K, V, H> {
     /// Return an independent deep copy of this cache — entries and metrics are
     /// duplicated, not shared. In most cases [`Clone::clone`] (Arc-share) is
     /// what you want.
@@ -235,7 +235,7 @@ impl<K: Clone + Hash + Eq, V: Clone, H: ShardHasher<K>> ShardedTtlCacheBase<K, V
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedTtlCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -326,7 +326,7 @@ where
     }
 }
 
-impl<K, V, H: ShardHasher<K>> ShardedTtlCacheBase<K, V, H>
+impl<K, V, H: ShardHasher<K>> ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
 {
@@ -553,17 +553,17 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCacheEvict for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheEvict for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq + Clone,
     H: ShardHasher<K>,
 {
     fn evict(&self) -> usize {
-        ShardedTtlCacheBase::evict(self)
+        ShardedTtlCache::evict(self)
     }
 }
 
-impl<K, V, H> ConcurrentCacheBase for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheBase for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -606,7 +606,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCacheTtl for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCacheTtl for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -628,7 +628,14 @@ where
         let prev = self.inner.ttl_nanos.swap(0, Ordering::Relaxed);
         decode_ttl(prev)
     }
+}
 
+impl<K, V, H> ConcurrentCacheRefreshOnHit for ShardedTtlCache<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+    H: ShardHasher<K>,
+{
     fn refresh_on_hit(&self) -> bool {
         self.inner.refresh.load(Ordering::Relaxed)
     }
@@ -638,7 +645,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCached<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCached<K, V> for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -851,7 +858,7 @@ where
     }
 }
 
-impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachePeek<K, V> for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -864,7 +871,7 @@ where
 
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachePeekAsync<K, V> for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq + Send + Sync,
     V: Clone + Send + Sync,
@@ -879,7 +886,7 @@ where
 
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
-impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCachedAsync<K, V> for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq + Send + Sync,
     V: Clone + Send + Sync,
@@ -925,7 +932,7 @@ where
     }
 }
 
-/// Builder for [`ShardedTtlCacheBase`].
+/// Builder for [`ShardedTtlCache`].
 ///
 /// Unlike the LRU-bounded builders, `ShardedTtlCacheBuilder` has no `per_shard_max_size` method
 /// because `ShardedTtlCache` is unbounded in size — entries expire by TTL, not by capacity.
@@ -1042,13 +1049,13 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
 
     /// Set a callback invoked when an entry is evicted. Fires in five situations:
     /// lazily during [`cache_get`](ConcurrentCached::cache_get) when a TTL-expired entry is
-    /// found and removed; explicitly via [`evict`](ShardedTtlCacheBase::evict); on
+    /// found and removed; explicitly via [`evict`](ShardedTtlCache::evict); on
     /// explicit [`cache_remove`](ConcurrentCached::cache_remove); on
     /// [`cache_remove_entry`](ConcurrentCached::cache_remove_entry); and on
     /// [`cache_set`](ConcurrentCached::cache_set) when the displaced entry is already expired.
-    /// Does **not** fire on [`clear`](ShardedTtlCacheBase::clear);
-    /// use [`cache_clear_with_on_evict`](ShardedTtlCacheBase::cache_clear_with_on_evict) to opt in.
-    /// [`cache_clear_with_on_evict`](ShardedTtlCacheBase::cache_clear_with_on_evict) fires
+    /// Does **not** fire on [`clear`](ShardedTtlCache::clear);
+    /// use [`cache_clear_with_on_evict`](ShardedTtlCache::cache_clear_with_on_evict) to opt in.
+    /// [`cache_clear_with_on_evict`](ShardedTtlCache::cache_clear_with_on_evict) fires
     /// callbacks after releasing the shard lock.
     ///
     /// The closure must be `'static` (its captures cannot borrow from the local stack), but `K`
@@ -1061,8 +1068,8 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
 
     /// Build the cache.
     ///
-    /// Use [`ShardedTtlCache::builder()`] (or [`ShardedTtlCacheBase::builder()`]) to obtain a
-    /// builder, set at least [`ttl`](Self::ttl), then call `.build()`.
+    /// Use [`ShardedTtlCache::builder()`] to obtain a builder, set at least
+    /// [`ttl`](Self::ttl), then call `.build()`.
     ///
     /// # Errors
     ///
@@ -1070,7 +1077,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     /// [`BuildError::InvalidValue`] if the TTL is zero, or [`BuildError`] if the
     /// shard count overflows.
     #[must_use = "the Result from build() must be used"]
-    pub fn build(self) -> Result<ShardedTtlCacheBase<K, V, H>, BuildError>
+    pub fn build(self) -> Result<ShardedTtlCache<K, V, H>, BuildError>
     where
         K: Hash + Eq,
         H: ShardHasher<K>,
@@ -1089,7 +1096,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Ok(ShardedTtlCacheBase {
+        Ok(ShardedTtlCache {
             inner: Arc::new(TtlInner {
                 shards,
                 shard_mask: mask,
@@ -1127,8 +1134,8 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     #[must_use = "the Result from copy_from() must be used"]
     pub fn copy_from<H2: ShardHasher<K>>(
         self,
-        existing: &ShardedTtlCacheBase<K, V, H2>,
-    ) -> Result<ShardedTtlCacheBase<K, V, H>, BuildError>
+        existing: &ShardedTtlCache<K, V, H2>,
+    ) -> Result<ShardedTtlCache<K, V, H>, BuildError>
     where
         K: Clone + Hash + Eq,
         V: Clone,
@@ -1158,7 +1165,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
     }
 }
 
-impl<K, V, H> ConcurrentCloneCached<K, V> for ShardedTtlCacheBase<K, V, H>
+impl<K, V, H> ConcurrentCloneCached<K, V> for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
@@ -1270,7 +1277,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AOrd};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(20))
             .on_evict(move |_, _| {
                 count2.fetch_add(1, AOrd::Relaxed);
@@ -1441,7 +1448,7 @@ mod tests {
             SyncConcurrentCached::cache_set(&old, i, i).expect("insert must succeed");
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let new_cache = ShardedTtlCacheBase::<u32, u32>::builder()
+        let new_cache = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
             .copy_from(&old)
             .unwrap();
@@ -1458,7 +1465,7 @@ mod tests {
         for i in 0..20u32 {
             SyncConcurrentCached::cache_set(&old, i, i * 10).expect("insert must succeed");
         }
-        let new_cache = ShardedTtlCacheBase::<u32, u32>::builder()
+        let new_cache = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
             .copy_from(&old)
             .unwrap();
@@ -1478,7 +1485,7 @@ mod tests {
 
     #[test]
     fn build_rejects_zero_ttl() {
-        let err = ShardedTtlCacheBase::<u32, u32>::builder()
+        let err = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_nanos(0))
             .build();
         assert!(
@@ -1495,7 +1502,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
@@ -1533,7 +1540,7 @@ mod tests {
     #[test]
     fn cache_clear_with_on_evict_counts_evictions_without_callback() {
         // metrics().evictions must not depend on an on_evict observer being attached.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -1565,7 +1572,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .on_evict(move |_, _| {
                 count2.fetch_add(1, Ordering::Relaxed);
@@ -1596,7 +1603,7 @@ mod tests {
         let handle2 = handle.clone();
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .on_evict(move |_, _| {
@@ -1631,7 +1638,7 @@ mod tests {
         // Expiry is sampled once per call, so an entry whose `expires_at` is in the
         // future relative to that sample survives, and one already past it does not —
         // no per-entry re-sampling of the clock.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(2)
             .build()
@@ -1670,7 +1677,7 @@ mod tests {
         // Because `Instant` is monotonic, the `now` sampled a moment later inside `evict`/
         // `retain` is always `>=` the `expires_at` captured here, so both paths must treat
         // it as expired.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(1)
             .build()
@@ -1776,7 +1783,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = Arc::new(AtomicU64::new(0));
         let count2 = count.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(50))
             .shards(1)
             .on_evict(move |_, _| {
@@ -1801,7 +1808,7 @@ mod tests {
 
     #[test]
     fn cache_remove_entry_increments_eviction_counter() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(10))
             .shards(1)
             .build()
@@ -1861,7 +1868,7 @@ mod tests {
 
     #[test]
     fn concurrent_clone_cached_expired_returns_stale_no_eviction() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(50))
             .shards(1)
             .build()
@@ -1901,7 +1908,7 @@ mod tests {
     fn peek_with_expiry_status_no_side_effects() {
         // Build a 1-shard cache so metrics are not split across shards, making
         // counter captures exact.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
             .shards(1)
             .build()
@@ -1944,7 +1951,7 @@ mod tests {
     #[test]
     fn peek_with_expiry_status_stale_entry_no_side_effects() {
         // Insert an entry with a very short TTL, let it expire, then peek it.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(10))
             .shards(1)
             .build()
@@ -1987,7 +1994,7 @@ mod tests {
     #[test]
     fn peek_with_expiry_status_does_not_renew_ttl_under_refresh_on_hit() {
         // peek must not extend the TTL even when refresh_on_hit is enabled.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .refresh_on_hit(true)
             .ttl(Duration::from_millis(10))
             .shards(1)
@@ -2126,7 +2133,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering as AOrd};
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(20))
             .on_evict(move |_, _| {
                 fired2.fetch_add(1, AOrd::Relaxed);
@@ -2174,7 +2181,7 @@ mod tests {
     // moved) and the aggregation (the sum the public API reports).
 
     /// Raw per-shard eviction counters, in shard order.
-    fn shard_eviction_counters<K, V, H>(c: &ShardedTtlCacheBase<K, V, H>) -> Vec<u64> {
+    fn shard_eviction_counters<K, V, H>(c: &ShardedTtlCache<K, V, H>) -> Vec<u64> {
         c.inner
             .shards
             .iter()
@@ -2183,13 +2190,13 @@ mod tests {
     }
 
     /// Index of the shard that owns `k`.
-    fn owning_shard<K, V, H: ShardHasher<K>>(c: &ShardedTtlCacheBase<K, V, H>, k: &K) -> usize {
+    fn owning_shard<K, V, H: ShardHasher<K>>(c: &ShardedTtlCache<K, V, H>, k: &K) -> usize {
         shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
     }
 
     #[test]
     fn evict_counts_land_on_owning_shards_and_aggregate_exactly() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(1))
             .shards(8)
             .build()
@@ -2225,7 +2232,7 @@ mod tests {
 
     #[test]
     fn every_eviction_path_counts_on_the_owning_shard() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(20))
             .shards(8)
             .build()
@@ -2325,7 +2332,7 @@ mod tests {
 
     #[test]
     fn cache_reset_metrics_zeroes_the_per_shard_eviction_counters() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(1))
             .shards(4)
             .build()
@@ -2353,7 +2360,7 @@ mod tests {
 
     #[test]
     fn deep_clone_carries_per_shard_eviction_counts_and_then_diverges() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(1))
             .shards(4)
             .build()
@@ -2398,7 +2405,7 @@ mod tests {
         use std::sync::Mutex;
         let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(30))
             .shards(4)
             .on_evict(move |k: &u32, v: &u32| {
@@ -2444,7 +2451,7 @@ mod tests {
     fn evict_without_callback_returns_count_and_counts_evictions() {
         // The no-callback branch removes in place (`retain` + length delta) and never builds
         // a Vec, so the returned count comes from the length delta -- pin it here.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_millis(30))
             .shards(4)
             .build()
@@ -2482,7 +2489,7 @@ mod tests {
         for with_callback in [false, true] {
             let fired = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let fired2 = fired.clone();
-            let mut builder = ShardedTtlCacheBase::<u32, u32>::builder()
+            let mut builder = ShardedTtlCache::<u32, u32>::builder()
                 .ttl(Duration::from_secs(3600))
                 .shards(4);
             if with_callback {
@@ -2511,7 +2518,7 @@ mod tests {
         for with_callback in [false, true] {
             let fired = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let fired2 = fired.clone();
-            let mut builder = ShardedTtlCacheBase::<u32, u32>::builder()
+            let mut builder = ShardedTtlCache::<u32, u32>::builder()
                 .ttl(Duration::from_secs(3600))
                 .shards(2);
             if with_callback {
@@ -2546,7 +2553,7 @@ mod tests {
 
     #[test]
     fn cache_clear_with_on_evict_without_callback_counts_across_shards() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(8)
             .build()
@@ -2586,7 +2593,7 @@ mod tests {
         // monotonic, so that sample is always >= the `expires_at` pinned here and the entry
         // must be judged expired (`now >= expires_at`), removed, and counted exactly once
         // on its own shard -- the same boundary `evict`/`retain` use.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .build()
@@ -2618,7 +2625,7 @@ mod tests {
     fn refresh_on_hit_get_evicts_at_the_boundary_and_renews_live_entries() {
         // Same boundary on the refresh_on_hit (write-lock) path, which now shares one clock
         // sample between the expiry check and the renewed expires_at stamp.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .refresh_on_hit(true)
             .shards(4)
@@ -2664,7 +2671,7 @@ mod tests {
     #[test]
     fn cache_get_with_expiry_status_uses_the_same_now_boundary() {
         for refresh in [false, true] {
-            let c = ShardedTtlCacheBase::<u32, u32>::builder()
+            let c = ShardedTtlCache::<u32, u32>::builder()
                 .ttl(Duration::from_secs(3600))
                 .refresh_on_hit(refresh)
                 .shards(1)
@@ -2714,7 +2721,7 @@ mod tests {
     /// of two independently built caches differ, so only the `Some`/`None` shape of the
     /// expiry is comparable across caches.
     fn entry_snapshot<H: ShardHasher<u32>>(
-        c: &ShardedTtlCacheBase<u32, u32, H>,
+        c: &ShardedTtlCache<u32, u32, H>,
     ) -> Vec<(u32, u32, bool)> {
         let mut out: Vec<(u32, u32, bool)> = Vec::new();
         for shard in c.inner.shards.iter() {
@@ -2729,7 +2736,7 @@ mod tests {
 
     /// Force a stored entry's `expires_at`, bypassing the TTL stamping.
     fn set_expiry<H: ShardHasher<u32>>(
-        c: &ShardedTtlCacheBase<u32, u32, H>,
+        c: &ShardedTtlCache<u32, u32, H>,
         k: u32,
         expires_at: Option<Instant>,
     ) {
@@ -2740,7 +2747,7 @@ mod tests {
 
     /// `None` when the key is absent, `Some(expires_at)` (itself optional) when stored.
     fn stored_expiry<H: ShardHasher<u32>>(
-        c: &ShardedTtlCacheBase<u32, u32, H>,
+        c: &ShardedTtlCache<u32, u32, H>,
         k: u32,
     ) -> Option<Option<Instant>> {
         let shard = c.shard_of(&k);
@@ -2750,7 +2757,7 @@ mod tests {
 
     /// Keys `0..8` expired, `8..16` live, `16..24` never-expires (`expires_at == None`,
     /// what `unset_ttl` stamps) -- all three kinds mixed into the same shards.
-    fn populate_mixed<H: ShardHasher<u32>>(c: &ShardedTtlCacheBase<u32, u32, H>) {
+    fn populate_mixed<H: ShardHasher<u32>>(c: &ShardedTtlCache<u32, u32, H>) {
         for i in 0..24u32 {
             SyncConcurrentCached::cache_set(c, i, i * 10).expect("insert must succeed");
         }
@@ -2772,7 +2779,7 @@ mod tests {
         let fired: Arc<std::sync::Mutex<Vec<(u32, u32)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let fired2 = fired.clone();
-        let with_cb = ShardedTtlCacheBase::<u32, u32>::builder()
+        let with_cb = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .hasher(FixedShardHasher)
@@ -2781,7 +2788,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let no_cb = ShardedTtlCacheBase::<u32, u32>::builder()
+        let no_cb = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .hasher(FixedShardHasher)
@@ -2861,7 +2868,7 @@ mod tests {
     fn evict_no_callback_length_delta_is_exact_for_all_and_none_expired_shards() {
         // The `before - guard.len()` arithmetic at its two extremes within one call: one
         // shard loses every entry, the other loses none.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(2)
             .hasher(FixedShardHasher)
@@ -2913,7 +2920,7 @@ mod tests {
         for with_callback in [false, true] {
             let fired = Arc::new(AtomicU64::new(0));
             let fired2 = fired.clone();
-            let mut builder = ShardedTtlCacheBase::<u32, u32>::builder()
+            let mut builder = ShardedTtlCache::<u32, u32>::builder()
                 .ttl(Duration::from_secs(3600))
                 .shards(1);
             if with_callback {
@@ -2964,7 +2971,7 @@ mod tests {
         let seen: Arc<std::sync::Mutex<Vec<(u32, u32)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen2 = seen.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .refresh_on_hit(true)
             .shards(1)
@@ -3027,7 +3034,7 @@ mod tests {
         // disabled, `compute_expires_at` is `None`, so a refresh hit must leave the stored
         // expiry exactly as it was -- it must neither clear it (making the entry immortal)
         // nor extend it.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .refresh_on_hit(true)
             .shards(1)
@@ -3075,7 +3082,7 @@ mod tests {
         // entry and to judge the displaced one.
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(1)
             .on_evict(move |_k: &u32, _v: &u32| {
@@ -3126,7 +3133,7 @@ mod tests {
         // against the same `now`.
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(1)
             .on_evict(move |_k: &u32, _v: &u32| {
@@ -3167,7 +3174,7 @@ mod tests {
         const EXPIRE_IN_MS: u64 = 200;
         const START_DELAY_MS: u64 = 50;
 
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(1)
             .build()
@@ -3235,7 +3242,7 @@ mod tests {
         // Runtime TTL changes apply to future stamps only. Entries carry their own
         // `expires_at`, so shrinking the TTL must not retroactively expire live entries and
         // growing it must not revive expired ones.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(1)
             .build()
@@ -3283,7 +3290,7 @@ mod tests {
 
     #[test]
     fn deep_clone_counters_are_independent_of_reset_metrics_on_either_handle() {
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .hasher(FixedShardHasher)
@@ -3366,7 +3373,7 @@ mod tests {
         // on_evict must stay silent.
         let fired = Arc::new(AtomicU64::new(0));
         let fired2 = fired.clone();
-        let src = ShardedTtlCacheBase::<u32, u32>::builder()
+        let src = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .on_evict(move |_k: &u32, _v: &u32| {
@@ -3398,7 +3405,7 @@ mod tests {
             "only the explicit remove fired the callback"
         );
 
-        let dst = ShardedTtlCacheBase::<u32, u32>::builder()
+        let dst = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(4)
             .copy_from(&src)
@@ -3464,7 +3471,7 @@ mod tests {
         // exactly.
         const THREADS: u32 = 8;
         const OPS: u32 = 250;
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(8)
             .build()
@@ -3538,7 +3545,7 @@ mod tests {
     fn peek_contains_and_remove_apply_the_same_now_boundary() {
         // The remaining converted read paths keep `now >= expires_at`, and the
         // non-removing ones stay non-removing.
-        let c = ShardedTtlCacheBase::<u32, u32>::builder()
+        let c = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(3600))
             .shards(1)
             .build()
@@ -3589,7 +3596,7 @@ mod tests {
         // compile-fail harness), so this pins the callable surface: both entry points
         // resolve for a `K: Clone` key and agree on the swept count.
         fn evict_both_ways<K: Clone + Hash + Eq, V: Clone>(c: &ShardedTtlCache<K, V>) -> usize {
-            let via_inherent = ShardedTtlCacheBase::evict(c);
+            let via_inherent = ShardedTtlCache::evict(c);
             let via_trait = ConcurrentCacheEvict::evict(c);
             via_inherent + via_trait
         }

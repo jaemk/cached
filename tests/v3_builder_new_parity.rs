@@ -66,7 +66,7 @@ fn lru_cache_new_matches_builder() {
 #[cfg(feature = "time_stores")]
 #[test]
 fn ttl_cache_new_matches_builder() {
-    use cached::{CacheTtl, Cached, TtlCache, TtlCacheBuilder};
+    use cached::{CacheRefreshOnHit, CacheTtl, Cached, TtlCache, TtlCacheBuilder};
 
     let ttl = Duration::from_secs(60);
     let mut a: TtlCache<u32, u32> = TtlCacheBuilder::new()
@@ -82,9 +82,12 @@ fn ttl_cache_new_matches_builder() {
 
     assert_eq!(CacheTtl::ttl(&a), CacheTtl::ttl(&b));
     assert_eq!(CacheTtl::ttl(&a), Some(ttl));
-    assert_eq!(CacheTtl::refresh_on_hit(&a), CacheTtl::refresh_on_hit(&b));
+    assert_eq!(
+        CacheRefreshOnHit::refresh_on_hit(&a),
+        CacheRefreshOnHit::refresh_on_hit(&b)
+    );
     assert!(
-        CacheTtl::refresh_on_hit(&a),
+        CacheRefreshOnHit::refresh_on_hit(&a),
         "refresh_on_hit(true) set via new() must be wired through to the store"
     );
 
@@ -96,7 +99,7 @@ fn ttl_cache_new_matches_builder() {
 #[cfg(feature = "time_stores")]
 #[test]
 fn lru_ttl_cache_new_matches_builder() {
-    use cached::{CacheTtl, Cached, LruTtlCache, LruTtlCacheBuilder};
+    use cached::{CacheRefreshOnHit, CacheTtl, Cached, LruTtlCache, LruTtlCacheBuilder};
 
     let ttl = Duration::from_secs(60);
     let mut a: LruTtlCache<u32, u32> = LruTtlCacheBuilder::new()
@@ -116,9 +119,12 @@ fn lru_ttl_cache_new_matches_builder() {
     assert_eq!(a.capacity(), 2);
     assert_eq!(CacheTtl::ttl(&a), CacheTtl::ttl(&b));
     assert_eq!(CacheTtl::ttl(&a), Some(ttl));
-    assert_eq!(CacheTtl::refresh_on_hit(&a), CacheTtl::refresh_on_hit(&b));
+    assert_eq!(
+        CacheRefreshOnHit::refresh_on_hit(&a),
+        CacheRefreshOnHit::refresh_on_hit(&b)
+    );
     assert!(
-        CacheTtl::refresh_on_hit(&a),
+        CacheRefreshOnHit::refresh_on_hit(&a),
         "refresh_on_hit(true) set via new() must be wired through to the store"
     );
 
@@ -340,7 +346,9 @@ fn sharded_lru_cache_new_100_yields_8_shards_and_128_capacity() {
 #[cfg(feature = "time_stores")]
 #[test]
 fn sharded_ttl_cache_new_matches_builder() {
-    use cached::{ConcurrentCacheTtl, ShardedTtlCache, ShardedTtlCacheBuilder};
+    use cached::{
+        ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ShardedTtlCache, ShardedTtlCacheBuilder,
+    };
 
     let ttl = Duration::from_secs(60);
     let a: ShardedTtlCache<u32, u32> = ShardedTtlCacheBuilder::new()
@@ -361,11 +369,11 @@ fn sharded_ttl_cache_new_matches_builder() {
     assert_eq!(ConcurrentCacheTtl::ttl(&a), ConcurrentCacheTtl::ttl(&b));
     assert_eq!(ConcurrentCacheTtl::ttl(&a), Some(ttl));
     assert_eq!(
-        ConcurrentCacheTtl::refresh_on_hit(&a),
-        ConcurrentCacheTtl::refresh_on_hit(&b)
+        ConcurrentCacheRefreshOnHit::refresh_on_hit(&a),
+        ConcurrentCacheRefreshOnHit::refresh_on_hit(&b)
     );
     assert!(
-        ConcurrentCacheTtl::refresh_on_hit(&a),
+        ConcurrentCacheRefreshOnHit::refresh_on_hit(&a),
         "refresh_on_hit(true) set via new() must be wired through to the store"
     );
 
@@ -377,7 +385,10 @@ fn sharded_ttl_cache_new_matches_builder() {
 #[cfg(feature = "time_stores")]
 #[test]
 fn sharded_lru_ttl_cache_new_matches_builder() {
-    use cached::{ConcurrentCacheTtl, ShardedLruTtlCache, ShardedLruTtlCacheBuilder};
+    use cached::{
+        ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ShardedLruTtlCache,
+        ShardedLruTtlCacheBuilder,
+    };
 
     let ttl = Duration::from_secs(60);
     let a: ShardedLruTtlCache<u32, u32> = ShardedLruTtlCacheBuilder::new()
@@ -401,11 +412,11 @@ fn sharded_lru_ttl_cache_new_matches_builder() {
     assert_eq!(ConcurrentCacheTtl::ttl(&a), ConcurrentCacheTtl::ttl(&b));
     assert_eq!(ConcurrentCacheTtl::ttl(&a), Some(ttl));
     assert_eq!(
-        ConcurrentCacheTtl::refresh_on_hit(&a),
-        ConcurrentCacheTtl::refresh_on_hit(&b)
+        ConcurrentCacheRefreshOnHit::refresh_on_hit(&a),
+        ConcurrentCacheRefreshOnHit::refresh_on_hit(&b)
     );
     assert!(
-        ConcurrentCacheTtl::refresh_on_hit(&a),
+        ConcurrentCacheRefreshOnHit::refresh_on_hit(&a),
         "refresh_on_hit(true) set via new() must be wired through to the store"
     );
 
@@ -622,14 +633,14 @@ impl cached::ShardHasher<u32> for KeyIsShardHasher {
 
 #[test]
 fn sharded_unbound_cache_new_hasher_matches_builder() {
-    use cached::{ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder};
+    use cached::{ShardedUnboundCache, ShardedUnboundCacheBuilder};
 
-    let a: ShardedUnboundCacheBase<u32, u32, KeyIsShardHasher> = ShardedUnboundCacheBuilder::new()
+    let a: ShardedUnboundCache<u32, u32, KeyIsShardHasher> = ShardedUnboundCacheBuilder::new()
         .shards(4)
         .hasher(KeyIsShardHasher)
         .build()
         .unwrap();
-    let b: ShardedUnboundCacheBase<u32, u32, KeyIsShardHasher> = ShardedUnboundCache::builder()
+    let b: ShardedUnboundCache<u32, u32, KeyIsShardHasher> = ShardedUnboundCache::builder()
         .shards(4)
         .hasher(KeyIsShardHasher)
         .build()

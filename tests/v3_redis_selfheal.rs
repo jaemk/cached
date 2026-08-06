@@ -51,7 +51,7 @@ mod sync_tests {
         };
         let mut conn = raw_conn(&cache);
         let key = "k".to_string();
-        let full_key = "v3_selfheal_sync_del:k";
+        let full_key = ":v3_selfheal_sync_del:k";
 
         let _: () = redis::cmd("SET")
             .arg(full_key)
@@ -81,7 +81,7 @@ mod sync_tests {
         let cache = Arc::new(cache);
         let mut conn = raw_conn(&cache);
         let key = "racekey".to_string();
-        let full_key = "v3_selfheal_sync_race:racekey";
+        let full_key = ":v3_selfheal_sync_race:racekey";
 
         for round in 0..ROUNDS {
             // Inject a corrupt entry for this round.
@@ -159,7 +159,7 @@ mod async_tests {
         let cache = Arc::new(cache);
         let mut conn = raw_conn(&cache);
         let key = "racekey".to_string();
-        let full_key = "v3_selfheal_async_race:racekey";
+        let full_key = ":v3_selfheal_async_race:racekey";
 
         for round in 0..ROUNDS {
             let _: () = redis::cmd("SET")

@@ -42,3 +42,12 @@ Builder-side resolved-path introspection and a configurable temp-dir fallback re
 [design/0005-store-error-consistency.md](design/0005-store-error-consistency.md)). Previously
 `{e}` rendered only the bare variant string (e.g. "Storage error"); `Debug` already showed the
 cause. `Display` text is not semver-guarded, so this is a non-breaking change.
+
+## REDB-6
+
+Stored entries are MessagePack in the compact (non-named) form: every write goes through
+`rmp_serde::to_vec`, never `to_vec_named`, so an entry is a positional 2-element array of `value`
+then `created_at` and the field names are not on the wire. Field order is part of the frozen 3.x
+on-disk layout, alongside the version in the file name and the redb table name: reordering,
+inserting or removing a field reinterprets every stored entry and must bump `DISK_FILE_VERSION`.
+`tests/frozen_format_golden.rs` pins the serialized bytes (no server required).

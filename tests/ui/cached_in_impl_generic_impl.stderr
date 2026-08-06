@@ -1,0 +1,13 @@
+error[E0401]: can't use generic parameters from outer item
+  --> tests/ui/cached_in_impl_generic_impl.rs:13:24
+   |
+ 5 | impl<T: Clone> Holder<T> {
+   |      - type parameter from outer item
+...
+13 |     fn value(&self) -> T {
+   |        -----           ^ use of generic parameter from outer item
+   |        |
+   |        generic parameter used in this inner static item
+   |
+   = note: nested items are independent from their parent item for everything except for privacy and name resolution
+   = note: a `static` is a separate item from the item that contains it

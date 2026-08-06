@@ -707,7 +707,8 @@ fn sharded_expiring_lru_copy_from_starts_from_clean_counters() {
 mod refresh_on_hit {
     use super::*;
     use cached::{
-        CacheTtl, ConcurrentCachePeek, ConcurrentCacheTtl, LruTtlCache, ShardedLruTtlCache,
+        CacheTtl, ConcurrentCachePeek, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl,
+        LruTtlCache, ShardedLruTtlCache,
     };
     use std::time::Duration;
 

@@ -31,10 +31,9 @@ The `connection_string()` getter returns a redacted value (credentials masked) v
 Errors are `RedisCacheError` (build: `RedisCacheBuildError`) with named, struct-style variants,
 per [design/0005-store-error-consistency.md](design/0005-store-error-consistency.md). Optional
 support: `redis_connection_manager`, `redis_async_cache` (RESP3 client-side caching). Runtime x
-TLS feature axes and namespace/key escaping are open directions
-([design/0017-redis-feature-axes.md](design/0017-redis-feature-axes.md),
-[design/0018-redis-key-escaping.md](design/0018-redis-key-escaping.md)). See
-[cargo-features.md](cargo-features.md).
+TLS feature axes remain an open direction
+([design/0017-redis-feature-axes.md](design/0017-redis-feature-axes.md)); namespace/key escaping
+shipped in 3.0, see [REDIS-6](#redis-6). See [cargo-features.md](cargo-features.md).
 
 ## REDIS-5
 
@@ -43,3 +42,31 @@ TLS feature axes and namespace/key escaping are open directions
 `RedbCacheError` / `RedbCacheBuildError` ([REDB-5](store-redb.md#redb-5)), per
 [design/0005-store-error-consistency.md](design/0005-store-error-consistency.md). `Display` text
 is not semver-guarded, so this is a non-breaking change.
+
+## REDIS-6
+
+Keys are `{namespace}:{prefix}:{key}` with fixed arity (every field contributes a field and a
+separator, so an empty namespace writes `:{prefix}:{key}`) and each field percent-escaped
+(`:` -> `%3A`, `%` -> `%25`). Distinct (namespace, prefix, key) triples therefore always map to
+distinct Redis keys. Trailing colons on the namespace are trimmed, so `"ns"` and `"ns:"` name the
+same namespace: injectivity is over that canonical namespace. `cache_clear` scans a `SCAN MATCH`
+glob built from the same escaped fields through the same framing (then glob-escaped) so it covers
+exactly this cache's keys: a differently-split namespace/prefix pair is out of scope, and so is a
+cache whose namespace equals a namespace-less cache's prefix (the scope is `:{prefix}:*`, which no
+non-empty namespace can produce). Per
+[design/0018-redis-key-escaping.md](design/0018-redis-key-escaping.md).
+
+Breaking in 3.0: a cache with an empty namespace, or whose namespace, prefix or keys contain `:`
+or `%`, writes at a different key than in 2.x. The value envelope's `version` field
+([REDIS-7](#redis-7)) lives inside the value and so cannot describe the key layout: pre-upgrade
+entries are simply not found, and are recomputed and rewritten at the new key. They are not
+deleted by the upgrade; they expire with their TTL, or persist until removed by hand when the
+cache has none.
+
+## REDIS-7
+
+The stored value envelope is MessagePack in its compact (non-named) form: every write goes
+through `rmp_serde::to_vec`, never `to_vec_named`, so an entry is a positional 2-element array of
+`value` then `version` and the field names are not on the wire. Field order is part of the frozen
+3.x layout: reordering, inserting or removing a field reinterprets every stored entry and must
+bump the embedded version. `tests/frozen_format_golden.rs` pins the serialized bytes.

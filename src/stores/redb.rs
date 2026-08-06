@@ -1,6 +1,8 @@
 use crate::time::Duration;
 use crate::time::SystemTime;
-use crate::{ConcurrentCacheBase, ConcurrentCacheTtl, ConcurrentCached};
+use crate::{
+    ConcurrentCacheBase, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached,
+};
 use directories::BaseDirs;
 use parking_lot::Mutex;
 use redb::{Builder, Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
@@ -96,10 +98,15 @@ static DISK_FILE_PREFIX: &str = "cached_disk_cache";
 // were the sled-backed DiskCache; those files are incompatible and are never read).
 //
 // Stability: the on-disk format (this version in the file name, the redb table
-// name, and the MessagePack `CachedDiskValue` field names/order) is stable for the
-// 3.x series — files written by any 3.x release remain readable by every later 3.x
-// release. A format change bumps this version (isolating old files rather than
-// corrupting them) and is otherwise reserved for a major release.
+// name, and the MessagePack layout of `CachedDiskValue`) is stable for the 3.x
+// series: files written by any 3.x release remain readable by every later 3.x
+// release. Values are written with `rmp_serde::to_vec`, never `to_vec_named`, so
+// the layout is a POSITIONAL array of `value` then `created_at`: the field names
+// are not on the wire and the field ORDER is part of the frozen format.
+// Reordering, inserting or removing a field of `CachedDiskValue` reinterprets
+// every stored entry and is a format change like any other. A format change bumps
+// this version (isolating old files rather than corrupting them) and is otherwise
+// reserved for a major release.
 const DISK_FILE_VERSION: u64 = 3;
 
 impl<K, V> Default for RedbCacheBuilder<K, V>
@@ -149,9 +156,10 @@ where
     ///
     /// **TTL is optional.** When no TTL is set (the default), entries never
     /// expire and are kept until explicitly removed or the cache is cleared.
-    /// Unlike `RedbCache`, which tracks expiry client-side via a stored `created_at`
-    /// timestamp, [`RedisCache`](crate::stores::RedisCache) relies on server-side TTL
-    /// commands (`PSETEX`/`PEXPIRE`). Both stores make TTL optional in 3.0.
+    /// `RedbCache` tracks expiry client-side via a stored `created_at` timestamp,
+    /// unlike [`RedisCache`](crate::stores::RedisCache), which relies on
+    /// server-side TTL commands (`PSETEX`/`PEXPIRE`). Both stores make TTL
+    /// optional in 3.0.
     ///
     /// Overrides any previously set ttl/ttl_secs/ttl_millis on this builder.
     #[must_use]
@@ -563,10 +571,17 @@ fn reject_if_symlink(path: &Path, what: &str) -> Result<(), std::io::Error> {
 /// # Format stability
 ///
 /// The on-disk format (the version embedded in the cache file name, the redb table
-/// name, and the MessagePack field layout of stored values) is stable for the 3.x
+/// name, and the MessagePack layout of stored values) is stable for the 3.x
 /// series: files written by any 3.x release remain readable by every later 3.x
 /// release. A format change bumps the embedded version, which isolates old files
 /// rather than corrupting them, and is otherwise reserved for a major release.
+///
+/// Values are encoded with MessagePack in its compact (non-named) form: each
+/// entry is a **positional array** of `value` then `created_at`, with the field
+/// names absent from the wire. Field order is part of the frozen layout:
+/// reordering, inserting or removing a field of the stored value reinterprets
+/// every existing entry, so it is a format change and must bump the embedded
+/// version, exactly as a type change would.
 pub struct RedbCache<K, V> {
     pub(super) ttl: Mutex<Option<Duration>>,
     pub(super) refresh: AtomicBool,
@@ -773,6 +788,9 @@ impl RedbCacheError {
     }
 }
 
+/// Stored entry. Serialized with `rmp_serde::to_vec` (never `to_vec_named`), so
+/// the on-disk form is a 2-element positional MessagePack array of `value` then
+/// `created_at`. Field order is frozen for 3.x: see `DISK_FILE_VERSION`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedDiskValue<V> {
     value: V,
@@ -794,8 +812,9 @@ impl<V> CachedDiskValue<V> {
 
 /// Borrowed counterpart of [`CachedDiskValue`] used by `cache_set_ref` to
 /// serialize from a `&V` without cloning. It serializes to the same bytes as
-/// `CachedDiskValue::new(value)` (same field names and order), so values written
-/// through either path deserialize identically.
+/// `CachedDiskValue::new(value)`: the encoding is positional, so the two structs
+/// must keep the same fields in the same order for values written through either
+/// path to deserialize identically.
 #[derive(serde::Serialize)]
 struct CachedDiskValueRef<'a, V> {
     value: &'a V,
@@ -1340,7 +1359,9 @@ impl<K, V> ConcurrentCacheTtl for RedbCache<K, V> {
     fn unset_ttl(&self) -> Option<Duration> {
         self.ttl.lock().take()
     }
+}
 
+impl<K, V> ConcurrentCacheRefreshOnHit for RedbCache<K, V> {
     fn refresh_on_hit(&self) -> bool {
         self.refresh.load(Ordering::Relaxed)
     }
@@ -1591,6 +1612,49 @@ mod tests {
         () => {
             TempDir::new().expect("Error creating temp dir")
         };
+    }
+
+    /// The stored entry is MessagePack in its compact form: a positional
+    /// 2-element array of `value` then `created_at`. The field names are not on
+    /// the wire, so the field ORDER is what a reader depends on. Reordering the
+    /// fields of `CachedDiskValue`, or switching a write site to
+    /// `rmp_serde::to_vec_named`, changes these bytes and makes every entry in an
+    /// existing 3.x cache file undecodable without a `DISK_FILE_VERSION` bump.
+    #[test]
+    fn cached_disk_value_is_a_positional_array_of_value_then_created_at() {
+        let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let stored = CachedDiskValue {
+            value: "hi".to_string(),
+            created_at,
+        };
+        let bytes = rmp_serde::to_vec(&stored).expect("serialize");
+        // 0x92: 2-element fixarray (a named encoding would start 0x82, fixmap).
+        // 0xa2 "hi": 2-byte fixstr. Then `created_at`, itself a positional
+        // 2-element array of seconds-since-epoch and sub-second nanoseconds.
+        assert_eq!(
+            bytes,
+            vec![0x92, 0xa2, b'h', b'i', 0x92, 0x01, 0x00],
+            "the frozen 3.x entry is a positional array of `value` then `created_at`"
+        );
+
+        // The same bytes decode as a positional tuple in that order.
+        let (value, (secs, nanos)): (String, (u64, u32)) =
+            rmp_serde::from_slice(&bytes).expect("positional decode");
+        assert_eq!(value, "hi");
+        assert_eq!((secs, nanos), (1, 0));
+
+        // The borrowed entry used by `cache_set_ref` must be byte-identical,
+        // which requires it to keep the same fields in the same order.
+        let borrowed = "hi".to_string();
+        let borrowed_bytes = rmp_serde::to_vec(&CachedDiskValueRef {
+            value: &borrowed,
+            created_at,
+        })
+        .expect("serialize borrowed");
+        assert_eq!(
+            borrowed_bytes, bytes,
+            "`cache_set_ref` must write the same positional layout as `cache_set`"
+        );
     }
 
     #[test]

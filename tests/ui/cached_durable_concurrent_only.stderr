@@ -1,0 +1,5 @@
+error: `durable` is not supported on `#[cached]`; `durable` sets the write durability of the redb disk-backed concurrent store. Use `#[concurrent_cached(disk = true, durable = ...)]` instead.
+ --> tests/ui/cached_durable_concurrent_only.rs:4:10
+  |
+4 | #[cached(durable = true)]
+  |          ^^^^^^^

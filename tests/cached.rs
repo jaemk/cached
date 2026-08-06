@@ -55,13 +55,13 @@ fn compile_fail_unsync_reads_timed() {
     t.compile_fail("tests/ui/unsync_reads_timed_cache.rs");
 }
 
-// `new`/`builder` on each sharded `*Base` are constrained to the default-hasher
-// specialization, so a `Base::<_, _, CustomHasher>::{new,builder}()` turbofish (which
+// `new`/`builder` on each sharded store are constrained to the default-hasher
+// instantiation, so a `ShardedX::<_, _, CustomHasher>::{new,builder}()` turbofish (which
 // would silently drop the custom hasher) must not compile.
 #[test]
 fn compile_fail_sharded_constructor() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/sharded_base_custom_hasher_constructor.rs");
+    t.compile_fail("tests/ui/sharded_custom_hasher_constructor.rs");
 }
 
 // `#[cached]` clones the cached value on every insert and cache hit, so the
@@ -205,7 +205,6 @@ fn compile_fail_macro_arg_validation() {
     t.compile_fail("tests/ui/concurrent_cached_expires_refresh_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_cache_none_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_expires_cache_err_exclusive.rs");
-    t.compile_fail("tests/ui/concurrent_cached_result_fallback_expires_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_result_fallback_redis_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_result_fallback_disk_exclusive.rs");
     t.compile_fail("tests/ui/concurrent_cached_result_fallback_requires_ttl.rs");
@@ -1041,7 +1040,12 @@ mod time_store_tests {
         assert_eq!(vec!["b".to_string()], b);
     }
 
-    #[cached(ttl_secs = 2, sync_writes = "default", key = "u32", convert = "{ 1 }")]
+    // The ttl only has to outlast the whole test: the assertions are about
+    // `sync_writes` serializing the three callers onto one computed value, not about
+    // expiry. A 1s sleep against a 2s ttl left ~1s of margin, so on a loaded machine
+    // the entry could expire before the later threads read it and they would
+    // recompute, failing the equality checks.
+    #[cached(ttl_secs = 30, sync_writes = "default", key = "u32", convert = "{ 1 }")]
     fn cached_sync_writes(s: String) -> Vec<String> {
         vec![s]
     }
@@ -2249,7 +2253,7 @@ mod sharded_ttl_tests {
     #[test]
     fn sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
-        use cached::{ConcurrentCacheTtl, ShardedLruTtlCache, ShardedTtlCache};
+        use cached::{ConcurrentCacheRefreshOnHit, ShardedLruTtlCache, ShardedTtlCache};
 
         let ttl = ShardedTtlCache::<u32, u32>::builder()
             .ttl(Duration::from_secs(60))
@@ -2331,7 +2335,7 @@ mod sharded_ttl_tests {
     #[test]
     fn non_sharded_ttl_builders_accept_refresh_on_hit() {
         use cached::time::Duration;
-        use cached::{CacheTtl, LruTtlCache, TtlCache};
+        use cached::{CacheRefreshOnHit, LruTtlCache, TtlCache};
 
         // Primary `.refresh_on_hit(true)` setter.
         let ttl = TtlCache::<u32, u32>::builder()
@@ -2339,7 +2343,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(true)
             .build()
             .expect("valid config");
-        assert!(CacheTtl::refresh_on_hit(&ttl));
+        assert!(CacheRefreshOnHit::refresh_on_hit(&ttl));
 
         let lru_ttl = LruTtlCache::<u32, u32>::builder()
             .max_size(64)
@@ -2347,7 +2351,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(true)
             .build()
             .expect("valid config");
-        assert!(CacheTtl::refresh_on_hit(&lru_ttl));
+        assert!(CacheRefreshOnHit::refresh_on_hit(&lru_ttl));
 
         // Both setters default to / can clear the flag.
         let ttl_off = TtlCache::<u32, u32>::builder()
@@ -2355,7 +2359,7 @@ mod sharded_ttl_tests {
             .refresh_on_hit(false)
             .build()
             .expect("valid config");
-        assert!(!CacheTtl::refresh_on_hit(&ttl_off));
+        assert!(!CacheRefreshOnHit::refresh_on_hit(&ttl_off));
     }
 
     #[test]
@@ -3099,7 +3103,7 @@ mod concurrent_cached_default_with_max_size {
 // `ttl = T` selects `ShardedTtlCache`.
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod concurrent_cached_default_with_ttl {
-    use cached::ConcurrentCacheTtl;
+    use cached::ConcurrentCacheRefreshOnHit;
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3137,7 +3141,7 @@ mod concurrent_cached_default_with_ttl {
 // `max_size = N, ttl = T` selects `ShardedLruTtlCache`.
 #[cfg(all(feature = "proc_macro", feature = "time_stores"))]
 mod concurrent_cached_default_with_max_size_and_ttl {
-    use cached::ConcurrentCacheTtl;
+    use cached::ConcurrentCacheRefreshOnHit;
     use cached::macros::concurrent_cached;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4730,7 +4734,7 @@ mod redis_tests {
                     .get_connection()
                     .expect("redis connection for TTL probe");
                 redis::cmd("TTL")
-                    .arg(format!("{prefix}:{key}"))
+                    .arg(format!(":{prefix}:{key}"))
                     .query(&mut conn)
                     .expect("TTL query")
             };
@@ -4806,7 +4810,7 @@ mod redis_tests {
                     .get_connection()
                     .expect("redis connection for TTL probe");
                 redis::cmd("TTL")
-                    .arg(format!("{prefix}:{key}"))
+                    .arg(format!(":{prefix}:{key}"))
                     .query(&mut conn)
                     .expect("TTL query")
             };
@@ -4879,7 +4883,7 @@ mod redis_tests {
                     .get_connection()
                     .expect("redis connection for TTL probe");
                 redis::cmd("TTL")
-                    .arg(format!("{prefix}:{key}"))
+                    .arg(format!(":{prefix}:{key}"))
                     .query(&mut conn)
                     .expect("TTL query")
             };
@@ -4983,13 +4987,13 @@ mod redis_tests {
             );
         }
 
-        // `ConcurrentCacheTtl::refresh_on_hit` on AsyncRedisCache reads the real
+        // `ConcurrentCacheRefreshOnHit::refresh_on_hit` on AsyncRedisCache reads the real
         // AtomicBool through trait dispatch (previously the trait default always
         // returned false even after set_refresh_on_hit(true)).
         #[cfg(feature = "redis_tokio")]
         #[tokio::test]
         async fn async_redis_refresh_on_hit_trait_getter_reflects_setter() {
-            use cached::ConcurrentCacheTtl;
+            use cached::ConcurrentCacheRefreshOnHit;
 
             let cache = AsyncRedisCache::<String, String>::builder("async_test_refresh_getter")
                 .ttl(Duration::from_secs(30))
@@ -4998,16 +5002,16 @@ mod redis_tests {
                 .await
                 .expect("build async cache");
 
-            assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
-            let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+            assert!(!ConcurrentCacheRefreshOnHit::refresh_on_hit(&cache));
+            let prev = ConcurrentCacheRefreshOnHit::set_refresh_on_hit(&cache, true);
             assert!(!prev, "previous flag must be false");
             assert!(
-                ConcurrentCacheTtl::refresh_on_hit(&cache),
+                ConcurrentCacheRefreshOnHit::refresh_on_hit(&cache),
                 "trait getter must reflect set_refresh_on_hit(true)"
             );
-            let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+            let prev = ConcurrentCacheRefreshOnHit::set_refresh_on_hit(&cache, false);
             assert!(prev, "previous flag must be true");
-            assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+            assert!(!ConcurrentCacheRefreshOnHit::refresh_on_hit(&cache));
         }
 
         // ConcurrentCacheBase::cache_size / len / is_empty on the ASYNC Redis store
@@ -5057,7 +5061,9 @@ mod redis_tests {
     }
 
     // Requires a live Redis server (provided by CI).
-    use cached::{ConcurrentCacheTtl, ConcurrentCached, SerializeCached};
+    use cached::{
+        ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached, SerializeCached,
+    };
 
     #[test]
     fn test_redis_cache_clear_scoped() {
@@ -5160,7 +5166,8 @@ mod redis_tests {
     }
 
     // Read the raw Redis `TTL` (in seconds) for the namespace-less key
-    // `{prefix}:{key}` directly via the redis client. Returns -1 for a
+    // `:{prefix}:{key}` directly via the redis client (the empty namespace field
+    // keeps its separator). Returns -1 for a
     // persistent (no-expiry) key, -2 if the key is absent, or the remaining
     // seconds otherwise.
     fn raw_ttl_secs(cache: &RedisCache<String, String>, prefix: &str, key: &str) -> i64 {
@@ -5170,7 +5177,7 @@ mod redis_tests {
         let mut conn = client
             .get_connection()
             .expect("redis connection for TTL probe");
-        let full_key = format!("{prefix}:{key}");
+        let full_key = format!(":{prefix}:{key}");
         redis::cmd("TTL")
             .arg(full_key)
             .query(&mut conn)
@@ -5461,26 +5468,26 @@ mod redis_tests {
                 .expect("build cache");
 
         // Trait getter starts false (builder default).
-        assert!(!ConcurrentCacheTtl::refresh_on_hit(&cache));
+        assert!(!ConcurrentCacheRefreshOnHit::refresh_on_hit(&cache));
 
         // set_refresh_on_hit returns the previous flag (the AtomicBool swap value).
-        let prev = ConcurrentCacheTtl::set_refresh_on_hit(&cache, true);
+        let prev = ConcurrentCacheRefreshOnHit::set_refresh_on_hit(&cache, true);
         assert!(!prev, "previous flag must be false");
 
         // Trait getter now reports the value set via trait dispatch.
         assert!(
-            ConcurrentCacheTtl::refresh_on_hit(&cache),
+            ConcurrentCacheRefreshOnHit::refresh_on_hit(&cache),
             "trait-level refresh_on_hit getter must reflect set_refresh_on_hit(true)"
         );
 
         // Round-trip back to false: getter reflects it, swap reports the real prior value.
-        let prev2 = ConcurrentCacheTtl::set_refresh_on_hit(&cache, false);
+        let prev2 = ConcurrentCacheRefreshOnHit::set_refresh_on_hit(&cache, false);
         assert!(
             prev2,
             "set_refresh_on_hit must report the real prior flag (true)"
         );
         assert!(
-            !ConcurrentCacheTtl::refresh_on_hit(&cache),
+            !ConcurrentCacheRefreshOnHit::refresh_on_hit(&cache),
             "trait-level refresh_on_hit getter must reflect set_refresh_on_hit(false)"
         );
     }
@@ -6681,7 +6688,7 @@ fn test_ttl_cache_builder_build() {
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_lru_ttl_cache_builder_build() {
-    use cached::{CacheTtl, Cached, LruTtlCache};
+    use cached::{CacheRefreshOnHit, Cached, LruTtlCache};
     let mut cache = LruTtlCache::<u32, u32>::builder()
         .max_size(4)
         .ttl(Duration::from_secs(60))
@@ -6690,7 +6697,7 @@ fn test_lru_ttl_cache_builder_build() {
         .unwrap();
     cache.cache_set(1, 10);
     assert_eq!(cache.cache_get(&1), Some(&10));
-    assert!(CacheTtl::refresh_on_hit(&cache));
+    assert!(CacheRefreshOnHit::refresh_on_hit(&cache));
 }
 
 #[test]
@@ -6731,57 +6738,57 @@ fn test_unbound_cache_size() {
     assert_eq!(cache.cache_size(), 2);
 }
 
-// ── `CacheTtl::refresh_on_hit()` and `CacheTtl::set_refresh_on_hit()` ────────
+// ── `CacheRefreshOnHit::refresh_on_hit()` and `CacheRefreshOnHit::set_refresh_on_hit()` ────────
 
 // Confirms the inherent shadowing methods are gone and the trait methods work.
 // `set_refresh_on_hit` now returns the PREVIOUS value (trait contract).
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_ttl_cache_refresh_getter_and_setter() {
-    use cached::{CacheTtl, TtlCache};
+    use cached::{CacheRefreshOnHit, TtlCache};
     let mut cache = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
         .refresh_on_hit(false)
         .build()
         .unwrap();
-    assert!(!CacheTtl::refresh_on_hit(&cache));
+    assert!(!CacheRefreshOnHit::refresh_on_hit(&cache));
     // set_refresh_on_hit returns the PREVIOUS value.
-    let prev = CacheTtl::set_refresh_on_hit(&mut cache, true);
+    let prev = CacheRefreshOnHit::set_refresh_on_hit(&mut cache, true);
     assert!(!prev, "previous value was false");
-    assert!(CacheTtl::refresh_on_hit(&cache));
-    let prev = CacheTtl::set_refresh_on_hit(&mut cache, false);
+    assert!(CacheRefreshOnHit::refresh_on_hit(&cache));
+    let prev = CacheRefreshOnHit::set_refresh_on_hit(&mut cache, false);
     assert!(prev, "previous value was true");
-    assert!(!CacheTtl::refresh_on_hit(&cache));
+    assert!(!CacheRefreshOnHit::refresh_on_hit(&cache));
 }
 
 // Same contract for LruTtlCache.
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_lru_ttl_cache_refresh_getter_and_setter() {
-    use cached::{CacheTtl, LruTtlCache};
+    use cached::{CacheRefreshOnHit, LruTtlCache};
     let mut cache = LruTtlCache::<u32, u32>::builder()
         .max_size(4)
         .ttl(Duration::from_secs(60))
         .refresh_on_hit(false)
         .build()
         .unwrap();
-    assert!(!CacheTtl::refresh_on_hit(&cache));
+    assert!(!CacheRefreshOnHit::refresh_on_hit(&cache));
     // set_refresh_on_hit returns the PREVIOUS value.
-    let prev = CacheTtl::set_refresh_on_hit(&mut cache, true);
+    let prev = CacheRefreshOnHit::set_refresh_on_hit(&mut cache, true);
     assert!(!prev, "previous value was false");
-    assert!(CacheTtl::refresh_on_hit(&cache));
-    let prev = CacheTtl::set_refresh_on_hit(&mut cache, false);
+    assert!(CacheRefreshOnHit::refresh_on_hit(&cache));
+    let prev = CacheRefreshOnHit::set_refresh_on_hit(&mut cache, false);
     assert!(prev, "previous value was true");
-    assert!(!CacheTtl::refresh_on_hit(&cache));
+    assert!(!CacheRefreshOnHit::refresh_on_hit(&cache));
 }
 
 // Builder-time `refresh_on_hit(true)` must be reflected by the getter on BOTH
 // timed stores (the round-trip tests above start from `false`; this pins the
-// `true` builder default through to `CacheTtl::refresh_on_hit`).
+// `true` builder default through to `CacheRefreshOnHit::refresh_on_hit`).
 #[test]
 #[cfg(feature = "time_stores")]
 fn test_refresh_on_hit_builder_true_reflected_on_both_stores() {
-    use cached::{CacheTtl, LruTtlCache, TtlCache};
+    use cached::{CacheRefreshOnHit, LruTtlCache, TtlCache};
 
     let ttl = TtlCache::<u32, u32>::builder()
         .ttl(Duration::from_secs(60))
@@ -6789,7 +6796,7 @@ fn test_refresh_on_hit_builder_true_reflected_on_both_stores() {
         .build()
         .unwrap();
     assert!(
-        CacheTtl::refresh_on_hit(&ttl),
+        CacheRefreshOnHit::refresh_on_hit(&ttl),
         "TtlCache builder refresh_on_hit(true) must be reflected"
     );
 
@@ -6800,7 +6807,7 @@ fn test_refresh_on_hit_builder_true_reflected_on_both_stores() {
         .build()
         .unwrap();
     assert!(
-        CacheTtl::refresh_on_hit(&lru_ttl),
+        CacheRefreshOnHit::refresh_on_hit(&lru_ttl),
         "LruTtlCache builder refresh_on_hit(true) must be reflected"
     );
 
@@ -6809,13 +6816,13 @@ fn test_refresh_on_hit_builder_true_reflected_on_both_stores() {
         .ttl(Duration::from_secs(60))
         .build()
         .unwrap();
-    assert!(!CacheTtl::refresh_on_hit(&ttl_default));
+    assert!(!CacheRefreshOnHit::refresh_on_hit(&ttl_default));
     let lru_default = LruTtlCache::<u32, u32>::builder()
         .max_size(4)
         .ttl(Duration::from_secs(60))
         .build()
         .unwrap();
-    assert!(!CacheTtl::refresh_on_hit(&lru_default));
+    assert!(!CacheRefreshOnHit::refresh_on_hit(&lru_default));
 }
 
 // ── CachedIter ────────────────────────────────────────────────────────────────

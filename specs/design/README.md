@@ -32,17 +32,17 @@ the item stays here for history.
 | [0011](0011-redis-serialization-codec.md) | Redis -> MessagePack; pluggable codec | MessagePack implemented; codec needs research |
 | [0012](0012-concurrent-metrics-trait.md) | Expose sharded metrics through a trait | Implemented |
 | [0013](0013-macro-store-attribute-placement.md) | Friendly rejection of store attrs on `#[cached]` | Implemented |
-| [0014](0014-infallible-builders.md) | Infallible builders return the cache directly | Needs research |
-| [0015](0015-sharded-base-alias-collapse.md) | Collapse `*Base` + alias into a defaulted type param | Needs research |
+| [0014](0014-infallible-builders.md) | Infallible builders return the cache directly | Declined |
+| [0015](0015-sharded-base-alias-collapse.md) | Collapse `*Base` + alias into a defaulted type param | Implemented |
 | [0016](0016-async-core-internal-feature.md) | Make `async_core` internal | Declined |
-| [0017](0017-redis-feature-axes.md) | Orthogonal redis runtime x TLS features | Capability axis resolved; TLS orthogonality needs research |
-| [0018](0018-redis-key-escaping.md) | Escape redis namespace/prefix/key segments | Needs research |
+| [0017](0017-redis-feature-axes.md) | Orthogonal redis runtime x TLS features | Capability axis resolved; TLS orthogonality needs research (4.0-only) |
+| [0018](0018-redis-key-escaping.md) | Escape redis namespace/prefix/key segments | Implemented |
 | [0019](0019-ahash-default-feature.md) | Drop `ahash` from default features | Declined (kept in defaults) |
 | [0020](0020-argument-error-unification.md) | Unify single-variant argument errors | Declined (split kept; `CacheSetError` removed instead) |
 | [0021](0021-redb-refresh-on-hit-cost.md) | Amortize redb refresh-on-hit write txns | Needs research |
 | [0022](0022-serialize-cached-set-ref-return.md) | `cache_set_ref` returning previous value | Implemented |
 | [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Declined |
-| [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Needs research |
+| [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Opt-out implemented; rename declined (4.0-only) |
 | [0025](0025-redb-disk-path-introspection.md) | redb resolved-path introspection + temp fallback | Needs research |
 | [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Implemented |
 | [0027](0027-sync-writes-default-revert.md) | `sync_writes` default flip and revert | Implemented |
@@ -62,3 +62,5 @@ the item stays here for history.
 | [0041](0041-retain-returns-removed-count.md) | `retain` returns the removed count | Implemented |
 | [0042](0042-macro-feature-guard-errors.md) | Macro missing-feature guards for disk and redis | Implemented |
 | [0043](0043-macro-error-precision.md) | Macro error precision: single `Clone` error, attribute spans | Implemented |
+| [0044](0044-blanket-shardhasher-over-buildhasher.md) | Blanket `ShardHasher` impl over `BuildHasher` | Implemented |
+| [0045](0045-refresh-on-hit-trait-split.md) | Refresh-on-hit split into its own trait, on both sides | Implemented |

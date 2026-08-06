@@ -44,6 +44,21 @@ function runs, so the store must implement `CloneCached`. Without an explicit `t
 requires either `ttl`/`ttl_millis`/`ttl_secs` or `expires = true`, because `CloneCached` is only
 available on TTL-capable and expiring stores.
 
+**`#[concurrent_cached]` accepts the same `ttl`-or-`expires` pairing.** It previously rejected
+`result_fallback` with `expires`, on the claim that per-value expiry cannot support expiry
+detection. That claim was wrong: `ShardedExpiringCache` and `ShardedExpiringLruCache` both
+implement `ConcurrentCloneCached`, which supplies the `cache_get_with_expiry_status` and
+`cache_peek_with_expiry_status` reads the `result_fallback` codegen performs, exactly as the
+sharded TTL stores do. The rejection is removed and the store requirement now reads the same on
+both macros: `result_fallback` needs entries that expire, by a uniform TTL or per value.
+
+The stale-value semantics follow the expiring stores. `cache_get_with_expiry_status` leaves an
+expired entry in place and returns it with `expired = true`, so an `Err` recompute over it
+returns the stale `Ok` and re-caches that same value. The re-cached value is still expired by
+its own `Expires::is_expired`, so the next call recomputes again rather than serving a hit.
+Callers that need to distinguish a fresh result from a stale fallback must check the value's
+own expiry, the same caveat that applies to `#[cached(expires = true, result_fallback = true)]`.
+
 ## Notes
 
 - `cached_proc_macro/src/cached.rs:1112-1190` contains the full codegen for this interaction.

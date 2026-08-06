@@ -37,8 +37,8 @@ family's sync peek trait, `ConcurrentCachePeek`, now also has an async mirror,
 `CachedIter<K, V>` iterates entries (filtering expired ones without removing them).
 `CloneCached<K, V>` returns owned values with expiry status (`cache_get_with_expiry_status` /
 `get_with_expiry_status`, `cache_peek_with_expiry_status` / `peek_with_expiry_status`). `CacheTtl`
-provides `ttl()` / `set_ttl()` / `unset_ttl()` / `try_set_ttl()` / `refresh_on_hit()` /
-`set_refresh_on_hit()` on single-owner timed stores.
+provides `ttl()` / `set_ttl()` / `try_set_ttl()` / `unset_ttl()` on single-owner timed stores;
+refresh-on-hit is a separate trait, see TRAIT-5.
 
 ## TRAIT-4
 
@@ -48,3 +48,23 @@ provides `ttl()` / `set_ttl()` / `unset_ttl()` / `try_set_ttl()` / `refresh_on_h
 see [store-expiring.md](store-expiring.md). Whether `Cached::get` should take
 `&self` is an open direction
 ([design/0009-cached-get-shared-receiver.md](design/0009-cached-get-shared-receiver.md)).
+
+## TRAIT-5
+
+`CacheRefreshOnHit` provides `refresh_on_hit()` / `set_refresh_on_hit()` on the single-owner
+timed stores that can extend an entry's deadline on read: `TtlCache` and `LruTtlCache`. It was
+split out of `CacheTtl`, which keeps `ttl()` / `set_ttl()` / `try_set_ttl()` / `unset_ttl()`.
+
+`TtlSortedCache` implements `CacheTtl` but not `CacheRefreshOnHit`. Its entries live in a
+deadline-ordered index, so moving one entry's expiry forward on a read would leave that index
+unsorted; the store has no refresh-on-hit mode. While the capability was part of `CacheTtl` it
+satisfied the bound with a `set_refresh_on_hit` that ignored its argument and returned `false`,
+which a generic caller cannot distinguish from "the flag was already off". Every remaining
+implementor honours the documented contract: the setter returns the state the store was actually
+in, and the new state takes effect for subsequent hits.
+
+Both traits are ungated, so an external store can implement either without `time_stores`; only
+the built-in impls are gated. Both are in `cached::prelude`. Builder `.refresh_on_hit(bool)`
+setters are unaffected. The concurrent mirror is `ConcurrentCacheRefreshOnHit`
+([traits-concurrent.md](traits-concurrent.md) CTRAIT-6). See
+[design/0045-refresh-on-hit-trait-split.md](design/0045-refresh-on-hit-trait-split.md).

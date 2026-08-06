@@ -207,12 +207,26 @@ impl std::error::Error for BuildError {}
 pub enum SetMaxSizeError {
     /// A max size of zero was supplied; max_size must be greater than zero.
     ZeroMaxSize,
+    /// The requested max size cannot be represented as a per-shard capacity.
+    ///
+    /// Only the sharded LRU-bounded stores produce this. They divide the requested total
+    /// across `n_shards` with `div_ceil` and a 16-entries-per-shard floor, then multiply back
+    /// to get the effective total; for a `max_size` close to `usize::MAX` on a multi-shard
+    /// cache that product overflows `usize` and no capacity can be assigned. Requesting a
+    /// smaller total, or a single shard, is always representable.
+    ///
+    /// The infallible `set_max_size` panics in the same situation.
+    CapacityOverflow,
 }
 
 impl std::fmt::Display for SetMaxSizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SetMaxSizeError::ZeroMaxSize => write!(f, "max_size must be greater than zero"),
+            SetMaxSizeError::CapacityOverflow => write!(
+                f,
+                "max_size is too large to divide across the shard count without overflowing usize"
+            ),
         }
     }
 }
@@ -438,16 +452,14 @@ pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder, TtlSortedSetBuilder}
 pub use unbound::{UnboundCache, UnboundCacheBuilder};
 
 pub use sharded::{
-    DefaultShardHasher, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBase,
-    ShardedExpiringCacheBuilder, ShardedExpiringLruCache, ShardedExpiringLruCacheBase,
-    ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder,
-    ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder,
+    DefaultShardHasher, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBuilder,
+    ShardedExpiringLruCache, ShardedExpiringLruCacheBuilder, ShardedLruCache,
+    ShardedLruCacheBuilder, ShardedUnboundCache, ShardedUnboundCacheBuilder,
 };
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use sharded::{
-    ShardedLruTtlCache, ShardedLruTtlCacheBase, ShardedLruTtlCacheBuilder, ShardedTtlCache,
-    ShardedTtlCacheBase, ShardedTtlCacheBuilder,
+    ShardedLruTtlCache, ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBuilder,
 };
 
 // Canonical `AsyncRedisCache` availability gate (kept in sync with src/lib.rs and
@@ -681,6 +693,19 @@ pub trait ConcurrentCacheEvict {
 /// Cache store tests
 mod tests {
     use super::*;
+
+    /// Each `SetMaxSizeError` variant renders a distinct, non-empty message naming the
+    /// constraint it stands for, so a caller matching on `Display` output can tell an
+    /// out-of-range total apart from a zero one.
+    #[test]
+    fn set_max_size_error_variants_have_distinct_messages() {
+        let zero = SetMaxSizeError::ZeroMaxSize.to_string();
+        let overflow = SetMaxSizeError::CapacityOverflow.to_string();
+        assert_ne!(zero, overflow);
+        assert!(zero.contains("greater than zero"), "{zero}");
+        assert!(overflow.contains("overflow"), "{overflow}");
+        assert!(overflow.contains("shard"), "{overflow}");
+    }
 
     // `increment_mut` (the exclusive-access, non-atomic fast path used by `&mut self`
     // call sites) and `increment` (the striped, thread-local-indexed atomic path used by

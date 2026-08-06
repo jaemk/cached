@@ -80,8 +80,19 @@ concurrent stores that manage their own synchronization (the in-memory sharded s
 IO-backed redis and redb stores). `CachedGetOrSetAsync` is narrower: it
 only memoizes an async closure over a synchronous in-memory `Cached` store, via the
 `async_cache_get_or_set_with` family (`async_cache_get_or_set_with`,
-`async_cache_try_get_or_set_with`, and their `_mut` variants). Neither trait has a short alias;
-the `async_` prefix already prevents collisions with the sync methods.
+`async_cache_try_get_or_set_with`, and their `_mut` variants).
+
+`ConcurrentCachedAsync` has its own deduplicated aliases on `ConcurrentCachedAsyncExt`
+(`async_get`, `async_set`, `async_remove`, `async_remove_entry`, `async_delete`,
+`async_contains`, `async_clear`, `async_reset`, `async_get_or_set_with`,
+`async_try_get_or_set_with`). They keep the `async_` prefix instead of being bare `get`/`set`,
+because the stores implementing `ConcurrentCachedAsync` also implement the synchronous
+`ConcurrentCached`: bare names would be a second applicable candidate alongside
+`ConcurrentCachedExt` and make `store.get(&k)` ambiguous. Size and metric introspection is not
+aliased there; it is `cache_size` / `cache_is_empty` and the metric readers on
+`ConcurrentCacheBase`, which are callable on an async store with no extension trait imported.
+`CachedGetOrSetAsync` has no alias trait; its `async_` prefix already prevents collisions with
+the sync methods.
 
 **Features**
 
@@ -108,7 +119,7 @@ the `async_` prefix already prevents collisions with the sync methods.
   Implies `async` and `redis_store`, but is runtime-agnostic (`redis/cache-aio` needs only `redis/aio`): pair it with a
   runtime feature (`redis_tokio*` or `redis_smol*`) or the build has no runtime to connect with. Does not enable TLS.
 - `redb_store`: Include disk cache store
-- `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html)).
+- `time_stores`: Include time-based cache stores ([`TtlCache`](https://docs.rs/cached/latest/cached/struct.TtlCache.html), [`LruTtlCache`](https://docs.rs/cached/latest/cached/struct.LruTtlCache.html), [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html), [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedTtlCache.html), and [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedLruTtlCache.html)).
   Also required when using `#[cached(ttl_secs = ...)]`, `#[cached(ttl = ...)]`, `#[cached(ttl_millis = ...)]`, `#[concurrent_cached(ttl_secs = ...)]`, `#[concurrent_cached(ttl = ...)]`, or `#[concurrent_cached(ttl_millis = ...)]` on the default in-memory path. (`#[once]` has its own ungated timer, so `#[once(ttl_secs = ...)]` does NOT require this feature.)
   Disable this feature when targeting environments without system time support (e.g. `wasm32-unknown-unknown` without WASI or JS).
 
@@ -190,12 +201,12 @@ For `disk` and `redis` stores, `Result<T, E>` is required. `map_error` is option
 | [`TtlSortedCache`](https://docs.rs/cached/latest/cached/struct.TtlSortedCache.html) | TTL (expiry-ordered) | Optional | Global | No | Yes | No | Yes |
 | [`ExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | No | Yes |
 | [`ExpiringCache`](https://docs.rs/cached/latest/cached/struct.ExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | No | Yes |
-| [`ShardedUnboundCache`](https://docs.rs/cached/latest/cached/type.ShardedUnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
-| [`ShardedLruCache`](https://docs.rs/cached/latest/cached/type.ShardedLruCache.html) | LRU | Yes | No | N/A | Yes | Yes (`Arc`) | Yes |
-| [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedTtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes (`Arc`) | Yes |
-| [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/type.ShardedLruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes (†) | Yes (`Arc`) | Yes |
-| [`ShardedExpiringCache`](https://docs.rs/cached/latest/cached/type.ShardedExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
-| [`ShardedExpiringLruCache`](https://docs.rs/cached/latest/cached/type.ShardedExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedUnboundCache`](https://docs.rs/cached/latest/cached/struct.ShardedUnboundCache.html) | None (unbounded) | No | No | N/A | On explicit remove | Yes (`Arc`) | Yes |
+| [`ShardedLruCache`](https://docs.rs/cached/latest/cached/struct.ShardedLruCache.html) | LRU | Yes | No | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedTtlCache.html) | TTL (insert time) | No | Global | Optional | Yes | Yes (`Arc`) | Yes |
+| [`ShardedLruTtlCache`](https://docs.rs/cached/latest/cached/struct.ShardedLruTtlCache.html) | LRU + TTL | Yes | Global | Optional | Yes (†) | Yes (`Arc`) | Yes |
+| [`ShardedExpiringCache`](https://docs.rs/cached/latest/cached/struct.ShardedExpiringCache.html) | Value-defined | No | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
+| [`ShardedExpiringLruCache`](https://docs.rs/cached/latest/cached/struct.ShardedExpiringLruCache.html) | LRU + value-defined | Yes | Per-value | N/A | Yes | Yes (`Arc`) | Yes |
 
 > "On explicit remove" — `on_evict` fires only on `cache_remove`; there is no capacity eviction or TTL expiry trigger for these stores.
 > † `ShardedLruTtlCacheBuilder::on_evict` requires `K: 'static + V: 'static`; see the builder docs for details.
@@ -213,7 +224,7 @@ Shard structs are padded to 128-byte alignment (covering Intel adjacent-line pre
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
 Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
-> **`*Base` types:** Each sharded store has a corresponding `*Base` generic (`ShardedUnboundCacheBase<K, V, H>`, `ShardedLruCacheBase<K, V, H>`, etc.) parameterized on a custom [`ShardHasher`]. The named aliases (`ShardedUnboundCache`, `ShardedLruCache`, …) use the default hasher and are what most users should reach for. Use the `*Base` types only when implementing a custom `ShardHasher` for non-standard shard routing. Construct a custom-hasher cache through the alias builder and its `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `*Base<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher alias, so a custom hasher is always introduced through `hasher`, never a `*Base::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
+> **Custom shard hashers:** Every sharded store carries a third, defaulted type parameter for its [`ShardHasher`] — `ShardedUnboundCache<K, V, H = DefaultShardHasher>`, `ShardedLruCache<K, V, H = DefaultShardHasher>`, and so on — mirroring `std::collections::HashMap<K, V, S = RandomState>`. Writing `ShardedLruCache<K, V>` therefore gets the default hasher, which is what most users want; name the third parameter only when routing keys through a custom `ShardHasher`. Construct such a cache through the builder's `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `ShardedLruCache<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher instantiation, so a custom hasher is always introduced through `hasher`, never a `ShardedLruCache::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
 
 **Behavioral guarantees**
 
@@ -838,10 +849,9 @@ pub use stores::{
     BuildError, CacheEvict, CacheValue, ConcurrentCacheEvict, DefaultHashBuilder,
     DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
     ExpiringLruCacheBuilder, IntoValues, LruCache, LruCacheBuilder, SetMaxSizeError, SetTtlError,
-    ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder,
-    ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
-    ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder, ShardedUnboundCache,
-    ShardedUnboundCacheBase, ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
+    ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBuilder, ShardedExpiringLruCache,
+    ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBuilder, ShardedUnboundCache,
+    ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
 };
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
@@ -854,9 +864,9 @@ pub use stores::{HasEvict, NoEvict};
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
 pub use stores::{
-    LruTtlCache, LruTtlCacheBuilder, ShardedLruTtlCache, ShardedLruTtlCacheBase,
-    ShardedLruTtlCacheBuilder, ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder,
-    TtlCache, TtlCacheBuilder, TtlSortedCache, TtlSortedCacheBuilder, TtlSortedSetBuilder,
+    LruTtlCache, LruTtlCacheBuilder, ShardedLruTtlCache, ShardedLruTtlCacheBuilder,
+    ShardedTtlCache, ShardedTtlCacheBuilder, TtlCache, TtlCacheBuilder, TtlSortedCache,
+    TtlSortedCacheBuilder, TtlSortedSetBuilder,
 };
 #[cfg(feature = "redb_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
@@ -1142,20 +1152,21 @@ pub mod prelude {
     pub use crate::{
         CacheEvict, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek, CachedRead,
         CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
-        ConcurrentCacheTtl, ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires,
-        IntoValues, SerializeCached,
+        ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached, ConcurrentCachedExt,
+        ConcurrentCloneCached, Expires, IntoValues, SerializeCached,
     };
 
-    // Unconditional, like `ConcurrentCacheTtl` above: the trait itself is not
-    // feature-gated (only the built-in stores implementing it require
-    // `time_stores`), so custom-store authors get it from the prelude in any
+    // Unconditional, like `ConcurrentCacheTtl` above: the traits themselves are
+    // not feature-gated (only the built-in stores implementing them require
+    // `time_stores`), so custom-store authors get them from the prelude in any
     // feature configuration.
-    pub use crate::CacheTtl;
+    pub use crate::{CacheRefreshOnHit, CacheTtl};
 
     #[cfg(feature = "async_core")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
     pub use crate::{
-        CachedGetOrSetAsync, ConcurrentCachePeekAsync, ConcurrentCachedAsync, SerializeCachedAsync,
+        CachedGetOrSetAsync, ConcurrentCachePeekAsync, ConcurrentCachedAsync,
+        ConcurrentCachedAsyncExt, SerializeCachedAsync,
     };
 }
 
@@ -2037,7 +2048,13 @@ pub trait ConcurrentCloneCached<K, V> {
 /// `AsyncRedisCache`, and `RedbCache`) do **not** implement this trait. They are held
 /// behind an `Arc`/`static` and cannot offer `&mut self`. Manage their TTL through the
 /// `&self` methods on the [`ConcurrentCacheTtl`] trait
-/// (`ttl`/`set_ttl`/`unset_ttl`/`set_refresh_on_hit`) instead.
+/// (`ttl`/`set_ttl`/`try_set_ttl`/`unset_ttl`) instead.
+///
+/// Refresh-on-hit is **not** part of this trait. It lives on [`CacheRefreshOnHit`], which
+/// [`TtlSortedCache`] deliberately does not implement: its entries are ordered by expiry, so
+/// extending one entry's deadline on read would break the ordering the store is built around.
+/// Bound on [`CacheRefreshOnHit`] when generic code needs the knob, and on `CacheTtl` when it
+/// only needs the TTL itself.
 ///
 /// The trait itself is always available (mirroring [`ConcurrentCacheTtl`]), so external stores
 /// can implement it without enabling `time_stores`; the built-in implementations on
@@ -2071,12 +2088,46 @@ pub trait CacheTtl {
     ///
     /// No-op for stores that cannot retain values indefinitely.
     fn unset_ttl(&mut self) -> Option<Duration>;
+}
 
+/// Refresh-on-hit control for single-owner time-bounded cache stores.
+///
+/// Split out of [`CacheTtl`] so that satisfying the bound implies the capability. Implemented by
+/// the `&mut self` single-owner stores that can genuinely extend an entry's deadline on read:
+/// [`TtlCache`] and [`LruTtlCache`].
+///
+/// [`TtlSortedCache`] implements [`CacheTtl`] but **not** this trait. Its entries are kept in a
+/// deadline-ordered index, so pushing one entry's expiry forward on a read would invalidate that
+/// ordering; the store therefore has no refresh-on-hit mode at all. Previously it satisfied the
+/// combined trait with a `set_refresh_on_hit` that ignored its argument and always returned
+/// `false`, which is indistinguishable from "the flag was already off" to a generic caller. With
+/// the capability in its own trait the difference is a compile error instead of a silent no-op.
+///
+/// The trait itself is always available (mirroring [`CacheTtl`] and
+/// [`ConcurrentCacheRefreshOnHit`]), so external stores can implement it without enabling
+/// `time_stores`; the built-in implementations require the `time_stores` feature.
+///
+/// ```rust
+/// # #[cfg(feature = "time_stores")] {
+/// use cached::{CacheRefreshOnHit, TtlCache};
+/// use std::time::Duration;
+///
+/// let mut cache: TtlCache<String, u32> = TtlCache::new(Duration::from_secs(60));
+/// assert!(!cache.refresh_on_hit());
+/// // The setter reports the previous value.
+/// assert!(!cache.set_refresh_on_hit(true));
+/// assert!(cache.refresh_on_hit());
+/// # }
+/// ```
+pub trait CacheRefreshOnHit {
     /// Return `true` if cache hits refresh the TTL of the accessed entry.
     #[must_use]
     fn refresh_on_hit(&self) -> bool;
 
     /// Set whether cache hits should refresh the TTL. Returns the previous value.
+    ///
+    /// Every implementor honors this: the returned flag is the state the store was actually in
+    /// before the call, and the new state takes effect for subsequent hits.
     fn set_refresh_on_hit(&mut self, refresh: bool) -> bool;
 }
 
@@ -2328,6 +2379,9 @@ pub trait ConcurrentCacheBase {
 /// (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`)
 /// deliberately do **not** implement it — they have no global TTL knob, so `set_ttl` simply does
 /// not exist on them.
+///
+/// Refresh-on-hit is **not** part of this trait; it lives on [`ConcurrentCacheRefreshOnHit`],
+/// mirroring the [`CacheTtl`] / [`CacheRefreshOnHit`] split on the single-owner side.
 pub trait ConcurrentCacheTtl {
     /// Return the ttl of cached values (time to eviction).
     #[must_use]
@@ -2366,7 +2420,25 @@ pub trait ConcurrentCacheTtl {
     /// a no-op. Takes `&self`: concurrent stores are internally synchronized, so this is
     /// callable through a shared reference.
     fn unset_ttl(&self) -> Option<Duration>;
+}
 
+/// Refresh-on-hit control for concurrent stores that have a global TTL.
+///
+/// The `&self` mirror of [`CacheRefreshOnHit`], split out of [`ConcurrentCacheTtl`] for the same
+/// reason: a bound that names the capability should imply the capability. Implemented by
+/// `RedisCache`, `AsyncRedisCache`, `RedbCache`, `ShardedTtlCache`, and `ShardedLruTtlCache`:
+/// every concurrent store that implements [`ConcurrentCacheTtl`].
+///
+/// The split discriminates nothing on the concurrent side today: the two implementor sets are
+/// currently identical. It exists so the two trait families stay symmetric, so that generic code
+/// written against one side ports to the other without a bound changing meaning, and so that a
+/// future concurrent TTL store which cannot refresh on hit (the position `TtlSortedCache` occupies
+/// among the single-owner stores) can implement [`ConcurrentCacheTtl`] alone rather than stubbing
+/// a setter that ignores its argument.
+///
+/// The trait is not feature-gated; only the built-in implementations are gated on the feature
+/// enabling their store.
+pub trait ConcurrentCacheRefreshOnHit {
     /// Return `true` if cache hits refresh the ttl of the accessed entry.
     #[must_use]
     fn refresh_on_hit(&self) -> bool;
@@ -2376,6 +2448,9 @@ pub trait ConcurrentCacheTtl {
     /// Takes `&self`: concurrent stores are internally synchronized (sharded stores use an
     /// `AtomicBool`; `RedisCache` / `RedbCache` use interior mutability), so this is callable
     /// through a shared reference such as an `Arc` or a `LazyLock` static.
+    ///
+    /// Every implementor honors this: the returned flag is the state the store was actually in
+    /// before the call, and the new state takes effect for subsequent hits.
     fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 }
 
@@ -2412,6 +2487,7 @@ pub trait ConcurrentCachePeek<K, V>: ConcurrentCacheBase {
     ///
     /// Should return `Self::Error` if the operation fails. The sharded implementors are
     /// infallible (`Self::Error = Infallible`), so the outer `Result` is always `Ok`.
+    #[must_use = "cache_peek returns the peeked value; ignoring it discards the result"]
     fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Ergonomic alias for [`cache_peek`](Self::cache_peek), mirroring
@@ -2838,10 +2914,12 @@ pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
 /// (`ConcurrentCached::cache_get`) to explicitly call the trait version.
 pub trait ConcurrentCachedExt<K, V>: ConcurrentCached<K, V> {
     /// Retrieve a cached value. Delegates to [`cache_get`](ConcurrentCached::cache_get).
+    #[must_use = "get returns the looked-up value; ignoring it discards the result"]
     fn get(&self, k: &K) -> Result<Option<V>, Self::Error>;
 
     /// Insert a key-value pair and return the previous value. Delegates to
     /// [`cache_set`](ConcurrentCached::cache_set).
+    #[must_use = "set returns the previous value; ignoring it discards the displaced entry"]
     fn set(&self, k: K, v: V) -> Result<Option<V>, Self::Error>;
 
     /// Remove a cached value and return it. Delegates to
@@ -3014,9 +3092,9 @@ impl<K, V, T: ConcurrentCached<K, V>> ConcurrentCachedExt<K, V> for T {
 /// store.async_cache_get(&key).await
 /// ```
 ///
-/// **Short aliases not provided**: Unlike [`ConcurrentCached`], this trait intentionally does
-/// **not** expose `get`/`set`/`remove`/`delete` short aliases. The `async_`-prefixed names are
-/// the full and only spelling of these operations.
+/// **Short aliases**: the deduplicated aliases live on [`ConcurrentCachedAsyncExt`] and keep the
+/// `async_` prefix (`async_get`, `async_set`, ...) rather than being bare `get`/`set`. The
+/// `cache_`-prefixed names on this trait remain the canonical spelling.
 ///
 /// **Custom `!Sync` implementors**: `async_cache_clear`, `async_cache_reset`,
 /// `async_cache_delete`, and `async_cache_reset_metrics` each carry a `where Self: Sync`
@@ -3102,10 +3180,16 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
     /// # Errors
     ///
     /// Should return `Self::Error` if the operation fails.
+    ///
+    /// Carries no `Self: Sized` bound, matching the synchronous
+    /// [`ConcurrentCached::cache_contains`] (which omits it so the method stays reachable
+    /// through a trait object) and the neighbouring
+    /// [`async_cache_delete`](Self::async_cache_delete). The bound constrained implementors
+    /// without buying anything here, so it is gone.
     #[doc(alias = "cache_contains")]
     fn async_cache_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
     where
-        Self: Sized + Sync,
+        Self: Sync,
         K: Sync;
 
     /// Remove all cached entries while preserving capacity allocation and metrics.
@@ -3227,6 +3311,220 @@ pub trait ConcurrentCachedAsync<K, V>: ConcurrentCacheBase {
                 Err(e) => Ok(Err(e)),
             }
         }
+    }
+}
+
+/// Short-alias extension for [`ConcurrentCachedAsync`] stores, the async counterpart of
+/// [`ConcurrentCachedExt`].
+///
+/// Every type that implements `ConcurrentCachedAsync<K, V>` automatically implements this trait
+/// through a blanket impl, which is the only implementation: the aliases are required methods
+/// filled in by the blanket impl rather than defaulted ones, so a downstream type cannot
+/// override an alias and make it disagree with the core method it names. Import this trait (or
+/// `use cached::prelude::*;`) to bring the short names into scope.
+///
+/// **Only genuinely asynchronous operations are aliased here.** The introspection and metric
+/// accessors (`cache_size`, `cache_is_empty`, `cache_hits`, `cache_misses`, `cache_capacity`,
+/// `cache_evictions`) live on [`ConcurrentCacheBase`], are already callable on any async store
+/// without importing an extension trait, and return plain values rather than futures. Prefixing
+/// them with `async_` would promise a future that is not there, so they are deliberately absent.
+/// The same holds for [`ConcurrentCacheBase::metrics`].
+///
+/// **The aliases keep the `async_` prefix.** They are `async_get` / `async_set` / ... rather than
+/// bare `get` / `set`, because the stores that implement `ConcurrentCachedAsync` also implement
+/// the synchronous [`ConcurrentCached`]: the six sharded in-memory stores and `RedbCache` all
+/// implement both. Since both extension traits are blanket-implemented and both are in
+/// [`prelude`], a bare `get` here would be a second applicable candidate on those types and
+/// `store.get(&k)` would become an ambiguity error (E0034); on the sharded types, whose concrete
+/// inherent `get` takes call-site priority, the async alias would instead be silently
+/// unreachable through method syntax. The prefix is the same device
+/// [`ConcurrentCachePeekAsync::async_peek`] uses for the same reason.
+///
+/// ```rust
+/// # #[cfg(feature = "async_core")]
+/// # {
+/// use cached::{ConcurrentCachedAsyncExt, ShardedUnboundCache};
+///
+/// futures::executor::block_on(async {
+///     let cache: ShardedUnboundCache<String, u32> =
+///         ShardedUnboundCache::builder().build().unwrap();
+///     assert_eq!(cache.async_set("key".to_string(), 42).await.unwrap(), None);
+///     assert_eq!(cache.async_get(&"key".to_string()).await.unwrap(), Some(42));
+///     assert_eq!(cache.async_remove(&"key".to_string()).await.unwrap(), Some(42));
+/// });
+/// # }
+/// ```
+#[cfg(feature = "async_core")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
+pub trait ConcurrentCachedAsyncExt<K, V>: ConcurrentCachedAsync<K, V> {
+    /// Retrieve a cached value. Delegates to
+    /// [`async_cache_get`](ConcurrentCachedAsync::async_cache_get).
+    #[must_use = "async_get returns the looked-up value; ignoring it discards the result"]
+    fn async_get(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+
+    /// Insert a key-value pair and return the previous value. Delegates to
+    /// [`async_cache_set`](ConcurrentCachedAsync::async_cache_set).
+    #[must_use = "async_set returns the previous value; ignoring it discards the displaced entry"]
+    fn async_set(&self, k: K, v: V) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+
+    /// Remove a cached value and return it. Delegates to
+    /// [`async_cache_remove`](ConcurrentCachedAsync::async_cache_remove).
+    #[must_use = "async_remove returns the previous value; ignoring it discards the displaced entry"]
+    fn async_remove(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send;
+
+    /// Remove a cached entry and return the stored key and value. Delegates to
+    /// [`async_cache_remove_entry`](ConcurrentCachedAsync::async_cache_remove_entry).
+    #[must_use = "async_remove_entry returns the previous entry; ignoring it discards the displaced key and value"]
+    fn async_remove_entry(
+        &self,
+        k: &K,
+    ) -> impl Future<Output = Result<Option<(K, V)>, Self::Error>> + Send;
+
+    /// Delete a cached value without returning it. Delegates to
+    /// [`async_cache_delete`](ConcurrentCachedAsync::async_cache_delete).
+    fn async_delete(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Sync;
+
+    /// Return `true` if the cache contains a live value for the given key. Delegates to
+    /// [`async_cache_contains`](ConcurrentCachedAsync::async_cache_contains).
+    fn async_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Sync;
+
+    /// Remove all entries from the cache. Delegates to
+    /// [`async_cache_clear`](ConcurrentCachedAsync::async_cache_clear).
+    fn async_clear(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync;
+
+    /// Remove all entries and reset the cache to its initial state. Delegates to
+    /// [`async_cache_reset`](ConcurrentCachedAsync::async_cache_reset).
+    fn async_reset(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync;
+
+    /// Return the cached value for `k`, or await `f()`, store it, and return it. Delegates to
+    /// [`async_cache_get_or_set_with`](ConcurrentCachedAsync::async_cache_get_or_set_with).
+    ///
+    /// Inherits that method's non-atomic get-then-set caveat: on a miss another task may store a
+    /// value for the same key between the get and the set, and the computed value overwrites it.
+    #[must_use = "async_get_or_set_with returns the cached or freshly computed value; ignoring it discards the result"]
+    fn async_get_or_set_with<F, Fut>(
+        &self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<V, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Send + Sync,
+        V: Clone + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send;
+
+    /// Return the cached value for `k`, or await `f()`, store it on success, and return it.
+    /// Delegates to
+    /// [`async_cache_try_get_or_set_with`](ConcurrentCachedAsync::async_cache_try_get_or_set_with).
+    ///
+    /// The two error sources stay separate: the outer `Result` carries the store's `Self::Error`,
+    /// the inner `Result` carries the closure's `E`. On `Err` nothing is stored.
+    #[must_use = "async_try_get_or_set_with returns the cached or freshly computed value; ignoring it discards the result"]
+    fn async_try_get_or_set_with<F, Fut, E>(
+        &self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<Result<V, E>, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Send + Sync,
+        V: Clone + Send,
+        E: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send;
+}
+
+#[cfg(feature = "async_core")]
+impl<K, V, T: ConcurrentCachedAsync<K, V>> ConcurrentCachedAsyncExt<K, V> for T {
+    fn async_get(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send {
+        self.async_cache_get(k)
+    }
+
+    fn async_set(&self, k: K, v: V) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send {
+        self.async_cache_set(k, v)
+    }
+
+    fn async_remove(&self, k: &K) -> impl Future<Output = Result<Option<V>, Self::Error>> + Send {
+        self.async_cache_remove(k)
+    }
+
+    fn async_remove_entry(
+        &self,
+        k: &K,
+    ) -> impl Future<Output = Result<Option<(K, V)>, Self::Error>> + Send {
+        self.async_cache_remove_entry(k)
+    }
+
+    fn async_delete(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Sync,
+    {
+        self.async_cache_delete(k)
+    }
+
+    fn async_contains(&self, k: &K) -> impl Future<Output = Result<bool, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Sync,
+    {
+        self.async_cache_contains(k)
+    }
+
+    fn async_clear(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync,
+    {
+        self.async_cache_clear()
+    }
+
+    fn async_reset(&self) -> impl Future<Output = Result<(), Self::Error>> + Send
+    where
+        Self: Sync,
+    {
+        self.async_cache_reset()
+    }
+
+    fn async_get_or_set_with<F, Fut>(
+        &self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<V, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Send + Sync,
+        V: Clone + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = V> + Send,
+    {
+        self.async_cache_get_or_set_with(k, f)
+    }
+
+    fn async_try_get_or_set_with<F, Fut, E>(
+        &self,
+        k: K,
+        f: F,
+    ) -> impl Future<Output = Result<Result<V, E>, Self::Error>> + Send
+    where
+        Self: Sync,
+        K: Send + Sync,
+        V: Clone + Send,
+        E: Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<V, E>> + Send,
+    {
+        self.async_cache_try_get_or_set_with(k, f)
     }
 }
 

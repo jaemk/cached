@@ -1,0 +1,5 @@
+error: `disk_dir` is not supported on `#[once]`; `disk_dir` sets the database directory of the redb disk-backed concurrent store. Use `#[concurrent_cached(disk = true, disk_dir = ...)]` instead.
+ --> tests/ui/once_disk_dir_concurrent_only.rs:4:8
+  |
+4 | #[once(disk_dir = "/tmp/cached-ui")]
+  |        ^^^^^^^^

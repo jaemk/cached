@@ -772,10 +772,10 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// The entry is inserted first. If [`max_size`](TtlSortedCacheBuilder::max_size) was
     /// configured and the insertion pushes the map over it, the soonest-to-expire entry is
     /// trimmed to restore the bound; this size-limit enforcement runs on every `set`,
-    /// independent of the `.evict()` opt-in. The `.set_with(..).evict()` opt-in controls
-    /// only the separate expiry sweep (dropping entries already past their TTL), not
-    /// size-limit enforcement; see [`set_with`](Self::set_with) for per-entry TTL
-    /// overrides and the opt-in sweep.
+    /// independent of the `.evict()` opt-in. The `.set_with(..).evict()` opt-in additionally
+    /// runs the expiry sweep (dropping entries already past their TTL) whether or not the map
+    /// is over the size bound; see [`set_with`](Self::set_with) for per-entry TTL overrides
+    /// and the opt-in sweep.
     ///
     /// If computing the expiry instant overflows (a TTL on the order of hundreds of
     /// years), the entry is stored with no expiry (never expires), matching
@@ -909,9 +909,11 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         // The sweeps reuse `now` rather than re-reading the clock.
         if !skip_size_eviction {
             if let Some(size_limit) = self.size_limit {
-                if self.map.len() > size_limit {
-                    self.retain_latest_at(size_limit, evict.then_some(now));
-                }
+                // Always run this: it unconditionally enforces the size bound, and when
+                // `retain_drop_count` comes out to 0 (map already at or under the bound) it
+                // degrades to a pure `evict_at` sweep driven by `cutoff` — so the `.evict()`
+                // opt-in still sweeps expired entries even when there is no size pressure.
+                self.retain_latest_at(size_limit, evict.then_some(now));
             } else if evict {
                 let _ = self.evict_at(now);
             }
@@ -1051,7 +1053,11 @@ impl<'a, K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedSetBuilder<'a, 
     ///
     /// The entry is inserted first. If [`max_size`](TtlSortedCacheBuilder::max_size) was
     /// specified and capacity is exceeded, the next-to-expire entry is dropped after
-    /// insertion, firing `on_evict` and counting an eviction.
+    /// insertion, firing `on_evict` and counting an eviction. Independent of that size-limit
+    /// enforcement (which always runs, `.evict()` or not, whenever `max_size` is configured),
+    /// `.evict()` also sweeps any already-expired entries, firing `on_evict` and counting an
+    /// eviction for each — this sweep runs even when the map is at or under `max_size`, or when
+    /// no `max_size` was configured at all.
     pub fn evict(mut self) -> Self {
         self.evict = true;
         self
@@ -1338,15 +1344,13 @@ impl<K: Hash + Eq + Ord, V, S: BuildHasher> CacheTtl for TtlSortedCache<K, V, S>
         self.ttl = Duration::ZERO;
         if old.is_zero() { None } else { Some(old) }
     }
-    /// `TtlSortedCache` does not refresh entries on hit; always returns `false`.
-    fn refresh_on_hit(&self) -> bool {
-        false
-    }
-    /// `TtlSortedCache` does not support refresh-on-hit; this is a no-op and always returns `false`.
-    fn set_refresh_on_hit(&mut self, _refresh: bool) -> bool {
-        false
-    }
 }
+
+// `TtlSortedCache` deliberately does not implement `CacheRefreshOnHit`. Entries live in a
+// deadline-ordered index that the store scans from the front to expire and to enforce
+// `max_size`; extending one entry's deadline on read would leave that index unsorted. The store
+// therefore has no refresh-on-hit mode, and generic code that needs one gets a compile error
+// here rather than a setter that accepts `true` and does nothing.
 
 impl<K: Hash + Eq + Ord, V, S: BuildHasher> CachedPeek<K, V> for TtlSortedCache<K, V, S> {
     fn cache_peek<Q>(&self, key: &Q) -> Option<&V>
@@ -2886,9 +2890,11 @@ mod test {
     /// `.evict()` opts into running the size-limit eviction pass after insertion: once the
     /// bound is exceeded, the next-to-expire entry is dropped as part of the `.set()` call
     /// that requested it. Without `.evict()`, `set_with` still enforces `size_limit`
-    /// (size-limit enforcement is unconditional in `set_inner`; `.evict()` only affects the
-    /// TTL-sweep-when-no-size-limit path), so this test also checks the no-size-limit case
-    /// via `evict()` triggering a plain expiry sweep.
+    /// (size-limit enforcement is unconditional in `set_inner`); `.evict()` additionally runs
+    /// the expiry sweep independent of size pressure, so this test also checks the
+    /// no-size-limit case via `evict()` triggering a plain expiry sweep. See
+    /// `evict_sweeps_expired_entries_even_when_under_size_limit` for the
+    /// size-bounded-and-under-capacity case.
     #[test]
     fn set_with_evict_triggers_eviction() {
         // Case 1: no size_limit configured — `.evict()` runs a TTL sweep as part of `.set()`.
@@ -2926,6 +2932,61 @@ mod test {
         );
         assert_eq!(cache.cache_get(&1u32), None, "next-to-expire entry evicted");
         assert_eq!(cache.cache_get(&2u32), Some(&20u32));
+    }
+
+    /// `.evict()` must sweep already-expired entries even when `max_size` is configured and
+    /// the map is well under that bound, not only when the insertion pushes it over. Before
+    /// the fix, the sweep was nested inside the "map exceeds size_limit" branch, so it never
+    /// ran while there was room to spare.
+    #[test]
+    fn evict_sweeps_expired_entries_even_when_under_size_limit() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<(u32, u32)>::new()));
+        let events2 = events.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(10))
+            .max_size(1000)
+            .on_evict(move |k: &u32, v: &u32| {
+                events2.lock().unwrap().push((*k, *v));
+            })
+            .build()
+            .unwrap();
+
+        // Insert well under `max_size` and let them expire.
+        for k in 0..5u32 {
+            cache.set_with(k, k * 10).set();
+        }
+        assert_eq!(cache.cache_size(), 5);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(cache.cache_evictions(), Some(0));
+
+        // A fresh, far-under-capacity insertion with `.evict()` must sweep every expired
+        // entry, not just enforce the (unreached) size bound.
+        cache.set_with(100u32, 1000u32).evict().set();
+
+        assert_eq!(
+            cache.cache_size(),
+            1,
+            "all 5 expired entries must be swept, leaving only the new one"
+        );
+        assert_eq!(
+            cache.cache_evictions(),
+            Some(5),
+            ".evict() must sweep expired entries independent of size pressure"
+        );
+        let mut fired = events.lock().unwrap().clone();
+        fired.sort_unstable();
+        assert_eq!(
+            fired,
+            vec![
+                (0u32, 0u32),
+                (1u32, 10u32),
+                (2u32, 20u32),
+                (3u32, 30u32),
+                (4u32, 40u32)
+            ],
+            "on_evict must fire for each swept expired entry"
+        );
+        assert_eq!(cache.cache_get(&100u32), Some(&1000u32));
     }
 
     /// The terminal `.set()` returns the displaced unexpired value on overwrite (`Some`),

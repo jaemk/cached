@@ -1,0 +1,5 @@
+error: `companions_vis` has no effect with `companions = false`: it sets the visibility of the `{fn}_no_cache` and `{fn}_prime_cache` companions, and `companions = false` emits neither. Remove one of the two.
+ --> tests/ui/once_companions_vis_with_companions_false.rs:4:4
+  |
+4 | fn my_fn(x: u32) -> u32 {
+  |    ^^^^^

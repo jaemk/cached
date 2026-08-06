@@ -54,9 +54,10 @@ struct ConcurrentCachedArgs {
     #[darling(default)]
     cache_none: bool,
     /// When `true`, an `Err` return serves the last cached `Ok` value for that key.
-    /// Requires `ttl`, `ttl_secs`, or `ttl_millis`. The stale value is read from the primary TTL cache slot via
+    /// Requires entries that expire: `ttl`, `ttl_secs`, `ttl_millis`, or `expires`.
+    /// The stale value is read from the primary cache slot via
     /// `ConcurrentCloneCached::cache_get_with_expiry_status` (no separate store is
-    /// created) and re-cached with a fresh TTL window on `Err`.
+    /// created) and re-cached on `Err`.
     #[darling(default)]
     result_fallback: bool,
     #[darling(default)]
@@ -86,9 +87,26 @@ struct ConcurrentCachedArgs {
     /// `{fn}_prime_cache`). `None` (default) inherits the cached fn's visibility.
     #[darling(default)]
     companions_vis: Option<String>,
+    /// Suppress the generated companion items. `None` / `Some(true)` (the default)
+    /// emits `{fn}_prime_cache`; `Some(false)` emits none. `#[concurrent_cached]`
+    /// already nests the `{fn}_no_cache` origin inside the cached function off the
+    /// `in_impl` path, so `{fn}_prime_cache` is the only free function it
+    /// suppresses (0024).
+    #[darling(default)]
+    companions: Option<bool>,
     /// Allow the macro on a method that takes `self` inside an `impl` block.
     /// The cache static is emitted inside the generated fn body and the receiver
     /// is preserved/forwarded (#16/#140).
+    ///
+    /// Limitation: the enclosing `impl` must not be generic over a type or const
+    /// parameter that the key or value type names. The function-local static is a
+    /// separate item from the method, so it cannot name the `impl`'s parameters, and
+    /// the generic guard below cannot catch this: an attribute macro applied to a
+    /// method receives only the method's tokens and cannot see the `impl` header, so
+    /// `impl<T> S<T> { #[concurrent_cached(in_impl = true)] fn f(&self) -> T }` has
+    /// empty method generics. rustc reports it as E0401 ("can't use generic parameters
+    /// from outer item") on the return type. Move the method to a non-generic `impl`,
+    /// or memoize a free function per concrete instantiation. See design record 0036.
     #[darling(default)]
     in_impl: bool,
 }
@@ -272,6 +290,30 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
+    // `companions = false` suppresses the generated companion items (0024).
+    // `#[concurrent_cached]` emits the `{fn}_no_cache` origin as a function-local `fn`
+    // inside the cached function already (off the `in_impl` path), so
+    // `{fn}_prime_cache` is the only free function it has to drop. Under `in_impl` the
+    // origin is a sibling `impl` method - it takes `self`, which a nested `fn` cannot -
+    // and `in_impl` already suppresses `{fn}_prime_cache`, so the two compose: together
+    // they remove every companion item the macro is structurally able to omit.
+    let companions = args.companions.unwrap_or(true);
+
+    // With `companions = false` and no `in_impl`, no companion item is left for
+    // `companions_vis` to apply to, so the value would be silently discarded. Reject the
+    // inert pairing. Under `in_impl` the `{fn}_no_cache` sibling method survives and
+    // still takes the visibility, so that combination stays valid.
+    if !companions && !args.in_impl && args.companions_vis.is_some() {
+        return syn::Error::new(
+            fn_ident.span(),
+            "`companions_vis` has no effect with `companions = false`: it sets the \
+             visibility of the `{fn}_no_cache` and `{fn}_prime_cache` companions, and \
+             `companions = false` emits neither. Remove one of the two.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     // Generic functions need the cache key pinned to a concrete type via
     // `key` + `convert` (and a concrete store `ty`/`create`): the cache is a
     // single monomorphic static and cannot name the function's type parameters.
@@ -422,21 +464,6 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                  the cache value type to implement `Expires`, but `cache_none = true` stores \
                  `Option<V>` as the value, which does not implement `Expires`. \
                  Remove `cache_none = true` (None values are not cached by default with `expires = true`).",
-            )
-            .to_compile_error()
-            .into();
-        }
-        if args.result_fallback {
-            return syn::Error::new(
-                fn_ident.span(),
-                "`result_fallback = true` and `expires = true` are mutually exclusive - \
-                 `expires` selects a per-value expiry store; `result_fallback` requires \
-                 a fixed-TTL store whose entry expiry can be detected and refreshed by \
-                 the cache layer, which per-value expiry does not support. \
-                 Note: `ttl` and `expires` serve different purposes - `ttl` applies a fixed \
-                 TTL to all entries, while `expires` delegates expiry to each value. \
-                 If you need time-based expiry together with `result_fallback`, use `ttl` \
-                 (not `expires`).",
             )
             .to_compile_error()
             .into();
@@ -895,14 +922,23 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    if args.result_fallback && !has_ttl {
+    // `result_fallback` needs entries that can expire: the fallback only fires when a
+    // cached key is recomputed, and a recompute only happens once the entry is stale.
+    // Either expiry model qualifies - a uniform TTL (`ShardedTtlCache`/`ShardedLruTtlCache`)
+    // or per-value expiry (`ShardedExpiringCache`/`ShardedExpiringLruCache`, `expires = true`).
+    // Both pairs implement `ConcurrentCloneCached`, which supplies the
+    // `cache_get_with_expiry_status` / `cache_peek_with_expiry_status` reads the
+    // `result_fallback` codegen performs, so the two are interchangeable here. This mirrors
+    // `#[cached]`, which accepts `ttl` or `expires` for the same reason (0030).
+    if args.result_fallback && !has_ttl && !args.expires {
         return syn::Error::new(
             fn_ident.span(),
-            "`result_fallback` requires a TTL (`ttl`/`ttl_secs`/`ttl_millis`) to be set (e.g. `ttl_secs = 60`). It serves the last \
-             cached `Ok` value when a refresh returns `Err`, but a refresh only happens after an \
-             entry expires. Without a TTL entries never expire, so the function body is never \
-             re-run for a cached key and the fallback can never fire - making the option a no-op. \
-             Set a TTL so cached entries expire and `result_fallback` has something to fall back to.",
+            "`result_fallback` requires entries that expire: set a TTL \
+             (`ttl`/`ttl_secs`/`ttl_millis`, e.g. `ttl_secs = 60`) or `expires = true` for \
+             per-value expiry. It serves the last cached `Ok` value when a refresh returns \
+             `Err`, but a refresh only happens after an entry expires. Without expiry the \
+             function body is never re-run for a cached key and the fallback can never fire - \
+             making the option a no-op.",
         )
         .to_compile_error()
         .into();
@@ -1010,6 +1046,13 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // either way (no key clone), matching the previous owned path. The `use ... as _;`
     // brings the fallback trait into scope so method resolution can reach it; the
     // inherent (serialize) method is always preferred when it applies.
+    //
+    // This is the only `use` the macros emit, and it is deliberately anonymous. An
+    // autoref shim needs the trait *in scope* (method resolution, not a path), so it
+    // cannot be replaced by a qualified call - but `as _` binds no name, so it cannot
+    // shadow a user item the way a named `use ::cached::Cached;` would. It is also
+    // confined to this block, which contains no user tokens. Every other trait the
+    // codegen calls is named through a fully-qualified path for the same reason.
     let set_call = |value_ref: proc_macro2::TokenStream| {
         if asyncness.is_some() {
             quote! {
@@ -1361,7 +1404,10 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // between two sibling methods, so a correct prime is impossible under
     // `in_impl`; do not emit the companion at all. Calling a non-existent prime
     // fn is then a clear compile error instead of a silent no-op (#16/#140).
-    let prime_fn = if args.in_impl {
+    //
+    // `companions = false` suppresses it for the same reason a user would ask for it: to
+    // keep the parent module free of generated free functions (0024).
+    let prime_fn = if args.in_impl || !companions {
         quote! {}
     } else {
         quote! {
@@ -1453,7 +1499,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 #initial_cache_lookup_async
                 #do_set_return_block
             }
-            // Prime cached function (omitted for `in_impl` methods)
+            // Prime cached function (omitted for `in_impl` methods and `companions = false`)
             #prime_fn
         }
     } else {
@@ -1474,7 +1520,7 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
                 #initial_cache_lookup_sync
                 #do_set_return_block
             }
-            // Prime cached function (omitted for `in_impl` methods)
+            // Prime cached function (omitted for `in_impl` methods and `companions = false`)
             #prime_fn
         }
     };

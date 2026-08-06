@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
-use crate::stores::BuildError;
+use crate::stores::{BuildError, SetMaxSizeError};
 
 /// Cache-line size used for padding. Covers both x86_64 (64 B + Intel adjacent-line prefetch)
 /// and Apple Silicon (128 B L1 line). Matches the `repr(align)` on `CachePadded`.
@@ -119,18 +119,39 @@ pub(crate) fn default_shard_count_for_capacity(max_size: Option<usize>) -> usize
 /// Returns `(per_shard_cap, total_cap)`, where `total_cap = n_shards * per_shard_cap`.
 /// The `total_cap` may exceed `total` when the 16-per-shard floor is in effect.
 ///
-/// Panics if `n_shards * per_shard_cap` overflows `usize`; in practice
-/// this can only happen with extremely large inputs and is never triggered from the
-/// `set_max_size` call path.
-pub(crate) fn per_shard_cap_from_total(total: usize, n_shards: usize) -> (usize, usize) {
+/// Returns [`SetMaxSizeError::CapacityOverflow`] when `n_shards * per_shard_cap` does not fit
+/// in a `usize`. That happens for a `total` close to `usize::MAX` on a multi-shard cache:
+/// `div_ceil` rounds the per-shard share up, and multiplying the rounded share back by
+/// `n_shards` then exceeds `usize::MAX`. It is the fallible entry point behind
+/// `try_set_max_size`, which must not panic.
+pub(crate) fn checked_per_shard_cap_from_total(
+    total: usize,
+    n_shards: usize,
+) -> Result<(usize, usize), SetMaxSizeError> {
     let mut per_shard = total.div_ceil(n_shards);
     if n_shards > 1 {
         per_shard = per_shard.max(16);
     }
     let total_cap = n_shards
         .checked_mul(per_shard)
-        .expect("per_shard_cap_from_total: n_shards * per_shard overflows usize");
-    (per_shard, total_cap)
+        .ok_or(SetMaxSizeError::CapacityOverflow)?;
+    Ok((per_shard, total_cap))
+}
+
+/// Compute the per-shard capacity for a given total and shard count, applying the
+/// same policy as the sharded LRU builders: ceiling division (`div_ceil`) with a
+/// minimum of 16 per shard when `n_shards > 1`.
+///
+/// Returns `(per_shard_cap, total_cap)`, where `total_cap = n_shards * per_shard_cap`.
+/// The `total_cap` may exceed `total` when the 16-per-shard floor is in effect.
+///
+/// # Panics
+///
+/// Panics if `n_shards * per_shard_cap` overflows `usize`. Callers that must not panic go
+/// through [`checked_per_shard_cap_from_total`] instead.
+pub(crate) fn per_shard_cap_from_total(total: usize, n_shards: usize) -> (usize, usize) {
+    checked_per_shard_cap_from_total(total, n_shards)
+        .expect("per_shard_cap_from_total: n_shards * per_shard overflows usize")
 }
 
 pub(crate) fn checked_shard_count(shards: Option<usize>) -> Result<usize, BuildError> {
@@ -179,6 +200,35 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 /// No `K: Hash` bound on the trait itself — custom impls can partition by
 /// arbitrary logic (e.g. numeric range, string prefix, etc.).
 ///
+/// # Any `BuildHasher` is a `ShardHasher`
+///
+/// A blanket impl covers every [`std::hash::BuildHasher`] that is `Clone + Send + Sync +
+/// 'static`, for every `K: Hash`, forwarding to
+/// [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one). The same hasher value therefore
+/// works on both cache families: what
+/// [`LruCacheBuilder::hasher`](crate::LruCacheBuilder::hasher) accepts,
+/// [`ShardedLruCacheBuilder::hasher`](crate::ShardedLruCacheBuilder::hasher) and its five
+/// siblings accept too.
+///
+/// ```rust
+/// use cached::ShardedLruCache;
+/// use std::hash::RandomState;
+///
+/// let cache = ShardedLruCache::<u64, u64>::builder()
+///     .max_size(1024)
+///     .hasher(RandomState::new())
+///     .build()
+///     .unwrap();
+/// ```
+///
+/// [`DefaultShardHasher`] itself implements `BuildHasher` and reaches `ShardHasher` through
+/// this blanket impl, so it is equally usable as the hash builder of a non-sharded store.
+///
+/// Coherence makes the blanket impl exclusive: a type that implements `BuildHasher` cannot also
+/// carry a hand-written `ShardHasher` impl (that is a duplicate-impl error). Custom shard
+/// routing (numeric range, string prefix, tenant id) therefore belongs on a type that does
+/// **not** implement `BuildHasher`.
+///
 /// # Shard selection
 ///
 /// The shard index is derived from the upper 32 bits of the returned hash:
@@ -186,6 +236,14 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 /// feature is enabled, otherwise std `RandomState`) produces high-quality bits
 /// in both halves. Custom implementations should ensure the
 /// **upper** 32 bits are well-distributed across keys, not just the lower bits.
+///
+/// The two hashers reached through the blanket impl that this crate builds on both satisfy
+/// that contract: `hash_one` on `std::hash::RandomState` finishes a SipHash-1-3 state, and
+/// `hash_one` on `ahash::RandomState` finishes an aHash state; both diffuse key entropy across
+/// all 64 bits, so the upper half is as well-distributed as the lower half. Reaching
+/// `ShardHasher` through `BuildHasher` is **not** by itself a guarantee, though: the warning
+/// below applies unchanged to a hand-written `BuildHasher` whose `finish` leaves the high bits
+/// constant (a `Hasher` accumulating into a `u32` widened to `u64`, for instance).
 ///
 /// # Warning: zero upper bits route everything to shard 0
 ///
@@ -233,8 +291,31 @@ pub trait ShardHasher<K>: Clone + Send + Sync + 'static {
     fn shard_hash(&self, key: &K) -> u64;
 }
 
+/// Every thread-safe [`BuildHasher`](std::hash::BuildHasher) routes keys by
+/// [`hash_one`](std::hash::BuildHasher::hash_one).
+///
+/// This is what lets a single hasher value be handed to both the single-owner builders
+/// (`S: BuildHasher`) and the sharded builders (`H: ShardHasher<K>`). It also means the two
+/// trait sets are no longer independent: implementing `BuildHasher` on a type commits it to
+/// this shard-routing behavior, since coherence rejects a second, hand-written `ShardHasher`
+/// impl for the same type.
+impl<K, S> ShardHasher<K> for S
+where
+    K: std::hash::Hash,
+    S: std::hash::BuildHasher + Clone + Send + Sync + 'static,
+{
+    fn shard_hash(&self, key: &K) -> u64 {
+        self.hash_one(key)
+    }
+}
+
 /// Default shard hasher backed by `ahash::RandomState` (or `std::collections::hash_map::RandomState`
-/// when the `ahash` feature is disabled). Requires `K: Hash`.
+/// when the `ahash` feature is disabled).
+///
+/// It implements [`BuildHasher`](std::hash::BuildHasher) and picks up
+/// [`ShardHasher<K>`] for every `K: Hash` through the blanket impl above, so it is also a valid
+/// hash builder for the non-sharded stores and for a plain
+/// [`HashMap`](std::collections::HashMap).
 #[derive(Clone)]
 pub struct DefaultShardHasher(
     #[cfg(feature = "ahash")] ahash::RandomState,
@@ -261,10 +342,18 @@ impl DefaultShardHasher {
     }
 }
 
-impl<K: std::hash::Hash> ShardHasher<K> for DefaultShardHasher {
-    fn shard_hash(&self, key: &K) -> u64 {
-        use std::hash::BuildHasher;
-        BuildHasher::hash_one(&self.0, key)
+impl std::hash::BuildHasher for DefaultShardHasher {
+    type Hasher = <crate::stores::DefaultHashBuilder as std::hash::BuildHasher>::Hasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        std::hash::BuildHasher::build_hasher(&self.0)
+    }
+
+    /// Delegates to the wrapped hash builder's own `hash_one` rather than falling back to the
+    /// provided implementation, so `ahash::RandomState`'s specialized single-value path is not
+    /// lost behind `build_hasher` + `write` + `finish`.
+    fn hash_one<T: std::hash::Hash>(&self, x: T) -> u64 {
+        std::hash::BuildHasher::hash_one(&self.0, x)
     }
 }
 
@@ -278,20 +367,18 @@ mod lru_ttl;
 #[cfg(feature = "time_stores")]
 mod ttl;
 
-pub use expiring::{ShardedExpiringCache, ShardedExpiringCacheBase, ShardedExpiringCacheBuilder};
-pub use expiring_lru::{
-    ShardedExpiringLruCache, ShardedExpiringLruCacheBase, ShardedExpiringLruCacheBuilder,
-};
-pub use lru::{ShardedLruCache, ShardedLruCacheBase, ShardedLruCacheBuilder};
-pub use unbound::{ShardedUnboundCache, ShardedUnboundCacheBase, ShardedUnboundCacheBuilder};
+pub use expiring::{ShardedExpiringCache, ShardedExpiringCacheBuilder};
+pub use expiring_lru::{ShardedExpiringLruCache, ShardedExpiringLruCacheBuilder};
+pub use lru::{ShardedLruCache, ShardedLruCacheBuilder};
+pub use unbound::{ShardedUnboundCache, ShardedUnboundCacheBuilder};
 
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub use ttl::{ShardedTtlCache, ShardedTtlCacheBase, ShardedTtlCacheBuilder};
+pub use ttl::{ShardedTtlCache, ShardedTtlCacheBuilder};
 
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
-pub use lru_ttl::{ShardedLruTtlCache, ShardedLruTtlCacheBase, ShardedLruTtlCacheBuilder};
+pub use lru_ttl::{ShardedLruTtlCache, ShardedLruTtlCacheBuilder};
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +400,18 @@ mod tests {
         // different keys should (almost certainly) produce different hashes
         let v3 = h.shard_hash(&43u64);
         assert_ne!(v1, v3);
+    }
+
+    /// `DefaultShardHasher` reaches `ShardHasher` through the `BuildHasher` blanket impl and
+    /// nothing else: `shard_hash` returns exactly what `hash_one` returns. A second, explicit
+    /// `ShardHasher for DefaultShardHasher` impl alongside the blanket one would be a
+    /// duplicate-impl error, so this compiling is itself the single-path check.
+    #[test]
+    fn default_shard_hasher_routes_through_build_hasher() {
+        use std::hash::BuildHasher;
+        let h = DefaultShardHasher::new();
+        assert_eq!(h.shard_hash(&42u64), h.hash_one(42u64));
+        assert_eq!(h.shard_hash(&"key"), h.hash_one("key"));
     }
 
     /// A `Clone`-implementing custom `ShardHasher` satisfies the `ShardHasher: Clone`
@@ -341,6 +440,45 @@ mod tests {
     fn check_shard_hasher_supertrait() {
         // DefaultShardHasher derives Clone, so it satisfies the bound.
         assert_shard_hasher_requires_clone(DefaultShardHasher::new());
+    }
+
+    /// `checked_per_shard_cap_from_total` reports the total-capacity overflow as an error
+    /// instead of panicking, so a `try_set_max_size` built on it stays total.
+    #[test]
+    fn checked_per_shard_cap_reports_overflow_instead_of_panicking() {
+        // usize::MAX.div_ceil(16) rounds the per-shard share up, so multiplying it back by
+        // 16 lands one past usize::MAX.
+        assert_eq!(
+            checked_per_shard_cap_from_total(usize::MAX, 16),
+            Err(SetMaxSizeError::CapacityOverflow)
+        );
+        assert_eq!(
+            checked_per_shard_cap_from_total(usize::MAX - 1, 1024),
+            Err(SetMaxSizeError::CapacityOverflow)
+        );
+    }
+
+    /// A single shard divides by one, so no rounding and no product: every total is
+    /// representable and the checked helper agrees with the requested size exactly.
+    #[test]
+    fn checked_per_shard_cap_accepts_max_total_on_one_shard() {
+        assert_eq!(
+            checked_per_shard_cap_from_total(usize::MAX, 1),
+            Ok((usize::MAX, usize::MAX))
+        );
+    }
+
+    /// The checked helper applies the same ceiling-division and 16-per-shard-floor policy as
+    /// the panicking wrapper for every non-overflowing input.
+    #[test]
+    fn checked_per_shard_cap_matches_panicking_wrapper() {
+        for (total, n_shards) in [(1usize, 1usize), (100, 8), (4, 16), (1024, 16), (17, 4)] {
+            assert_eq!(
+                checked_per_shard_cap_from_total(total, n_shards),
+                Ok(per_shard_cap_from_total(total, n_shards)),
+                "policy diverged for total={total} n_shards={n_shards}"
+            );
+        }
     }
 
     #[test]

@@ -28,6 +28,14 @@ Status: Capability axis resolved; TLS orthogonality needs research
   "tokio + rustls".
 - At minimum, introduce one internal aggregator feature so the 8-way `any()` lists collapse.
 
+## Status: deferred to 4.0
+
+Not landing in 3.0. The four fused `redis_{tokio,smol}_{native_tls,rustls}` feature names freeze
+as public API at the 3.0 release: renaming or splitting them into orthogonal runtime/TLS features
+after that point is a breaking Cargo-feature change, so the earliest this can land is 4.0. The
+capability axis (`redis_connection_manager`, `redis_async_cache`) is unaffected and stays resolved
+as described above.
+
 ## Notes
 
 - Cargo features are additive; an orthogonal TLS feature with no runtime needs a compile_error
