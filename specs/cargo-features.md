@@ -35,10 +35,10 @@ MSRV is **1.92** (raised from 1.89; see [FEAT-6](#feat-6)).
 ## FEAT-5
 
 `ahash` remains in the default set (DEC-3=A per
-[design/0019-ahash-default-feature.md](design/0019-ahash-default-feature.md)). The explicit
-`serde = ["dep:serde", "dep:rmp-serde"]` feature shipped (DEC-6=A per
-[design/0026-serde-feature.md](design/0026-serde-feature.md)); `redis_store` and `redb_store`
-depend on it transitively.
+[design/0019-ahash-default-feature.md](design/0019-ahash-default-feature.md)). There is no
+public `serde` feature: DEC-6=A was reverted before 3.0.0 (see
+[design/0026-serde-feature.md](design/0026-serde-feature.md)) because no public item is gated
+on it. `redis_store` and `redb_store` pull `dep:serde` / `dep:rmp-serde` directly.
 
 ## FEAT-6
 

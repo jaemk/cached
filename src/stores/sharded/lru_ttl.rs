@@ -1019,14 +1019,19 @@ where
 
 /// Builder for [`ShardedLruTtlCache`].
 ///
-/// The third type parameter `E` is a **typestate** marker: it starts as [`NoEvict`] and
+/// The hasher `H` is the third type parameter, matching every other builder in the crate
+/// (`ShardedLruCacheBuilder<K, V, H>`, `ShardedTtlCacheBuilder<K, V, H>`, and so on) and
+/// [`LruTtlCacheBuilder`](crate::LruTtlCacheBuilder)`<K, V, S, E>`, so
+/// `ShardedLruTtlCacheBuilder<K, V, MyHasher>` names a hasher rather than silently binding
+/// `MyHasher` to a typestate slot.
+///
+/// The trailing type parameter `E` is a **typestate** marker: it starts as [`NoEvict`] and
 /// transitions to [`HasEvict`] after `.on_evict(…)` is called. This encodes at compile time
 /// whether an eviction callback has been registered, allowing the two `build()` / `copy_from()`
 /// overloads to impose `K: 'static + V: 'static` bounds only when `on_evict` is set. You will
 /// see this parameter in IDE completions and compiler errors once you call `.on_evict(…)`;
-/// it is otherwise invisible. The hasher `H` is last, matching
-/// [`LruTtlCacheBuilder`](crate::LruTtlCacheBuilder)`<K, V, E, S>`.
-pub struct ShardedLruTtlCacheBuilder<K, V, E = NoEvict, H = DefaultShardHasher> {
+/// it is otherwise invisible.
+pub struct ShardedLruTtlCacheBuilder<K, V, H = DefaultShardHasher, E = NoEvict> {
     shards: Option<usize>,
     max_size: Option<usize>,
     per_shard_max_size: Option<usize>,
@@ -1060,7 +1065,7 @@ impl<K, V> ShardedLruTtlCacheBuilder<K, V> {
     }
 }
 
-impl<K, V, E, H> ShardedLruTtlCacheBuilder<K, V, E, H> {
+impl<K, V, H, E> ShardedLruTtlCacheBuilder<K, V, H, E> {
     /// Set the requested total capacity (divided across shards via `div_ceil`).
     ///
     /// Eviction is enforced independently per shard. Each shard gets
@@ -1152,7 +1157,7 @@ impl<K, V, E, H> ShardedLruTtlCacheBuilder<K, V, E, H> {
     /// distribution contract and a worked example. Defaults to [`DefaultShardHasher`].
     #[doc(alias = "with_hasher")]
     #[must_use]
-    pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruTtlCacheBuilder<K, V, E, H2> {
+    pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedLruTtlCacheBuilder<K, V, H2, E> {
         ShardedLruTtlCacheBuilder {
             shards: self.shards,
             max_size: self.max_size,
@@ -1243,7 +1248,7 @@ impl<K, V, E, H> ShardedLruTtlCacheBuilder<K, V, E, H> {
     }
 }
 
-impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, NoEvict, H> {
+impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, NoEvict> {
     /// Set a callback invoked when an entry is evicted by LRU capacity pressure,
     /// TTL-expiry sweeps via [`evict`](ShardedLruTtlCache::evict), explicit
     /// [`cache_remove`](ConcurrentCached::cache_remove) or
@@ -1269,7 +1274,7 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, NoEvict, H> {
     pub fn on_evict(
         self,
         on_evict: impl Fn(&K, &V) + Send + Sync + 'static,
-    ) -> ShardedLruTtlCacheBuilder<K, V, HasEvict, H> {
+    ) -> ShardedLruTtlCacheBuilder<K, V, H, HasEvict> {
         ShardedLruTtlCacheBuilder {
             shards: self.shards,
             max_size: self.max_size,
@@ -1363,7 +1368,7 @@ impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, NoEvict, H> {
     }
 }
 
-impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, HasEvict, H> {
+impl<K, V, H> ShardedLruTtlCacheBuilder<K, V, H, HasEvict> {
     /// Build the cache, returning an error if required fields are missing or invalid.
     ///
     /// Use [`ShardedLruTtlCache::builder()`] to obtain a builder, set at least
@@ -1640,15 +1645,21 @@ mod tests {
     }
 
     #[test]
-    fn builder_generic_param_order_is_eviction_typestate_then_hasher() {
-        // API-5: ShardedLruTtlCacheBuilder's params are <K, V, E, H> (eviction typestate
-        // before hasher, hasher last), matching LruTtlCacheBuilder<K, V, E, S>. Naming them
-        // positionally in that order must compile; this pins the order against reordering.
-        let _default: ShardedLruTtlCacheBuilder<u32, u32, NoEvict, DefaultShardHasher> =
+    fn builder_generic_param_order_is_hasher_then_eviction_typestate() {
+        // API-5: ShardedLruTtlCacheBuilder's params are <K, V, H, E> (hasher third, eviction
+        // typestate last), matching every other builder in the crate and
+        // LruTtlCacheBuilder<K, V, S, E>. Naming them positionally in that order must compile;
+        // this pins the order against reordering.
+        let _default: ShardedLruTtlCacheBuilder<u32, u32, DefaultShardHasher, NoEvict> =
             ShardedLruTtlCache::<u32, u32>::builder();
 
-        // A custom hasher slots into the last position, and .on_evict flips the typestate to
-        // HasEvict (third position) while the hasher stays last.
+        // Naming only the hasher must resolve to the hasher slot, not the typestate slot: this
+        // is the spelling a user reaches for, and it silently bound to `E` before the reorder.
+        let _hasher_only: ShardedLruTtlCacheBuilder<u32, u32, DefaultShardHasher> =
+            ShardedLruTtlCache::<u32, u32>::builder();
+
+        // A custom hasher slots into the third position, and .on_evict flips the typestate to
+        // HasEvict (last position) while the hasher stays third.
         let cache = ShardedLruTtlCache::<u32, u32>::builder()
             .shards(1)
             .max_size(8)

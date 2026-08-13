@@ -25,7 +25,10 @@ Builders accept `on_evict(|k, v| { ... })`, fired on every evicted entry (LRU ca
 TTL/expiry sweeps via `evict()`). `LruTtlCacheBuilder` and `ShardedLruTtlCacheBuilder` use
 `HasEvict` / `NoEvict` type-state markers to track whether a callback is configured (both
 re-exported at the crate root under the `time_stores` feature); other builders with `on_evict`
-store a plain `Option`. See [metrics.md](metrics.md) for the eviction counter and
+store a plain `Option`. The marker is the *last* type parameter on both
+(`LruTtlCacheBuilder<K, V, S = DefaultHashBuilder, E = NoEvict>`,
+`ShardedLruTtlCacheBuilder<K, V, H = DefaultShardHasher, E = NoEvict>`) so that the hasher is
+the third parameter on all 13 builders; `tests/builder_hasher_slot_parity.rs` pins this. See [metrics.md](metrics.md) for the eviction counter and
 [design/0002-size-iter-evict-semantics.md](design/0002-size-iter-evict-semantics.md) for the
 size/iter/evict semantics.
 

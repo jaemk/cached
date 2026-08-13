@@ -100,16 +100,19 @@ pub struct HasEvict;
 ///
 /// Obtain one via [`LruTtlCache::builder`].
 ///
-/// The `E` type parameter is a compile-time marker:
+/// The `S` type parameter selects the hash builder; it defaults to [`DefaultHashBuilder`].
+/// Call [`.hasher()`](LruTtlCacheBuilder::hasher) to use a custom hasher. It sits in the
+/// third slot, matching every other builder in the crate
+/// (`LruCacheBuilder<K, V, S>`, `TtlCacheBuilder<K, V, S>`, and so on), so
+/// `LruTtlCacheBuilder<K, V, MyHasher>` means what it looks like it means.
+///
+/// The trailing `E` type parameter is a compile-time marker:
 /// - [`NoEvict`] (the default): no eviction callback has been set; `build`
 ///   does **not** require `K: 'static` or `V: 'static`.
 /// - [`HasEvict`]: an eviction callback was registered via [`on_evict`](LruTtlCacheBuilder::on_evict);
 ///   `build` requires `K: 'static + V: 'static` so the callback
 ///   can be wired into the inner LRU eviction path.
-///
-/// The `S` type parameter selects the hash builder; it defaults to [`DefaultHashBuilder`].
-/// Call [`.hasher()`](LruTtlCacheBuilder::hasher) to use a custom hasher.
-pub struct LruTtlCacheBuilder<K, V, E = NoEvict, S = DefaultHashBuilder> {
+pub struct LruTtlCacheBuilder<K, V, S = DefaultHashBuilder, E = NoEvict> {
     size: Option<usize>,
     ttl: Option<Duration>,
     refresh: bool,
@@ -140,7 +143,7 @@ impl<K, V> LruTtlCacheBuilder<K, V> {
 }
 
 // size / ttl / refresh work regardless of eviction state or hasher
-impl<K, V, E, S> LruTtlCacheBuilder<K, V, E, S> {
+impl<K, V, S, E> LruTtlCacheBuilder<K, V, S, E> {
     /// Set the maximum number of entries. Required.
     #[doc(alias = "size")]
     #[doc(alias = "capacity")]
@@ -208,7 +211,7 @@ impl<K, V, E, S> LruTtlCacheBuilder<K, V, E, S> {
     /// ```
     #[doc(alias = "with_hasher")]
     #[must_use]
-    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> LruTtlCacheBuilder<K, V, E, S2> {
+    pub fn hasher<S2: BuildHasher>(self, hasher: S2) -> LruTtlCacheBuilder<K, V, S2, E> {
         LruTtlCacheBuilder {
             size: self.size,
             ttl: self.ttl,
@@ -221,7 +224,7 @@ impl<K, V, E, S> LruTtlCacheBuilder<K, V, E, S> {
 }
 
 // on_evict transitions the builder from NoEvict -> HasEvict
-impl<K, V, S> LruTtlCacheBuilder<K, V, NoEvict, S> {
+impl<K, V, S> LruTtlCacheBuilder<K, V, S, NoEvict> {
     /// Set a callback to be invoked when an entry is evicted. The callback fires for:
     /// - LRU capacity eviction: inserting past `max_size` evicts the least-recently-used entry.
     /// - Capacity shrink via [`set_max_size`](LruTtlCache::set_max_size) /
@@ -238,7 +241,7 @@ impl<K, V, S> LruTtlCacheBuilder<K, V, NoEvict, S> {
     ///   entry was already expired.
     ///
     /// Calling this method changes the builder's type to
-    /// `LruTtlCacheBuilder<K, V, `[`HasEvict`]`>`, which requires `K: 'static`
+    /// `LruTtlCacheBuilder<K, V, S, `[`HasEvict`]`>`, which requires `K: 'static`
     /// and `V: 'static` at [`build`](LruTtlCacheBuilder::build) time so the
     /// callback can be wired into the inner LRU eviction path.
     ///
@@ -250,7 +253,7 @@ impl<K, V, S> LruTtlCacheBuilder<K, V, NoEvict, S> {
     pub fn on_evict(
         self,
         on_evict: impl Fn(&K, &V) + Send + Sync + 'static,
-    ) -> LruTtlCacheBuilder<K, V, HasEvict, S> {
+    ) -> LruTtlCacheBuilder<K, V, S, HasEvict> {
         LruTtlCacheBuilder {
             size: self.size,
             ttl: self.ttl,
@@ -263,7 +266,7 @@ impl<K, V, S> LruTtlCacheBuilder<K, V, NoEvict, S> {
 }
 
 // build without an eviction callback -- no 'static required
-impl<K, V, S: BuildHasher> LruTtlCacheBuilder<K, V, NoEvict, S> {
+impl<K, V, S: BuildHasher> LruTtlCacheBuilder<K, V, S, NoEvict> {
     /// Build the cache.
     ///
     /// # Errors
@@ -283,7 +286,7 @@ impl<K, V, S: BuildHasher> LruTtlCacheBuilder<K, V, NoEvict, S> {
 }
 
 // build with an eviction callback -- 'static required for sync_on_evict
-impl<K, V, S: BuildHasher> LruTtlCacheBuilder<K, V, HasEvict, S> {
+impl<K, V, S: BuildHasher> LruTtlCacheBuilder<K, V, S, HasEvict> {
     /// Build the cache.
     ///
     /// # Errors

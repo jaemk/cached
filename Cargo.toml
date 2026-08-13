@@ -27,11 +27,12 @@ ahash = ["dep:ahash", "hashbrown/default"]
 # can access the async trait surface without pulling in async-lock (see design/0016).
 async_core = []
 async = ["async_core", "dep:async-lock"]
-# Serialization support for custom `SerializeCached` stores without an IO store.
-# Pulls the MessagePack codec (`serde` + `rmp-serde`); the IO-store features below
-# enable it transitively.
-serde = ["dep:serde", "dep:rmp-serde"]
-redis_store = ["serde", "dep:redis", "dep:r2d2", "dep:serde_json"]
+# NOTE: there is deliberately no public `serde` feature. The MessagePack codec
+# (`serde` + `rmp-serde`) is an implementation detail of the IO stores, which pull it
+# directly below. Nothing in the public surface is gated on it -- `SerializeCached` and
+# `SerializeCachedAsync` are ungated traits -- so a standalone `serde` feature only ever
+# added two dependencies to a consumer's graph and no API.
+redis_store = ["dep:serde", "dep:rmp-serde", "dep:redis", "dep:r2d2", "dep:serde_json"]
 # Runtime axis: the redis async capabilities below (`redis_connection_manager`,
 # `redis_async_cache`) express only the redis capability and are runtime-agnostic;
 # the async runtime is chosen separately via `redis_tokio` (or its TLS variants) or
@@ -72,7 +73,7 @@ redis_async_cache = ["redis_store", "async", "redis/cache-aio"]
 # `redb_store` rather than `async`. Redis-only and in-memory async builds do not
 # pay for it. The `blocking::unblock` call sites are `#[cfg(feature = "async")]`,
 # so a sync-only `redb_store` build enables the dependency without invoking it.
-redb_store = ["serde", "dep:redb", "dep:directories", "dep:blocking"]
+redb_store = ["dep:serde", "dep:rmp-serde", "dep:redb", "dep:directories", "dep:blocking"]
 time_stores = []
 
 [dependencies.cached_proc_macro]

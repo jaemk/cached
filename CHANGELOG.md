@@ -4,6 +4,22 @@
 
 ### Breaking Changes
 
+- `LruTtlCacheBuilder` and `ShardedLruTtlCacheBuilder` take the hasher in the third generic
+  slot and the eviction typestate marker last: `LruTtlCacheBuilder<K, V, S = DefaultHashBuilder,
+  E = NoEvict>` and `ShardedLruTtlCacheBuilder<K, V, H = DefaultShardHasher, E = NoEvict>`.
+  These were the only two of the crate's 13 builders where naming a hasher positionally
+  (`ShardedLruTtlCacheBuilder<K, V, MyHasher>`) bound it to the typestate slot instead,
+  surfacing as a mismatched-types error at `.build()` rather than at the annotation. The
+  sharded builder now matches its 2.0.2 parameter order again (rc.1 through rc.10 had it
+  reversed); `LruTtlCacheBuilder` had no hasher parameter in 2.0.2, so a 2.x annotation of
+  `LruTtlCacheBuilder<K, V, HasEvict>` names the hasher slot in 3.0 and must gain the hasher
+  as the third argument. Code naming only `<K, V>`, or reaching the hasher through
+  `.hasher(..)`, is unaffected.
+- The `serde` feature is removed. No public item was gated on it (`SerializeCached` and
+  `SerializeCachedAsync` are ungated and expose no codec), so enabling it added `serde` and
+  `rmp-serde` to the dependency graph and no API. The codec is now an implementation detail
+  pulled directly by `redis_store` and `redb_store`. `features = ["serde"]` fails with
+  `the package 'cached' does not contain this feature: serde`; drop it from the list.
 - The six sharded stores collapse from a `ShardedXBase<K, V, H>` struct plus a
   `ShardedX<K, V>` alias into a single `ShardedX<K, V, H = DefaultShardHasher>`, mirroring
   `HashMap<K, V, S = RandomState>`. There is no deprecated alias:
@@ -70,6 +86,17 @@
 - `RedbCacheBuilder::ttl` doc corrected: `RedbCache` tracks expiry client-side, `RedisCache`
   relies on server-side TTL commands (the framing was inverted).
 - `expiring.rs` docs say `max_size`, not the removed `size` macro attribute.
+- The migration guide's sharded-hasher example compiles: it turbofished the hasher onto
+  `ShardedLruCache::<K, V, H>::builder()`, which does not resolve (`builder()` is on the
+  default-hasher impl block, as the surrounding prose already said), and called
+  `ShardedLruCache::default()`, which does not exist on the LRU stores in either 2.x or 3.0.
+- `#[concurrent_cached]`'s `result_fallback` docs record that `expires = true` satisfies the
+  expiry requirement alongside `ttl`/`ttl_secs`/`ttl_millis`, and that the per-value-expiry
+  path has no TTL window to refresh: the value re-cached on `Err` is still expired, so the
+  next call recomputes. The crate-level docs carried the same stale "requires a TTL" claim.
+- The `companions_vis` + `companions = false` conflict error names only `{fn}_prime_cache` on
+  `#[once]` and `#[concurrent_cached]`, which do not emit a `{fn}_no_cache` sibling (their
+  uncached body is a nested inner function). Only `#[cached]` emits a callable one.
 
 ## [3.0.0-rc.10 / cached_proc_macro 3.0.0-rc.10 / cached_proc_macro_types 3.0.0-rc.10] - 2026-08-03
 
