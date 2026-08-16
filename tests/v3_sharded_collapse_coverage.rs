@@ -69,7 +69,7 @@ const EVEN_SPREAD: [usize; 4] = [4, 4, 4, 4];
 // ---------------------------------------------------------------------------------------------
 
 /// `.on_evict(..)` flips the builder's typestate to `HasEvict`, which resolves to a *different*
-/// `build()` impl (`ShardedLruTtlCacheBuilder<K, V, HasEvict, H>`) than the untouched-typestate
+/// `build()` impl (`ShardedLruTtlCacheBuilder<K, V, H, HasEvict>`) than the untouched-typestate
 /// `NoEvict` path the rest of this crate's own tests exercise on a collapsed-type annotation.
 /// Chaining `.hasher(..)` either before or after `.on_evict(..)` must resolve to the same
 /// `ShardedLruTtlCache<K, V, H>` and the callback must actually fire, keyed correctly through

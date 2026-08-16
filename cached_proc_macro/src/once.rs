@@ -233,9 +233,11 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     if !companions && !args.in_impl && args.companions_vis.is_some() {
         return syn::Error::new(
             fn_ident.span(),
-            "`companions_vis` has no effect with `companions = false`: it sets the \
-             visibility of the `{fn}_no_cache` and `{fn}_prime_cache` companions, and \
-             `companions = false` emits neither. Remove one of the two.",
+            "`companions_vis` has no effect with `companions = false`: the only companion it \
+             could apply to here is `{fn}_prime_cache`, and `companions = false` does not \
+             emit it. Remove one of the two. (Without `in_impl = true`, `#[once]` emits the \
+             uncached `{fn}_no_cache` origin as a function-local `fn` inside the cached \
+             function, not as a sibling item, so there is nothing else to make visible.)",
         )
         .to_compile_error()
         .into();

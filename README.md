@@ -102,7 +102,6 @@ the sync methods.
 - `ahash`: Enable the optional `ahash` hasher as default hashing algorithm.
 - `async_core`: Async trait definitions (the runtime-agnostic async cache traits) without the `async-lock` dependency. Enabled by `async`.
 - `async`: Include support for async functions and async cache stores (runtime-agnostic; no tokio dependency; uses `async-lock`)
-- `serde`: Enable the `serde` and `rmp-serde` codec dependencies used by [`SerializeCached`] implementations and the IO stores. The `redis_store` and `redb_store` features enable it transitively. Note: the `SerializeCached` and `SerializeCachedAsync` trait definitions are always present (no feature gate); this feature only enables the codec libraries needed to implement them.
 - `redis_store`: Include Redis cache store
 - `redis_smol`: Include async Redis support using `smol` (no TLS); implies `redis_store` and `async`
 - `redis_smol_native_tls`: `redis_smol` + TLS via `native-tls` (system TLS library)
@@ -705,10 +704,12 @@ use cached::macros::concurrent_cached;
 /// `#[concurrent_cached]` does **not** support `sync_writes`.
 /// For `Option<T>` returns, `None` is skipped by default (use `cache_none = true` to cache it).
 /// For `Result<T, E>` returns, only `Ok` values are cached by default (use `cache_err = true`
-/// to also cache `Err`). `result_fallback = true` is supported (requires `ttl_secs`, `ttl_millis`, or `ttl = "<Duration expr>"`): on an `Err`
-/// return, the last cached `Ok` value for the same key is returned instead. The stale value
-/// is held in the primary cache slot and re-cached with a fresh TTL window on `Err`; no
-/// secondary store is created.
+/// to also cache `Err`). `result_fallback = true` is supported: on an `Err` return, the last
+/// cached `Ok` value for the same key is returned instead. The stale value is held in the
+/// primary cache slot and re-cached on `Err`; no secondary store is created. It requires
+/// expiring entries, so set either a TTL (`ttl_secs`, `ttl_millis`, or
+/// `ttl = "<Duration expr>"`, which re-caches with a fresh TTL window) or `expires = true`
+/// (per-value expiry, where the re-cached value stays expired and the next call recomputes).
 #[concurrent_cached]
 fn slow_double(x: u64) -> u64 {
     std::thread::sleep(cached::time::Duration::from_millis(10));

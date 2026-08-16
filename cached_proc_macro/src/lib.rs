@@ -283,7 +283,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 /// to also cache `None`. `Result<T, E>` caches only successful `Ok(T)` values and returns
 /// `Err(E)` without storing it; use `cache_err = true` to also cache `Err` values.
 /// `result_fallback = true` is supported: on an `Err` return, the last cached `Ok` value
-/// for the same key is returned instead (requires `ttl`, `ttl_secs`, or `ttl_millis`).
+/// for the same key is returned instead (requires expiring entries, so set a TTL via
+/// `ttl`/`ttl_secs`/`ttl_millis` or per-value expiry via `expires = true`).
 ///
 /// Result detection is exact: the macro matches only the bare identifier `Result` (including
 /// qualified forms like `std::result::Result<T, E>`). Type aliases are never resolved, so any
@@ -424,17 +425,25 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   return the last cached `Ok` value for the same key is returned instead (wrapped back in
 ///   `Ok`). If there is no prior `Ok` for that key (e.g., the function has never succeeded or
 ///   the cache was cleared), the original `Err` is returned as-is. Refreshes are best-effort:
-///   an `Ok` return refreshes the cache as usual; an `Err` return re-caches the stale value
-///   with a fresh TTL window. **Note:** the stale value's TTL is refreshed on *every* `Err`
-///   call - if the backend stays down indefinitely, the stale entry will never expire. `ttl`
-///   bounds staleness under normal (transient) failure; it does not bound it under permanent
-///   failure. This is useful for keeping the last successful result available during transient
+///   an `Ok` return refreshes the cache as usual; an `Err` return re-caches the stale value.
+///   This is useful for keeping the last successful result available during transient
 ///   failures, e.g. network disconnects.
-///   **Requires `ttl`, `ttl_secs`, or `ttl_millis`** - only implemented on the expiry-capable sharded stores
-///   (`ShardedTtlCache` and `ShardedLruTtlCache`). Setting `ttl`/`ttl_secs`/`ttl_millis` without `max_size` selects
-///   `ShardedTtlCache`; with `max_size` selects `ShardedLruTtlCache`. Omitting all three is a compile error.
-///   Mutually exclusive with `cache_err`, `with_cached_flag`, `expires = true`, `redis = true`,
-///   `disk = true`, and custom `ty`/`create`.
+///   **Requires expiring entries** - a refresh only happens once an entry expires, so without
+///   expiry the body is never re-run for a cached key and the fallback can never fire. Satisfy
+///   it either way:
+///   - `ttl` / `ttl_secs` / `ttl_millis`: selects `ShardedTtlCache`, or `ShardedLruTtlCache`
+///     when `max_size` is also set. An `Err` re-caches the stale value with a fresh TTL
+///     window, so the TTL is refreshed on *every* `Err` call: if the backend stays down
+///     indefinitely, the stale entry never expires. `ttl` bounds staleness under transient
+///     failure, not under permanent failure.
+///   - `expires = true`: selects `ShardedExpiringCache`, or `ShardedExpiringLruCache` when
+///     `max_size` is also set. The value carries its own expiry, and the value re-cached on
+///     `Err` is still expired by its own `Expires::is_expired`, so the next call recomputes
+///     rather than serving a hit. There is no TTL window to refresh. Callers that need to
+///     tell a fresh result from a stale fallback must check the value's own expiry.
+///
+///   Setting neither is a compile error. Mutually exclusive with `cache_err`,
+///   `with_cached_flag`, `redis = true`, `disk = true`, and custom `ty`/`create`.
 ///   Requires the cache key type to implement `Clone` (the fallback path re-caches the key). The
 ///   default key already satisfies this, so it only matters with a custom non-`Clone` `key`/`convert`.
 /// - `with_cached_flag`: (optional, bool) If your function returns a `cached::Return`,

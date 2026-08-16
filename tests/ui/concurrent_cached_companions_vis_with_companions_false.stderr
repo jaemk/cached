@@ -1,4 +1,4 @@
-error: `companions_vis` has no effect with `companions = false`: it sets the visibility of the `{fn}_no_cache` and `{fn}_prime_cache` companions, and `companions = false` emits neither. Remove one of the two.
+error: `companions_vis` has no effect with `companions = false`: the only companion it could apply to here is `{fn}_prime_cache`, and `companions = false` does not emit it. Remove one of the two. (Without `in_impl = true`, `#[concurrent_cached]` emits the uncached `{fn}_no_cache` origin as a function-local `fn` inside the cached function, not as a sibling item, so there is nothing else to make visible.)
  --> tests/ui/concurrent_cached_companions_vis_with_companions_false.rs:4:4
   |
 4 | fn my_fn(x: u32) -> u32 {

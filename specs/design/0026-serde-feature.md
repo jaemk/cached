@@ -26,3 +26,16 @@ and `redb_store` list `serde` instead of the individual deps directly. Custom
 `SerializeCached` impl authors can now enable `features = ["serde"]` without pulling in
 an IO store. `serde_json` remains redis_store-only (MessagePack is the redb codec; JSON
 is not used by redb). Feature is documented in the features table in src/lib.rs docs.
+
+## Reversal (pre-3.0.0)
+
+DEC-6=A is reverted. The premise ("enable serde support independent of choosing redis or
+redb") did not hold: no public item is gated on the feature. `SerializeCached` and
+`SerializeCachedAsync` are ungated traits with no exposed codec, and `grep 'feature =
+"serde"' src/` matched nothing, so `features = ["serde"]` added `serde` + `rmp-serde` to a
+consumer's dependency graph and no API. `redis_store` and `redb_store` now list
+`dep:serde` / `dep:rmp-serde` directly and the public feature is gone. Removing a public
+feature is breaking, so it lands in 3.0.0 rather than a 3.x minor.
+
+Re-adding a `serde` feature is only worthwhile alongside actual gated API (exposed codec
+helpers a custom `SerializeCached` store would need); that would be additive at any time.

@@ -37,7 +37,7 @@ Consequences:
 - The custom-hasher store is `ShardedX<K, V, H>`, spellable in a type annotation or a generic
   bound without naming an internal type.
 - Builder types are untouched: `ShardedXBuilder<K, V, H>` (and
-  `ShardedLruTtlCacheBuilder<K, V, E, H>`) already carried `H`.
+  `ShardedLruTtlCacheBuilder<K, V, H, E>`) already carried `H`.
 
 ## No deprecated alias
 
