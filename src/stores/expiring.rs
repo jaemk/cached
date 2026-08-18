@@ -266,23 +266,10 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     /// Phase 1 of a two-phase sweep: run `doomed` over every entry and hand back the
     /// entries it selected, removed from the store.
     ///
-    /// The selection pass only *reads* the map, so a panic out of `doomed` (it runs the
-    /// caller's `retain` predicate and the value's own [`Expires::is_expired`]) leaves the
-    /// cache exactly as it was: nothing removed, nothing counted, nothing notified. The
-    /// removal pass replays the recorded decisions through a closure that cannot panic, so
-    /// every entry it takes out reaches the caller to be counted and notified. `extract_if`
-    /// walks the same untouched table `iter` just walked, in the same order, so the
-    /// decisions line up positionally.
-    fn take_doomed<F: FnMut(&K, &V) -> bool>(&mut self, mut doomed: F) -> Vec<(K, V)> {
-        let mut flags: Vec<bool> = Vec::with_capacity(self.store.len());
-        flags.extend(self.store.iter().map(|(k, v)| doomed(k, v)));
-        if !flags.contains(&true) {
-            return Vec::new();
-        }
-        let mut flags = flags.into_iter();
-        self.store
-            .extract_if(|_, _| flags.next().unwrap_or(false))
-            .collect()
+    /// See [`take_doomed`](crate::stores::take_doomed) for why the sweep is split in two and
+    /// what ties the passes together.
+    fn take_doomed<F: FnMut(&K, &V) -> bool>(&mut self, doomed: F) -> Vec<(K, V)> {
+        crate::stores::take_doomed(&mut self.store, doomed)
     }
 
     /// Phase 2 of a two-phase sweep: count `removed` as evictions and then notify

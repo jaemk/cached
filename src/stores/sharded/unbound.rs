@@ -388,35 +388,18 @@ where
     ///
     /// If `keep` panics, nothing has been removed yet from the shard it panicked in (or from
     /// any shard not yet visited): the sweep of a shard runs `keep` in a first pass that only
-    /// *selects* doomed keys and removes them in a second pass that runs no user code. Shards
-    /// already swept keep their removals, all of which were counted and notified before the
-    /// panic. This is why the selection pass clones the doomed keys, and why the method
-    /// requires `K: Clone`.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize
-    where
-        K: Clone,
-    {
+    /// *selects* doomed entries and removes them in a second pass that runs no user code.
+    /// Shards already swept keep their removals, all of which were counted and notified before
+    /// the panic.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
         let mut total_removed = 0usize;
         for shard in self.inner.shards.iter() {
-            // Collect under the write lock, fire callbacks after releasing it.
+            // Collect under the write lock, fire callbacks after releasing it. Two phases: the
+            // first runs `keep` (user code) and only selects, the second removes and runs
+            // nothing that can panic. See `stores::take_doomed`.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                // Two passes, matching the LRU-backed sharded stores. The first runs `keep`
-                // (user code) and only selects; the second removes and runs nothing that can
-                // panic. A single `extract_if` pass removes eagerly *while* `keep` runs, so a
-                // panicking predicate drops every already-yielded entry during unwind: gone
-                // from the cache, never handed to `on_evict`, never counted.
-                let doomed: Vec<K> = guard
-                    .iter()
-                    .filter_map(|(k, v)| if keep(k, v) { None } else { Some(k.clone()) })
-                    .collect();
-                let mut removed = Vec::with_capacity(doomed.len());
-                for key in doomed {
-                    if let Some(pair) = guard.remove_entry(&key) {
-                        removed.push(pair);
-                    }
-                }
-                removed
+                crate::stores::take_doomed(&mut guard, |k, v| !keep(k, v))
             };
             total_removed += removed.len();
             if let Some(on_evict) = &self.inner.on_evict {

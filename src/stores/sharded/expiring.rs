@@ -388,10 +388,14 @@ where
     ///
     /// [`Expires::is_expired`] is user code. If it panics, nothing has been removed yet from
     /// the shard it panicked in (or from any shard not yet visited): each shard is swept in a
-    /// first pass that only *selects* expired keys and a second pass that removes them without
-    /// running user code. Shards already swept keep their removals, all of which were counted
-    /// and notified before the panic. This holds whether or not an `on_evict` callback is
-    /// configured, and is why the selection pass clones the doomed keys.
+    /// first pass that only *selects* expired entries and a second pass that removes them
+    /// without running user code. Shards already swept keep their removals, all of which were
+    /// counted and notified before the panic. This holds whether or not an `on_evict` callback
+    /// is configured.
+    ///
+    /// The `K: Clone` bound is not needed by this implementation; it predates the two-phase
+    /// sweep and is kept because removing it from the inherent method alone would leave it
+    /// stricter on the [`ConcurrentCacheEvict`](crate::ConcurrentCacheEvict) impl.
     #[must_use]
     pub fn evict(&self) -> usize
     where
@@ -399,34 +403,15 @@ where
     {
         let mut total = 0;
         for shard in self.inner.shards.iter() {
-            // Two passes, matching the LRU-backed sharded stores. The first calls
-            // `is_expired` (user code) and only selects; the second removes and runs nothing
-            // that can panic. A single `extract_if` pass removes eagerly *while* `is_expired`
-            // runs, so a panicking implementation dropped every already-yielded entry during
-            // unwind: gone from the cache, never handed to `on_evict`, never counted. The
-            // no-callback path used to take a `before - guard.len()` delta after an in-place
-            // `HashMap::retain`, which the same unwind skipped entirely; it now shares this
-            // structure so both paths remove and count exactly the same entries.
-            // Collect under the write lock, fire callbacks after releasing it.
+            // Collect under the write lock, fire callbacks after releasing it. Two phases: the
+            // first calls `is_expired` (user code) and only selects, the second removes and
+            // runs nothing that can panic. See `stores::take_doomed`. The no-callback path used
+            // to take a `before - guard.len()` delta after an in-place `HashMap::retain`, which
+            // a panicking `is_expired` skipped entirely; both paths now remove and count
+            // exactly the same entries.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                let doomed: Vec<K> = guard
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        if v.is_expired() {
-                            Some(k.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let mut removed = Vec::with_capacity(doomed.len());
-                for key in doomed {
-                    if let Some(pair) = guard.remove_entry(&key) {
-                        removed.push(pair);
-                    }
-                }
-                removed
+                crate::stores::take_doomed(&mut guard, |_, v| v.is_expired())
             };
 
             total += removed.len();
@@ -475,42 +460,20 @@ where
     ///
     /// If `keep` (or [`Expires::is_expired`], equally user code) panics, nothing has been
     /// removed yet from the shard it panicked in (or from any shard not yet visited): the sweep
-    /// of a shard runs the predicates in a first pass that only *selects* doomed keys and
+    /// of a shard runs the predicates in a first pass that only *selects* doomed entries and
     /// removes them in a second pass that runs no user code. Shards already swept keep their
     /// removals, all of which were counted and notified before the panic. This holds whether or
-    /// not an `on_evict` callback is configured. It is why the selection pass clones the doomed
-    /// keys, and why the method requires `K: Clone`.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize
-    where
-        K: Clone,
-    {
+    /// not an `on_evict` callback is configured.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
         let mut total_removed = 0usize;
         for shard in self.inner.shards.iter() {
-            // Collect under the write lock, fire callbacks after releasing it. Two passes for
-            // the same reason as `evict`: `extract_if` removes eagerly *while* the user
-            // predicates run, so a panic dropped every already-yielded entry during unwind --
-            // gone from the cache, never handed to `on_evict`, never counted. The no-callback
-            // path used to take a `before - guard.len()` delta that the same unwind skipped
+            // Collect under the write lock, fire callbacks after releasing it. Two phases for
+            // the same reason as `evict`; see `stores::take_doomed`. The no-callback path used
+            // to take a `before - guard.len()` delta that a panicking predicate skipped
             // entirely; it now shares this structure.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                let doomed: Vec<K> = guard
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        if v.is_expired() || !keep(k, v) {
-                            Some(k.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let mut removed = Vec::with_capacity(doomed.len());
-                for key in doomed {
-                    if let Some(pair) = guard.remove_entry(&key) {
-                        removed.push(pair);
-                    }
-                }
-                removed
+                crate::stores::take_doomed(&mut guard, |k, v| v.is_expired() || !keep(k, v))
             };
             total_removed += removed.len();
             if !removed.is_empty() {
@@ -2449,12 +2412,13 @@ mod tests {
 
     #[test]
     fn evict_is_callable_through_both_entry_points_under_the_key_clone_bound() {
-        // The one-pass rewrite no longer clones keys internally, but the public `K: Clone`
-        // bound on the inherent `evict` and on the `ConcurrentCacheEvict` impl was
-        // deliberately kept (relaxing a public bound was explicitly out of scope for this
-        // refactor). A passing test cannot prove a bound is still *required* (that needs a
-        // compile-fail harness), so this pins the callable surface: both entry points
-        // resolve for a `K: Clone` key and agree on the swept count.
+        // The two-phase sweep carries decisions, not cloned keys, so it does not need
+        // `K: Clone`. The public bound on the inherent `evict` and on the
+        // `ConcurrentCacheEvict` impl is kept anyway: dropping it from the inherent method
+        // alone would leave the trait method stricter, and relaxing both is a separate change.
+        // A passing test cannot prove a bound is still *required* (that needs a compile-fail
+        // harness), so this pins the callable surface: both entry points resolve for a
+        // `K: Clone` key and agree on the swept count.
         fn evict_both_ways<K: Clone + Hash + Eq, V: Clone + Expires>(
             c: &ShardedExpiringCache<K, V>,
         ) -> usize {
