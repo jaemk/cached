@@ -125,6 +125,31 @@ impl over `ConcurrentCachedAsync`, not defaulted methods. The blanket impl is th
 implementation, so a downstream type cannot override an alias and make `async_get` disagree with
 `async_cache_get`.
 
+## CTRAIT-8
+
+`ShardedTtlCache::cache_set` and `ShardedExpiringCache::cache_set` no longer choose their write
+path based on whether an `on_evict` callback is configured. Previously the callback branch did
+`remove_entry` + `insert` (replacing the stored key) while the no-callback branch did a plain
+`HashMap::insert` (keeping it), so attaching a purely observational callback changed which key was
+physically stored:
+
+```
+ttl  no-on_evict stored tag = "first"   with-on_evict stored tag = "second"
+```
+
+Both paths now take one shape: `get_mut` plus an in-place value swap on an overwrite, `insert` on a
+vacant slot. That keeps the stored key (`HashMap::insert` semantics, matching their single-owner
+counterparts `TtlCache` / `ExpiringCache`, [store-ttl.md](store-ttl.md) TTL-7) and is a single
+lookup on the overwrite path. The stored key no longer depends on unrelated builder configuration.
+
+Note the one place the sharded stores still differ from their single-owner counterparts. When a
+displaced entry has already expired, `on_evict` fires after the shard lock is released, so the
+callback is handed the CALLER's key rather than the stored one: the stored key stays in the map and
+cannot be borrowed past the unlock. `TtlCache` / `ExpiringCache` fire while still holding the map
+and therefore pass `occupied.key()`, the stored instance. The two keys are `Eq`-equal, so this is
+observable only for a key type whose `Hash`/`Eq` cover part of the payload. Making it uniform would
+cost a `K::clone` on the expired-displacement path; it has not been judged worth it.
+
 The aliases keep the `async_` prefix instead of being bare `get` / `set`. Every store
 implementing `ConcurrentCachedAsync` also implements the synchronous `ConcurrentCached`: the six
 sharded stores and `RedbCache`. Since both alias traits are blanket implemented and both are in

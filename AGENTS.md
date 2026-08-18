@@ -170,8 +170,8 @@ The macro attributes use `ttl_secs =` (whole seconds), `ttl_millis =` (milliseco
 
 **2.0 attribute changes**: `result` and `option` were **removed** — `Result<T, E>`/`Option<T>` returns now skip caching `Err`/`None` by default; opt back in with `cache_err = true` / `cache_none = true`. The `size = N` attribute is a **hard rename error** — the macro rejects it with "`size` was renamed to `max_size`; use `max_size = ...`" and does not compile. Use `max_size = N`.
 
-**Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `cache_err`, `cache_none`, `with_cached_flag`):
-- `sync_writes`: `false` (default; no synchronization, matching 2.x and `functools.lru_cache`), `"by_key"` (opt-in per-key bucketed locks), `true` / `"default"` (whole-cache lock). `#[once]` also defaults to `false`; `#[concurrent_cached]` does not support `sync_writes`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled`.
+**Additional `#[cached]` / `#[concurrent_cached]` attributes** (beyond `name`, `max_size`, `ttl_secs`, `ttl_millis`, `ttl`, `expires`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`), and **`#[once]`** (beyond `name`, `ttl_secs`, `ttl_millis`, `ttl`, `expires`, `cache_err`, `cache_none`, `with_cached_flag`):
+- `sync_writes`: `false` / `"false"` / `"disabled"` (default; no synchronization, matching 2.x and `functools.lru_cache`), `"by_key"` (opt-in per-key bucketed locks), `true` / `"default"` (whole-cache lock). `#[once]` also defaults to `false`; `#[concurrent_cached]` does not support `sync_writes`. `result_fallback` with no explicit `sync_writes` implicitly uses `Disabled`.
 - `sync_writes_buckets`: `usize` — number of per-key lock buckets for `sync_writes = "by_key"`; defaults to 64
 - `sync_lock`: `"rwlock"` (default) or `"mutex"` — the lock type wrapping the generated cache static
 - `unsync_reads`: `bool` — use a shared read lock for cache hits; only works for stores implementing `CachedRead` (e.g. `UnboundCache`, `TtlSortedCache`, `HashMap`)
@@ -299,7 +299,6 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `time_stores` (default) | `TtlCache`, `LruTtlCache`, `TtlSortedCache` |
 | `async_core` | Async support marker (no runtime); use with custom async runtimes |
 | `async` | Async support (runtime-agnostic; pulls `async-lock`, no tokio) |
-| `serde` | `serde` + `rmp-serde` codec dependencies for `SerializeCached`/`SerializeCachedAsync` implementations and the IO stores; `redis_store` and `redb_store` enable it transitively |
 | `redis_store` | Synchronous Redis backend |
 | `redis_tokio` | Async Redis backend (Tokio, no TLS); implies `redis_store` + `async` |
 | `redis_tokio_native_tls` | `redis_tokio` + TLS via `native-tls` |

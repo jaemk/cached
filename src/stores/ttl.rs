@@ -320,17 +320,80 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
         }
     }
 
+    /// Expiry instant for an entry whose TTL is being refreshed on hit.
+    ///
+    /// A zero TTL means expiry is disabled, and disabling expiry must not silently clear a
+    /// deadline an entry already carries, so `current` is kept unchanged. Otherwise the
+    /// deadline is recomputed from `now` and -- exactly like a fresh insert through
+    /// [`compute_expires_at`](Self::compute_expires_at) -- an overflowing `now + ttl` yields
+    /// `None`, i.e. never expires. Writing `compute_expires_at(ttl, now).or(current)` instead
+    /// would conflate the two `None` cases and leave a refreshed entry pinned to its old, much
+    /// shorter deadline under a TTL so large it overflows `Instant`.
+    #[inline]
+    pub(super) fn refreshed_expires_at(
+        ttl: Duration,
+        now: Instant,
+        current: Option<Instant>,
+    ) -> Option<Instant> {
+        if ttl.is_zero() {
+            current
+        } else {
+            now.checked_add(ttl)
+        }
+    }
+
+    /// Phase 1 of a two-phase sweep: run `doomed` over every entry and hand back the
+    /// entries it selected, removed from the store.
+    ///
+    /// The selection pass only *reads* the map, so a panic out of `doomed` (it runs the
+    /// caller's `retain` predicate) leaves the cache exactly as it was: nothing removed,
+    /// nothing counted, nothing notified. The
+    /// removal pass replays the recorded decisions through a closure that cannot panic, so
+    /// every entry it takes out reaches the caller to be counted and notified. `extract_if`
+    /// walks the same untouched table `iter` just walked, in the same order, so the
+    /// decisions line up positionally.
+    fn take_doomed<F: FnMut(&K, &TimedEntry<V>) -> bool>(
+        &mut self,
+        mut doomed: F,
+    ) -> Vec<(K, TimedEntry<V>)> {
+        let mut flags: Vec<bool> = Vec::with_capacity(self.store.len());
+        flags.extend(self.store.iter().map(|(k, entry)| doomed(k, entry)));
+        if !flags.contains(&true) {
+            return Vec::new();
+        }
+        let mut flags = flags.into_iter();
+        self.store
+            .extract_if(|_, _| flags.next().unwrap_or(false))
+            .collect()
+    }
+
+    /// Phase 2 of a two-phase sweep: count `removed` as evictions and then notify
+    /// `on_evict` for each, returning how many entries were removed.
+    ///
+    /// The entries are already out of the store, and the whole batch is counted before the
+    /// first notification, so a panicking `on_evict` can never leave an entry that has been
+    /// cleaned up still reachable, nor an entry removed-but-uncounted.
+    fn notify_evicted(&self, removed: &[(K, TimedEntry<V>)]) -> usize {
+        if !removed.is_empty() {
+            self.evictions
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (k, entry) in removed {
+                on_evict(k, &entry.value);
+            }
+        }
+        removed.len()
+    }
+
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
     /// evictions counter.
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
     /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
-    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
-    /// the plain `cache_clear`.
+    /// and increments `evictions`. The eviction count does not depend on whether an `on_evict`
+    /// callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
-        if self.on_evict.is_none() {
-            return self.cache_clear();
-        }
         let entries: Vec<(K, TimedEntry<V>)> = self.store.drain().collect();
         let count = entries.len() as u64;
         if count > 0 {
@@ -346,26 +409,14 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
     /// Evict expired values from the cache.
     #[must_use]
     pub fn evict(&mut self) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
-        let mut removed = 0;
         let now = Instant::now();
-        self.store.retain(|key, entry| {
-            // None means never-expires; Some(t) expires when now >= t.
-            if entry.expires_at.is_none_or(|t| now < t) {
-                true
-            } else {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, &entry.value);
-                }
-                removed += 1;
-                false
-            }
-        });
-        removed
+        // Two-phase: select, then remove, then count, then notify. Counting or notifying
+        // from inside a `HashMap::retain` predicate would fire the side effects *before*
+        // the map drops the entry, so a panicking `on_evict` would leave an entry counted
+        // (and cleaned up) while still stored and served.
+        // None means never-expires; Some(t) expires when now >= t.
+        let removed = self.take_doomed(|_key, entry| !Self::entry_live_at(entry.expires_at, now));
+        self.notify_evicted(&removed)
     }
 
     /// Retain only entries that are unexpired and satisfy `keep`.
@@ -384,28 +435,16 @@ impl<K: Hash + Eq, V, S: BuildHasher> TtlCache<K, V, S> {
     /// `#[must_use]`: discarding the count is a legitimate and common use, matching
     /// existing bare `cache.retain(...);` call sites.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
-        let mut removed = 0usize;
         // Sample the clock once for the whole eager sweep, as `evict` does above --
         // one `now` shared across every entry instead of a clock read per entry.
         let now = Instant::now();
-        self.store.retain(|key, entry| {
+        // Two-phase (see `take_doomed`): the selection pass must be side-effect free so a
+        // panicking `keep` leaves the cache untouched rather than half-notified.
+        let removed = self.take_doomed(|key, entry| {
             let expired = !Self::entry_live_at(entry.expires_at, now);
-            if expired || !keep(key, &entry.value) {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, &entry.value);
-                }
-                removed += 1;
-                false
-            } else {
-                true
-            }
+            expired || !keep(key, &entry.value)
         });
-        removed
+        self.notify_evicted(&removed)
     }
 }
 
@@ -424,7 +463,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
             Some(entry) if Self::entry_live_at(entry.expires_at, now) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    entry.expires_at = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                    entry.expires_at = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                 }
                 // SAFETY: `ptr` points into a HashMap entry obtained from
                 // `get_mut`. We return immediately without modifying the map, so
@@ -461,7 +500,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
             Some(entry) if Self::entry_live_at(entry.expires_at, now) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    entry.expires_at = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                    entry.expires_at = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                 }
                 // SAFETY: same as `cache_get` -- entry is not moved between
                 // obtaining the pointer and returning, and `&mut self` prevents
@@ -493,7 +532,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                 if Self::entry_live_at(occupied.get().expires_at, now) {
                     if self.refresh {
                         let new_exp =
-                            Self::compute_expires_at(self.ttl, now).or(occupied.get().expires_at);
+                            Self::refreshed_expires_at(self.ttl, now, occupied.get().expires_at);
                         occupied.get_mut().expires_at = new_exp;
                     }
                     self.hits.fetch_add(1, Ordering::Relaxed);
@@ -504,18 +543,20 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                     // so firing on_evict / counting here would double-fire when the
                     // next call finally evicts the same physical entry (EXP-3).
                     let val = f();
-                    // Count BEFORE notifying: a panicking callback must never leave
-                    // an entry removed-but-uncounted.
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
-                    if let Some(on_evict) = &self.on_evict {
-                        on_evict(occupied.key(), &occupied.get().value);
-                    }
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now);
-                    occupied.insert(TimedEntry {
+                    // Replace FIRST, then count, then notify -- as `set_entry` does. Firing
+                    // the side effects while the expired entry is still installed would let a
+                    // panicking `on_evict` leave it in place *and* counted, so the retry that
+                    // finally replaces it counts a second eviction for one physical entry.
+                    let old = occupied.insert(TimedEntry {
                         expires_at,
                         value: val,
                     });
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                    if let Some(on_evict) = &self.on_evict {
+                        on_evict(occupied.key(), &old.value);
+                    }
                 }
                 &mut occupied.into_mut().value
             }
@@ -547,7 +588,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                 if Self::entry_live_at(occupied.get().expires_at, now) {
                     if self.refresh {
                         let new_exp =
-                            Self::compute_expires_at(self.ttl, now).or(occupied.get().expires_at);
+                            Self::refreshed_expires_at(self.ttl, now, occupied.get().expires_at);
                         occupied.get_mut().expires_at = new_exp;
                     }
                     self.hits.fetch_add(1, Ordering::Relaxed);
@@ -558,18 +599,18 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
                     // firing on_evict / counting here would double-fire when the
                     // next call finally evicts the same physical entry (EXP-3).
                     let val = f()?;
-                    // Count BEFORE notifying: a panicking callback must never leave
-                    // an entry removed-but-uncounted.
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
-                    if let Some(on_evict) = &self.on_evict {
-                        on_evict(occupied.key(), &occupied.get().value);
-                    }
                     let now = Instant::now();
                     let expires_at = Self::compute_expires_at(self.ttl, now);
-                    occupied.insert(TimedEntry {
+                    // Replace FIRST, then count, then notify -- see
+                    // `cache_get_or_set_with_mut` above.
+                    let old = occupied.insert(TimedEntry {
                         expires_at,
                         value: val,
                     });
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                    if let Some(on_evict) = &self.on_evict {
+                        on_evict(occupied.key(), &old.value);
+                    }
                 }
                 Ok(&mut occupied.into_mut().value)
             }
@@ -612,17 +653,17 @@ impl<K: Hash + Eq, V, S: BuildHasher> Cached<K, V> for TtlCache<K, V, S> {
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some((stored_k, entry)) = self.store.remove_entry(k) {
+            // Judge liveness at the moment of removal, BEFORE the callback runs. Sampling
+            // it afterwards would let a slow `on_evict` push the entry past its deadline and
+            // report `None` for a value that was live when it was taken out.
+            let live = Self::entry_live(entry.expires_at);
             // Count BEFORE notifying: a panicking callback must never leave
             // an entry removed-but-uncounted.
             self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&stored_k, &entry.value);
             }
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
+            if live { Some(entry.value) } else { None }
         } else {
             None
         }
@@ -775,7 +816,7 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
             } else {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                    let new_exp = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                     entry.expires_at = new_exp;
                 }
                 (Some(entry.value.clone()), false)
@@ -832,8 +873,11 @@ where
                 Entry::Occupied(mut occupied) => {
                     if Self::entry_live_at(occupied.get().expires_at, now) {
                         if self.refresh {
-                            let new_exp = Self::compute_expires_at(self.ttl, now)
-                                .or(occupied.get().expires_at);
+                            let new_exp = Self::refreshed_expires_at(
+                                self.ttl,
+                                now,
+                                occupied.get().expires_at,
+                            );
                             occupied.get_mut().expires_at = new_exp;
                         }
                         self.hits.fetch_add(1, Ordering::Relaxed);
@@ -847,18 +891,18 @@ where
                         // expiry after the factory resolves so a slow factory does
                         // not eat into the fresh entry's TTL (CORE-3).
                         let val = f().await;
-                        // Count BEFORE notifying: a panicking callback must never
-                        // leave an entry removed-but-uncounted.
-                        self.evictions.fetch_add(1, Ordering::Relaxed);
-                        if let Some(on_evict) = &self.on_evict {
-                            on_evict(occupied.key(), &occupied.get().value);
-                        }
                         let now = Instant::now();
                         let expires_at = Self::compute_expires_at(self.ttl, now);
-                        occupied.insert(TimedEntry {
+                        // Replace FIRST, then count, then notify -- see the sync
+                        // `cache_get_or_set_with_mut`.
+                        let old = occupied.insert(TimedEntry {
                             expires_at,
                             value: val,
                         });
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                        if let Some(on_evict) = &self.on_evict {
+                            on_evict(occupied.key(), &old.value);
+                        }
                     }
                     &mut occupied.into_mut().value
                 }
@@ -898,8 +942,11 @@ where
                 Entry::Occupied(mut occupied) => {
                     if Self::entry_live_at(occupied.get().expires_at, now) {
                         if self.refresh {
-                            let new_exp = Self::compute_expires_at(self.ttl, now)
-                                .or(occupied.get().expires_at);
+                            let new_exp = Self::refreshed_expires_at(
+                                self.ttl,
+                                now,
+                                occupied.get().expires_at,
+                            );
                             occupied.get_mut().expires_at = new_exp;
                         }
                         self.hits.fetch_add(1, Ordering::Relaxed);
@@ -910,18 +957,18 @@ where
                         // (CORE-3). On `Err` the expired entry is left in place
                         // and nothing is fired, so the next call evicts it once.
                         let val = f().await?;
-                        // Count BEFORE notifying: a panicking callback must never
-                        // leave an entry removed-but-uncounted.
-                        self.evictions.fetch_add(1, Ordering::Relaxed);
-                        if let Some(on_evict) = &self.on_evict {
-                            on_evict(occupied.key(), &occupied.get().value);
-                        }
                         let now = Instant::now();
                         let expires_at = Self::compute_expires_at(self.ttl, now);
-                        occupied.insert(TimedEntry {
+                        // Replace FIRST, then count, then notify -- see the sync
+                        // `cache_get_or_set_with_mut`.
+                        let old = occupied.insert(TimedEntry {
                             expires_at,
                             value: val,
                         });
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                        if let Some(on_evict) = &self.on_evict {
+                            on_evict(occupied.key(), &old.value);
+                        }
                     }
                     &mut occupied.into_mut().value
                 }
@@ -996,6 +1043,105 @@ mod tests {
         // Overwriting the now-live value: returns it and no new eviction.
         assert_eq!(c.cache_set(1, 300), Some(200));
         assert_eq!(c.cache_evictions(), Some(1));
+    }
+
+    /// A key whose `Hash`/`Eq` cover only `label`, so two keys carrying different `payload`s
+    /// compare EQUAL and an overwrite has an observable choice of which instance to store.
+    #[derive(Clone, Debug)]
+    struct CoarseKey {
+        label: &'static str,
+        payload: u32,
+    }
+
+    impl std::hash::Hash for CoarseKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.label.hash(state);
+        }
+    }
+    impl PartialEq for CoarseKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.label == other.label
+        }
+    }
+    impl Eq for CoarseKey {}
+
+    /// `cache_set` over an existing key takes `HashMap`'s native fast path: the value is
+    /// replaced in place and the FIRST-inserted key stays stored, so `cache_remove_entry` and
+    /// `on_evict` report that key rather than the caller's. Re-keying the slot (an explicit
+    /// `remove_entry` + `insert`) would report the last-written payload instead.
+    #[test]
+    fn cache_set_overwrite_keeps_the_first_stored_key() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen2 = seen.clone();
+        let mut c: TtlCache<CoarseKey, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(move |k: &CoarseKey, _v: &u32| seen2.lock().unwrap().push(k.payload))
+            .build()
+            .unwrap();
+        let first = CoarseKey {
+            label: "a",
+            payload: 1,
+        };
+        let second = CoarseKey {
+            label: "a",
+            payload: 2,
+        };
+        assert_eq!(first, second, "the two keys compare equal");
+
+        c.cache_set(first, 10);
+        assert_eq!(c.cache_set(second.clone(), 20), Some(10));
+        assert_eq!(c.cache_size(), 1);
+
+        let (stored, value) = c.cache_remove_entry(&second).expect("present");
+        assert_eq!(
+            stored.payload, 1,
+            "an overwrite keeps the incumbent key, so the first payload is the stored one"
+        );
+        assert_eq!(value, 20);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![1u32],
+            "the removal callback receives the stored key"
+        );
+    }
+
+    /// Same fast path when the displaced entry had expired: the value is replaced in place,
+    /// the eviction is counted and `on_evict` fires with the stored key -- and the key that
+    /// remains stored is still the first one.
+    #[test]
+    fn cache_set_over_expired_keeps_the_first_stored_key() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen2 = seen.clone();
+        let mut c: TtlCache<CoarseKey, u32> = TtlCache::builder()
+            .ttl(crate::time::Duration::from_millis(20))
+            .on_evict(move |k: &CoarseKey, _v: &u32| seen2.lock().unwrap().push(k.payload))
+            .build()
+            .unwrap();
+        let first = CoarseKey {
+            label: "a",
+            payload: 1,
+        };
+        let second = CoarseKey {
+            label: "a",
+            payload: 2,
+        };
+        c.cache_set(first, 10);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        assert_eq!(c.cache_set(second.clone(), 20), None, "displaced expired");
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![1u32],
+            "on_evict receives the key that was physically stored"
+        );
+
+        let (stored, value) = c.cache_remove_entry(&second).expect("present");
+        assert_eq!(
+            stored.payload, 1,
+            "replacing an expired value still keeps the incumbent key"
+        );
+        assert_eq!(value, 20);
     }
 
     #[test]

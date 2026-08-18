@@ -347,21 +347,52 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     /// Evict expired values from the cache.
     #[must_use]
     pub fn evict(&mut self) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
-        self.store.retain_silent(|key, value| {
-            if value.is_expired() {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, value);
-                }
-                false
-            } else {
-                true
+        // Two-phase: select, then remove, then count, then notify. The scan collects every
+        // doomed slot before unlinking any of them, so counting or notifying from inside the
+        // scan predicate would fire the side effects
+        // for entries that are still stored -- and a panic anywhere in the scan would leave
+        // them served after their `on_evict` cleanup already ran.
+        let doomed = self.doomed_indices(|_key, value| value.is_expired());
+        self.remove_and_notify(doomed)
+    }
+
+    /// Phase 1 of a two-phase sweep: inner-store slot indices (MRU -> LRU) of the entries
+    /// `doomed` selects.
+    ///
+    /// Reads only, so a panic out of `doomed` (it runs the caller's `retain` predicate and
+    /// the value's own [`Expires::is_expired`]) leaves the cache exactly as it was: nothing
+    /// removed, nothing counted, nothing notified. Mirrors `LruCache::retain`'s scan.
+    fn doomed_indices<F: FnMut(&K, &V) -> bool>(&self, mut doomed: F) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.store.store.len());
+        out.extend(self.store.order.iter_indices().filter(|&index| {
+            let (key, value) = self.store.order.get(index);
+            doomed(key, value)
+        }));
+        out
+    }
+
+    /// Phase 2 of a two-phase sweep: remove every selected slot, then count the batch as
+    /// evictions, then notify `on_evict`. Returns the number of entries removed.
+    ///
+    /// Indices stay valid because nothing is inserted between the scan and the removals.
+    /// Every entry is out of the store and counted before the first notification, so a
+    /// panicking `on_evict` can never leave a cleaned-up entry still reachable, nor an
+    /// entry removed-but-uncounted.
+    fn remove_and_notify(&mut self, doomed: Vec<usize>) -> usize {
+        let removed: Vec<(K, V)> = doomed
+            .into_iter()
+            .map(|index| self.store.remove_index(index))
+            .collect();
+        if !removed.is_empty() {
+            self.evictions
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (key, value) in &removed {
+                on_evict(key, value);
             }
-        })
+        }
+        removed.len()
     }
 
     /// Retain only entries that are unexpired and satisfy `keep`.
@@ -383,21 +414,11 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     /// `#[must_use]`: discarding the count is a legitimate and common use, matching
     /// existing bare `cache.retain(...);` call sites.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
-        self.store.retain_silent(|key, value| {
-            if value.is_expired() || !keep(key, value) {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, value);
-                }
-                false
-            } else {
-                true
-            }
-        })
+        // Two-phase (see `doomed_indices` / `remove_and_notify`): the selection pass must be
+        // side-effect free so a panicking `keep` leaves the cache untouched rather than
+        // half-notified with every scanned entry still stored.
+        let doomed = self.doomed_indices(|key, value| value.is_expired() || !keep(key, value));
+        self.remove_and_notify(doomed)
     }
 
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
@@ -405,12 +426,9 @@ impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> ExpiringLruCache<K, V, S>
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
     /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
-    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
-    /// the plain `cache_clear`.
+    /// and increments `evictions`. The eviction count does not depend on whether an
+    /// `on_evict` callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
-        if self.on_evict.is_none() {
-            return self.cache_clear();
-        }
         // `drain_all` walks the LRU chain once taking owned pairs (MRU -> LRU, the same
         // order the old key-by-key drain fired in) -- no key clones, no re-hashing.
         let removed = self.store.drain_all();
@@ -648,8 +666,19 @@ impl<K: Hash + Eq + Clone, V: Expires, S: BuildHasher> Cached<K, V> for Expiring
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.cache_remove_entry(k)
-            .and_then(|(_, v)| if v.is_expired() { None } else { Some(v) })
+        let (stored_k, v) = self.store.pop_raw(k)?;
+        // Judge expiry at the moment of removal, BEFORE the callback runs. Asking the value
+        // again on the way out (as delegating to `cache_remove_entry` used to) would let a
+        // slow `on_evict` push it past its deadline and report `None` for a value that was
+        // live when it was taken out.
+        let expired = v.is_expired();
+        // Count BEFORE notifying: a panicking callback must never leave an
+        // entry removed-but-uncounted.
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+        if let Some(on_evict) = &self.on_evict {
+            on_evict(&stored_k, &v);
+        }
+        if expired { None } else { Some(v) }
     }
 
     /// Removes the entry and returns it **regardless of expiry** (unlike

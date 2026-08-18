@@ -255,24 +255,53 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     /// memory from entries that expire but are never re-accessed.
     #[must_use]
     pub fn evict(&mut self) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
-        let mut removed = 0;
-        self.store.retain(|key, value| {
-            if value.is_expired() {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, value);
-                }
-                removed += 1;
-                false
-            } else {
-                true
+        // Two-phase: select, then remove, then count, then notify. Counting or notifying
+        // from inside a `HashMap::retain` predicate would fire the side effects *before*
+        // the map drops the entry, so a panicking `on_evict` would leave an entry counted
+        // (and cleaned up) while still stored and served.
+        let removed = self.take_doomed(|_key, value| value.is_expired());
+        self.notify_evicted(&removed)
+    }
+
+    /// Phase 1 of a two-phase sweep: run `doomed` over every entry and hand back the
+    /// entries it selected, removed from the store.
+    ///
+    /// The selection pass only *reads* the map, so a panic out of `doomed` (it runs the
+    /// caller's `retain` predicate and the value's own [`Expires::is_expired`]) leaves the
+    /// cache exactly as it was: nothing removed, nothing counted, nothing notified. The
+    /// removal pass replays the recorded decisions through a closure that cannot panic, so
+    /// every entry it takes out reaches the caller to be counted and notified. `extract_if`
+    /// walks the same untouched table `iter` just walked, in the same order, so the
+    /// decisions line up positionally.
+    fn take_doomed<F: FnMut(&K, &V) -> bool>(&mut self, mut doomed: F) -> Vec<(K, V)> {
+        let mut flags: Vec<bool> = Vec::with_capacity(self.store.len());
+        flags.extend(self.store.iter().map(|(k, v)| doomed(k, v)));
+        if !flags.contains(&true) {
+            return Vec::new();
+        }
+        let mut flags = flags.into_iter();
+        self.store
+            .extract_if(|_, _| flags.next().unwrap_or(false))
+            .collect()
+    }
+
+    /// Phase 2 of a two-phase sweep: count `removed` as evictions and then notify
+    /// `on_evict` for each, returning how many entries were removed.
+    ///
+    /// The entries are already out of the store, and the whole batch is counted before the
+    /// first notification, so a panicking `on_evict` can never leave an entry that has been
+    /// cleaned up still reachable, nor an entry removed-but-uncounted.
+    fn notify_evicted(&self, removed: &[(K, V)]) -> usize {
+        if !removed.is_empty() {
+            self.evictions
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (k, v) in removed {
+                on_evict(k, v);
             }
-        });
-        removed
+        }
+        removed.len()
     }
 
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
@@ -280,12 +309,9 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
     /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
-    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
-    /// the plain `cache_clear`.
+    /// and increments `evictions`. The eviction count does not depend on whether an `on_evict`
+    /// callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
-        if self.on_evict.is_none() {
-            return self.cache_clear();
-        }
         let entries: Vec<(K, V)> = self.store.drain().collect();
         let count = entries.len() as u64;
         if count > 0 {
@@ -315,24 +341,10 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> ExpiringCache<K, V, S> {
     /// `#[must_use]`: discarding the count is a legitimate and common use, matching
     /// existing bare `cache.retain(...);` call sites.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
-        let mut removed = 0usize;
-        self.store.retain(|key, value| {
-            if value.is_expired() || !keep(key, value) {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, value);
-                }
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        });
-        removed
+        // Two-phase (see `take_doomed`): the selection pass must be side-effect free so a
+        // panicking `keep` leaves the cache untouched rather than half-notified.
+        let removed = self.take_doomed(|key, value| value.is_expired() || !keep(key, value));
+        self.notify_evicted(&removed)
     }
 }
 
@@ -424,18 +436,18 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
                     // If `f()` panics the expired entry is left in place, so firing
                     // on_evict / counting here would double-fire when the next call
                     // finally evicts the same physical entry.
-                    //
-                    // Fire on_evict while the old entry is still present in the map
-                    // slot, matching TtlCache ordering (compute value, fire callback,
-                    // then insert). A callback that peeks the cache sees the old value.
                     let new_val = f();
-                    // Count BEFORE notifying: a panicking callback must never leave
-                    // an entry removed-but-uncounted.
+                    // Replace FIRST, then count, then notify -- as `cache_set` does.
+                    // Firing the side effects while the expired entry is still installed
+                    // would let a panicking `on_evict` leave it in place *and* counted, so
+                    // the retry that finally replaces it counts a second eviction for one
+                    // physical entry. (`on_evict` is `Fn(&K, &V)` and gets no handle on the
+                    // cache, so nothing it can do observes the old value in the slot.)
+                    let old = occupied.insert(new_val);
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                     if let Some(on_evict) = &self.on_evict {
-                        on_evict(occupied.key(), occupied.get());
+                        on_evict(occupied.key(), &old);
                     }
-                    occupied.insert(new_val);
                     occupied.into_mut()
                 }
             }
@@ -458,16 +470,14 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
                     Ok(occupied.into_mut())
                 } else {
                     self.misses.fetch_add(1, Ordering::Relaxed);
-                    // Same ordering fix as cache_get_or_set_with_mut: compute,
-                    // fire on_evict while old entry is still in the map, then insert.
+                    // Same ordering as `cache_get_or_set_with_mut`: compute, replace,
+                    // count, then notify.
                     let new_val = f()?;
-                    // Count BEFORE notifying: a panicking callback must never leave
-                    // an entry removed-but-uncounted.
+                    let old = occupied.insert(new_val);
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                     if let Some(on_evict) = &self.on_evict {
-                        on_evict(occupied.key(), occupied.get());
+                        on_evict(occupied.key(), &old);
                     }
-                    occupied.insert(new_val);
                     Ok(occupied.into_mut())
                 }
             }
@@ -514,8 +524,19 @@ impl<K: Hash + Eq, V: Expires, S: BuildHasher> Cached<K, V> for ExpiringCache<K,
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.cache_remove_entry(k)
-            .and_then(|(_, v)| if v.is_expired() { None } else { Some(v) })
+        let (stored_k, v) = self.store.remove_entry(k)?;
+        // Judge expiry at the moment of removal, BEFORE the callback runs. Asking the value
+        // again on the way out (as delegating to `cache_remove_entry` used to) would let a
+        // slow `on_evict` push it past its deadline and report `None` for a value that was
+        // live when it was taken out.
+        let expired = v.is_expired();
+        // Count BEFORE notifying: a panicking callback must never leave an
+        // entry removed-but-uncounted.
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+        if let Some(on_evict) = &self.on_evict {
+            on_evict(&stored_k, &v);
+        }
+        if expired { None } else { Some(v) }
     }
 
     /// Removes the entry and returns it **regardless of expiry** (unlike
@@ -640,16 +661,14 @@ where
                         occupied.into_mut()
                     } else {
                         self.misses.fetch_add(1, Ordering::Relaxed);
-                        // Same ordering fix: compute, fire on_evict while old entry
-                        // is still in the map slot, then insert.
+                        // Same ordering as the sync path: compute, replace, count,
+                        // then notify.
                         let new_val = f().await;
-                        // Count BEFORE notifying: a panicking callback must never
-                        // leave an entry removed-but-uncounted.
+                        let old = occupied.insert(new_val);
                         self.evictions.fetch_add(1, Ordering::Relaxed);
                         if let Some(on_evict) = &self.on_evict {
-                            on_evict(occupied.key(), occupied.get());
+                            on_evict(occupied.key(), &old);
                         }
-                        occupied.insert(new_val);
                         occupied.into_mut()
                     }
                 }
@@ -681,16 +700,14 @@ where
                         occupied.into_mut()
                     } else {
                         self.misses.fetch_add(1, Ordering::Relaxed);
-                        // Same ordering fix: compute, fire on_evict while old entry
-                        // is still in the map slot, then insert.
+                        // Same ordering as the sync path: compute, replace, count,
+                        // then notify.
                         let new_val = f().await?;
-                        // Count BEFORE notifying: a panicking callback must never
-                        // leave an entry removed-but-uncounted.
+                        let old = occupied.insert(new_val);
                         self.evictions.fetch_add(1, Ordering::Relaxed);
                         if let Some(on_evict) = &self.on_evict {
-                            on_evict(occupied.key(), occupied.get());
+                            on_evict(occupied.key(), &old);
                         }
-                        occupied.insert(new_val);
                         occupied.into_mut()
                     }
                 }
@@ -1163,6 +1180,109 @@ mod tests {
         assert!(result.is_ok());
         let c = result.unwrap();
         assert_eq!(c.cache_size(), 0);
+    }
+
+    /// A key whose `Hash`/`Eq` cover only `label`, so two keys carrying different `payload`s
+    /// compare EQUAL and an overwrite has an observable choice of which instance to store.
+    #[derive(Clone, Debug)]
+    struct CoarseKey {
+        label: &'static str,
+        payload: u32,
+    }
+
+    impl std::hash::Hash for CoarseKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.label.hash(state);
+        }
+    }
+    impl PartialEq for CoarseKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.label == other.label
+        }
+    }
+    impl Eq for CoarseKey {}
+
+    /// `cache_set` over an existing key takes `HashMap`'s native fast path: the value is
+    /// replaced in place and the FIRST-inserted key stays stored, so `cache_remove_entry` and
+    /// `on_evict` report that key rather than the caller's. Re-keying the slot (an explicit
+    /// `remove_entry` + `insert`) would report the last-written payload instead.
+    #[test]
+    fn cache_set_overwrite_keeps_the_first_stored_key() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen2 = seen.clone();
+        let mut c: ExpiringCache<CoarseKey, ExpiredU8> = ExpiringCache::builder()
+            .on_evict(move |k: &CoarseKey, _v: &ExpiredU8| seen2.lock().unwrap().push(k.payload))
+            .build()
+            .unwrap();
+        let first = CoarseKey {
+            label: "a",
+            payload: 1,
+        };
+        let second = CoarseKey {
+            label: "a",
+            payload: 2,
+        };
+        assert_eq!(first, second, "the two keys compare equal");
+
+        c.cache_set(first, ExpiredU8(1));
+        assert_eq!(
+            c.cache_set(second.clone(), ExpiredU8(2)),
+            Some(ExpiredU8(1))
+        );
+        assert_eq!(c.cache_size(), 1);
+
+        let (stored, value) = c.cache_remove_entry(&second).expect("present");
+        assert_eq!(
+            stored.payload, 1,
+            "an overwrite keeps the incumbent key, so the first payload is the stored one"
+        );
+        assert_eq!(value, ExpiredU8(2));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![1u32],
+            "the removal callback receives the stored key"
+        );
+    }
+
+    /// Same fast path when the displaced value had expired: the value is replaced in place,
+    /// the eviction is counted and `on_evict` fires with the stored key -- and the key that
+    /// remains stored is still the first one.
+    #[test]
+    fn cache_set_over_expired_keeps_the_first_stored_key() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen2 = seen.clone();
+        let mut c: ExpiringCache<CoarseKey, ExpiredU8> = ExpiringCache::builder()
+            .on_evict(move |k: &CoarseKey, _v: &ExpiredU8| seen2.lock().unwrap().push(k.payload))
+            .build()
+            .unwrap();
+        let first = CoarseKey {
+            label: "a",
+            payload: 1,
+        };
+        let second = CoarseKey {
+            label: "a",
+            payload: 2,
+        };
+        c.cache_set(first, ExpiredU8(20)); // expired: 20 > 10
+
+        assert_eq!(
+            c.cache_set(second.clone(), ExpiredU8(2)),
+            None,
+            "an expired displaced value is filtered from the return"
+        );
+        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![1u32],
+            "on_evict receives the key that was physically stored"
+        );
+
+        let (stored, value) = c.cache_remove_entry(&second).expect("present");
+        assert_eq!(
+            stored.payload, 1,
+            "replacing an expired value still keeps the incumbent key"
+        );
+        assert_eq!(value, ExpiredU8(2));
     }
 
     #[test]

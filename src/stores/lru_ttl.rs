@@ -418,6 +418,28 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
         }
     }
 
+    /// Expiry instant for an entry whose TTL is being refreshed on hit.
+    ///
+    /// A zero TTL means expiry is disabled, and disabling expiry must not silently clear a
+    /// deadline an entry already carries, so `current` is kept unchanged. Otherwise the
+    /// deadline is recomputed from `now` and -- exactly like a fresh insert through
+    /// [`compute_expires_at`](Self::compute_expires_at) -- an overflowing `now + ttl` yields
+    /// `None`, i.e. never expires. Writing `compute_expires_at(ttl, now).or(current)` instead
+    /// would conflate the two `None` cases and leave a refreshed entry pinned to its old, much
+    /// shorter deadline under a TTL so large it overflows `Instant`.
+    #[inline]
+    pub(super) fn refreshed_expires_at(
+        ttl: Duration,
+        now: Instant,
+        current: Option<Instant>,
+    ) -> Option<Instant> {
+        if ttl.is_zero() {
+            current
+        } else {
+            now.checked_add(ttl)
+        }
+    }
+
     fn new_internal(
         size: usize,
         ttl: Duration,
@@ -572,23 +594,54 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// Evict expired values from the cache.
     #[must_use]
     pub fn evict(&mut self) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
         let now = Instant::now();
-        self.store.retain_silent(|key, entry| {
-            // None means never-expires; Some(t) expires when now >= t.
-            if Self::entry_live_at(entry.expires_at, now) {
-                true
-            } else {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, &entry.value);
-                }
-                false
+        // Two-phase: select, then remove, then count, then notify. The scan collects every
+        // doomed slot before unlinking any of them, so counting or notifying from inside the
+        // scan predicate would fire the side effects
+        // for entries that are still stored -- and a panic anywhere in the scan would leave
+        // them served after their `on_evict` cleanup already ran.
+        // None means never-expires; Some(t) expires when now >= t.
+        let doomed = self.doomed_indices(|_key, entry| !Self::entry_live_at(entry.expires_at, now));
+        self.remove_and_notify(doomed)
+    }
+
+    /// Phase 1 of a two-phase sweep: inner-store slot indices (MRU -> LRU) of the entries
+    /// `doomed` selects.
+    ///
+    /// Reads only, so a panic out of `doomed` (it runs the caller's `retain` predicate)
+    /// leaves the cache exactly as it was: nothing removed, nothing counted, nothing
+    /// notified. Mirrors `LruCache::retain`'s scan.
+    fn doomed_indices<F: FnMut(&K, &TimedEntry<V>) -> bool>(&self, mut doomed: F) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.store.store.len());
+        out.extend(self.store.order.iter_indices().filter(|&index| {
+            let (key, entry) = self.store.order.get(index);
+            doomed(key, entry)
+        }));
+        out
+    }
+
+    /// Phase 2 of a two-phase sweep: remove every selected slot, then count the batch as
+    /// evictions, then notify `on_evict`. Returns the number of entries removed.
+    ///
+    /// Indices stay valid because nothing is inserted between the scan and the removals.
+    /// Every entry is out of the store and counted before the first notification, so a
+    /// panicking `on_evict` can never leave a cleaned-up entry still reachable, nor an
+    /// entry removed-but-uncounted.
+    fn remove_and_notify(&mut self, doomed: Vec<usize>) -> usize {
+        let removed: Vec<(K, TimedEntry<V>)> = doomed
+            .into_iter()
+            .map(|index| self.store.remove_index(index))
+            .collect();
+        if !removed.is_empty() {
+            self.evictions
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
+        }
+        if let Some(on_evict) = &self.on_evict {
+            for (key, entry) in &removed {
+                on_evict(key, &entry.value);
             }
-        })
+        }
+        removed.len()
     }
 
     /// Retain only entries that are unexpired and satisfy `keep`.
@@ -610,25 +663,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// `#[must_use]`: discarding the count is a legitimate and common use, matching
     /// existing bare `cache.retain(...);` call sites.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
-        let on_evict = &self.on_evict;
-        let evictions = &self.evictions;
         // One clock reading for the whole pass (as in `evict`): every entry is judged
         // against the same instant instead of re-reading the clock per entry.
         let now = Instant::now();
-        self.store.retain_silent(|key, entry| {
+        // Two-phase (see `doomed_indices` / `remove_and_notify`): the selection pass must be
+        // side-effect free so a panicking `keep` leaves the cache untouched rather than
+        // half-notified with every scanned entry still stored.
+        let doomed = self.doomed_indices(|key, entry| {
             let expired = !Self::entry_live_at(entry.expires_at, now);
-            if expired || !keep(key, &entry.value) {
-                // Count BEFORE notifying: a panicking callback must never leave
-                // an entry removed-but-uncounted.
-                evictions.fetch_add(1, Ordering::Relaxed);
-                if let Some(on_evict) = on_evict {
-                    on_evict(key, &entry.value);
-                }
-                false
-            } else {
-                true
-            }
-        })
+            expired || !keep(key, &entry.value)
+        });
+        self.remove_and_notify(doomed)
     }
 
     /// Remove all entries and fire the `on_evict` callback for each one, incrementing the
@@ -636,12 +681,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
     /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
-    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
-    /// the plain `cache_clear`.
+    /// and increments `evictions`. The eviction count does not depend on whether an
+    /// `on_evict` callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
-        if self.on_evict.is_none() {
-            return self.cache_clear();
-        }
         // `drain_all` walks the LRU chain once taking owned pairs (MRU -> LRU, the same
         // order the old `key_order` + per-key `pop_raw` drain fired in) -- no key clones
         // and no re-hashing.
@@ -677,12 +719,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    let new_exp = Self::compute_expires_at(self.ttl, now).or(self
-                        .store
-                        .order
-                        .get(index)
-                        .1
-                        .expires_at);
+                    let new_exp = Self::refreshed_expires_at(
+                        self.ttl,
+                        now,
+                        self.store.order.get(index).1.expires_at,
+                    );
                     self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 Some(&self.store.order.get(index).1.value)
@@ -721,12 +762,11 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    let new_exp = Self::compute_expires_at(self.ttl, now).or(self
-                        .store
-                        .order
-                        .get(index)
-                        .1
-                        .expires_at);
+                    let new_exp = Self::refreshed_expires_at(
+                        self.ttl,
+                        now,
+                        self.store.order.get(index).1.expires_at,
+                    );
                     self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 Some(&mut self.store.order.get_mut(index).1.value)
@@ -785,7 +825,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         if was_present && was_valid {
             if self.refresh {
                 let now = hit_at.unwrap_or_else(Instant::now);
-                let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                let new_exp = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                 entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -832,7 +872,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         if was_present && was_valid {
             if self.refresh {
                 let now = hit_at.unwrap_or_else(Instant::now);
-                let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                let new_exp = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                 entry.expires_at = new_exp;
             }
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -880,17 +920,17 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Cached<K, V> for LruTtlCache<K, V,
         Q: std::hash::Hash + Eq + ?Sized,
     {
         if let Some((stored_k, entry)) = self.store.pop_raw(k) {
+            // Judge liveness at the moment of removal, BEFORE the callback runs. Sampling
+            // it afterwards would let a slow `on_evict` push the entry past its deadline and
+            // report `None` for a value that was live when it was taken out.
+            let live = Self::entry_live(entry.expires_at);
             // Count BEFORE notifying: a panicking callback must never leave an
             // entry removed-but-uncounted.
             self.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(on_evict) = &self.on_evict {
                 on_evict(&stored_k, &entry.value);
             }
-            if Self::entry_live(entry.expires_at) {
-                Some(entry.value)
-            } else {
-                None
-            }
+            if live { Some(entry.value) } else { None }
         } else {
             None
         }
@@ -1056,12 +1096,11 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
                 self.store.order.move_to_front(index);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if self.refresh {
-                    let new_exp = Self::compute_expires_at(self.ttl, now).or(self
-                        .store
-                        .order
-                        .get(index)
-                        .1
-                        .expires_at);
+                    let new_exp = Self::refreshed_expires_at(
+                        self.ttl,
+                        now,
+                        self.store.order.get(index).1.expires_at,
+                    );
                     self.store.order.get_mut(index).1.expires_at = new_exp;
                 }
                 (Some(self.store.order.get(index).1.value.clone()), false)
@@ -1145,7 +1184,7 @@ where
             if was_present && was_valid {
                 if self.refresh {
                     let now = hit_at.unwrap_or_else(Instant::now);
-                    let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                    let new_exp = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                     entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -1203,7 +1242,7 @@ where
             if was_present && was_valid {
                 if self.refresh {
                     let now = hit_at.unwrap_or_else(Instant::now);
-                    let new_exp = Self::compute_expires_at(self.ttl, now).or(entry.expires_at);
+                    let new_exp = Self::refreshed_expires_at(self.ttl, now, entry.expires_at);
                     entry.expires_at = new_exp;
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -2072,9 +2111,9 @@ mod tests {
 
     #[test]
     fn retain_with_panicking_on_evict_still_counts_eviction() {
-        // The predicate closure passed to the inner `retain_silent` fires `on_evict`
-        // and counts the eviction before returning `false`, so a panicking callback
-        // still leaves the eviction counted.
+        // `retain` removes every selected entry and counts the batch BEFORE the first
+        // notification, so a panicking callback still leaves the eviction counted (and
+        // the entry gone).
         use std::panic::{AssertUnwindSafe, catch_unwind};
         let mut c = LruTtlCache::builder()
             .max_size(4)
@@ -3295,7 +3334,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_clear_with_on_evict_without_callback_is_a_plain_clear() {
+    fn cache_clear_with_on_evict_counts_without_a_callback() {
+        // The eviction count must not depend on whether a callback is configured:
+        // attaching a purely observational `on_evict` cannot change `evictions`.
+        // Matches `LruCache::cache_clear_with_on_evict`.
         let mut c = long_ttl_cache(4);
         c.cache_set(1, 10);
         c.cache_set(2, 20);
@@ -3304,9 +3346,21 @@ mod tests {
         assert_eq!(c.cache_size(), 0);
         assert_eq!(
             c.cache_evictions().unwrap(),
-            before,
-            "without a callback this is a plain clear: no eviction accounting"
+            before + 2,
+            "clearing two entries counts two evictions with or without a callback"
         );
+
+        // Same sequence, with a no-op callback: identical count.
+        let mut with_cb: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .on_evict(|_: &u32, _: &u32| {})
+            .build()
+            .unwrap();
+        with_cb.cache_set(1, 10);
+        with_cb.cache_set(2, 20);
+        with_cb.cache_clear_with_on_evict();
+        assert_eq!(with_cb.cache_evictions(), c.cache_evictions());
     }
 
     // --- lazy expiry sweep reuses the probe's hash ---------------------------

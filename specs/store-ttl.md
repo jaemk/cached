@@ -57,7 +57,12 @@ For a key type whose `Eq` ignores part of its payload, `set` / `set_with` report
 **first-inserted** key to `on_evict` and the displaced value's key in `cache_remove_entry`, not
 the most recently inserted key: the occupied-entry insert path reuses the existing entry's stored
 key `Arc` rather than replacing it with the caller's new key. This matches `HashMap::insert`'s own
-rule for keys that compare equal. Every removal path counts an eviction (increments the
+rule for keys that compare equal. It is the opposite of the LRU family, which rebinds the slot to
+the caller's key ([store-lru.md](store-lru.md) LRU-6); the split is deliberate, not configurable,
+and each store keeps its backing collection's native single-probe write path. To force a specific
+key instance, `cache_remove` then `cache_set`.
+
+Every removal path counts an eviction (increments the
 `evictions` counter) before invoking `on_evict` for that entry, so a panicking `on_evict`
 callback still leaves the eviction counted; this is the crate-wide ordering, see
 [metrics.md](metrics.md) METRIC-4.

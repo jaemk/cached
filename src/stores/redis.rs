@@ -1997,7 +1997,13 @@ where
         let pattern = self.clear_match_pattern();
         let mut cursor: u64 = 0;
         loop {
-            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            // Redis keys are binary-safe, and this scope can legitimately contain
+            // keys that are not valid UTF-8 (a non-`String` key type, another
+            // client writing under the same prefix, ...). Decoding as
+            // `Vec<String>` made the whole clear fail on the first such key and
+            // never self-heal, because the offending key was never deleted.
+            // `DEL` takes the raw bytes unchanged.
+            let (next, keys): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("MATCH")
                 .arg(&pattern)
@@ -2031,6 +2037,12 @@ where
     /// This delegates to [`cache_get`](ConcurrentCached::cache_get): the value is
     /// fetched and deserialized to determine presence. There is no separate Redis
     /// EXISTS round-trip in this implementation.
+    ///
+    /// **Note:** because it is a full `cache_get`, this is not a read-only probe
+    /// when [`refresh_on_hit`](crate::ConcurrentCacheRefreshOnHit::refresh_on_hit)
+    /// is enabled: a `true` result renews the entry's TTL (a `PEXPIRE` write) just
+    /// as a real read would, and an undecodable entry is self-healed (deleted) and
+    /// reported absent. `RedbCache::cache_contains` behaves the same way.
     fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_get(k).map(|v| v.is_some())
     }
@@ -2981,7 +2993,10 @@ mod async_redis {
             let pattern = self.clear_match_pattern();
             let mut cursor: u64 = 0;
             loop {
-                let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                // Binary-safe: see the sync `cache_clear`. Decoding as
+                // `Vec<String>` aborted the clear on the first non-UTF-8 key in
+                // scope and left this cache's own entries in place forever.
+                let (next, keys): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN")
                     .arg(cursor)
                     .arg("MATCH")
                     .arg(&pattern)
@@ -3018,6 +3033,13 @@ mod async_redis {
         /// Delegates to [`async_cache_get`](ConcurrentCachedAsync::async_cache_get):
         /// the value is fetched and deserialized to determine presence. There is no
         /// separate Redis EXISTS round-trip in this implementation.
+        ///
+        /// **Note:** because it is a full `async_cache_get`, this is not a read-only
+        /// probe when
+        /// [`refresh_on_hit`](crate::ConcurrentCacheRefreshOnHit::refresh_on_hit) is
+        /// enabled: a `true` result renews the entry's TTL (a `PEXPIRE` write) just
+        /// as a real read would, and an undecodable entry is self-healed (deleted)
+        /// and reported absent. `RedbCache` behaves the same way.
         async fn async_cache_contains(&self, k: &K) -> Result<bool, Self::Error>
         where
             Self: Sized + Sync,

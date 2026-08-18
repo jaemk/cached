@@ -383,35 +383,50 @@ where
 
     /// Sweep all shards for expired entries, remove them, fire the `on_evict` callback
     /// (if set) for each, and return the total count of removed entries.
+    ///
+    /// # Panicking `is_expired`
+    ///
+    /// [`Expires::is_expired`] is user code. If it panics, nothing has been removed yet from
+    /// the shard it panicked in (or from any shard not yet visited): each shard is swept in a
+    /// first pass that only *selects* expired keys and a second pass that removes them without
+    /// running user code. Shards already swept keep their removals, all of which were counted
+    /// and notified before the panic. This holds whether or not an `on_evict` callback is
+    /// configured, and is why the selection pass clones the doomed keys.
     #[must_use]
     pub fn evict(&self) -> usize
     where
         K: Clone,
     {
         let mut total = 0;
-        if self.inner.on_evict.is_none() {
-            // No callback: nothing needs the removed keys/values, so avoid cloning any
-            // key and skip building a `Vec` entirely — `retain` plus a length delta.
-            for shard in self.inner.shards.iter() {
-                let mut guard = shard.lock.write();
-                let before = guard.len();
-                guard.retain(|_, v| !v.is_expired());
-                let removed = before - guard.len();
-                drop(guard);
-                if removed > 0 {
-                    shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
-                    total += removed;
-                }
-            }
-            return total;
-        }
         for shard in self.inner.shards.iter() {
-            // Single-pass sweep: `extract_if` removes matching entries in place without
-            // cloning keys or re-probing the map. Collect under the write lock, fire
-            // callbacks after releasing it.
+            // Two passes, matching the LRU-backed sharded stores. The first calls
+            // `is_expired` (user code) and only selects; the second removes and runs nothing
+            // that can panic. A single `extract_if` pass removes eagerly *while* `is_expired`
+            // runs, so a panicking implementation dropped every already-yielded entry during
+            // unwind: gone from the cache, never handed to `on_evict`, never counted. The
+            // no-callback path used to take a `before - guard.len()` delta after an in-place
+            // `HashMap::retain`, which the same unwind skipped entirely; it now shares this
+            // structure so both paths remove and count exactly the same entries.
+            // Collect under the write lock, fire callbacks after releasing it.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                guard.extract_if(|_, v| v.is_expired()).collect()
+                let doomed: Vec<K> = guard
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        if v.is_expired() {
+                            Some(k.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let mut removed = Vec::with_capacity(doomed.len());
+                for key in doomed {
+                    if let Some(pair) = guard.remove_entry(&key) {
+                        removed.push(pair);
+                    }
+                }
+                removed
             };
 
             total += removed.len();
@@ -455,32 +470,47 @@ where
     /// together predicate-rejected entries and entries swept for having already expired -- the
     /// two are not distinguished in the count. Not `#[must_use]`: discarding the count is a
     /// legitimate and common use.
-    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
+    ///
+    /// # Panicking predicate
+    ///
+    /// If `keep` (or [`Expires::is_expired`], equally user code) panics, nothing has been
+    /// removed yet from the shard it panicked in (or from any shard not yet visited): the sweep
+    /// of a shard runs the predicates in a first pass that only *selects* doomed keys and
+    /// removes them in a second pass that runs no user code. Shards already swept keep their
+    /// removals, all of which were counted and notified before the panic. This holds whether or
+    /// not an `on_evict` callback is configured. It is why the selection pass clones the doomed
+    /// keys, and why the method requires `K: Clone`.
+    pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize
+    where
+        K: Clone,
+    {
         let mut total_removed = 0usize;
-        if self.inner.on_evict.is_none() {
-            // No callback: only the removed *count* is observable, so drop the filtered-out
-            // entries in place via `retain` and take the length delta -- no key clones, no
-            // `Vec` (matching `evict`'s no-callback fast path).
-            for shard in self.inner.shards.iter() {
-                let mut guard = shard.lock.write();
-                let before = guard.len();
-                guard.retain(|k, v| !v.is_expired() && keep(k, v));
-                let removed = before - guard.len();
-                drop(guard);
-                total_removed += removed;
-                if removed > 0 {
-                    shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
-                }
-            }
-            return total_removed;
-        }
         for shard in self.inner.shards.iter() {
-            // Collect under the write lock, fire callbacks after releasing it.
+            // Collect under the write lock, fire callbacks after releasing it. Two passes for
+            // the same reason as `evict`: `extract_if` removes eagerly *while* the user
+            // predicates run, so a panic dropped every already-yielded entry during unwind --
+            // gone from the cache, never handed to `on_evict`, never counted. The no-callback
+            // path used to take a `before - guard.len()` delta that the same unwind skipped
+            // entirely; it now shares this structure.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                guard
-                    .extract_if(|k, v| v.is_expired() || !keep(k, v))
-                    .collect()
+                let doomed: Vec<K> = guard
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        if v.is_expired() || !keep(k, v) {
+                            Some(k.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let mut removed = Vec::with_capacity(doomed.len());
+                for key in doomed {
+                    if let Some(pair) = guard.remove_entry(&key) {
+                        removed.push(pair);
+                    }
+                }
+                removed
             };
             total_removed += removed.len();
             if !removed.is_empty() {
@@ -601,21 +631,31 @@ where
         let shard = self.shard_of(&k);
         // Capture the displaced value and evaluate is_expired() while the write lock is still
         // held (B2: avoids a TOCTOU where an entry crosses the expiry threshold between unlock
-        // and the check). When an `on_evict` callback is configured, remove-then-insert so the
-        // owned old key can fire the callback after the lock is released (on_evict-after-unlock).
-        let old: Option<(Option<K>, V, bool)> = if self.inner.on_evict.is_some() {
+        // and the check). An owned key is kept in hand so `on_evict` can fire after the lock is
+        // released (on_evict-after-unlock).
+        //
+        // There is exactly ONE write shape here, taken whether or not an `on_evict` callback is
+        // configured: an overwrite keeps the STORED key and drops the caller's, matching
+        // `HashMap::insert` and the single-owner `ExpiringCache`. This used to branch on
+        // `on_evict.is_some()` and take a `remove_entry` + `insert` (key-rebinding) path when a
+        // callback was present, so attaching a purely observational callback changed which key
+        // was physically stored. The value is swapped in place through `get_mut`, which leaves
+        // the caller's key `k` owned here; `on_evict` therefore receives the caller's key -- the
+        // same key the LRU-backed sharded stores hand it when the stored key is kept. The two
+        // compare `Eq`.
+        let old: Option<(K, V, bool)> = {
             let mut guard = shard.lock.write();
-            let removed = guard.remove_entry(&k);
-            guard.insert(k, v);
-            removed.map(|(ok, old_v)| {
-                let expired = old_v.is_expired();
-                (Some(ok), old_v, expired)
-            })
-        } else {
-            shard.lock.write().insert(k, v).map(|old_v| {
-                let expired = old_v.is_expired();
-                (None, old_v, expired)
-            })
+            match guard.get_mut(&k) {
+                Some(slot) => {
+                    let old_v = std::mem::replace(slot, v);
+                    let expired = old_v.is_expired();
+                    Some((k, old_v, expired))
+                }
+                None => {
+                    guard.insert(k, v);
+                    None
+                }
+            }
         };
         match old {
             // A displaced expired value is filtered from the return (matching cache_remove and
@@ -624,8 +664,8 @@ where
                 // Count BEFORE notifying: a panicking callback must never leave an
                 // entry removed-but-uncounted.
                 shard.evictions.fetch_add(1, Ordering::Relaxed);
-                if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
-                    cb(key, &old_v);
+                if let Some(cb) = &self.inner.on_evict {
+                    cb(&key, &old_v);
                 }
                 Ok(None)
             }

@@ -295,8 +295,9 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   return references from direct store APIs; sharded stores return owned `Option<V>` values
   (cloned under a shard lock). Macro-generated functions clone cached return values in all cases.
 - Macro-generated `#[cached]` / `#[once]` cache statics use `RwLock` by default. Named cache
-  statics for those macros should be inspected with `.read()` or `.write()` unless
-  `sync_lock = "mutex"` is set. Named `#[concurrent_cached]` statics hold a self-synchronizing
+  statics for those macros should be inspected with `.read()` or `.write()`. `#[cached]` can
+  switch to a `Mutex` with `sync_lock = "mutex"`; `#[once]` does not accept `sync_lock` and is
+  always `RwLock`. Named `#[concurrent_cached]` statics hold a self-synchronizing
   store directly: sync functions use `LazyLock<Store>`, and async functions use
   `OnceCell<Store>`.
 - `CachedPeek` provides non-mutating lookups that do not update recency, refresh TTLs, or record
@@ -465,7 +466,7 @@ It is also the idiomatic way to give entries a **dynamic, per-entry TTL** — a 
 
 When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `max_size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
 
-The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the same code runs in the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example):
+The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example uses the same pattern):
 
 ```rust
 use cached::macros::cached;
