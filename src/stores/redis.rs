@@ -3283,7 +3283,10 @@ mod async_redis {
             assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
             assert!(c.async_cache_get(&1).await.unwrap().is_some());
 
-            sleep(Duration::new(2, 500_000));
+            // 500ms past the 2s ttl. `Duration::new`'s second argument is nanoseconds, so the
+            // literal 500_000 this used to pass left a 500us margin between a local sleep and
+            // redis's own expiry clock, which is not enough under load.
+            sleep(Duration::from_millis(2_500));
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
             let old = ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(1)).unwrap();
@@ -3291,7 +3294,8 @@ mod async_redis {
             assert!(c.async_cache_set(1, 100).await.unwrap().is_none());
             assert!(c.async_cache_get(&1).await.unwrap().is_some());
 
-            sleep(Duration::new(1, 600_000));
+            // 600ms past the 1s ttl; see the note above.
+            sleep(Duration::from_millis(1_600));
             assert!(c.async_cache_get(&1).await.unwrap().is_none());
 
             ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(10)).unwrap();
@@ -4439,7 +4443,10 @@ mod tests {
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
-        sleep(Duration::new(2, 500_000));
+        // 500ms past the 2s ttl. `Duration::new`'s second argument is nanoseconds, so the
+        // literal 500_000 this used to pass left a 500us margin between a local sleep and
+        // redis's own expiry clock, which is not enough under load.
+        sleep(Duration::from_millis(2_500));
         assert!(c.cache_get(&1).unwrap().is_none());
 
         let old = ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(1)).unwrap();
@@ -4447,7 +4454,8 @@ mod tests {
         assert!(c.cache_set(1, 100).unwrap().is_none());
         assert!(c.cache_get(&1).unwrap().is_some());
 
-        sleep(Duration::new(1, 600_000));
+        // 600ms past the 1s ttl; see the note above.
+        sleep(Duration::from_millis(1_600));
         assert!(c.cache_get(&1).unwrap().is_none());
 
         ConcurrentCacheTtl::set_ttl(&c, Duration::from_secs(10)).unwrap();
