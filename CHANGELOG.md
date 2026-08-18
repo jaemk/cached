@@ -107,8 +107,9 @@
 - `retain` on `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache`, and
   `evict` on `ShardedExpiringCache`, no longer discard entries silently. They removed entries
   eagerly while the user predicate (or `Expires::is_expired`) ran, so a panic dropped every
-  entry already yielded without firing `on_evict` or counting an eviction. These three
-  `retain` methods now require `K: Clone`, matching the sharded LRU stores.
+  entry already yielded without firing `on_evict` or counting an eviction. The two-phase sweep
+  carries a recorded `Vec<bool>` of decisions rather than cloned keys, so these methods keep
+  their existing bounds; `retain` on the three stores is still callable with a non-`Clone` key.
 - `TtlSortedCache::set_and_get_mut` no longer orphans a map row when the size trim it triggers
   unwinds. The entry's stamp was unlinked from the deadline index and re-inserted after the
   trim, so a panicking `on_evict` (or a panicking `Drop` for the value, with no callback at
