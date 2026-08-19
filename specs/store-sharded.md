@@ -65,9 +65,17 @@ filtered and others not), and the predicate runs under the shard write lock, so 
 re-enter the cache. `on_evict` fires after each shard's lock is released, once per removed
 entry, in shard order. On the expiry-aware variants, expired entries are removed regardless of
 the predicate and every removal counts an eviction; `ShardedUnboundCache` tracks no evictions
-counter, so an entry there simply survives exactly when `keep` returns `true`. `retain` requires
-no `K: Clone` bound and is inherent-only, not a trait method; see
-[traits-concurrent.md](traits-concurrent.md).
+counter, so an entry there simply survives exactly when `keep` returns `true`. `retain` is
+inherent-only, not a trait method; see [traits-concurrent.md](traits-concurrent.md).
+
+`retain` itself adds no `K: Clone` bound on any of the six. A panicking predicate is made safe by
+sweeping each shard in two phases (select, then remove), and the selection is carried across the
+phases as a `Vec<bool>` of decisions replayed through `extract_if`, not as a `Vec<K>` of cloned
+keys -- so the panic-safety guarantee costs no bound. On the three `HashMap`-backed stores
+(`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) `retain` is therefore callable
+with a non-`Clone` key. The three LRU-backed stores (`ShardedLruCache`, `ShardedLruTtlCache`,
+`ShardedExpiringLruCache`) still require `K: Clone`, inherited from their enclosing impl block
+because the LRU ring needs it independently of `retain`.
 
 ## SHARD-7
 

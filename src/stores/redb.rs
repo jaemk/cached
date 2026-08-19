@@ -326,7 +326,14 @@ where
     ///   including DEL `0x7F`).
     /// - `Build(BuildError::InvalidValue { field: "ttl", .. })`: the configured TTL is zero.
     /// - `Io`: the cache directory could not be created.
-    /// - `Storage`: the redb database file could not be opened or initialized.
+    /// - `Storage`: the redb database file could not be opened or initialized. This includes a
+    ///   DAMAGED file (truncated by a full disk, a killed process, an interrupted copy, or a
+    ///   restored snapshot): `redb` panics rather than erroring on several kinds of damage, so
+    ///   the open runs under [`std::panic::catch_unwind`] and a caught panic is reported as
+    ///   `Storage` instead of unwinding out of `build`. The damaged file is left on disk
+    ///   untouched — nothing is deleted or recreated — so recovering (or removing) it stays the
+    ///   caller's decision. Note this cannot work when the final binary is built with
+    ///   `panic = "abort"`, where a `redb` panic still aborts the process.
     pub fn build(self) -> Result<RedbCache<K, V>, RedbCacheBuildError> {
         let cache_name = self
             .cache_name
@@ -406,8 +413,82 @@ where
                 .map_err(RedbCacheBuildError::io)?;
         }
 
+        // Opening a damaged file must be an `Err`, never a process-killing panic:
+        // see `open_database`.
+        let db = open_database(&disk_path)?;
+
+        Ok(RedbCache {
+            ttl: Mutex::new(self.ttl),
+            refresh: AtomicBool::new(self.refresh),
+            durable: self.durable,
+            disk_path,
+            connection: Arc::new(db),
+            strict_deserialization: self.strict_deserialization,
+            _phantom: self._phantom,
+        })
+    }
+}
+
+/// The `source` recorded on [`RedbCacheBuildError::Storage`] when a `redb` call
+/// unwinds instead of returning an error. Private: the concrete source type is
+/// explicitly not part of the public API.
+#[derive(Debug, Error)]
+#[error("{0}")]
+struct RedbPanic(String);
+
+/// Extract a human-readable message from a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
+}
+
+/// Open (or create) the redb database file at `disk_path` and ensure the entry
+/// table exists, converting a panic from inside `redb` into a `Storage` error.
+///
+/// `redb` returns a `DatabaseError` for some kinds of damage but PANICS for
+/// others: as of redb 4.1, a file truncated by as little as one byte, or with a
+/// flipped byte in the header or an early page, trips an internal assertion
+/// (`storage.raw_file_len()? >= header.layout().len()` in its page manager)
+/// rather than reporting an error. A truncated tail is the ordinary result of a
+/// full disk, a killed container, an interrupted copy, or a restored snapshot,
+/// and this file is a DISPOSABLE cache: losing it is a cache miss, so taking the
+/// whole application down for it is the wrong response — and [`build`] documents
+/// that an unopenable file surfaces as `Storage`. The open therefore runs under
+/// [`std::panic::catch_unwind`] and a caught panic becomes
+/// [`RedbCacheBuildError::Storage`].
+///
+/// The damaged file is left exactly as it is on disk. Deleting and recreating it
+/// would make `build` succeed, but it would also destroy a file the caller may
+/// want to inspect or recover, silently and by default; the caller can remove it
+/// (or fall back to an in-memory store) once the error says so.
+///
+/// The table creation is inside the guarded block on purpose: the first write
+/// transaction touches the same damaged structures and can unwind for the same
+/// reasons.
+///
+/// Limitations:
+///
+/// - `catch_unwind` only catches panics that UNWIND. If the final binary is
+///   built with `panic = "abort"`, a `redb` panic still aborts the process and
+///   no error can be returned. Nothing in-process can change that.
+/// - The panic is still reported by the global panic hook (the usual
+///   `thread ... panicked at ...` line on stderr) before it is converted.
+///   Silencing it would mean replacing the process-wide hook, which would race
+///   with every other thread, so the noise is left alone.
+///
+/// [`build`]: RedbCacheBuilder::build
+fn open_database(disk_path: &Path) -> Result<Database, RedbCacheBuildError> {
+    // The closure captures only `&Path` (`Path: RefUnwindSafe`), and nothing
+    // observable is left half-modified by a panic here: a partially constructed
+    // `Database` is dropped during the unwind, releasing redb's file lock.
+    let opened = std::panic::catch_unwind(|| {
         let db = Builder::new()
-            .create(&disk_path)
+            .create(disk_path)
             .map_err(RedbCacheBuildError::storage)?;
 
         // Create the table once at build time so that read transactions always
@@ -420,16 +501,16 @@ where
             wtxn.commit().map_err(RedbCacheBuildError::storage)?;
         }
 
-        Ok(RedbCache {
-            ttl: Mutex::new(self.ttl),
-            refresh: AtomicBool::new(self.refresh),
-            durable: self.durable,
-            disk_path,
-            connection: Arc::new(db),
-            strict_deserialization: self.strict_deserialization,
-            _phantom: self._phantom,
-        })
-    }
+        Ok(db)
+    });
+
+    opened.unwrap_or_else(|payload| {
+        Err(RedbCacheBuildError::storage(RedbPanic(format!(
+            "redb panicked opening the database file (it is most likely damaged \
+             or truncated); the file was left untouched: {}",
+            panic_message(payload.as_ref())
+        ))))
+    })
 }
 
 /// Create a directory (and all parents) for storing the redb database file.
@@ -1035,6 +1116,7 @@ fn disk_cache_set<V>(
     connection: &Database,
     key: &str,
     serialized: Vec<u8>,
+    ttl: Option<Duration>,
     durable: bool,
 ) -> Result<Option<V>, RedbCacheError>
 where
@@ -1054,8 +1136,23 @@ where
             .map(|guard| guard.value().to_vec())
     };
     wtxn.commit().map_err(RedbCacheError::storage)?;
+    // `cache_set` returns the previous LIVE value only: a displaced entry that
+    // was already past the TTL is reported as `None`, matching the
+    // `ConcurrentCached::cache_set` contract and the in-memory/redis stores
+    // (where an expired key is simply not there any more). The write above
+    // already overwrote it, so the stale entry is gone from disk either way;
+    // this filter only decides what the caller is handed back. Same shape as
+    // `disk_cache_remove`, which filters the removed entry identically.
     Ok(previous_bytes
         .and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok())
+        .filter(|cached| {
+            ttl.is_none_or(|ttl| {
+                SystemTime::now()
+                    .duration_since(cached.created_at)
+                    .unwrap_or(Duration::from_secs(0))
+                    < ttl
+            })
+        })
         .map(|cached| cached.value))
 }
 
@@ -1389,10 +1486,22 @@ where
         )
     }
 
+    /// Insert `key`/`value`, returning the previous **live** value at that key.
+    ///
+    /// A displaced entry that was already past the TTL is filtered to `None`
+    /// (per the [`ConcurrentCached::cache_set`] contract); it is overwritten on
+    /// disk either way.
     fn cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
+        let ttl = *self.ttl.lock();
         let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))
             .map_err(RedbCacheError::serialization)?;
-        disk_cache_set(&self.connection, &key.to_string(), serialized, self.durable)
+        disk_cache_set(
+            &self.connection,
+            &key.to_string(),
+            serialized,
+            ttl,
+            self.durable,
+        )
     }
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
@@ -1436,6 +1545,17 @@ where
     ///
     /// Delegates to [`cache_get`](ConcurrentCached::cache_get): the value is
     /// fetched and deserialized to determine presence.
+    ///
+    /// **This is not a read-only probe.** Because it is a real `cache_get`, it
+    /// takes the same paths that call has: with
+    /// [`refresh_on_hit`](ConcurrentCacheRefreshOnHit) enabled a presence check
+    /// RENEWS the entry's TTL, and it costs a write transaction (plus an fsync
+    /// when built with `durable(true)`) rather than a read transaction.
+    /// Expired-entry eviction and non-strict self-heal likewise write. Same
+    /// behavior as `RedisCache`. If you need a probe that neither renews nor
+    /// writes, disable `refresh_on_hit` (see
+    /// [`set_refresh_on_hit`](ConcurrentCacheRefreshOnHit::set_refresh_on_hit))
+    /// for the duration of the check.
     fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
         self.cache_get(k).map(|v| v.is_some())
     }
@@ -1496,13 +1616,16 @@ where
         .await
     }
 
+    /// Async counterpart of [`ConcurrentCached::cache_set`]: returns the previous
+    /// **live** value, filtering an already-expired displaced entry to `None`.
     async fn async_cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
         let key = key.to_string();
-        let durable = self.durable;
+        let (ttl, durable) = (*self.ttl.lock(), self.durable);
         let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))
             .map_err(RedbCacheError::serialization)?;
-        blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, durable)).await
+        blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, ttl, durable))
+            .await
     }
 
     async fn async_cache_remove(&self, key: &K) -> Result<Option<V>, RedbCacheError> {

@@ -44,7 +44,7 @@ the item stays here for history.
 | [0023](0023-peek-read-trait-merge.md) | Merge `CachedPeek`/`CachedRead`; trait fragmentation | Declined |
 | [0024](0024-generated-companion-naming.md) | Rename/namespace generated companion fns | Opt-out implemented; rename declined (4.0-only) |
 | [0025](0025-redb-disk-path-introspection.md) | redb resolved-path introspection + temp fallback | Needs research |
-| [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Implemented |
+| [0026](0026-serde-feature.md) | Explicit `serde` feature for custom serialize stores | Not implemented (reverted pre-3.0.0) |
 | [0027](0027-sync-writes-default-revert.md) | `sync_writes` default flip and revert | Implemented |
 | [0028](0028-per-entry-expiry-and-set-ttl-zero.md) | Per-entry expiry model and `set_ttl(0)` semantics | Implemented |
 | [0029](0029-self-healing-deserialization-default.md) | Self-healing deserialization default | Implemented |
@@ -64,3 +64,4 @@ the item stays here for history.
 | [0043](0043-macro-error-precision.md) | Macro error precision: single `Clone` error, attribute spans | Implemented |
 | [0044](0044-blanket-shardhasher-over-buildhasher.md) | Blanket `ShardHasher` impl over `BuildHasher` | Implemented |
 | [0045](0045-refresh-on-hit-trait-split.md) | Refresh-on-hit split into its own trait, on both sides | Implemented |
+| [0046](0046-configurable-key-replacement-policy.md) | Key replacement on overwrite is configurable, defaulting to replace | Not implemented (declined) |

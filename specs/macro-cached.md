@@ -7,7 +7,9 @@ pre-1.0; the Cargo feature is still `proc_macro`.
 ## CACHED-1
 
 Core attributes: `name`, `max_size`, `ttl_secs` / `ttl_millis` / `ttl = "<Duration expr>"`,
-`refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`, `with_cached_flag`. TTL
+`expires`, `refresh`, `ty`, `create`, `key`, `convert`, `cache_err`, `cache_none`,
+`with_cached_flag`. `expires` selects per-value expiry via the `Expires` trait and is mutually
+exclusive with the three TTL attributes. TTL
 uses `ttl_secs` (whole seconds) / `ttl_millis` (ms) / `ttl` (a `Duration` expr), not `time =`;
 refresh-on-hit is `refresh =`, not `time_refresh =`.
 

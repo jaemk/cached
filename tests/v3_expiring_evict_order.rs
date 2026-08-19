@@ -1,7 +1,11 @@
 //! Formal tests for ExpiringCache::cache_get_or_set_with_mut on_evict ordering (C4).
 //!
-//! Contract: on_evict fires while the old entry is still in the map slot, BEFORE
-//! the new value is inserted. This matches TtlCache semantics.
+//! Contract: the replacement is installed FIRST, then the eviction is counted, then
+//! on_evict fires with the displaced value. This matches `cache_set` / `TtlCache::set_entry`
+//! and is what makes the path panic-safe: a callback that unwinds cannot leave the stale
+//! entry in the slot, counted, for the next call to count and clean up a second time.
+//! `on_evict` is `Fn(&K, &V)` and receives no handle on the cache, so nothing observable
+//! depends on the old value still occupying the slot while it runs.
 //!
 //! How the distinguishing assertion works
 //! ----------------------------------------
@@ -12,17 +16,18 @@
 //!
 //! Inside the on_evict callback we record the address of the &V argument.
 //!
-//! Broken code (insert before on_evict):
+//! Broken code (on_evict before insert):
+//!   occupied.get() returns &V pointing directly at the map slot, so the callback
+//!   address equals the pre-call slot address -- the stale entry is still installed.
+//!
+//! Fixed code (insert before on_evict):
 //!   OccupiedEntry::insert(new_val) performs a mem::replace at the slot address,
 //!   writing new_val into the slot and returning the old value as a moved local.
-//!   The &V argument to on_evict is then &old (the local), whose address differs
-//!   from the original map slot.
+//!   The &V argument to on_evict is then &old (that local), whose address differs
+//!   from the map slot -- and the slot itself (the returned &mut V) is unchanged and
+//!   already holds the new value.
 //!
-//! Fixed code (on_evict before insert):
-//!   occupied.get() returns &V pointing directly at the map slot.  The address
-//!   matches the pointer captured before the call.
-//!
-//! The test therefore fails on the broken implementation and passes on the fix.
+//! The tests therefore fail on the pre-fix implementation and pass on the fix.
 
 use std::sync::{Arc, Mutex};
 
@@ -62,10 +67,10 @@ fn insert_and_expire(cache: &mut ExpiringCache<u32, Val>, key: u32, id: u32) -> 
 // cache_get_or_set_with_mut
 // ---------------------------------------------------------------------------
 
-/// on_evict must fire with a &V that points to the original map slot, proving
-/// the old entry is still present at the time the callback runs.
+/// on_evict must fire with a &V that is the DISPLACED value, proving the replacement
+/// already landed in the map slot at the time the callback runs.
 #[test]
-fn on_evict_fires_before_insert_in_get_or_set_with_mut() {
+fn on_evict_fires_after_insert_in_get_or_set_with_mut() {
     let captured_ptr: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let captured_ptr_clone = captured_ptr.clone();
     let events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
@@ -105,17 +110,23 @@ fn on_evict_fires_before_insert_in_get_or_set_with_mut() {
         );
     }
 
-    // The callback's &V argument must point to the same slot as before the call.
-    // Broken code: &old (displaced local) has a different address than old_ptr.
-    // Fixed code: occupied.get() IS the map slot, so it matches old_ptr.
+    // The map slot itself is untouched by the replacement (mem::replace in place) and
+    // already holds the new value when the callback runs.
+    assert_eq!(
+        returned as *const Val as usize, old_ptr,
+        "the slot address is stable across the replacement"
+    );
+
+    // The callback's &V argument must be the displaced local, NOT the map slot.
+    // Pre-fix: occupied.get() IS the map slot, so the addresses match.
     let cb_ptr = captured_ptr
         .lock()
         .unwrap()
         .expect("on_evict must have fired");
-    assert_eq!(
+    assert_ne!(
         cb_ptr, old_ptr,
-        "on_evict must fire while the old entry is still in the map slot \
-         (callback &V address must match the pre-call slot address)"
+        "on_evict must fire AFTER the replacement, with the displaced value \
+         (callback &V address must differ from the map slot address)"
     );
 }
 
@@ -157,7 +168,7 @@ fn on_evict_callback_arg_is_old_value_in_get_or_set_with_mut() {
 
 /// Same slot-pointer ordering check for the fallible try variant.
 #[test]
-fn on_evict_fires_before_insert_in_try_get_or_set_with_mut() {
+fn on_evict_fires_after_insert_in_try_get_or_set_with_mut() {
     let captured_ptr: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let captured_ptr_clone = captured_ptr.clone();
     let events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
@@ -197,14 +208,19 @@ fn on_evict_fires_before_insert_in_try_get_or_set_with_mut() {
         );
     }
 
+    assert_eq!(
+        returned as *const Val as usize, old_ptr,
+        "the slot address is stable across the replacement"
+    );
+
     let cb_ptr = captured_ptr
         .lock()
         .unwrap()
         .expect("on_evict must have fired");
-    assert_eq!(
+    assert_ne!(
         cb_ptr, old_ptr,
-        "on_evict must fire while the old entry is still in the map slot \
-         (try variant: callback &V address must match the pre-call slot address)"
+        "on_evict must fire AFTER the replacement, with the displaced value \
+         (try variant: callback &V address must differ from the map slot address)"
     );
 }
 
@@ -254,7 +270,7 @@ mod async_tests {
 
     /// Same slot-pointer ordering check for async_cache_get_or_set_with_mut.
     #[tokio::test]
-    async fn on_evict_fires_before_insert_in_async_get_or_set_with_mut() {
+    async fn on_evict_fires_after_insert_in_async_get_or_set_with_mut() {
         let captured_ptr: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
         let captured_ptr_clone = captured_ptr.clone();
         let events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
@@ -294,19 +310,24 @@ mod async_tests {
             );
         }
 
+        assert_eq!(
+            returned as *const Val as usize, old_ptr,
+            "the slot address is stable across the replacement"
+        );
+
         let cb_ptr = captured_ptr
             .lock()
             .unwrap()
             .expect("on_evict must have fired");
-        assert_eq!(
+        assert_ne!(
             cb_ptr, old_ptr,
-            "async on_evict must fire while the old entry is still in the map slot"
+            "async on_evict must fire AFTER the replacement, with the displaced value"
         );
     }
 
     /// Same slot-pointer ordering check for async_cache_try_get_or_set_with_mut.
     #[tokio::test]
-    async fn on_evict_fires_before_insert_in_async_try_get_or_set_with_mut() {
+    async fn on_evict_fires_after_insert_in_async_try_get_or_set_with_mut() {
         let captured_ptr: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
         let captured_ptr_clone = captured_ptr.clone();
         let events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
@@ -347,13 +368,18 @@ mod async_tests {
             );
         }
 
+        assert_eq!(
+            returned as *const Val as usize, old_ptr,
+            "the slot address is stable across the replacement"
+        );
+
         let cb_ptr = captured_ptr
             .lock()
             .unwrap()
             .expect("on_evict must have fired");
-        assert_eq!(
+        assert_ne!(
             cb_ptr, old_ptr,
-            "async try on_evict must fire while old entry is still in the map slot"
+            "async try on_evict must fire AFTER the replacement, with the displaced value"
         );
     }
 }

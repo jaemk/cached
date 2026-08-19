@@ -1248,7 +1248,10 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                     };
                     quote! {
                         #force_refreshing_flag
-                        let __cached_old_val = {
+                        // This block exists for its early-return on a fresh hit. The value it
+                        // captures is deliberately discarded: the fallback is re-read below
+                        // under the final lock instead.
+                        let _ = {
                             let mut __cached_old_val = None;
                             let mut __cached_cache = #cache_ident.#lock_method()#await_if_async;
                             #capture_old_val
@@ -1256,11 +1259,20 @@ pub fn cached(args: TokenStream, input: TokenStream) -> TokenStream {
                         };
                         #function_call
                         let mut __cached_cache = #cache_ident.#lock_method()#await_if_async;
-                        let __cached_result = match (__cached_result.is_err(), __cached_old_val) {
-                            (true, Some(__cached_old_val)) => {
-                                Ok(__cached_old_val)
+                        // Read the fallback under the SAME lock that the write below takes. The
+                        // cache lock is released while the body runs, so a concurrent call may
+                        // have stored a newer `Ok` in the meantime; falling back to a pre-body
+                        // snapshot would overwrite that newer value with a stale one. Peeking
+                        // is non-renewing and still returns expired entries, which is what a
+                        // stale fallback needs.
+                        let __cached_result = if __cached_result.is_err() {
+                            let (__cached_fallback, _) = #krate::CloneCached::cache_peek_with_expiry_status(&*__cached_cache, &__cached_key);
+                            match __cached_fallback {
+                                Some(__cached_fallback) => Ok(__cached_fallback),
+                                None => __cached_result,
                             }
-                            _ => __cached_result
+                        } else {
+                            __cached_result
                         };
                         #set_cache_and_return
                     }

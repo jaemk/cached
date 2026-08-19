@@ -701,7 +701,8 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     }
 
     /// Slot indices (MRU -> LRU) of the entries for which `keep` returns `false`.
-    /// Shared by [`retain`](Self::retain) and [`retain_silent`](Self::retain_silent).
+    /// Shared by [`retain`](Self::retain) and the TTL/expiring wrapper stores, which run their
+    /// own two-phase sweep so a panicking predicate cannot remove an entry uncounted.
     fn doomed_indices<F: FnMut(&K, &V) -> bool>(&self, keep: &mut F) -> Vec<usize> {
         // The live entry count is an upper bound on the number of doomed indices;
         // pre-size instead of growing the Vec from zero.
@@ -711,20 +712,6 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
             !keep(k, v)
         }));
         doomed
-    }
-
-    /// Removes entries for which `keep` returns `false` without firing `on_evict` or
-    /// incrementing `evictions`. Used internally by TTL/expiring wrapper stores to avoid
-    /// double-counting when those wrappers handle eviction side effects themselves.
-    /// Returns the number of entries removed, so callers can use it as their own removed
-    /// count instead of tracking a separate counter.
-    pub(super) fn retain_silent<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
-        let doomed = self.doomed_indices(&mut keep);
-        let removed = doomed.len();
-        for index in doomed {
-            let _ = self.remove_index(index);
-        }
-        removed
     }
 
     /// Insert or replace a cache entry, returning the **stored** key and value of the displaced
@@ -764,12 +751,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// evictions counter.
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
-    /// this method invokes `on_evict` for every removed entry and increments `evictions`. If no
-    /// `on_evict` callback was configured, it falls back to the plain `cache_clear`.
+    /// this method invokes `on_evict` for every removed entry and increments `evictions`.
+    /// The eviction count does not depend on whether an `on_evict` callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
-        if self.on_evict.is_none() {
-            return self.cache_clear();
-        }
         // `drain_all` walks the LRU chain once taking owned pairs (MRU -> LRU, the same
         // order the old key-by-key drain fired in) -- no key clones, no re-hashing.
         let removed = self.drain_all();
@@ -1435,28 +1419,6 @@ mod tests {
         c.cache_set(7, 70);
         assert_eq!(c.cache_peek(&7), Some(&70));
         assert_eq!(c.key_order(), vec![7, 4, 2, 0]);
-    }
-
-    #[test]
-    fn retain_silent_removes_without_on_evict_or_counters() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
-        let count = Arc::new(AtomicUsize::new(0));
-        let count2 = count.clone();
-        let mut c = LruCache::builder()
-            .max_size(5)
-            .on_evict(move |_k: &i32, _v: &i32| {
-                count2.fetch_add(1, AOrdering::Relaxed);
-            })
-            .build()
-            .unwrap();
-        for i in 0i32..5 {
-            c.cache_set(i, i * 10);
-        }
-        c.retain_silent(|k, _v| k % 2 == 0);
-        assert_eq!(c.key_order(), vec![4, 2, 0]);
-        assert_eq!(count.load(AOrdering::Relaxed), 0);
-        assert_eq!(c.cache_evictions(), Some(0));
     }
 
     #[test]
@@ -2226,7 +2188,7 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // Certification coverage for the index/drain rewrite of `retain`,
-    // `retain_silent`, `cache_clear_with_on_evict`, and the `*_order`
+    // `cache_clear_with_on_evict` and the `*_order`
     // collectors. The bar is that observable behavior is UNCHANGED, so these
     // pin side-effect ordering, counters, panic paths, and the store/order
     // invariant the pre-sizing depends on.
@@ -2561,15 +2523,6 @@ mod tests {
         assert_eq!(c.cache_size(), 0);
         assert_eq!(c.cache_evictions(), Some(0));
         assert_eq!(removed, 0);
-
-        // Same for `retain_silent`.
-        let mut calls = 0usize;
-        let removed = c.retain_silent(|_k, _v| {
-            calls += 1;
-            false
-        });
-        assert_eq!(calls, 0);
-        assert_eq!(removed, 0);
         assert_store_and_order_agree(&c);
     }
 
@@ -2587,15 +2540,11 @@ mod tests {
         // The removal path must not look like a lookup: hit/miss counters are untouched.
         assert_eq!(c.cache_hits(), hits);
         assert_eq!(c.cache_misses(), misses);
-        let removed_silent = c.retain_silent(|k, _v| *k >= 3);
-        assert_eq!(removed_silent, 1);
-        assert_eq!(c.cache_hits(), hits);
-        assert_eq!(c.cache_misses(), misses);
         assert_store_and_order_agree(&c);
     }
 
     #[test]
-    fn retain_silent_removes_all_and_none() {
+    fn retain_removes_all_and_none_and_frees_slots() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
         let count = Arc::new(AtomicUsize::new(0));
@@ -2610,27 +2559,27 @@ mod tests {
         for i in 0..4u32 {
             c.cache_set(i, i * 10);
         }
-        let removed = c.retain_silent(|_k, _v| true);
+        let removed = c.retain(|_k, _v| true);
         assert_eq!(removed, 0);
         assert_eq!(c.key_order(), vec![3, 2, 1, 0]);
+        assert_eq!(count.load(AOrdering::Relaxed), 0);
         assert_store_and_order_agree(&c);
 
-        let removed = c.retain_silent(|_k, _v| false);
+        let removed = c.retain(|_k, _v| false);
         assert_eq!(removed, 4);
         assert_eq!(c.cache_size(), 0);
         assert!(c.key_order().is_empty());
-        assert_eq!(count.load(AOrdering::Relaxed), 0);
-        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(count.load(AOrdering::Relaxed), 4);
+        assert_eq!(c.cache_evictions(), Some(4));
         assert_store_and_order_agree(&c);
 
-        // Freed slots are reusable and capacity eviction still fires normally
-        // (that path is NOT silent).
+        // Freed slots are reusable and capacity eviction still fires normally.
         for i in 10..15u32 {
             c.cache_set(i, i);
         }
         assert_eq!(c.key_order(), vec![14, 13, 12, 11]);
-        assert_eq!(count.load(AOrdering::Relaxed), 1);
-        assert_eq!(c.cache_evictions(), Some(1));
+        assert_eq!(count.load(AOrdering::Relaxed), 5);
+        assert_eq!(c.cache_evictions(), Some(5));
         assert_store_and_order_agree(&c);
     }
 
@@ -2789,19 +2738,30 @@ mod tests {
     }
 
     #[test]
-    fn cache_clear_with_on_evict_without_callback_is_a_silent_clear() {
-        // The early-return branch: no callback configured, so it must degrade to
-        // `cache_clear` semantics -- entries gone, `evictions` untouched.
+    fn cache_clear_with_on_evict_counts_without_a_callback() {
+        // The eviction count must not depend on whether a callback is configured:
+        // attaching a purely observational `on_evict` cannot change `evictions`.
         let mut c: LruCache<u32, u32> = LruCache::new(4);
         c.cache_set(1, 10);
         c.cache_set(2, 20);
         c.cache_clear_with_on_evict();
         assert_eq!(c.cache_size(), 0);
-        assert_eq!(c.cache_evictions(), Some(0));
+        assert_eq!(c.cache_evictions(), Some(2));
         assert!(c.key_order().is_empty());
         c.cache_set(3, 30);
         assert_eq!(c.cache_get(&3), Some(&30));
         assert_store_and_order_agree(&c);
+
+        // Same sequence, with a no-op callback: identical count.
+        let mut with_cb: LruCache<u32, u32> = LruCache::builder()
+            .max_size(4)
+            .on_evict(|_: &u32, _: &u32| {})
+            .build()
+            .unwrap();
+        with_cb.cache_set(1, 10);
+        with_cb.cache_set(2, 20);
+        with_cb.cache_clear_with_on_evict();
+        assert_eq!(with_cb.cache_evictions(), c.cache_evictions());
     }
 
     #[test]
@@ -3010,6 +2970,87 @@ mod tests {
     }
 
     #[test]
+    fn cache_set_over_an_existing_key_rebinds_the_stored_key() {
+        // The native LRU fast path replaces the whole `(K, V)` slot, so an overwrite
+        // rebinds the entry to the caller's key and drops the previously stored one.
+        // This is unconditional: there is no key-replacement policy knob.
+        #[derive(Debug, Clone)]
+        struct TaggedKey {
+            id: u32,
+            tag: &'static str,
+        }
+        impl PartialEq for TaggedKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.id == other.id
+            }
+        }
+        impl Eq for TaggedKey {}
+        impl Hash for TaggedKey {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                self.id.hash(state);
+            }
+        }
+
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let mut c = LruCache::builder()
+            .max_size(2)
+            .on_evict(move |k: &TaggedKey, _v: &u32| seen2.lock().unwrap().push(k.tag))
+            .build()
+            .unwrap();
+
+        c.cache_set(
+            TaggedKey {
+                id: 1,
+                tag: "first",
+            },
+            10,
+        );
+        assert_eq!(
+            c.cache_set(
+                TaggedKey {
+                    id: 1,
+                    tag: "second"
+                },
+                20
+            ),
+            Some(10)
+        );
+
+        // The stored key is now the caller's most recent key.
+        assert_eq!(
+            c.key_order().iter().map(|k| k.tag).collect::<Vec<_>>(),
+            vec!["second"]
+        );
+
+        // A further overwrite hands the *stored* key back through
+        // `cache_set_returning_entry`, and `on_evict` sees the stored key on removal.
+        let displaced = c
+            .cache_set_returning_entry(
+                TaggedKey {
+                    id: 1,
+                    tag: "third",
+                },
+                30,
+            )
+            .expect("existing key must return the displaced entry");
+        assert_eq!(displaced.0.tag, "second");
+        assert_eq!(displaced.1, 20);
+
+        let (removed_key, removed_val) = c
+            .cache_remove_entry(&TaggedKey {
+                id: 1,
+                tag: "probe",
+            })
+            .expect("the entry must still be present");
+        assert_eq!(removed_key.tag, "third");
+        assert_eq!(removed_val, 30);
+        assert_eq!(*seen.lock().unwrap(), vec!["third"]);
+        assert_store_and_order_agree(&c);
+    }
+
+    #[test]
     fn order_collectors_presize_from_live_count_not_capacity() {
         // The pre-size must come from `store.len()`, never from the configured
         // capacity: a large `max_size` with two live entries must not allocate large
@@ -3038,7 +3079,7 @@ mod tests {
     fn store_len_and_live_chain_never_diverge_under_mixed_operations() {
         // The `*_order` pre-sizing assumes `store.len()` equals the live chain length.
         // Hammer every mutating path that touches the slab -- capacity eviction,
-        // retain, retain_silent, remove_index, drain_all, clear-with-callback, replace
+        // retain, remove_index, drain_all, clear-with-callback, replace
         // -- and assert the two views agree after every single step.
         use std::sync::{Arc, Mutex};
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -3067,7 +3108,7 @@ mod tests {
                     c.retain(|k, _v| k % 3 != 0);
                 }
                 7 => {
-                    c.retain_silent(|k, _v| *k != key);
+                    c.retain(|k, _v| *k != key);
                 }
                 8 => {
                     if c.cache_size() > 0 {

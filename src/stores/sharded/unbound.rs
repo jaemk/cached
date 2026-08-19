@@ -383,13 +383,23 @@ where
     /// **after** the shard lock is released, once per removed entry, in shard order. Because
     /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
     /// not yet visited will have that entry filtered by the same in-flight `retain`.
+    ///
+    /// # Panicking predicate
+    ///
+    /// If `keep` panics, nothing has been removed yet from the shard it panicked in (or from
+    /// any shard not yet visited): the sweep of a shard runs `keep` in a first pass that only
+    /// *selects* doomed entries and removes them in a second pass that runs no user code.
+    /// Shards already swept keep their removals, all of which were counted and notified before
+    /// the panic.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
         let mut total_removed = 0usize;
         for shard in self.inner.shards.iter() {
-            // Collect under the write lock, fire callbacks after releasing it.
+            // Collect under the write lock, fire callbacks after releasing it. Two phases: the
+            // first runs `keep` (user code) and only selects, the second removes and runs
+            // nothing that can panic. See `stores::take_doomed`.
             let removed: Vec<(K, V)> = {
                 let mut guard = shard.lock.write();
-                guard.extract_if(|k, v| !keep(k, v)).collect()
+                crate::stores::take_doomed(&mut guard, |k, v| !keep(k, v))
             };
             total_removed += removed.len();
             if let Some(on_evict) = &self.inner.on_evict {
@@ -460,7 +470,9 @@ where
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
         let shard = self.shard_of(&k);
-        Ok(shard.lock.write().insert(k, v))
+        let mut guard = shard.lock.write();
+        // `HashMap::insert` keeps the stored key and drops the caller's.
+        Ok(guard.insert(k, v))
     }
 
     fn cache_remove(&self, k: &K) -> Result<Option<V>, Self::Error> {

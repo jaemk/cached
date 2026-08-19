@@ -743,7 +743,10 @@ mod redb_serialize_cached {
         let dir = TempDir::new().unwrap();
         let cache: RedbCache<u32, String> = RedbCache::builder("serialize_cached_ttl_expiry")
             .disk_dir(dir.path())
-            .ttl(Duration::from_millis(100))
+            // A durable write is an fsync, which on a loaded machine can itself take longer
+            // than a short TTL, expiring the entry before the liveness assertion below can
+            // read it. The window has to comfortably exceed one commit, not one memory write.
+            .ttl(Duration::from_secs(2))
             .build()
             .expect("error building redb cache");
 
@@ -758,7 +761,7 @@ mod redb_serialize_cached {
         assert_eq!(cache.cache_get(&key).unwrap(), Some("expires".to_string()));
 
         // Sleep past the TTL; the entry must now be treated as expired (absent).
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(2400));
         assert_eq!(cache.cache_get(&key).unwrap(), None);
     }
 }

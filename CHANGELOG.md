@@ -10,7 +10,7 @@
   These were the only two of the crate's 13 builders where naming a hasher positionally
   (`ShardedLruTtlCacheBuilder<K, V, MyHasher>`) bound it to the typestate slot instead,
   surfacing as a mismatched-types error at `.build()` rather than at the annotation. The
-  sharded builder now matches its 2.0.2 parameter order again (rc.1 through rc.10 had it
+  sharded builder now matches its 2.0.2 parameter order again (rc.3 through rc.10 had it
   reversed); `LruTtlCacheBuilder` had no hasher parameter in 2.0.2, so a 2.x annotation of
   `LruTtlCacheBuilder<K, V, HasEvict>` names the hasher slot in 3.0 and must gain the hasher
   as the third argument. Code naming only `<K, V>`, or reaching the hasher through
@@ -78,6 +78,56 @@
   in that case.
 - `LruTtlCache`'s two infallible get-or-set paths now count a miss before running the
   factory, matching `TtlCache`, so a panicking factory records the miss.
+- `#[cached(result_fallback = true)]` no longer overwrites a newer cached value with a stale
+  one. The fallback was captured before the function body ran and written back unconditionally
+  on `Err`, so a slow failing call could clobber a value a concurrent call had refreshed in the
+  meantime, and on a TTL store refresh its deadline. The fallback is now read under the same
+  lock the write takes. `result_fallback` cannot be combined with a non-disabled `sync_writes`,
+  so there was no way for a caller to serialize the window themselves.
+- `RedisCache::cache_clear` / `async_cache_clear` (and `cache_reset`, which delegates) decode
+  `SCAN` replies as bytes rather than `String`. Redis keys are binary-safe, so a single
+  non-UTF-8 key anywhere in the cache's `{namespace}:{prefix}:*` scope aborted the clear and
+  left the cache's own entries in place, permanently: the offending key was never removed, so
+  every retry failed identically.
+- `RedbCache::cache_set` / `async_cache_set` no longer return a displaced value that had
+  already expired. The `Cached` contract filters an expired displaced entry to `None`, which
+  `cache_remove` already did; `cache_set` was the only store path leaking a stale value.
+- `RedbCacheBuilder::build()` returns `RedbCacheBuildError::Storage` instead of panicking when
+  the backing file is damaged. A file truncated by as little as one byte, or with a flipped
+  byte in an early page, unwound out of redb rather than surfacing as the documented error.
+  A truncated tail is the ordinary result of a full disk or a killed process, and the file is
+  a disposable cache, so it must not take the application down. The database open and the
+  initial table-creation transaction are both guarded. Note this cannot help under
+  `panic = "abort"`.
+- `retain` and `evict` no longer fire `on_evict` for entries that remain in the cache. On
+  `LruTtlCache` and `ExpiringLruCache` the callback and eviction counter ran inside the
+  selection scan, which completes before anything is removed, so a panicking predicate removed
+  nothing while having already run cleanup callbacks for entries the cache kept serving. All
+  sweeps are now two-phase: select, remove, count, then notify.
+- `retain` on `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache`, and
+  `evict` on `ShardedExpiringCache`, no longer discard entries silently. They removed entries
+  eagerly while the user predicate (or `Expires::is_expired`) ran, so a panic dropped every
+  entry already yielded without firing `on_evict` or counting an eviction. The two-phase sweep
+  carries a recorded `Vec<bool>` of decisions rather than cloned keys, so these methods keep
+  their existing bounds; `retain` on the three stores is still callable with a non-`Clone` key.
+- `TtlSortedCache::set_and_get_mut` no longer orphans a map row when the size trim it triggers
+  unwinds. The entry's stamp was unlinked from the deadline index and re-inserted after the
+  trim, so a panicking `on_evict` (or a panicking `Drop` for the value, with no callback at
+  all) left the entry in the map but invisible to `evict()` and every index-driven sweep, while
+  still counted by `cache_size()`. Reached through `cache_get_or_set_with`,
+  `cache_try_get_or_set_with`, their `_mut` variants, and the async pair.
+- `ShardedTtlCache::cache_set` and `ShardedExpiringCache::cache_set` no longer choose their
+  write path based on whether an `on_evict` callback is configured, which made the physically
+  stored key depend on unrelated builder configuration. Both keep the stored key, matching
+  `TtlCache` / `ExpiringCache`.
+- `cache_clear_with_on_evict` counts every removed entry on all six stores that have it. It
+  previously degraded to a silent `cache_clear` when no callback was configured, so attaching
+  a no-op callback changed the reported eviction count.
+- `cache_remove` samples an entry's expiry once, at removal, on `TtlCache`, `LruTtlCache`,
+  `ExpiringCache`, and `ExpiringLruCache`. Expiry was re-checked after `on_evict` returned, so
+  a slow callback could turn an entry that was live when removed into a `None` return.
+- Refreshing an entry under an overflowing TTL (`Duration::MAX`) now clears the deadline, as a
+  fresh insert already did, instead of leaving the old shorter deadline in place.
 
 ### Documentation
 
@@ -97,6 +147,23 @@
 - The `companions_vis` + `companions = false` conflict error names only `{fn}_prime_cache` on
   `#[once]` and `#[concurrent_cached]`, which do not emit a `{fn}_no_cache` sibling (their
   uncached body is a nested inner function). Only `#[cached]` emits a callable one.
+- The human migration guide covers the `serde` feature removal and the `LruTtlCacheBuilder` /
+  `ShardedLruTtlCacheBuilder` hasher-slot reorder, including the deferred `.build()` error a
+  positional `LruTtlCacheBuilder<K, V, HasEvict>` annotation now produces.
+- The agent migration guide no longer claims `serde` is a public feature that keeps working,
+  which contradicted its own feature-removal entry and `Cargo.toml`.
+- `sync_writes = "by_key"` is described as unchanged from 2.x in both migration guides rather
+  than as a 3.0 opt-in; it has been available since 0.55.1.
+- The 2.0.2 baselines for `CacheTtl` and the concurrent traits are corrected: `CacheTtl` had
+  five methods (`try_set_ttl` is new in 3.0), there was no `ConcurrentCacheTtl` trait, and the
+  concurrent traits had no `len`/`is_empty` to remove (those names are new on
+  `ConcurrentCachedExt`).
+- `TtlSortedCache` is no longer listed among the types made `#[non_exhaustive]`; its `Error` is
+  `Infallible` and it has no error type.
+- The crate-level lock docs no longer imply `#[once]` accepts `sync_lock`; it rejects the
+  attribute and is always `RwLock`.
+- `AGENTS.md` drops the removed `serde` feature row, and `AGENTS.md` / `specs/macro-cached.md`
+  list the `expires` macro attribute.
 
 ## [3.0.0-rc.10 / cached_proc_macro 3.0.0-rc.10 / cached_proc_macro_types 3.0.0-rc.10] - 2026-08-03
 
@@ -965,7 +1032,8 @@
 - `RedbCache::flush` and `RedbCache::async_flush` force a durable (fsync) commit, so you can run with `durable(false)` for cheap writes and flush at chosen points (periodically or before shutdown) to persist them.
 - `RedbCache::disk_path()` returns the path of the on-disk redb database file backing the cache.
 - New `SerializeCached` / `SerializeCachedAsync` traits with `cache_set_ref(&self, &K, &V)` / `async_cache_set_ref`, implemented by `RedisCache` / `AsyncRedisCache` / `RedbCache`, let serialize-backed stores set an entry without taking ownership of the key/value. The `#[concurrent_cached]` macro now calls the borrowed setter for any store implementing these traits (the built-in `redis`/`disk` stores and custom `ty`/`create` stores alike), avoiding an extra value clone on the set ([#196](https://github.com/jaemk/cached/issues/196), [#195](https://github.com/jaemk/cached/issues/195)).
-- `RedisCache` / `AsyncRedisCache` now implement `cache_clear` / `async_cache_clear` via a namespace-scoped `SCAN` + batched `DEL` (O(n), scoped to the cache's prefix, not a server flush), and `cache_reset` / `async_cache_reset` delegate to them (redis tracks no in-memory metrics, matching `RedbCache`). Glob metacharacters (`*`, `?`, `[`, `]`, `\`) in the namespace/prefix are escaped in the `SCAN` pattern so they match literally ([#200](https://github.com/jaemk/cached/issues/200)). `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `build()` now returns `RedisCacheBuildError::EmptyScope` when both the namespace (after trimming trailing `:`) and the prefix are empty, since that would make `cache_clear` run `SCAN MATCH *` and delete every key in the database. (This is technically a breaking behavior change for any caller that explicitly set the namespace to empty and left the prefix empty; the default namespace `"cached-redis-store:"` is non-empty so normal usage is unaffected. See the [migration guide](docs/migrations/2.0-to-3.0.md#9-rediscachebuilderbuild--asyncrediscachebuilderbuild-return-emptyscope-when-namespace-and-prefix-are-both-empty) for details.)
+- `RedisCache` / `AsyncRedisCache` now implement `cache_clear` / `async_cache_clear` via a namespace-scoped `SCAN` + batched `DEL` (O(n), scoped to the cache's prefix, not a server flush), and `cache_reset` / `async_cache_reset` delegate to them (redis tracks no in-memory metrics, matching `RedbCache`). Glob metacharacters (`*`, `?`, `[`, `]`, `\`) in the namespace/prefix are escaped in the `SCAN` pattern so they match literally ([#200](https://github.com/jaemk/cached/issues/200)). `RedisCacheBuilder` / `AsyncRedisCacheBuilder` `build()` now returns `RedisCacheBuildError::EmptyScope` when both the namespace (after trimming trailing `:`) and the prefix are empty, since that would make `cache_clear` run `SCAN MATCH *` and delete every key in the database. (This is technically a breaking behavior change for any caller that explicitly set the namespace to empty and left the prefix empty; the default namespace `"cached-redis-store:"` is non-empty so normal usage is unaffected.)
+  _Superseded before 3.0.0: `RedisCacheBuildError::EmptyScope` was removed and replaced by a stricter empty-prefix rejection. See the "`RedisCacheBuilder::build()` / `AsyncRedisCacheBuilder::build()` reject an empty prefix" entry in the 3.0.0-rc.7 notes and [the migration guide](docs/migrations/2.0-to-3.0.md#9-rediscachebuilderbuild--asyncrediscachebuilderbuild-reject-an-empty-prefix)._
 - `LruCache::set_max_size` / `try_set_max_size` resize a live cache, eagerly evicting LRU entries when shrinking (paralleling `TtlSortedCache`'s existing `set_max_size` / `try_set_max_size`, which set the new bound but evict lazily on the next insert rather than eagerly); `LruTtlCache` and `ExpiringLruCache` gained the same two methods (delegating to their inner LRU) for parity ([#180](https://github.com/jaemk/cached/issues/180)). All four `try_set_max_size` methods now return a single dedicated `SetMaxSizeError` (variant `ZeroSize`) instead of the builder `BuildError` (LRU family) or a `std::io::Error` (`TtlSortedCache`), so the runtime-resize error is self-describing and consistent across stores.
 - `RedbCacheBuilder::build()` now validates `cache_name` (used as a filename component) and returns `RedbCacheBuildError::InvalidCacheName` if it is empty, contains a path separator (`/` or `\`), or is a path-traversal component (`.` or `..`), which would otherwise silently create subdirectories, escape the cache directory, or produce a meaningless filename.
 - `#[cached]` / `#[concurrent_cached]` / `#[once]` gained a `ttl_millis = N` attribute for sub-second TTLs (milliseconds); mutually exclusive with `ttl`, `ttl_secs`, and `expires`, with a compile error if any are combined ([#149](https://github.com/jaemk/cached/issues/149)).

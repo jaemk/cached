@@ -673,34 +673,47 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) -> usize {
         // Sample the clock once so every entry is judged against the same instant.
         let now = Instant::now();
-        // Disjoint field borrows: `map.retain` takes `&mut self.map` while the closure
-        // holds `&mut self.keys` plus shared borrows of the callback and counter.
-        let keys = &mut self.keys;
-        // Drain both structures first and fire `on_evict` only once the pass is over.
-        // Firing mid-pass would let a panicking callback unwind between the index
-        // removal and the map removal, leaving `keys` short of `map` permanently:
-        // the orphaned entry would be invisible to `evict`/`retain_latest` (their
-        // `pop_first` walk never reaches it) yet still counted by `len`.
-        let removed: Vec<_> = self
+        // Pass 1 runs the caller's predicate WITHOUT touching either structure, collecting
+        // the doomed stamps. An eager removal here (the natural `extract_if` shape) hands
+        // already-yielded entries to the collecting iterator, so a panicking `keep` unwinds
+        // with them still in flight: they are dropped mid-unwind, never notified and never
+        // counted -- gone from the cache with no trace in `on_evict` or `evictions`. Deciding
+        // first means a panicking predicate leaves the cache exactly as it found it.
+        //
+        // `as_stamped` rebuilds the exact `Stamped` that was inserted (same expiry, same
+        // `CacheArc` key), so pass 2 cannot leave a stale index entry that a later `pop_first`
+        // would miscount as a drop.
+        let doomed: Vec<Stamped<K>> = self
             .map
-            .extract_if(|key, entry| {
-                if entry.is_expired_at(now) || !keep(key, &entry.value) {
-                    // `as_stamped` rebuilds the exact `Stamped` that was inserted (same
-                    // expiry, same `CacheArc` key), so this cannot leave a stale index
-                    // entry that a later `pop_first` would miscount as a drop.
-                    keys.remove(&entry.as_stamped());
-                    true
-                } else {
-                    false
-                }
-            })
+            .iter()
+            .filter(|(key, entry)| entry.is_expired_at(now) || !keep(key, &entry.value))
+            .map(|(_key, entry)| entry.as_stamped())
             .collect();
+
+        // Pass 2 runs no user code at all: map and index are unlinked together for each
+        // doomed entry, and the removed entries are held in `removed` so that no value is
+        // dropped until both structures are back in lockstep.
+        let mut removed = Vec::with_capacity(doomed.len());
+        for stamped in &doomed {
+            // Invariant: `None` keys are only ever artificial range sentinels; `as_stamped`
+            // never produces one.
+            let key = stamped
+                .key
+                .as_ref()
+                .expect("retaining: only artificial bounds are none");
+            self.keys.remove(stamped);
+            if let Some(entry) = self.map.remove(key.0.as_ref()) {
+                removed.push(entry);
+            }
+        }
         let count = removed.len();
+        // Count BEFORE notifying (and before the values drop): a panicking callback or `Drop`
+        // must never leave an entry removed-but-uncounted.
         self.evictions
             .fetch_add(count as u64, AtomicOrdering::Relaxed);
         if let Some(on_evict) = &self.on_evict {
-            for (key, entry) in &removed {
-                on_evict(key, &entry.value);
+            for entry in &removed {
+                on_evict(entry.key.0.as_ref(), &entry.value);
             }
         }
         count
@@ -728,19 +741,45 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// popped that many; since the expired entries are exactly a front prefix, popping while
     /// `dropped < retain_drop_count || (evict && front_is_expired)` removes the same set.
     fn retain_latest_at(&mut self, count: usize, cutoff: Option<Instant>) -> usize {
+        self.retain_latest_at_protecting(count, cutoff, None)
+    }
+
+    /// [`retain_latest_at`](Self::retain_latest_at) with one stamp exempted from selection.
+    ///
+    /// `protected` names an entry that must survive this trim: it is never chosen as a victim
+    /// and, crucially, never leaves the expiry index even momentarily. `set_and_get_mut` has to
+    /// guarantee its just-inserted entry is still there when it returns `&mut V`, and the
+    /// alternative -- unlinking the stamp around the call and re-inserting it afterwards --
+    /// leaves a window in which that map row has no stamp. A panic out of that window (an
+    /// `on_evict` callback, or a `Drop` for `V`/`K`) would skip the re-insert and orphan the
+    /// row: invisible to `evict` and every other index-driven sweep forever, yet still counted
+    /// by `cache_size` and still costing a slot of `max_size`. Skipping instead of unlinking
+    /// keeps the map/index lockstep intact at every instant.
+    fn retain_latest_at_protecting(
+        &mut self,
+        count: usize,
+        cutoff: Option<Instant>,
+        protected: Option<&Stamped<K>>,
+    ) -> usize {
         let retain_drop_count = self.map.len().saturating_sub(count);
-        if retain_drop_count == 0 {
+        if retain_drop_count == 0 && protected.is_none() {
             // No size trim to do: this is either a pure expiry sweep (where the old
             // `max(0, expired_count)` is just the sweep count) or a complete no-op that must
-            // leave the index untouched.
+            // leave the index untouched. `evict_at` detaches the whole expired prefix
+            // indiscriminately, so it is only usable when nothing is protected; a protected
+            // sweep falls through to the front-walking loop below instead.
             return match cutoff {
                 Some(cutoff) => self.evict_at(cutoff),
                 None => 0,
             };
         }
+        if retain_drop_count == 0 && cutoff.is_none() {
+            // Nothing to trim and no sweep requested: a no-op even with a protected stamp.
+            return 0;
+        }
 
         let mut dropped = 0;
-        while let Some(stamped) = self.keys.pop_first() {
+        while let Some(stamped) = self.pop_first_unprotected(protected) {
             if dropped >= retain_drop_count {
                 // Size trim satisfied; keep going only while the front is expired.
                 let expired = match cutoff {
@@ -765,6 +804,26 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
             dropped += 1;
         }
         dropped
+    }
+
+    /// Pop the soonest-to-expire stamp that is not `protected`.
+    ///
+    /// The protected stamp is only ever out of the index across the two `BTreeSet` operations
+    /// below, with no user code (an `on_evict` callback, a `Drop` for `V` or `K`, the caller's
+    /// predicate) able to run in between, so nothing can unwind while its map row is unindexed.
+    fn pop_first_unprotected(&mut self, protected: Option<&Stamped<K>>) -> Option<Stamped<K>> {
+        let first = self.keys.pop_first()?;
+        match protected {
+            Some(protected) if *protected == first => {
+                // The protected stamp sorts first: take the next victim and put it straight
+                // back. It sorts first again on the following call, so each iteration of a
+                // protected trim pays one extra pop/insert pair.
+                let next = self.keys.pop_first();
+                self.keys.insert(first);
+                next
+            }
+            _ => Some(first),
+        }
     }
 
     /// Set k/v pair without running eviction logic, using the cache's default TTL.
@@ -938,13 +997,13 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
         if let Some(size_limit) = self.size_limit
             && self.map.len() > size_limit
         {
-            // Temporarily unlink the just-inserted entry from the expiry index so
-            // `retain_latest` cannot select it for eviction. Other entries are
-            // dropped in TTL order until the map is back within `size_limit`.
-            // The stamp is restored afterward so the index stays consistent.
-            self.keys.remove(&protected);
-            self.retain_latest(size_limit, false);
-            self.keys.insert(protected.clone());
+            // The just-inserted entry is protected by being SKIPPED during the trim, not by
+            // being unlinked from the expiry index around it: its map row is never left
+            // without a stamp, so a panic out of a user `on_evict` (or a `Drop` for `V`/`K`)
+            // cannot strand it in the map, invisible to every index-driven sweep yet still
+            // counted by `cache_size` and still holding a slot of `max_size`. Other entries
+            // are dropped in TTL order until the map is back within `size_limit`.
+            self.retain_latest_at_protecting(size_limit, None, Some(&protected));
         }
 
         // The stamp shares the stored entry's key `Arc`, so this borrows the key rather than

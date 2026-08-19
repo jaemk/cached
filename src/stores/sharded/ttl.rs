@@ -507,45 +507,38 @@ where
     /// **after** the shard lock is released, once per removed entry, in shard order. Because
     /// callbacks run between shard sweeps, an `on_evict` that inserts into a shard this call has
     /// not yet visited will have that entry filtered by the same in-flight `retain`.
+    /// # Panicking predicate
+    ///
+    /// If `keep` panics, nothing has been removed yet from the shard it panicked in (or from
+    /// any shard not yet visited): the sweep of a shard runs `keep` in a first pass that only
+    /// *selects* doomed entries and removes them in a second pass that runs no user code.
+    /// Shards already swept keep their removals, all of which were counted and notified before
+    /// the panic. This holds whether or not an `on_evict` callback is configured.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&self, mut keep: F) -> usize {
         let now = Instant::now();
         let mut total_removed = 0usize;
-        let Some(cb) = &self.inner.on_evict else {
-            // No callback: only the removed *count* is observable, so drop the filtered-out
-            // entries in place via `retain` and take the length delta -- no key clones, no
-            // `Vec` (matching `evict`'s no-callback fast path). The length delta itself is
-            // computed under the shard's write lock (`before` and `guard.len()` are both read
-            // while `guard` is held), but the atomic `evictions` counter is incremented only
-            // after the block ends and `guard` has already been dropped.
-            for shard in self.inner.shards.iter() {
-                let removed = {
-                    let mut guard = shard.lock.write();
-                    let before = guard.len();
-                    guard.retain(|k, entry| !expired_at(entry, now) && keep(k, &entry.value));
-                    before - guard.len()
-                };
-                total_removed += removed;
-                if removed > 0 {
-                    shard.evictions.fetch_add(removed as u64, Ordering::Relaxed);
-                }
-            }
-            return total_removed;
-        };
         for shard in self.inner.shards.iter() {
-            // Collect under the write lock, fire callbacks after releasing it.
+            // Collect under the write lock, fire callbacks after releasing it. Two phases: the
+            // first runs `keep` (user code) and only selects, the second removes and runs
+            // nothing that can panic. See `stores::take_doomed`. The no-callback path used to
+            // take a `before - guard.len()` delta after an in-place `HashMap::retain`, which a
+            // panicking predicate skipped entirely; both paths now remove, count, and (where
+            // configured) notify exactly the same entries.
             let removed: Vec<(K, TimedEntry<V>)> = {
                 let mut guard = shard.lock.write();
-                guard
-                    .extract_if(|k, entry| expired_at(entry, now) || !keep(k, &entry.value))
-                    .collect()
+                crate::stores::take_doomed(&mut guard, |k, entry| {
+                    expired_at(entry, now) || !keep(k, &entry.value)
+                })
             };
             total_removed += removed.len();
             if !removed.is_empty() {
                 shard
                     .evictions
                     .fetch_add(removed.len() as u64, Ordering::Relaxed);
-                for (k, entry) in &removed {
-                    cb(k, &entry.value);
+                if let Some(cb) = &self.inner.on_evict {
+                    for (k, entry) in &removed {
+                        cb(k, &entry.value);
+                    }
                 }
             }
         }
@@ -765,22 +758,31 @@ where
         // (B2: avoids a TOCTOU where the entry crosses the expiry threshold between unlock and
         // the check). Expiry is judged against the same `now` that stamps the replacement
         // entry — one clock read per call, and the displaced entry is judged against exactly
-        // the instant the new entry claims to start at. When an `on_evict` callback is
-        // configured, remove-then-insert so the owned old key can fire the callback after the
-        // lock is released (on_evict-after-unlock).
-        let old: Option<(Option<K>, TimedEntry<V>, bool)> = if self.inner.on_evict.is_some() {
+        // the instant the new entry claims to start at. An owned key is kept in hand so
+        // `on_evict` can fire after the lock is released (on_evict-after-unlock).
+        //
+        // There is exactly ONE write shape here, taken whether or not an `on_evict` callback is
+        // configured: an overwrite keeps the STORED key and drops the caller's, matching
+        // `HashMap::insert` and the single-owner `TtlCache`. This used to branch on
+        // `on_evict.is_some()` and take a `remove_entry` + `insert` (key-rebinding) path when a
+        // callback was present, so attaching a purely observational callback changed which key
+        // was physically stored. The value is swapped in place through `get_mut`, which leaves
+        // the caller's key `k` owned here; `on_evict` therefore receives the caller's key -- the
+        // same key the LRU-backed sharded stores hand it when the stored key is kept. The two
+        // compare `Eq`.
+        let old: Option<(K, TimedEntry<V>, bool)> = {
             let mut guard = shard.lock.write();
-            let removed = guard.remove_entry(&k);
-            guard.insert(k, new_entry);
-            removed.map(|(ok, e)| {
-                let expired = expired_at(&e, now);
-                (Some(ok), e, expired)
-            })
-        } else {
-            shard.lock.write().insert(k, new_entry).map(|e| {
-                let expired = expired_at(&e, now);
-                (None, e, expired)
-            })
+            match guard.get_mut(&k) {
+                Some(slot) => {
+                    let e = std::mem::replace(slot, new_entry);
+                    let expired = expired_at(&e, now);
+                    Some((k, e, expired))
+                }
+                None => {
+                    guard.insert(k, new_entry);
+                    None
+                }
+            }
         };
         match old {
             // A displaced expired value is filtered from the return (matching cache_remove and
@@ -789,8 +791,8 @@ where
                 // Count BEFORE notifying: a panicking callback must never leave an
                 // entry removed-but-uncounted.
                 shard.evictions.fetch_add(1, Ordering::Relaxed);
-                if let (Some(cb), Some(key)) = (&self.inner.on_evict, &key) {
-                    cb(key, &entry.value);
+                if let Some(cb) = &self.inner.on_evict {
+                    cb(&key, &entry.value);
                 }
                 Ok(None)
             }

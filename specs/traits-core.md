@@ -62,9 +62,3 @@ satisfied the bound with a `set_refresh_on_hit` that ignored its argument and re
 which a generic caller cannot distinguish from "the flag was already off". Every remaining
 implementor honours the documented contract: the setter returns the state the store was actually
 in, and the new state takes effect for subsequent hits.
-
-Both traits are ungated, so an external store can implement either without `time_stores`; only
-the built-in impls are gated. Both are in `cached::prelude`. Builder `.refresh_on_hit(bool)`
-setters are unaffected. The concurrent mirror is `ConcurrentCacheRefreshOnHit`
-([traits-concurrent.md](traits-concurrent.md) CTRAIT-6). See
-[design/0045-refresh-on-hit-trait-split.md](design/0045-refresh-on-hit-trait-split.md).

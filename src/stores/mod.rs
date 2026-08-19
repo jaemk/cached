@@ -383,6 +383,54 @@ impl<K, V, M> IntoValues<V> for Vec<(K, CacheValue<V, M>)> {
     }
 }
 
+/// Phase 1 of a two-phase sweep: run `doomed` over every entry in `store` and hand back the
+/// entries it selected, removed from the map.
+///
+/// Shared by every `HashMap`-backed store, single-owner and sharded alike, so the ordering
+/// assumption below lives in exactly one place.
+///
+/// # Why two passes
+///
+/// `doomed` wraps user code (a `retain` predicate, or a value's own
+/// [`Expires::is_expired`](crate::Expires::is_expired)),
+/// so it can panic. The selection pass only *reads* the map, so a panic leaves the cache
+/// exactly as it was: nothing removed, nothing counted, nothing notified. The removal pass
+/// replays the recorded decisions through a closure that cannot panic, so every entry it takes
+/// out reaches the caller to be counted and notified.
+///
+/// A single `extract_if` pass driven directly by `doomed` would instead remove eagerly *while*
+/// the user code runs, dropping every already-yielded entry during unwind: gone from the cache,
+/// never notified, never counted.
+///
+/// # Ordering assumption
+///
+/// The two passes are tied together positionally: `flags[i]` is the decision for the `i`th
+/// entry `iter` yielded, and `extract_if` consumes them in its own iteration order. This is
+/// sound because nothing mutates the map between the passes -- the selection pass takes `&self`
+/// on the map and the caller holds the only handle (a `&mut self` receiver, or a shard write
+/// guard) for the whole call -- so `extract_if` walks the same untouched table `iter` just
+/// walked, in the same order.
+///
+/// Recording decisions rather than keys is what keeps this off a `K: Clone` bound; the
+/// alternative (collect doomed keys, then re-look-up each one) costs a clone plus a second hash
+/// and probe per removed entry, and would force `K: Clone` on every caller's `retain`.
+pub(crate) fn take_doomed<K, V, S, F>(store: &mut HashMap<K, V, S>, mut doomed: F) -> Vec<(K, V)>
+where
+    K: Hash + Eq,
+    S: std::hash::BuildHasher,
+    F: FnMut(&K, &V) -> bool,
+{
+    let mut flags: Vec<bool> = Vec::with_capacity(store.len());
+    flags.extend(store.iter().map(|(k, v)| doomed(k, v)));
+    if !flags.contains(&true) {
+        return Vec::new();
+    }
+    let mut flags = flags.into_iter();
+    store
+        .extract_if(|_, _| flags.next().unwrap_or(false))
+        .collect()
+}
+
 /// Validate that `ttl` is non-zero; used by all TTL-capable store builders.
 #[cfg(any(
     feature = "time_stores",

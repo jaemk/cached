@@ -72,6 +72,15 @@ most recently inserted one, while in the HashMap-backed stores it is the first-i
 Key rebinding is independent of recency (LRU-7): a rebind happens on every overwrite regardless
 of where the entry sits in the eviction order.
 
+This split is deliberate and is NOT configurable. Making it selectable was implemented and then
+withdrawn: on a `std::collections::HashMap` (whose `OccupiedEntry` cannot re-key a slot) the
+non-native policy costs a second hash and probe on every overwrite, and on `TtlSortedCache` it also
+costs a `K::clone` and a fresh `Arc`, to change something only a partial-key type can observe. See
+[design/0046-configurable-key-replacement-policy.md](design/0046-configurable-key-replacement-policy.md).
+
+A caller who needs a specific key instance stored can force it with `cache_remove` followed by
+`cache_set`, paying the extra probe only where it is actually wanted.
+
 ## LRU-7
 
 `cache_set` and a `get_or_set` overwrite (`cache_get_or_set_with` and its try variants, backed by

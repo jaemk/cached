@@ -6549,8 +6549,9 @@ fn test_lru_ttl_evict_does_not_double_count_evictions() {
 
     std::thread::sleep(Duration::from_millis(100));
 
-    // evict() uses retain_silent internally; cache_evictions() = outer + inner counters.
-    // With retain_silent the inner counter stays 0, so total == 3, not 6.
+    // `cache_evictions()` sums the outer and inner counters. `evict()` selects doomed slots and
+    // unlinks them from the inner LRU directly, which does not touch the inner counter, so the
+    // three removals are counted once by the wrapper: total == 3, not 6.
     assert_eq!(cache.evict(), 3);
     assert_eq!(cache.cache_evictions(), Some(3));
 }
