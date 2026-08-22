@@ -1,5 +1,6 @@
 //! Attaching an `on_evict` callback must not change which key a sharded store physically
-//! stores on an overwrite.
+//! stores on an overwrite, and `on_evict` must receive the displaced entry's own stored
+//! (key, value) pair.
 //!
 //! `ShardedTtlCache::cache_set` and `ShardedExpiringCache::cache_set` used to branch on
 //! `self.inner.on_evict.is_some()`: the callback branch did `remove_entry` + `insert`
@@ -11,20 +12,25 @@
 //! ttl  no-on_evict stored tag = "first"   with-on_evict stored tag = "second"
 //! ```
 //!
-//! Both now take the single stored-key-keeping shape, so an `on_evict` callback is purely
-//! observational.
+//! Both now take the single `remove_entry` + `insert` shape unconditionally, so an
+//! `on_evict` callback is purely observational, and the callback receives the displaced
+//! stored key rather than the caller's `Eq`-equal (but possibly non-identical) instance.
 //!
-//! Each store's own overwrite semantics differ by backing store, and that difference is
-//! pinned here too:
+//! Each store's own overwrite semantics are pinned here too:
 //!
-//! * `HashMap`-backed (`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) keep
-//!   the **first-inserted** key, matching `HashMap::insert` and the single-owner `TtlCache` /
-//!   `ExpiringCache`.
-//! * `LruCache`-backed (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`)
-//!   rebind the slot to the **caller's** key, because the LRU primitive replaces the whole
-//!   `(K, V)` slot (see `tests/v3_cert_expiring_lru_stored_key.rs`).
+//! * `ShardedUnboundCache` keeps the **first-inserted** key, matching `HashMap::insert` and
+//!   the single-owner `UnboundCache` (its overwrite never evicts, so there is no callback
+//!   pair to keep coherent and the plain value swap stands).
+//! * The other five (`ShardedTtlCache`, `ShardedExpiringCache`, `ShardedLruCache`,
+//!   `ShardedLruTtlCache`, `ShardedExpiringLruCache`) rebind the slot to the **caller's**
+//!   key: the LRU primitive replaces the whole `(K, V)` slot (see
+//!   `tests/v3_cert_expiring_lru_stored_key.rs`), and the TTL/expiring stores rebind so the
+//!   displaced stored key is available to hand to `on_evict` after the shard lock is
+//!   released. The single-owner `TtlCache` / `ExpiringCache` keep the first-inserted key
+//!   instead (they fire `on_evict` under `&mut self` and can borrow the stored key in
+//!   place).
 //!
-//! Both are unconditional on `on_evict`, which is what this file certifies.
+//! All of it is unconditional on `on_evict`, which is what this file certifies.
 
 #![allow(clippy::redundant_closure_call)]
 
@@ -137,10 +143,10 @@ on_evict_key_parity!(
 
 #[cfg(feature = "time_stores")]
 on_evict_key_parity!(
-    sharded_ttl_keeps_the_first_key_either_way,
+    sharded_ttl_rebinds_to_the_caller_key_either_way,
     10u32,
     20u32,
-    "first",
+    "second",
     |with_on_evict: bool| {
         let b = ShardedTtlCache::<Tagged, u32>::builder()
             .shards(4)
@@ -155,10 +161,10 @@ on_evict_key_parity!(
 );
 
 on_evict_key_parity!(
-    sharded_expiring_keeps_the_first_key_either_way,
+    sharded_expiring_rebinds_to_the_caller_key_either_way,
     Live(10),
     Live(20),
-    "first",
+    "second",
     |with_on_evict: bool| {
         let b = ShardedExpiringCache::<Tagged, Live>::builder().shards(4);
         let b = if with_on_evict {
@@ -227,10 +233,10 @@ on_evict_key_parity!(
     }
 );
 
-/// Keeping the stored key must not change what `cache_set` reports: the displaced **live**
-/// value is still returned. The `HashMap`-backed stores swap the value in place through
-/// `get_mut` rather than going through `remove_entry` + `insert`, so this is the one thing
-/// that could silently regress alongside the key.
+/// The key handling must not change what `cache_set` reports: the displaced **live** value
+/// is still returned, whether the store swaps the value in place through `get_mut`
+/// (`ShardedUnboundCache`) or rebinds the slot through `remove_entry` + `insert`
+/// (`ShardedTtlCache`, `ShardedExpiringCache`).
 #[test]
 fn displaced_live_value_is_still_returned() {
     let unbound = ShardedUnboundCache::<Tagged, u32>::builder()
@@ -277,13 +283,13 @@ fn displaced_live_value_is_still_returned() {
 
 /// Overwriting an entry that has **already expired** filters the displaced value from the
 /// return, fires `on_evict` once and counts one eviction -- from the same single write shape
-/// that keeps the stored key. The callback receives the caller's key (the stored one stays in
-/// the map, and the two compare `Eq`), after the shard lock is released.
+/// that rebinds the slot to the caller's key. The callback receives the displaced entry's
+/// own stored (key, value) pair, after the shard lock is released.
 #[test]
 fn expired_displaced_entry_is_counted_and_notified() {
     use cached::ConcurrentCacheBase;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// Always expired.
     #[derive(Clone, Debug, PartialEq)]
@@ -296,10 +302,13 @@ fn expired_displaced_entry_is_counted_and_notified() {
 
     let fired = Arc::new(AtomicUsize::new(0));
     let sink = Arc::clone(&fired);
+    let seen = Arc::new(Mutex::new(Vec::<(&'static str, Stale)>::new()));
+    let seen_sink = Arc::clone(&seen);
     let c = ShardedExpiringCache::<Tagged, Stale>::builder()
         .shards(1)
-        .on_evict(move |_: &Tagged, _: &Stale| {
+        .on_evict(move |key: &Tagged, v: &Stale| {
             sink.fetch_add(1, Ordering::SeqCst);
+            seen_sink.lock().unwrap().push((key.tag, v.clone()));
         })
         .build()
         .unwrap();
@@ -315,15 +324,21 @@ fn expired_displaced_entry_is_counted_and_notified() {
         "on_evict fires once for the displaced expired entry"
     );
     assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("first", Stale(10))],
+        "on_evict receives the displaced entry's own stored (key, value) pair, \
+         not the caller's key instance"
+    );
+    assert_eq!(
         ConcurrentCacheBase::cache_evictions(&c),
         Some(1),
         "one eviction counted"
     );
-    // The overwrite still kept the stored key.
+    // The overwrite rebinds the slot to the caller's key.
     let (stored, _) = ConcurrentCached::cache_remove_entry(&c, &k(1, "probe"))
         .unwrap()
         .expect("entry present");
-    assert_eq!(stored.tag, "first");
+    assert_eq!(stored.tag, "second");
 }
 
 /// The same accounting on the TTL store, whose displaced entry expires by wall clock.
@@ -331,16 +346,19 @@ fn expired_displaced_entry_is_counted_and_notified() {
 #[test]
 fn expired_displaced_ttl_entry_is_counted_and_notified() {
     use cached::ConcurrentCacheBase;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     let fired = Arc::new(AtomicUsize::new(0));
     let sink = Arc::clone(&fired);
+    let seen = Arc::new(Mutex::new(Vec::<(&'static str, u32)>::new()));
+    let seen_sink = Arc::clone(&seen);
     let c = ShardedTtlCache::<Tagged, u32>::builder()
         .shards(1)
         .ttl_millis(20)
-        .on_evict(move |_: &Tagged, _: &u32| {
+        .on_evict(move |key: &Tagged, v: &u32| {
             sink.fetch_add(1, Ordering::SeqCst);
+            seen_sink.lock().unwrap().push((key.tag, *v));
         })
         .build()
         .unwrap();
@@ -357,6 +375,12 @@ fn expired_displaced_ttl_entry_is_counted_and_notified() {
         "on_evict fires once for the displaced expired entry"
     );
     assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("first", 10u32)],
+        "on_evict receives the displaced entry's own stored (key, value) pair, \
+         not the caller's key instance"
+    );
+    assert_eq!(
         ConcurrentCacheBase::cache_evictions(&c),
         Some(1),
         "one eviction counted"
@@ -364,5 +388,5 @@ fn expired_displaced_ttl_entry_is_counted_and_notified() {
     let (stored, _) = ConcurrentCached::cache_remove_entry(&c, &k(1, "probe"))
         .unwrap()
         .expect("entry present");
-    assert_eq!(stored.tag, "first");
+    assert_eq!(stored.tag, "second");
 }

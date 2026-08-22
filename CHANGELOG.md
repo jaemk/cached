@@ -118,8 +118,12 @@
   `cache_try_get_or_set_with`, their `_mut` variants, and the async pair.
 - `ShardedTtlCache::cache_set` and `ShardedExpiringCache::cache_set` no longer choose their
   write path based on whether an `on_evict` callback is configured, which made the physically
-  stored key depend on unrelated builder configuration. Both keep the stored key, matching
-  `TtlCache` / `ExpiringCache`.
+  stored key depend on unrelated builder configuration. Both now take a single
+  `remove_entry` + `insert` shape: an overwrite rebinds the slot to the caller's key
+  (matching the sharded LRU stores), and `on_evict` receives the displaced entry's own
+  stored key rather than the caller's `Eq`-equal instance, matching every other `on_evict`
+  site in the crate. For a key type whose `Hash`/`Eq` cover only part of its fields, the
+  callback previously saw the new key paired with the old value.
 - `cache_clear_with_on_evict` counts every removed entry on all six stores that have it. It
   previously degraded to a silent `cache_clear` when no callback was configured, so attaching
   a no-op callback changed the reported eviction count.

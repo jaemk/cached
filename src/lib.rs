@@ -8,6 +8,10 @@
 `cached` provides implementations of several caching structures as well as macros
 for defining memoized functions.
 
+When using the store types directly, start with `use cached::prelude::*;`. The short
+method names (`get`/`set`/`len`/...) live on blanket extension traits, and the prelude
+brings every trait in with one import (see Method naming below).
+
 Requires Rust >= 1.92. (The `async_core` / `async` features do not compile before 1.92: the
 `CachedGetOrSetAsync` default bodies hit a borrowck limitation rustc attributes to
 [rust-lang/rust#100013](https://github.com/rust-lang/rust/issues/100013). `rust-version` is a
@@ -878,6 +882,11 @@ mod lru_list;
 #[cfg(feature = "proc_macro")]
 #[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
 pub mod macros;
+/// Alias of [`macros`] under the module path many proc-macro crates use,
+/// so `use cached::proc_macro::cached;` resolves.
+#[cfg(feature = "proc_macro")]
+#[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
+pub use macros as proc_macro;
 pub mod stores;
 /// Re-export of the [`web_time`](https://docs.rs/web_time) crate,
 /// which provides time types compatible with both native and WebAssembly targets.

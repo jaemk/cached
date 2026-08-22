@@ -762,21 +762,22 @@ where
         // `on_evict` can fire after the lock is released (on_evict-after-unlock).
         //
         // There is exactly ONE write shape here, taken whether or not an `on_evict` callback is
-        // configured: an overwrite keeps the STORED key and drops the caller's, matching
-        // `HashMap::insert` and the single-owner `TtlCache`. This used to branch on
-        // `on_evict.is_some()` and take a `remove_entry` + `insert` (key-rebinding) path when a
-        // callback was present, so attaching a purely observational callback changed which key
-        // was physically stored. The value is swapped in place through `get_mut`, which leaves
-        // the caller's key `k` owned here; `on_evict` therefore receives the caller's key -- the
-        // same key the LRU-backed sharded stores hand it when the stored key is kept. The two
-        // compare `Eq`.
+        // configured, so attaching a purely observational callback cannot change which key is
+        // physically stored. An overwrite goes through `remove_entry` + `insert`, rebinding the
+        // slot to the CALLER's key (matching the LRU-backed sharded stores) and yielding the
+        // displaced stored key owned, so `on_evict` receives the evicted entry's own (key,
+        // value) pair after the lock is released. Every sharded `on_evict` site hands the
+        // callback the stored pair; a `get_mut` value swap would keep the stored key in the
+        // map but leave only the caller's (`Eq`-equal, possibly non-identical) key on hand
+        // for the callback. Note the single-owner `TtlCache` differs on the stored-key axis:
+        // it keeps the first-inserted key, matching `HashMap::insert`.
         let old: Option<(K, TimedEntry<V>, bool)> = {
             let mut guard = shard.lock.write();
-            match guard.get_mut(&k) {
-                Some(slot) => {
-                    let e = std::mem::replace(slot, new_entry);
+            match guard.remove_entry(&k) {
+                Some((stored_k, e)) => {
                     let expired = expired_at(&e, now);
-                    Some((k, e, expired))
+                    guard.insert(k, new_entry);
+                    Some((stored_k, e, expired))
                 }
                 None => {
                     guard.insert(k, new_entry);
