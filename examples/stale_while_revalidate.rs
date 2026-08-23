@@ -20,12 +20,18 @@ Spawning is left to the caller on purpose: `cached` has no runtime dependency, s
 cannot pick tokio or smol on your behalf. That also means you decide the policy -
 whether to rate-limit refreshes, drop them under load, or run them on a dedicated pool.
 
-The static's shape depends on the macro and on whether the function is async, so the
-three sections below spell out each one:
+The static's shape depends on the macro, on whether the function is async, and on
+`sync_writes`, so the sections below spell out each one:
 
     sync  #[cached]            LazyLock<parking_lot::RwLock<Store>>   .read()
     async #[cached]            LazyLock<async_lock::RwLock<Store>>    .read().await
     async #[concurrent_cached] OnceCell<Store>                        .get() (no guard)
+    sync_writes = "by_key"     ..wrapped in KeyedCache<Lock, _>       derefs to the lock
+
+Sections 1 to 3 cover the read side per shape; section 4 collapses concurrent refreshes
+onto one caller; section 5 combines that with `sync_writes = "by_key"` so the cold path
+deduplicates too, which is per-key write synchronization that serves stale instead of
+blocking.
 
 Run:
     cargo run --example stale_while_revalidate --features "proc_macro,time_stores,async"
@@ -206,6 +212,63 @@ async fn async_lookup_swr_deduped(id: &str) -> String {
     }
 }
 
+// ============================================================================
+// 5. Single-flight revalidation
+//
+// Section 4 collapses the refreshes but leaves the cold path alone: with no
+// cached value at all, concurrent first callers each run the function. Adding
+// `sync_writes = "by_key"` closes that, and the two policies compose into one
+// rule per state:
+//
+//   cold  (nothing cached) -> callers deduplicate and WAIT; there is nothing to
+//                             serve, and `by_key` makes exactly one of them run
+//                             the body while the rest reuse its result.
+//   stale (expired entry)  -> callers never wait. One claims the refresh, and
+//                             every caller (claimant included) returns the stale
+//                             value immediately.
+//
+// That is per-key write synchronization that degrades to serving stale instead
+// of blocking, which is what a stale-while-revalidate policy usually means.
+//
+// Note that `sync_writes = "by_key"` wraps the cache static in a `KeyedCache`,
+// which derefs to the same lock, so the peek below is unchanged.
+// ============================================================================
+
+#[cached(
+    ttl_secs = 1,
+    key = "String",
+    convert = r#"{ id.to_string() }"#,
+    sync_writes = "by_key"
+)]
+async fn single_flight(id: &str) -> String {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    format!("{id}-v{n}")
+}
+
+async fn single_flight_swr(id: &str) -> String {
+    let (value, expired) = {
+        let cache = SINGLE_FLIGHT.read().await;
+        cache.cache_peek_with_expiry_status(&id.to_string())
+    };
+
+    match value {
+        Some(v) if !expired => v,
+        Some(stale) => {
+            if claim_refresh(id) {
+                let owned = id.to_string();
+                tokio::spawn(async move {
+                    single_flight_prime_cache(&owned).await;
+                    release_refresh(&owned);
+                });
+            }
+            stale
+        }
+        // The only blocking path, and only because there is nothing to serve.
+        None => single_flight(id).await,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // --- 1. synchronous -----------------------------------------------------
@@ -284,6 +347,69 @@ async fn main() {
         compute_count() - before,
         1,
         "the in-flight guard must collapse the refreshes to one"
+    );
+
+    // --- 5. single-flight revalidation --------------------------------------
+    println!("\nsingle-flight revalidation");
+
+    // Cold: 8 callers, nothing cached. They deduplicate and wait together, so the
+    // body runs once and every caller gets the same value.
+    let before = compute_count();
+    let started = std::time::Instant::now();
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        handles.push(tokio::spawn(async { single_flight_swr("d").await }));
+    }
+    let mut cold = Vec::new();
+    for handle in handles {
+        cold.push(handle.await.expect("cold task panicked"));
+    }
+    println!(
+        "  cold : 8 callers -> {} compute(s) in {}ms, all callers agree: {}",
+        compute_count() - before,
+        started.elapsed().as_millis(),
+        cold.iter().all(|v| *v == cold[0])
+    );
+    assert_eq!(
+        compute_count() - before,
+        1,
+        "`by_key` must dedupe the cold path"
+    );
+    assert!(cold.iter().all(|v| *v == cold[0]));
+
+    // Stale: the same 8 callers, now with an expired entry. Nobody waits.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let before = compute_count();
+    let started = std::time::Instant::now();
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        handles.push(tokio::spawn(async { single_flight_swr("d").await }));
+    }
+    let mut served = Vec::new();
+    for handle in handles {
+        served.push(handle.await.expect("stale task panicked"));
+    }
+    let stale_ms = started.elapsed().as_millis();
+    println!(
+        "  stale: 8 callers -> served {} in {}ms without waiting",
+        served[0], stale_ms
+    );
+    assert!(stale_ms < 100, "a stale read must not wait for the refresh");
+    assert_eq!(
+        served[0], cold[0],
+        "the stale reads must serve the old value"
+    );
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    println!(
+        "  after: {} refresh(es), next read -> {}",
+        compute_count() - before,
+        single_flight_swr("d").await
+    );
+    assert_eq!(
+        compute_count() - before,
+        1,
+        "exactly one caller may revalidate"
     );
 
     println!("\nstale-while-revalidate ok");
