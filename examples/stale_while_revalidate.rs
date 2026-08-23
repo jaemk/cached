@@ -38,8 +38,8 @@ Run:
 */
 
 use std::collections::HashSet;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use cached::macros::{cached, concurrent_cached};
@@ -169,20 +169,54 @@ async fn sharded_lookup_swr(id: &str) -> String {
 // here: its per-key lock covers the store write, not the function body (that is
 // what keeps a refresh from blocking readers). When the recompute is expensive,
 // track the keys already being refreshed and let the first caller win.
+//
+// The claim is an RAII guard rather than a `release_refresh(id)` call at the end
+// of the spawned task, because that call is skipped when the refresh body panics
+// or the task is aborted. The key would then stay claimed for the life of the
+// process, and since the peek deliberately never removes an expired entry, it
+// would be served stale forever with no caller able to recompute it: strictly
+// worse than not deduplicating at all. `main` asserts the guard.
 // ============================================================================
 
 static REFRESHING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-/// Returns `true` if this caller claimed the refresh for `key`.
-fn claim_refresh(key: &str) -> bool {
+/// An in-flight refresh claim on one key, released when dropped.
+struct RefreshClaim {
+    key: String,
+}
+
+impl RefreshClaim {
+    fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+impl Drop for RefreshClaim {
+    fn drop(&mut self) {
+        release_refresh(&self.key);
+    }
+}
+
+/// Returns a claim if this caller is the one that must refresh `key`, or `None` if
+/// a refresh is already in flight.
+fn claim_refresh(key: &str) -> Option<RefreshClaim> {
     let mut guard = REFRESHING.lock().expect("refresh set poisoned");
-    guard
+    if guard
         .get_or_insert_with(HashSet::new)
         .insert(key.to_string())
+    {
+        Some(RefreshClaim {
+            key: key.to_string(),
+        })
+    } else {
+        None
+    }
 }
 
 fn release_refresh(key: &str) {
-    let mut guard = REFRESHING.lock().expect("refresh set poisoned");
+    // Reached from `Drop`, including while a panic unwinds, where a second panic
+    // would abort the process. So recover a poisoned lock instead of unwrapping it.
+    let mut guard = REFRESHING.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(set) = guard.as_mut() {
         set.remove(key);
     }
@@ -197,19 +231,92 @@ async fn async_lookup_swr_deduped(id: &str) -> String {
     match value {
         Some(v) if !expired => v,
         Some(stale) => {
-            if claim_refresh(id) {
-                let owned = id.to_string();
+            if let Some(claim) = claim_refresh(id) {
                 tokio::spawn(async move {
-                    async_lookup_prime_cache(&owned).await;
-                    // Release only after the new value is stored, so a caller that
-                    // arrives mid-refresh sees the claim rather than starting a second.
-                    release_refresh(&owned);
+                    // `claim` lives until this task ends, so a caller arriving
+                    // mid-refresh sees the claim rather than starting a second one.
+                    // It is dropped, and the key released, on completion, on an
+                    // unwind out of the refresh, and on cancellation alike.
+                    async_lookup_prime_cache(claim.key()).await;
                 });
             }
             stale
         }
         None => async_lookup(id).await,
     }
+}
+
+/// Silences the default panic handler for its lifetime, restoring the previous hook on
+/// drop rather than at a fixed point after some `.await`. A plain `take_hook` /
+/// `set_hook(previous)` pair only restores if nothing between the two panics; here that
+/// gap is meant to stay empty (only the awaited outcome is expected to panic, inside the
+/// spawned task, not in `main`'s own thread), but a guard costs nothing and does not rely
+/// on that staying true.
+type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send;
+
+struct SilencedPanic {
+    previous: Option<Box<PanicHook>>,
+}
+
+impl SilencedPanic {
+    fn new() -> Self {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        Self {
+            previous: Some(previous),
+        }
+    }
+}
+
+impl Drop for SilencedPanic {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::panic::set_hook(previous);
+        }
+    }
+}
+
+/// Set to make the next `flaky_lookup` body panic, so `main` can drive a refresh
+/// that fails partway through.
+static PANIC_NEXT_REFRESH: AtomicBool = AtomicBool::new(false);
+
+#[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
+async fn flaky_lookup(id: &str) -> String {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    assert!(
+        !PANIC_NEXT_REFRESH.swap(false, Ordering::SeqCst),
+        "simulated refresh failure"
+    );
+    format!("{id}-v{n}")
+}
+
+/// The spawn shape above, reduced to the claim and the refresh, so `main` can await
+/// the outcome. Returns `None` when a refresh is already in flight.
+fn spawn_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
+    let claim = claim_refresh(id)?;
+    Some(tokio::spawn(async move {
+        flaky_lookup_prime_cache(claim.key()).await;
+    }))
+}
+
+/// A body slow enough that `main` can reliably abort its task mid-flight, to prove the
+/// RAII claim also releases when the task is CANCELLED rather than unwound by a panic.
+/// `claim` lives inside the spawned future's own captured state, so `JoinHandle::abort`
+/// dropping that future in place runs `RefreshClaim::drop` exactly the same as an unwind
+/// or a normal return does.
+#[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
+async fn stuck_lookup(id: &str) -> String {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    format!("{id}-v{n}")
+}
+
+/// The spawn shape above, over `stuck_lookup`, so `main` can abort the handle mid-flight.
+fn spawn_stuck_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
+    let claim = claim_refresh(id)?;
+    Some(tokio::spawn(async move {
+        stuck_lookup_prime_cache(claim.key()).await;
+    }))
 }
 
 // ============================================================================
@@ -255,11 +362,11 @@ async fn single_flight_swr(id: &str) -> String {
     match value {
         Some(v) if !expired => v,
         Some(stale) => {
-            if claim_refresh(id) {
-                let owned = id.to_string();
+            // The same RAII claim as section 4: released by drop, so a refresh that
+            // panics or is cancelled cannot wedge the key.
+            if let Some(claim) = claim_refresh(id) {
                 tokio::spawn(async move {
-                    single_flight_prime_cache(&owned).await;
-                    release_refresh(&owned);
+                    single_flight_prime_cache(claim.key()).await;
                 });
             }
             stale
@@ -267,6 +374,36 @@ async fn single_flight_swr(id: &str) -> String {
         // The only blocking path, and only because there is nothing to serve.
         None => single_flight(id).await,
     }
+}
+
+/// Set to make the next `flaky_single_flight` body panic. Section 4's `flaky_lookup`
+/// already proves the RAII claim releases under `#[cached]`; this is the same proof
+/// under `sync_writes = "by_key"`, the other call site the fix touched, so a
+/// regression specific to that site (say, a `by_key` bucket lock held across the
+/// panic instead of released with the claim) would not go unnoticed.
+static PANIC_NEXT_SINGLE_FLIGHT_REFRESH: AtomicBool = AtomicBool::new(false);
+
+#[cached(
+    ttl_secs = 2,
+    key = "String",
+    convert = r#"{ id.to_string() }"#,
+    sync_writes = "by_key"
+)]
+async fn flaky_single_flight(id: &str) -> String {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    assert!(
+        !PANIC_NEXT_SINGLE_FLIGHT_REFRESH.swap(false, Ordering::SeqCst),
+        "simulated single-flight refresh failure"
+    );
+    format!("{id}-v{n}")
+}
+
+/// `spawn_refresh`'s shape, over `flaky_single_flight`.
+fn spawn_flaky_single_flight_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
+    let claim = claim_refresh(id)?;
+    Some(tokio::spawn(async move {
+        flaky_single_flight_prime_cache(claim.key()).await;
+    }))
 }
 
 #[tokio::main]
@@ -349,6 +486,60 @@ async fn main() {
         "the in-flight guard must collapse the refreshes to one"
     );
 
+    // The claim is RAII, so a refresh that panics still releases its key. Were it
+    // released by a statement at the end of the task instead, `g` would stay claimed
+    // for the life of the process and could never be refreshed again.
+    let cold = flaky_lookup("g").await;
+    PANIC_NEXT_REFRESH.store(true, Ordering::SeqCst);
+    let outcome = {
+        let _silence = SilencedPanic::new(); // the panic below is deliberate
+        let failing = spawn_refresh("g").expect("the first caller must claim the refresh");
+        failing.await
+    };
+    assert!(outcome.is_err(), "the refresh task must have panicked");
+
+    let retry = spawn_refresh("g").expect("a panicking refresh must not wedge the key");
+    retry.await.expect("the retry must not panic");
+    let stored = {
+        let cache = FLAKY_LOOKUP.read().await;
+        cache.cache_peek_with_expiry_status(&"g".to_string()).0
+    };
+    println!("  a panicking refresh released its claim, retry stored {stored:?}");
+    assert!(
+        stored.is_some(),
+        "the retried refresh must have stored a value"
+    );
+    assert_ne!(
+        stored.as_deref(),
+        Some(cold.as_str()),
+        "the retry must have replaced the value the panicking refresh failed to"
+    );
+
+    // The other way a spawned task can stop running without reaching its own end: the
+    // caller aborts or drops the `JoinHandle` instead of the body panicking. A cancelled
+    // task's future is dropped just like any other, so the guard releases here too.
+    let stuck = spawn_stuck_refresh("h").expect("the first caller must claim the refresh");
+    // Let the task actually start running (and park inside its sleep) before aborting
+    // it - aborting a task the runtime never polled would prove nothing about a claim
+    // held mid-execution.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    stuck.abort();
+    let cancelled = stuck.await;
+    assert!(
+        cancelled.as_ref().is_err_and(|e| e.is_cancelled()),
+        "the task must have been cancelled, not merely finished on its own: {cancelled:?}"
+    );
+    let retry_claim = claim_refresh("h");
+    println!(
+        "  an aborted refresh released its claim: retry claim succeeded {}",
+        retry_claim.is_some()
+    );
+    assert!(
+        retry_claim.is_some(),
+        "an aborted refresh must release its claim, not wedge the key forever"
+    );
+    drop(retry_claim);
+
     // --- 5. single-flight revalidation --------------------------------------
     println!("\nsingle-flight revalidation");
 
@@ -410,6 +601,75 @@ async fn main() {
         compute_count() - before,
         1,
         "exactly one caller may revalidate"
+    );
+
+    // Section 4 proved the panicking-refresh case under plain `#[cached]`; the fix
+    // touched the `sync_writes = "by_key"` call site too, and nothing above drives a
+    // panic through it, so repeat the same proof here.
+    let cold_flaky = flaky_single_flight("i").await;
+    PANIC_NEXT_SINGLE_FLIGHT_REFRESH.store(true, Ordering::SeqCst);
+    let outcome = {
+        let _silence = SilencedPanic::new(); // the panic below is deliberate
+        let failing = spawn_flaky_single_flight_refresh("i")
+            .expect("the first caller must claim the refresh");
+        failing.await
+    };
+    assert!(
+        outcome.is_err(),
+        "the single-flight refresh task must have panicked"
+    );
+
+    let retry = spawn_flaky_single_flight_refresh("i")
+        .expect("a panicking single-flight refresh must not wedge the key");
+    retry.await.expect("the retry must not panic");
+    let stored = {
+        let cache = FLAKY_SINGLE_FLIGHT.read().await;
+        cache.cache_peek_with_expiry_status(&"i".to_string()).0
+    };
+    println!("  a panicking single-flight refresh released its claim, retry stored {stored:?}");
+    assert!(
+        stored.is_some(),
+        "the retried single-flight refresh must have stored a value"
+    );
+    assert_ne!(
+        stored.as_deref(),
+        Some(cold_flaky.as_str()),
+        "the retry must have replaced the value the panicking refresh failed to"
+    );
+
+    // Poison recovery: `release_refresh` runs from `Drop`, including mid-unwind, where
+    // a second panic would abort the process, so it recovers a poisoned `REFRESHING`
+    // instead of unwrapping it. Nothing above ever poisons the lock, so poison it here
+    // directly. This must run last - poisoning is permanent for the mutex's lifetime,
+    // and `claim_refresh` (unlike `release_refresh`) still `.expect`s a healthy lock, so
+    // any assertion after this point would panic there instead of testing what it means to.
+    let claim = claim_refresh("poison-me").expect("the first claim on a fresh key must succeed");
+    let poisoned = {
+        let _silence = SilencedPanic::new(); // the panic below is deliberate
+        std::panic::catch_unwind(|| {
+            let _guard = REFRESHING.lock().expect("not yet poisoned");
+            panic!("deliberately poison REFRESHING while a guard is held");
+        })
+    };
+    assert!(
+        poisoned.is_err(),
+        "the deliberate panic must have propagated"
+    );
+    assert!(REFRESHING.is_poisoned(), "REFRESHING must now be poisoned");
+
+    // Runs `RefreshClaim::drop` -> `release_refresh` against the now-poisoned mutex.
+    // Were `release_refresh` still `.expect`-ing a healthy lock, this drop would panic
+    // during a `Drop`, and if it happened during an unwind, that second panic would
+    // abort the process rather than merely failing this assertion.
+    drop(claim);
+    let recovered = REFRESHING.lock().unwrap_or_else(PoisonError::into_inner);
+    let still_claimed = recovered
+        .as_ref()
+        .is_some_and(|set| set.contains("poison-me"));
+    println!("  release_refresh recovered a poisoned lock: still claimed = {still_claimed}");
+    assert!(
+        !still_claimed,
+        "release_refresh must remove the key even from a poisoned set"
     );
 
     println!("\nstale-while-revalidate ok");
