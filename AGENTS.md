@@ -39,7 +39,16 @@ Two consequences worth knowing:
 `cached_proc_macro` -> `cached`) and fails the release if any crate fails for a reason other
 than "already published". Do not relax that: publishing the root crate while a bumped subcrate
 failed would put `cached` on the index depending on a `cached_proc_macro*` version that does not
-exist.
+exist. Two wordings count as "already published": cargo's pre-flight index check, and crates.io
+rejecting the upload itself (which is what a re-run after a partial publish hits).
+
+`bin/check-versions.sh` runs before the publish decision and fails the release if the workspace
+is half-bumped. The publish trigger looks at the root version alone, so it cannot see a stale
+`cached_proc_macro*` pin: those resolve against the index, where the previous version really does
+exist, and a stable `cached` would go out depending on pre-release subcrates with every step
+reporting green. Bump all three `Cargo.toml` versions and the two dependency pins together.
+`tests/release_scripts.rs` runs the same script against the committed workspace, so a half-bumped
+state fails the test suite long before it reaches a release.
 
 This guard used to require the head commit message to start with `release:`. That is fragile and
 was dropped: squash-merging a release PR replaces the commit message with the PR title, silently
@@ -340,7 +349,7 @@ directions, indexed in `specs/design/README.md`.
 | `specs/` | Feature inventory (`specs/README.md` table + per-feature `*.md` docs); consult before changing public API/behavior |
 | `specs/design/` | Design records / decision log behind the inventory, indexed in `specs/design/README.md` |
 | `benches/cache_benches.rs` | Cache benchmarks (`make bench`) |
-| `bin/` | Release helper scripts (`publish.sh`, `tag-release.sh`) |
+| `bin/` | Release helper scripts (`check-versions.sh`, `publish.sh`, `tag-release.sh`) |
 | `src/lib.rs` | Main library entry point + doc comments (source of truth for README) |
 | `src/stores/` | Cache store implementations |
 | `src/macros.rs` | Proc macro re-export module (`cached::macros`) |
