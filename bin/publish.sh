@@ -19,7 +19,13 @@
 
 set -uo pipefail
 
-ALREADY_PUBLISHED_RE="already exists on crates.io index"
+# Two distinct "this version is already published" messages, from two different
+# stages. Cargo's pre-flight check against the local index registry produces the
+# first; crates.io itself rejects the upload with the second, which is what a
+# re-run hits when an earlier attempt uploaded a crate but died before the index
+# caught up. Matching only the pre-flight wording made the documented re-run
+# guarantee fail hard on exactly the partial-publish case it exists for.
+ALREADY_PUBLISHED_RE="already exists on crates.io index|is already uploaded"
 
 published=0
 skipped=0
@@ -39,7 +45,7 @@ publish_crate() {
         return 0
     fi
 
-    if grep -qF -- "$ALREADY_PUBLISHED_RE" <<<"$out"; then
+    if grep -qE -- "$ALREADY_PUBLISHED_RE" <<<"$out"; then
         echo "Version in $dir is already on the index - nothing to publish."
         skipped=$((skipped + 1))
         return 0

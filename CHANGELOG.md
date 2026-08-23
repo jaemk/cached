@@ -428,7 +428,9 @@ list in the [agent-oriented guide](docs/migrations/2.0-to-3.0.md).
 - `#[doc(alias)]` entries mapping the 2.x store names to their 3.0 types (`SizedCache` ->
   `LruCache`, `TimedCache` -> `TtlCache`, `TimedSizedCache` -> `LruTtlCache`) for docs.rs search.
 - The release workflow creates a git tag and GitHub release for each workspace crate that is
-  newly published ([#245]).
+  newly published ([#245]), and refuses to publish a half-bumped workspace: `bin/check-versions.sh`
+  fails the release when a `cached_proc_macro*` dependency pin disagrees with that subcrate's
+  version, or when a stable `cached` would depend on a pre-release subcrate.
 
 ### Security
 

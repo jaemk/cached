@@ -22,6 +22,13 @@ jobs:
       version: ${{ steps.decide.outputs.version }}
     steps:
     - uses: actions/checkout@v6
+    # The publish decision below keys off the ROOT crate's version alone, which
+    # cannot see a half-bumped workspace: a stale `cached_proc_macro*` pin still
+    # resolves against the index, so a stable `cached` would publish green while
+    # depending on pre-release subcrates. Assert the versions agree first, and
+    # fail the release rather than the crate.
+    - name: Check the workspace versions agree
+      run: bash bin/check-versions.sh
     - name: Check whether the root crate version is already published
       id: decide
       run: |
