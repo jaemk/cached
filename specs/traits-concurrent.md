@@ -187,8 +187,10 @@ Implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, 
 rationale ([design/0040-peek-is-an-in-memory-concept.md](design/0040-peek-is-an-in-memory-concept.md)).
 On `ShardedExpiringCache` / `ShardedExpiringLruCache`, whose deadline comes from
 `Expires::expires_at()`, the returned `Instant` is advisory in the same way described at TRAIT-6:
-it can be `None` for an expired entry and can be in the past for an entry `Expires::is_expired()`
-still reports live.
+it can be `None` for an expired entry. The two can disagree in both directions: `t` can be in the
+past for an entry `Expires::is_expired` reports live, and `t` can be in the future for an entry
+`is_expired` reports expired (a token with a fixed deadline that is also revocable). A future `t`
+is therefore not evidence that the entry is live on these stores.
 
 Deliberately a standalone trait rather than a new required method on `ConcurrentCloneCached`: that
 would break external store implementations.

@@ -2109,6 +2109,47 @@ mod tests {
     }
 
     #[test]
+    fn peek_expires_at_reports_absent_after_evict_removes_the_entry() {
+        // The peek deliberately keeps an expired entry, so "expired" and "gone" must
+        // stay distinguishable: once `evict()` physically removes it, the same peek
+        // must report (None, None) rather than the value it kept before.
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        c.cache_set(1, ExpiredU8(99)); // 99 > 10, so is_expired() is true
+
+        assert_eq!(
+            c.cache_peek_expires_at(&1u8),
+            (Some(ExpiredU8(99)), None),
+            "the expired entry is still stored before the sweep"
+        );
+
+        assert_eq!(
+            c.evict(),
+            1,
+            "evict must physically remove the expired entry"
+        );
+        assert_eq!(
+            c.cache_peek_expires_at(&1u8),
+            (None, None),
+            "a physically removed entry must be reported as absent"
+        );
+        assert_eq!(c.cache_size(), 0);
+    }
+
+    #[test]
+    fn peek_expires_at_reports_absent_after_cache_remove() {
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        c.cache_set(1, ExpiredU8(2));
+        assert_eq!(c.cache_remove(&1u8), Some(ExpiredU8(2)));
+
+        assert_eq!(c.cache_peek_expires_at(&1u8), (None, None));
+        assert_eq!(
+            c.peek_expires_at(&1u8),
+            (None, None),
+            "the alias must agree on the removed key too"
+        );
+    }
+
+    #[test]
     fn peek_expires_at_does_not_touch_hit_or_miss_counters() {
         let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
         c.cache_set(1, ExpiredU8(2));

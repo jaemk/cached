@@ -40,11 +40,25 @@ and on whether the function is async, so the sections below spell out each one:
     async #[cached]            LazyLock<async_lock::RwLock<Store>>    .read().await
     async #[concurrent_cached] OnceCell<Store>                        .get() (no guard)
 
-Section 0 is the policy itself; sections 1 to 3 cover the read side per shape;
-section 4 collapses concurrent refreshes onto one caller; section 5 asserts the
-property this example exists for: across a window spanning the threshold, every read
-is served a live value, no read waits for the recompute, and the value is replaced
-exactly once.
+Two macro forms this recipe does NOT apply to:
+
+    in_impl   `#[cached(in_impl)]`, `#[concurrent_cached(in_impl)]` and
+              `#[once(in_impl)]` generate no `{fn}_prime_cache` companion: the cache
+              static is function-local and cannot be shared with a prime sibling, so
+              there is nothing to refresh with.
+    #[once]   keeps its own expiry timer around one shared value rather than storing
+              it in a cache implementing `CacheExpiry`, so there is nothing to peek.
+
+Section 0 is the policy itself; sections 1 to 3 cover the read side per store shape;
+section 4 covers `expires = true`, where the deadline comes from the value rather
+than from a store-wide ttl; section 5 collapses concurrent refreshes onto one caller
+and makes the in-flight claim panic-safe; section 6 asserts the property this example
+exists for: across a window spanning the threshold, every read is served a live
+value, no read waits for the recompute, and the value is replaced exactly once.
+
+The timing assertions compare against NO_WAIT, a budget well under COMPUTE, so they
+separate "served from the cache" from "waited for the recompute" with room to spare
+for scheduling jitter.
 
 Run:
     cargo run --example refresh_before_expiry --features "proc_macro,time_stores,async"
@@ -52,11 +66,12 @@ Run:
 
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::PoisonError;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cached::macros::{cached, concurrent_cached};
 use cached::time::{Duration, Instant};
-use cached::{CacheExpiry, ConcurrentCacheExpiry};
+use cached::{CacheExpiry, ConcurrentCacheExpiry, Expires};
 
 /// Recompute cost of every cached body below.
 const COMPUTE: Duration = Duration::from_millis(200);
@@ -65,6 +80,15 @@ const COMPUTE: Duration = Duration::from_millis(200);
 /// `ttl_secs = 2`, so this fires in the second half of the entry's life. It must
 /// exceed `COMPUTE`, or the refresh cannot land before the deadline.
 const THRESHOLD: Duration = Duration::from_secs(1);
+
+/// Budget for a read that must not wait for the recompute. A read that did wait
+/// takes at least `COMPUTE` (200ms), while a peek plus a spawn costs microseconds
+/// even under load (measured consistently at 0ms locally with 8 concurrent runs of
+/// this whole example oversubscribed on a 4-core box, plus CPU-burning background
+/// processes on every core). 180ms keeps a real 200ms+ wait clearly on the other
+/// side while giving more headroom against scheduler jitter than a tighter budget
+/// would on a slower or more heavily shared CI runner than that.
+const NO_WAIT: Duration = Duration::from_millis(180);
 
 /// Counts real executions of a function body, so the output distinguishes a served
 /// value from a recompute.
@@ -86,16 +110,19 @@ fn expired_reads() -> usize {
 // 0. The threshold policy
 //
 // The only place the deadline is interpreted, shared by every section below.
-// Both `None` cases are real states, not error paths: no deadline means the
-// entry never expires, and a zero remaining means it already expired.
+// Both `None` cases are real states, not error paths: no deadline means nothing
+// to refresh ahead of, and a zero remaining means the entry already expired.
 // ============================================================================
 
 fn needs_refresh(expires_at: Option<Instant>) -> bool {
     let Some(deadline) = expires_at else {
-        // Present with no deadline (ttl disabled at insert time): the entry never
-        // expires, so there is nothing to refresh ahead of. This is the case a
-        // remaining-`Duration` API could not express - it would have to report
-        // either zero or some sentinel, and zero means the exact opposite.
+        // Present with no deadline. On a ttl store that means the ttl was disabled
+        // at insert time, so the entry never expires and there is nothing to
+        // refresh ahead of. This is the case a remaining-`Duration` API could not
+        // express - it would have to report either zero or some sentinel, and zero
+        // means the exact opposite. On an `expires = true` store it means something
+        // weaker: the value type does not report a deadline at all, which says
+        // nothing about liveness. Section 4 covers that.
         return false;
     };
 
@@ -116,8 +143,11 @@ fn needs_refresh(expires_at: Option<Instant>) -> bool {
 // 1. Synchronous `#[cached]`
 //
 // The static is a `parking_lot::RwLock`, so the read guard is taken without
-// `.await`. Bind the peek in its own scope so the guard drops before the spawn:
-// the refresh will want the write lock.
+// `.await`. Bind the peek in its own scope so the guard is dropped before the
+// call below. This is not a throughput tweak: calling the cached function or
+// `{fn}_prime_cache` takes the write lock on that same `RwLock`, `parking_lot`'s
+// `RwLock` is not reentrant, and the thread then deadlocks permanently, with no
+// panic and no output.
 // ============================================================================
 
 #[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
@@ -164,8 +194,12 @@ fn sync_remaining(id: &str) -> Option<Duration> {
 // 2. Asynchronous `#[cached]`
 //
 // Identical shape, except the static is an `async_lock::RwLock`, so the read is
-// `.read().await`. The scope around the peek matters more here: holding the
-// guard across an `.await` would serialize every reader against the refresh.
+// `.read().await`. The scope around the peek carries the same hard requirement:
+// `async_lock`'s `RwLock` is not reentrant either, so awaiting the cached
+// function or `{fn}_prime_cache` while the read guard is alive parks the task on
+// a write lock it can never get - a permanent hang with no panic and no output.
+// Holding the guard across an await point would also serialize every reader
+// against the refresh, but that is the lesser of the two problems.
 // ============================================================================
 
 #[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
@@ -233,28 +267,168 @@ async fn sharded_lookup_refreshed(id: &str) -> String {
 }
 
 // ============================================================================
-// 4. Collapsing concurrent refreshes
+// 4. `expires = true`: the deadline comes from the value
+//
+// On the ttl stores the deadline is the store's own clock reading, so it is
+// always known. On the `Expires`-based stores (`expires = true`, giving an
+// `ExpiringCache` or, with `max_size`, an `ExpiringLruCache`) the peek reports
+// whatever `Expires::expires_at()` returns, and that method is DEFAULTED to
+// `None`. Every `Expires` impl shipped in this repo (see
+// `examples/expires_per_key.rs`) implements only `is_expired`, and on such a type
+// the peek returns `(Some(v), None)` for live and expired entries alike, so the
+// threshold policy above is a no-op: `needs_refresh(None)` is always false and no
+// refresh is ever spawned. Override `expires_at` to opt in, as `Token` does here.
+// `is_expired` stays the authority on liveness either way - the deadline is
+// advisory and the store never reconciles the two.
+// ============================================================================
+
+/// Reports both: `is_expired` for the store, `expires_at` for this recipe.
+#[derive(Clone)]
+struct Token {
+    data: String,
+    deadline: Instant,
+}
+
+impl Expires for Token {
+    fn is_expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    /// Without this override every peek of a `Token` reports no deadline and
+    /// nothing below fires.
+    fn expires_at(&self) -> Option<Instant> {
+        Some(self.deadline)
+    }
+}
+
+/// The far more common shape: `is_expired` only. `main` asserts that the policy
+/// cannot see a deadline on it, live or expired.
+#[derive(Clone)]
+struct OpaqueToken {
+    data: String,
+    deadline: Instant,
+}
+
+impl Expires for OpaqueToken {
+    fn is_expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+}
+
+#[cached(expires = true, key = "String", convert = r#"{ id.to_string() }"#)]
+fn token_lookup(id: &str) -> Token {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::sleep(COMPUTE);
+    Token {
+        data: format!("{id}-v{n}"),
+        deadline: Instant::now() + Duration::from_secs(2),
+    }
+}
+
+/// Lifetime of an `OpaqueToken`, short enough for `main` to peek it on both sides
+/// of its own deadline.
+const OPAQUE_TTL: Duration = Duration::from_millis(300);
+
+#[cached(expires = true, key = "String", convert = r#"{ id.to_string() }"#)]
+fn opaque_lookup(id: &str) -> OpaqueToken {
+    // Counted (and folded into `data`) so a real read that recomputes this entry is
+    // distinguishable from one that reused the stored value, the same way every other
+    // cached body in this file is.
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    OpaqueToken {
+        data: format!("{id}-opaque-v{n}"),
+        deadline: Instant::now() + OPAQUE_TTL,
+    }
+}
+
+fn token_lookup_refreshed(id: &str) -> Token {
+    let (value, expires_at) = {
+        let cache = TOKEN_LOOKUP.read();
+        cache.peek_expires_at(&id.to_string())
+    };
+
+    match value {
+        Some(v) => {
+            if needs_refresh(expires_at) {
+                let owned = id.to_string();
+                std::thread::spawn(move || {
+                    token_lookup_prime_cache(&owned);
+                });
+            }
+            v
+        }
+        None => token_lookup(id),
+    }
+}
+
+/// The advisory deadline an `OpaqueToken` entry reports, which is `None` whatever
+/// its state.
+fn opaque_deadline(id: &str) -> (bool, Option<Instant>) {
+    let cache = OPAQUE_LOOKUP.read();
+    let (value, expires_at) = cache.peek_expires_at(&id.to_string());
+    (value.is_some(), expires_at)
+}
+
+// ============================================================================
+// 5. Collapsing concurrent refreshes
 //
 // Every caller that reads the entry between the threshold and the landing of the
 // new value sees the same short remaining ttl, so each spawns its own refresh:
 // N readers cause N recomputes. Track the keys already being refreshed and let
-// the first caller win. `sync_writes = "by_key"` does NOT do this: its per-key
-// lock covers the store write, not the function body (that is what keeps a
-// refresh from blocking readers).
+// the first caller win.
+//
+// This covers the refresh only. The cold path (`None => async_lookup(id)`) still
+// lets N concurrent first callers all run the body; `sync_writes = "by_key"` is
+// what deduplicates that, and section 5 of `examples/stale_while_revalidate.rs`
+// composes the two.
+//
+// The claim is an RAII guard rather than a `release_refresh(id)` call at the end
+// of the spawned task, because that call is skipped when the refresh body panics.
+// The key would then stay claimed for the life of the process, and since the peek
+// deliberately never removes an expired entry, it would be served past its
+// deadline forever with no caller able to recompute it: strictly worse than the
+// stale-while-revalidate fallback. `main` asserts the guard.
 // ============================================================================
 
 static REFRESHING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-/// Returns `true` if this caller claimed the refresh for `key`.
-fn claim_refresh(key: &str) -> bool {
+/// An in-flight refresh claim on one key, released when dropped.
+struct RefreshClaim {
+    key: String,
+}
+
+impl RefreshClaim {
+    fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+impl Drop for RefreshClaim {
+    fn drop(&mut self) {
+        release_refresh(&self.key);
+    }
+}
+
+/// Returns a claim if this caller is the one that must refresh `key`, or `None` if
+/// a refresh is already in flight.
+fn claim_refresh(key: &str) -> Option<RefreshClaim> {
     let mut guard = REFRESHING.lock().expect("refresh set poisoned");
-    guard
+    if guard
         .get_or_insert_with(HashSet::new)
         .insert(key.to_string())
+    {
+        Some(RefreshClaim {
+            key: key.to_string(),
+        })
+    } else {
+        None
+    }
 }
 
 fn release_refresh(key: &str) {
-    let mut guard = REFRESHING.lock().expect("refresh set poisoned");
+    // Reached from `Drop`, including while a panic unwinds, where a second panic
+    // would abort the process. So recover a poisoned lock instead of unwrapping it.
+    let mut guard = REFRESHING.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(set) = guard.as_mut() {
         set.remove(key);
     }
@@ -270,13 +444,14 @@ async fn async_lookup_refreshed_deduped(id: &str) -> String {
         Some(v) => {
             // `claim_refresh` runs only past the threshold, so the uncontended
             // path never touches the mutex.
-            if needs_refresh(expires_at) && claim_refresh(id) {
-                let owned = id.to_string();
+            if needs_refresh(expires_at)
+                && let Some(claim) = claim_refresh(id)
+            {
                 tokio::spawn(async move {
-                    async_lookup_prime_cache(&owned).await;
-                    // Release only after the new value is stored, so a caller that
-                    // arrives mid-refresh sees the claim rather than starting a second.
-                    release_refresh(&owned);
+                    // `claim` is dropped when this task ends - on its own
+                    // completion or on an unwind out of the refresh - and the key
+                    // is released either way.
+                    async_lookup_prime_cache(claim.key()).await;
                 });
             }
             v
@@ -285,8 +460,52 @@ async fn async_lookup_refreshed_deduped(id: &str) -> String {
     }
 }
 
+/// Set to make the next `flaky_lookup` body panic, so `main` can drive a refresh
+/// that fails partway through.
+static PANIC_NEXT_REFRESH: AtomicBool = AtomicBool::new(false);
+
+#[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
+async fn flaky_lookup(id: &str) -> String {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    assert!(
+        !PANIC_NEXT_REFRESH.swap(false, Ordering::SeqCst),
+        "simulated refresh failure"
+    );
+    format!("{id}-v{n}")
+}
+
+/// The spawn shape above, reduced to the claim and the refresh, so `main` can
+/// await the outcome. Returns `None` when a refresh is already in flight.
+fn spawn_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
+    let claim = claim_refresh(id)?;
+    Some(tokio::spawn(async move {
+        flaky_lookup_prime_cache(claim.key()).await;
+    }))
+}
+
+/// A body slow enough that `main` can reliably abort its task mid-flight, to prove the
+/// RAII claim also releases when the task is CANCELLED rather than unwound by a panic.
+/// `claim` lives inside the spawned future's own captured state, so `JoinHandle::abort`
+/// dropping that future in place runs `RefreshClaim::drop` exactly the same as an unwind
+/// or a normal return does - there is no separate "cancellation" case in the guard itself,
+/// only in how the future stops running.
+#[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
+async fn stuck_lookup(id: &str) -> String {
+    let n = COMPUTES.fetch_add(1, Ordering::SeqCst) + 1;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    format!("{id}-v{n}")
+}
+
+/// The spawn shape above, over `stuck_lookup`, so `main` can abort the handle mid-flight.
+fn spawn_stuck_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
+    let claim = claim_refresh(id)?;
+    Some(tokio::spawn(async move {
+        stuck_lookup_prime_cache(claim.key()).await;
+    }))
+}
+
 // ============================================================================
-// 5. Never expired, never blocked
+// 6. Never expired, never blocked
 //
 // The property that separates this from stale-while-revalidate. Read one key
 // across a window that spans the threshold and check three things: the value was
@@ -350,15 +569,18 @@ async fn main() {
     std::thread::sleep(Duration::from_millis(1_300));
     let started = Instant::now();
     let at_threshold = sync_lookup_refreshed("a");
+    // Captured before anything else runs: the budget below is for the read alone,
+    // not for the read plus the printout.
+    let took = started.elapsed();
     let remaining = sync_remaining("a").unwrap_or_default();
     println!(
         "  threshold  -> {at_threshold} returned in {}ms with {}ms still live, refresh spawned",
-        started.elapsed().as_millis(),
+        took.as_millis(),
         remaining.as_millis()
     );
     assert_eq!(at_threshold, first, "the entry is refreshed, not evicted");
     assert!(!remaining.is_zero(), "the entry must still be live");
-    assert!(started.elapsed() < COMPUTE / 2, "the caller must not wait");
+    assert!(took < NO_WAIT, "the caller must not wait (took {took:?})");
 
     std::thread::sleep(Duration::from_millis(400));
     let refreshed = sync_lookup_refreshed("a");
@@ -378,12 +600,13 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(1_300)).await;
     let started = Instant::now();
     let at_threshold = async_lookup_refreshed("b").await;
+    let took = started.elapsed();
     println!(
         "  threshold  -> {at_threshold} returned in {}ms, refresh spawned",
-        started.elapsed().as_millis()
+        took.as_millis()
     );
     assert_eq!(at_threshold, first);
-    assert!(started.elapsed() < COMPUTE / 2, "the caller must not wait");
+    assert!(took < NO_WAIT, "the caller must not wait (took {took:?})");
 
     tokio::time::sleep(Duration::from_millis(400)).await;
     let refreshed = async_lookup_refreshed("b").await;
@@ -403,12 +626,13 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(1_300)).await;
     let started = Instant::now();
     let at_threshold = sharded_lookup_refreshed("c").await;
+    let took = started.elapsed();
     println!(
         "  threshold  -> {at_threshold} returned in {}ms, refresh spawned",
-        started.elapsed().as_millis()
+        took.as_millis()
     );
     assert_eq!(at_threshold, first);
-    assert!(started.elapsed() < COMPUTE / 2, "the caller must not wait");
+    assert!(took < NO_WAIT, "the caller must not wait (took {took:?})");
 
     tokio::time::sleep(Duration::from_millis(400)).await;
     let refreshed = sharded_lookup_refreshed("c").await;
@@ -419,7 +643,91 @@ async fn main() {
     assert_ne!(refreshed, first);
     assert_eq!(compute_count() - before, 2);
 
-    // --- 4. deduplicated refresh --------------------------------------------
+    // --- 4. `expires = true` ------------------------------------------------
+    println!("\nsync `#[cached(expires = true)]`");
+    let before = compute_count();
+    let first = token_lookup_refreshed("d");
+    println!("  cold miss  -> {}", first.data);
+
+    std::thread::sleep(Duration::from_millis(1_300));
+    let started = Instant::now();
+    let at_threshold = token_lookup_refreshed("d");
+    let took = started.elapsed();
+    println!(
+        "  threshold  -> {} returned in {}ms, refresh spawned",
+        at_threshold.data,
+        took.as_millis()
+    );
+    assert_eq!(at_threshold.data, first.data);
+    assert!(took < NO_WAIT, "the caller must not wait (took {took:?})");
+
+    std::thread::sleep(Duration::from_millis(400));
+    let refreshed = token_lookup_refreshed("d");
+    println!(
+        "  after bg   -> {} ({} computes), replaced before expiring",
+        refreshed.data,
+        compute_count() - before
+    );
+    assert_ne!(refreshed.data, first.data);
+    assert_eq!(compute_count() - before, 2);
+
+    // The caveat, on the value type that implements only `is_expired`.
+    let opaque = opaque_lookup("d");
+    let (present, deadline) = opaque_deadline("d");
+    println!(
+        "  is_expired-only {} -> present {present}, deadline {deadline:?}, refresh {}",
+        opaque.data,
+        needs_refresh(deadline)
+    );
+    assert!(present);
+    assert_eq!(
+        deadline, None,
+        "a value type that does not override expires_at reports no deadline"
+    );
+    assert!(
+        !needs_refresh(deadline),
+        "the threshold policy is a no-op on an is_expired-only value type"
+    );
+
+    std::thread::sleep(OPAQUE_TTL + Duration::from_millis(50));
+    let (present, deadline) = opaque_deadline("d");
+    println!("  the same entry, now expired -> present {present}, deadline {deadline:?}");
+    assert!(present, "the peek must not remove the expired entry");
+    assert_eq!(
+        deadline, None,
+        "None does not mean live: the entry is expired and still reports no deadline"
+    );
+
+    // The peeks above only ever read `OPAQUE_LOOKUP` through `cache_peek_expires_at`,
+    // which never removes or replaces anything - so nothing yet has exercised what an
+    // ACTUAL read (the cached function itself) does with this same expired entry. The
+    // store's lazy sweep is keyed off `is_expired`, not off the advisory (and here
+    // absent) deadline, so a real call must still recompute and replace it.
+    let before = compute_count();
+    let read_after_expiry = opaque_lookup("d");
+    println!(
+        "  a real read of the expired entry -> {} ({} compute)",
+        read_after_expiry.data,
+        compute_count() - before
+    );
+    assert_ne!(
+        read_after_expiry.data, opaque.data,
+        "a real read of an expired is_expired-only entry must recompute, not reuse the stale value"
+    );
+    assert_eq!(
+        compute_count() - before,
+        1,
+        "the real read must recompute exactly once"
+    );
+    let (present, deadline) = opaque_deadline("d");
+    println!("  peeked again after the real read -> present {present}, deadline {deadline:?}");
+    assert!(present, "the freshly-recomputed entry is live");
+    assert_eq!(
+        deadline, None,
+        "the fresh entry still does not override expires_at either"
+    );
+
+    // --- 5. deduplicated refresh --------------------------------------------
     println!("\ncollapsing concurrent refreshes");
     let cold = async_lookup_refreshed_deduped("e").await;
     tokio::time::sleep(Duration::from_millis(1_300)).await;
@@ -446,7 +754,10 @@ async fn main() {
         served.iter().all(|v| *v == cold),
         "all readers see the live value"
     );
-    assert!(elapsed < COMPUTE / 2, "no reader may wait for the refresh");
+    assert!(
+        elapsed < NO_WAIT,
+        "no reader may wait for the refresh (took {elapsed:?})"
+    );
 
     tokio::time::sleep(Duration::from_millis(400)).await;
     let refreshes = compute_count() - before;
@@ -459,7 +770,63 @@ async fn main() {
         "the in-flight guard must collapse the refreshes to one"
     );
 
-    // --- 5. never expired, never blocked ------------------------------------
+    // The claim is RAII, so a refresh that panics still releases its key. Were it
+    // released by a statement at the end of the task instead, `g` would stay
+    // claimed for the life of the process and could never be refreshed again.
+    let cold = flaky_lookup("g").await;
+    PANIC_NEXT_REFRESH.store(true, Ordering::SeqCst);
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {})); // the panic below is deliberate
+    let failing = spawn_refresh("g").expect("the first caller must claim the refresh");
+    let outcome = failing.await;
+    std::panic::set_hook(previous_hook);
+    assert!(outcome.is_err(), "the refresh task must have panicked");
+
+    let retry = spawn_refresh("g").expect("a panicking refresh must not wedge the key");
+    retry.await.expect("the retry must not panic");
+    let stored = {
+        let cache = FLAKY_LOOKUP.read().await;
+        cache.peek_expires_at(&"g".to_string()).0
+    };
+    println!("  a panicking refresh released its claim, retry stored {stored:?}");
+    assert!(
+        stored.is_some(),
+        "the retried refresh must have stored a value"
+    );
+    assert_ne!(
+        stored.as_deref(),
+        Some(cold.as_str()),
+        "the retry must have replaced the value the panicking refresh failed to"
+    );
+
+    // The other way a spawned task can stop running without reaching its own end: the
+    // caller drops or aborts the `JoinHandle` instead of the body panicking. The guard
+    // must release the claim here too - it is released by drop, and a cancelled task's
+    // future is dropped just like any other, whether or not it ever panicked.
+    let _ = stuck_lookup("h").await; // seed an entry so the claim below is meaningful
+    let stuck = spawn_stuck_refresh("h").expect("the first caller must claim the refresh");
+    // Give the task a chance to actually start running (and be parked inside its 5s
+    // sleep) before aborting it - aborting a task the runtime never polled would prove
+    // nothing about releasing a claim held mid-execution.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    stuck.abort();
+    let cancelled = stuck.await;
+    assert!(
+        cancelled.as_ref().is_err_and(|e| e.is_cancelled()),
+        "the task must have been cancelled, not merely finished on its own: {cancelled:?}"
+    );
+    let retry_claim = claim_refresh("h");
+    println!(
+        "  an aborted refresh released its claim: retry claim succeeded {}",
+        retry_claim.is_some()
+    );
+    assert!(
+        retry_claim.is_some(),
+        "an aborted refresh must release its claim, not wedge the key forever"
+    );
+    drop(retry_claim);
+
+    // --- 6. never expired, never blocked ------------------------------------
     println!("\nnever expired, never blocked");
     let before = compute_count();
     let expired_before = expired_reads();
@@ -492,7 +859,7 @@ async fn main() {
         "one cold compute plus exactly one background refresh"
     );
     assert!(
-        slowest < COMPUTE / 2,
+        slowest < NO_WAIT,
         "no read may wait for the recompute (slowest {slowest:?})"
     );
 
@@ -503,6 +870,42 @@ async fn main() {
         0,
         "no read in this example may observe an expired entry"
     );
+
+    // --- 7. a poisoned REFRESHING mutex --------------------------------------
+    //
+    // `release_refresh` is reached from `Drop`, including while a panic is already
+    // unwinding a spawned task, so a plain `.lock().unwrap()` there would panic a
+    // SECOND time on a poisoned mutex - and a panic during an unwind aborts the whole
+    // process instead of merely losing one claim. `claim_refresh` never runs from a
+    // Drop / unwind context, so it is allowed to keep propagating poison via
+    // `.expect()`; only the release path needs to recover. Poison the mutex directly
+    // (independent of any claim) and confirm the drop path recovers instead of
+    // aborting.
+    //
+    // Run last: recovering the guard's data does not clear the poisoned flag, so every
+    // `claim_refresh` call after this point would itself panic via its own `.expect()`.
+    println!("\npoisoned refresh-claim mutex");
+    {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // the panic below is deliberate
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = REFRESHING.lock().unwrap();
+            panic!("deliberately poison REFRESHING");
+        });
+        std::panic::set_hook(previous_hook);
+        assert!(poisoned.is_err(), "the poisoning panic must have happened");
+    }
+    assert!(
+        REFRESHING.lock().is_err(),
+        "the mutex must now be reported as poisoned"
+    );
+    // Constructed directly rather than through `claim_refresh`, which still panics on
+    // a poisoned mutex by design (it never runs from a Drop / unwind context).
+    let claim = RefreshClaim {
+        key: "poison-test".to_string(),
+    };
+    drop(claim); // must recover the poisoned lock, not panic a second time
+    println!("  a claim dropped over a poisoned mutex released cleanly");
 
     println!("\nrefresh-before-expiry ok");
 }

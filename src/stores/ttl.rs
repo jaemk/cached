@@ -838,10 +838,14 @@ impl<K: Hash + Eq, V: Clone, S: BuildHasher> CacheExpiry<K, V> for TtlCache<K, V
     /// Returns the stored value and its expiry instant, with no read side effects.
     ///
     /// The instant is the entry's own deadline, `None` when the entry never expires (TTL was
-    /// disabled at insert time). An expired entry is returned with its past deadline and is
-    /// **not** removed. Uses the same lookup as
+    /// disabled at insert time). `None` also when `now + ttl` overflowed `Instant` at insert
+    /// time, so no deadline could be recorded. An expired entry is returned with its past
+    /// deadline and is **not** removed. Uses the same lookup as
     /// [`cache_peek_with_expiry_status`](CloneCached::cache_peek_with_expiry_status): no
     /// hit/miss counting, no LRU promotion, no TTL renewal.
+    ///
+    /// The convention is `now >= t` means expired: a deadline exactly equal to the current
+    /// instant counts as already past, matching the liveness check the store itself applies.
     fn cache_peek_expires_at<Q>(&self, k: &Q) -> (Option<V>, Option<Instant>)
     where
         K: std::borrow::Borrow<Q>,

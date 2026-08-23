@@ -1565,8 +1565,13 @@ where
     ///
     /// Takes only a read lock and does not promote LRU recency. The instant is the entry's own
     /// deadline, `None` when the entry never expires (TTL was disabled at insert time). An
-    /// expired entry is returned with its past deadline and is **not** removed; the hits/misses
-    /// counters, the LRU order, and the TTL are untouched.
+    /// extreme ttl is clamped to `u64::MAX` nanoseconds rather than overflowing, so it reports a
+    /// real far-future deadline, never `None`. An expired entry is returned with its past
+    /// deadline and is **not** removed; the hits/misses counters, the LRU order, and the TTL are
+    /// untouched.
+    ///
+    /// The convention is `now >= t` means expired: a deadline exactly equal to the current
+    /// instant counts as already past, matching the liveness check the store itself applies.
     fn cache_peek_expires_at(&self, k: &K) -> (Option<V>, Option<Instant>) {
         let shard = self.shard_of(k);
         let guard = shard.lock.read();

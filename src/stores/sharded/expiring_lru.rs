@@ -2293,7 +2293,7 @@ mod tests {
     }
 
     #[test]
-    fn peek_expires_at_never_expiring_entry_reports_no_deadline() {
+    fn peek_expires_at_value_not_overriding_expires_at_returns_no_deadline() {
         let c = ShardedExpiringLruCache::<u32, Val>::builder()
             .max_size(64)
             .build()
@@ -2311,7 +2311,7 @@ mod tests {
         assert_eq!(value.map(|x| x.v), Some(10));
         assert_eq!(
             expires_at, None,
-            "a value type that does not override expires_at reports no deadline"
+            "a value type that does not override expires_at must report no deadline"
         );
         // Distinguishable from an absent key by the value, not by the deadline.
         let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
@@ -2556,6 +2556,61 @@ mod tests {
         assert!(
             !expired,
             "cache_peek_with_expiry_status must still report the entry as live"
+        );
+    }
+
+    // Certification gap (L5): the test above pins only the past-deadline-while-live
+    // direction of the bidirectional advisory caveat. Port the other direction: a
+    // value type whose `expires_at()` is in the FUTURE while `is_expired()` reports
+    // EXPIRED must still return that future deadline, and a real `cache_get` must
+    // still obey `is_expired` and treat the entry as gone. Mirrors the single-owner
+    // `ExpiringLruCache`'s
+    // `peek_expires_at_advisory_future_deadline_survives_while_is_expired_reports_expired`.
+    #[test]
+    fn peek_expires_at_advisory_future_deadline_survives_while_is_expired_reports_expired() {
+        let future = crate::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let c = ShardedExpiringLruCache::<u32, TimedVal>::builder()
+            .max_size(64)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(
+            &c,
+            1u32,
+            TimedVal {
+                v: 10,
+                expired: true,    // is_expired() reports EXPIRED
+                deadline: future, // yet the advisory deadline is still in the future
+            },
+        )
+        .expect("insert must succeed");
+
+        let (value, expires_at) = ConcurrentCacheExpiry::cache_peek_expires_at(&c, &1u32);
+        assert_eq!(value.map(|x| x.v), Some(10));
+        assert_eq!(
+            expires_at,
+            Some(future),
+            "the advisory deadline must be surfaced unchanged, even though it is in the future"
+        );
+        let (val, expired) = ConcurrentCloneCached::cache_peek_with_expiry_status(&c, &1u32);
+        assert_eq!(val.map(|x| x.v), Some(10));
+        assert!(
+            expired,
+            "cache_peek_with_expiry_status must still report the entry as expired"
+        );
+        assert_eq!(c.len(), 1, "the peek must not remove the entry");
+
+        // The store's real read path must obey is_expired, not the advisory deadline.
+        assert!(
+            SyncConcurrentCached::cache_get(&c, &1u32)
+                .expect("cache_get must succeed")
+                .is_none(),
+            "is_expired remains the authority the store acts on, regardless of a \
+             future-looking advisory deadline"
+        );
+        assert_eq!(
+            c.len(),
+            0,
+            "the expired entry must be swept on the real access"
         );
     }
 

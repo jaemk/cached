@@ -1492,8 +1492,11 @@ impl<K: Hash + Eq + Ord, V: Clone, S: BuildHasher> CacheExpiry<K, V> for TtlSort
     /// Returns the stored value and its expiry instant, with no read side effects.
     ///
     /// The instant is the entry's own deadline, `None` when the entry never expires (TTL was
-    /// disabled at insert time). An expired entry is returned with its past deadline and is
-    /// **not** removed. Uses the same lookup as
+    /// disabled at insert time). `None` also when `now + ttl` overflowed `Instant` at insert
+    /// time, so no deadline could be recorded. An expired entry is returned with its past
+    /// deadline and is **not** removed. The convention is `now >= t` means expired: a deadline
+    /// exactly equal to the current instant counts as already past, matching the liveness check
+    /// the store itself applies. Uses the same lookup as
     /// [`cache_peek_with_expiry_status`](CloneCached::cache_peek_with_expiry_status): no
     /// hit/miss counting, no TTL renewal, and the expiry-ordered index is left untouched.
     fn cache_peek_expires_at<Q>(&self, k: &Q) -> (Option<V>, Option<Instant>)
@@ -6090,8 +6093,13 @@ mod test {
     // the deadline-ordered `keys` index is left completely undisturbed by the peek.
     #[test]
     fn peek_expires_at_never_renews_and_leaves_the_expiry_index_untouched() {
+        let evicted: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let evicted2 = evicted.clone();
         let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
-            .ttl(Duration::from_millis(200))
+            .ttl(Duration::from_millis(60))
+            .on_evict(move |k: &u32, _v: &u32| {
+                evicted2.lock().unwrap().push(*k);
+            })
             .build()
             .unwrap();
         c.cache_set(1, 100);
@@ -6101,7 +6109,7 @@ mod test {
         let before_len = c.keys.len();
 
         let (_, first) = c.cache_peek_expires_at(&1u32);
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let (_, second) = c.cache_peek_expires_at(&1u32);
         assert_eq!(
             first, second,
@@ -6117,6 +6125,30 @@ mod test {
         assert_eq!(
             after_stamps, before_stamps,
             "peek must not disturb the deadline-ordered index"
+        );
+
+        // Representational checks above only compare the stamps read out of `c.keys`; prove
+        // the non-promotion behaviorally too. Key 1 was inserted first, so it sorts at the
+        // front of the deadline-ordered index (see
+        // `peek_expires_at_front_of_index_key_is_the_one_being_peeked`). If peeking it had
+        // renewed or reordered its deadline, it would no longer be the first entry a real
+        // sweep removes.
+        //
+        // Margin: 60ms ttl elapsed (20ms already slept above) + this sleep must clear it with
+        // room to spare on a loaded box, matching the >=2x-plus-slack convention used elsewhere
+        // in this file (e.g. ttl 50ms / sleep 100ms). A bare 60ms sleep here left only ~20ms of
+        // absolute margin over the 60ms ttl, which is tight enough to flake under scheduler
+        // jitter; 200ms brings the total elapsed time to ~220ms against a 60ms ttl.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            c.evict(),
+            2,
+            "both entries share the same ttl and must have expired by now"
+        );
+        assert_eq!(
+            evicted.lock().unwrap().first().copied(),
+            Some(1),
+            "the peeked key must still be the first entry the sweep removes"
         );
     }
 

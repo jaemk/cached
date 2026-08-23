@@ -80,8 +80,10 @@ Deliberately a standalone trait rather than a new required method on `CloneCache
 break external store implementations. Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`,
 `ExpiringCache`, and `ExpiringLruCache`. On the last two, whose deadline comes from
 `Expires::expires_at()` (TRAIT-4), the returned `Instant` is advisory: `expires_at()`'s default
-body returns `None`, so the pair can be `(Some(v), None)` for an entry that is in fact expired,
-and `t` can be in the past for an entry `Expires::is_expired()` still reports live.
-`cache_peek_with_expiry_status` remains the authoritative liveness read on those two stores. The
-concurrent mirror is `ConcurrentCacheExpiry`, see
+body returns `None`, so the pair can be `(Some(v), None)` for an entry that is in fact expired.
+The two can disagree in both directions: `t` can be in the past for an entry `Expires::is_expired`
+reports live, and `t` can be in the future for an entry `is_expired` reports expired (a token with
+a fixed deadline that is also revocable). A future `t` is therefore not evidence that the entry is
+live on these stores. `cache_peek_with_expiry_status` remains the authoritative liveness read on
+those two stores. The concurrent mirror is `ConcurrentCacheExpiry`, see
 [traits-concurrent.md](traits-concurrent.md) CTRAIT-9.

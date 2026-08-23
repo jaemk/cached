@@ -12,8 +12,20 @@
   standalone traits, not new required methods on `CloneCached` / `ConcurrentCloneCached`.
   Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`,
   `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, and `ShardedExpiringLruCache`.
+  On `ExpiringCache`, `ExpiringLruCache`, `ShardedExpiringCache`, and `ShardedExpiringLruCache`
+  the deadline comes from `Expires::expires_at()`, whose default body returns `None`: for an
+  `Expires` impl that only implements `is_expired` (the crate's own documented recipe), the read
+  reports `None` for both live and expired entries, and a threshold-refresh policy built on it
+  silently never fires.
 
 ### Documentation
+
+- New runnable example `examples/refresh_before_expiry.rs`: recompute an entry once its
+  remaining ttl drops below a threshold, using `cache_peek_expires_at` (`peek_expires_at`) to
+  read the deadline and `{fn}_prime_cache` to refresh outside the cache write lock, so the
+  stored value is replaced while still live and no caller reads an expired entry. Companion to
+  `examples/stale_while_revalidate.rs`, which handles the already-expired case. Covers the sync
+  `#[cached]`, async `#[cached]`, and async `#[concurrent_cached]` static shapes. No API change.
 
 - New runnable example `examples/stale_while_revalidate.rs`: serve an expired value
   immediately and refresh it off the critical path, composed from

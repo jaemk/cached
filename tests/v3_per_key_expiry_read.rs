@@ -31,6 +31,11 @@ Properties certified:
      proof of liveness. `is_expired` (via `cache_peek_with_expiry_status`) remains the authority.
   5. Reachability through `cached::prelude::*` and through a generic `T: CacheExpiry<K, V>` /
      `T: ConcurrentCacheExpiry<K, V>` bound.
+  6. The `K: Borrow<Q>` generality of the single-owner trait: a `String`-keyed store peeked with
+     a `&str` (`Q = str`, so `Q != K`). Every other call site in this file and in the per-store
+     unit tests passes `Q == K`, which leaves the one bound that distinguishes `CacheExpiry`
+     from `ConcurrentCacheExpiry` unexercised. `ConcurrentCacheExpiry` takes `&K` by design, so
+     there is no concurrent counterpart to certify.
 
 Also certified where the store supports it: no deadline movement across two peeks with
 `set_refresh_on_hit(true)` (TTL stores only -- `TtlSortedCache` deliberately has no
@@ -269,6 +274,40 @@ where
 fn peek_via_generic_bound_concurrent<K, V, C>(store: &C, key: &K) -> (Option<V>, Option<Instant>)
 where
     C: ConcurrentCacheExpiry<K, V>,
+{
+    store.cache_peek_expires_at(key)
+}
+
+/// Peeks a `String`-keyed store through a BORROWED key, i.e. `Q = str` with `Q != K`.
+///
+/// This is the only property in this file that exercises the generic `Q` at all: every other
+/// call site here (and everywhere else in the repo) passes `Q == K`, so the `K: Borrow<Q>`
+/// bound that distinguishes [`CacheExpiry`] from [`ConcurrentCacheExpiry`] would be
+/// unexercised without it. The signature is the assertion: this function cannot compile if
+/// `cache_peek_expires_at` ever narrows to `&K`, because `&str` is not a `&String`. It also
+/// removes the need for callers to allocate a `String` just to look one up.
+///
+/// There is deliberately no concurrent counterpart: [`ConcurrentCacheExpiry`] takes `&K`
+/// (the concurrent family includes external stores that must serialize the key, and
+/// `Borrow<Q>` carries no serialization guarantee), so no borrowed-key path exists there.
+fn peek_via_borrowed_str<V, C>(store: &C, key: &str) -> (Option<V>, Option<Instant>)
+where
+    V: Clone,
+    C: CacheExpiry<String, V>,
+{
+    store.cache_peek_expires_at(key)
+}
+
+/// A second, unrelated `Borrow<Q>` shape from the `&str`/`String` one above: `K = Vec<u8>`
+/// peeked through `Q = [u8]`. `String`/`str` is the one `Borrow` pair the crate's own macros and
+/// examples ever reach for, so a regression that special-cased that pair specifically (e.g. a
+/// accidental `&str`-only overload, or a bound that reads `K: Borrow<str>` instead of the fully
+/// generic `K: Borrow<Q>`) would slip past every other test in this file. `Vec<u8>` borrowing to
+/// `[u8]` exercises the same generic bound through a completely different concrete `Q`.
+fn peek_via_borrowed_slice<V, C>(store: &C, key: &[u8]) -> (Option<V>, Option<Instant>)
+where
+    V: Clone,
+    C: CacheExpiry<Vec<u8>, V>,
 {
     store.cache_peek_expires_at(key)
 }
@@ -732,6 +771,78 @@ mod ttl_stores {
         );
     }
 
+    /// The TTL-family half of the borrowed-key property certified for the `Expires` stores in
+    /// `expires_stores::peek_expires_at_accepts_a_borrowed_key_on_single_owner_expires_stores`.
+    /// Here the deadline is a real clock reading, so the `&str` peek must report a live
+    /// deadline, not just the same value.
+    #[test]
+    fn peek_expires_at_accepts_a_borrowed_key_on_single_owner_ttl_stores() {
+        let mut ttl: TtlCache<String, i32> = TtlCache::builder().ttl(LONG_TTL).build().unwrap();
+        ttl.cache_set("k".to_string(), 100);
+        let (value, deadline) = peek_via_borrowed_str(&ttl, "k");
+        assert_eq!(value, Some(100), "a &str peek must reach the &String entry");
+        assert!(
+            deadline.is_some_and(|t| t > Instant::now()),
+            "the borrowed peek must report the live deadline, not None"
+        );
+        assert_eq!(
+            ttl.peek_expires_at("k"),
+            ttl.cache_peek_expires_at("k"),
+            "the alias must accept the borrowed key too, and agree"
+        );
+        assert_eq!(
+            peek_via_borrowed_str::<i32, _>(&ttl, "absent"),
+            (None, None)
+        );
+
+        let mut lru_ttl: LruTtlCache<String, i32> = LruTtlCache::builder()
+            .max_size(8)
+            .ttl(LONG_TTL)
+            .build()
+            .unwrap();
+        lru_ttl.cache_set("k".to_string(), 100);
+        assert_eq!(peek_via_borrowed_str(&lru_ttl, "k").0, Some(100));
+
+        let mut sorted: TtlSortedCache<String, i32> =
+            TtlSortedCache::builder().ttl(LONG_TTL).build().unwrap();
+        sorted.cache_set("k".to_string(), 100);
+        assert_eq!(peek_via_borrowed_str(&sorted, "k").0, Some(100));
+    }
+
+    /// Combines the borrowed-key property with the LRU-no-promotion property
+    /// (`lru_no_promotion_uniform_across_single_owner_ttl_lru_store` above): both are certified
+    /// individually, but only ever with `Q == K`. A peek reached through `Q = str` must be just
+    /// as side-effect-free on recency as one reached through `Q = String` -- a `Borrow`-specific
+    /// codepath that renewed recency (e.g. one that fell through to a renewing lookup instead of
+    /// the peek because the borrowed form was not wired the same way) would be invisible to
+    /// every other test in this file.
+    #[test]
+    fn peek_via_borrowed_key_does_not_promote_lru_on_single_owner_ttl_lru_store() {
+        let mut lru_ttl: LruTtlCache<String, i32> = LruTtlCache::builder()
+            .max_size(2)
+            .ttl(LONG_TTL)
+            .build()
+            .unwrap();
+        lru_ttl.cache_set("k1".to_string(), 100); // LRU
+        lru_ttl.cache_set("k2".to_string(), 200); // MRU
+
+        // Peek the LRU key through a borrowed &str, repeatedly. Must not promote it.
+        for _ in 0..3 {
+            assert_eq!(peek_via_borrowed_str(&lru_ttl, "k1").0, Some(100));
+        }
+
+        // Overflow: k3 must evict the still-LRU key (k1), not k2.
+        lru_ttl.cache_set("k3".to_string(), 300);
+
+        assert_eq!(
+            lru_ttl.cache_get(&"k1".to_string()),
+            None,
+            "a borrowed-key peek must not promote recency; k1 must still be the LRU victim"
+        );
+        assert_eq!(lru_ttl.cache_get(&"k2".to_string()), Some(&200));
+        assert_eq!(lru_ttl.cache_get(&"k3".to_string()), Some(&300));
+    }
+
     #[test]
     fn cache_expiry_reachable_via_prelude_and_generic_bound_ttl_stores() {
         let mut ttl: TtlCache<u32, i32> = TtlCache::builder().ttl(LONG_TTL).build().unwrap();
@@ -998,6 +1109,119 @@ mod expires_stores {
             AdvisoryToken::live(200),
             3u32,
             AdvisoryToken::live(300),
+        );
+    }
+
+    /// Property 6 (the `K: Borrow<Q>` generality): a `String`-keyed store peeked with a
+    /// `&str`, i.e. `Q = str`, so `Q != K`. Every other call site in this file and in the
+    /// per-store unit tests passes `Q == K`, which leaves the one bound that distinguishes
+    /// `CacheExpiry` from `ConcurrentCacheExpiry` unexercised. The borrowed peek must reach
+    /// the same entry as the owned one, through both the required method and the alias, and
+    /// must report an absent key as `(None, None)` like any other miss.
+    ///
+    /// Run here (in the ungated module) rather than only under `time_stores`, so the
+    /// borrowed-key path is certified even with zero features enabled.
+    #[test]
+    fn peek_expires_at_accepts_a_borrowed_key_on_single_owner_expires_stores() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let stored = AdvisoryToken::live_with_deadline(1, deadline);
+
+        let mut plain: ExpiringCache<String, AdvisoryToken> =
+            ExpiringCache::builder().build().unwrap();
+        plain.cache_set("k".to_string(), stored.clone());
+        assert_eq!(
+            peek_via_borrowed_str(&plain, "k"),
+            (Some(stored.clone()), Some(deadline)),
+            "a &str peek must reach the same entry a &String peek does"
+        );
+        assert_eq!(
+            peek_via_borrowed_str(&plain, "k"),
+            plain.cache_peek_expires_at(&"k".to_string()),
+            "the borrowed and owned key forms must not diverge"
+        );
+        assert_eq!(
+            plain.peek_expires_at("k"),
+            plain.cache_peek_expires_at("k"),
+            "the alias must accept the borrowed key too, and agree"
+        );
+        assert_eq!(
+            peek_via_borrowed_str::<AdvisoryToken, _>(&plain, "absent"),
+            (None, None)
+        );
+
+        let mut lru: ExpiringLruCache<String, AdvisoryToken> =
+            ExpiringLruCache::builder().max_size(8).build().unwrap();
+        lru.cache_set("k".to_string(), stored.clone());
+        assert_eq!(
+            peek_via_borrowed_str(&lru, "k"),
+            (Some(stored), Some(deadline))
+        );
+        assert_eq!(
+            peek_via_borrowed_str::<AdvisoryToken, _>(&lru, "absent"),
+            (None, None)
+        );
+    }
+
+    /// A second `Borrow<Q>` shape, distinct from `String`/`str`: `K = Vec<u8>` peeked through
+    /// `Q = [u8]`. See [`peek_via_borrowed_slice`] for why `String`/`str` alone is not enough to
+    /// certify the bound is fully generic.
+    #[test]
+    fn peek_expires_at_accepts_a_borrowed_slice_key_on_single_owner_expires_stores() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let stored = AdvisoryToken::live_with_deadline(7, deadline);
+
+        let mut plain: ExpiringCache<Vec<u8>, AdvisoryToken> =
+            ExpiringCache::builder().build().unwrap();
+        plain.cache_set(vec![1, 2, 3], stored.clone());
+        assert_eq!(
+            peek_via_borrowed_slice(&plain, &[1, 2, 3]),
+            (Some(stored.clone()), Some(deadline)),
+            "a &[u8] peek must reach the same entry a &Vec<u8> peek does"
+        );
+        assert_eq!(
+            peek_via_borrowed_slice(&plain, &[1, 2, 3]),
+            plain.cache_peek_expires_at(&vec![1, 2, 3]),
+            "the borrowed and owned key forms must not diverge"
+        );
+        assert_eq!(
+            peek_via_borrowed_slice::<AdvisoryToken, _>(&plain, &[9, 9, 9]),
+            (None, None)
+        );
+    }
+
+    /// Combines the borrowed-key property with the LRU-no-promotion property
+    /// (`lru_no_promotion_uniform_across_single_owner_expires_lru_store` above): both are
+    /// certified individually, but only ever with `Q == K`. See the TTL-family counterpart
+    /// `ttl_stores::peek_via_borrowed_key_does_not_promote_lru_on_single_owner_ttl_lru_store`
+    /// for why the combination needs its own test.
+    #[test]
+    fn peek_via_borrowed_key_does_not_promote_lru_on_single_owner_expires_lru_store() {
+        let mut lru: ExpiringLruCache<String, AdvisoryToken> =
+            ExpiringLruCache::builder().max_size(2).build().unwrap();
+        lru.cache_set("k1".to_string(), AdvisoryToken::live(100)); // LRU
+        lru.cache_set("k2".to_string(), AdvisoryToken::live(200)); // MRU
+
+        for _ in 0..3 {
+            assert_eq!(
+                peek_via_borrowed_str(&lru, "k1").0,
+                Some(AdvisoryToken::live(100))
+            );
+        }
+
+        lru.cache_set("k3".to_string(), AdvisoryToken::live(300));
+
+        assert_eq!(
+            lru.cache_get(&"k1".to_string()),
+            None,
+            "a borrowed-key peek must not promote recency; k1 must still be the LRU victim"
+        );
+        assert_eq!(
+            lru.cache_get(&"k2".to_string()),
+            Some(&AdvisoryToken::live(200))
+        );
+        assert_eq!(
+            lru.cache_get(&"k3".to_string()),
+            Some(&AdvisoryToken::live(300))
         );
     }
 

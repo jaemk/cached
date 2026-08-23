@@ -141,12 +141,12 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `CacheExpiry` | `cache_peek_expires_at()` / `peek_expires_at()`: side-effect-free per-key expiry read returning `(Option<V>, Option<Instant>)`; implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache` |
 | `ConcurrentCacheExpiry` | `&self` mirror of `CacheExpiry`; implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache` |
 
-**Peek is an in-memory concept.** Both peek traits are implemented by the six sharded stores only
-(`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately
-implement neither: an IO-backed store has no client-side recency or TTL state to skip and the
-hit/miss-metrics distinction is meaningless, while the read remains a full round trip. Generic
-code bounded on either peek trait therefore accepts only the sharded stores. See
-`specs/design/0040-peek-is-an-in-memory-concept.md`.
+**Peek is an in-memory concept.** `CachedPeek` and `ConcurrentCachePeek` are implemented by the
+six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and
+`AsyncRedisCache` deliberately implement neither: an IO-backed store has no client-side recency
+or TTL state to skip and the hit/miss-metrics distinction is meaningless, while the read remains
+a full round trip. Generic code bounded on either peek trait therefore accepts only the sharded
+stores. See `specs/design/0040-peek-is-an-in-memory-concept.md`.
 
 **`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
 expiry-aware stores the count folds predicate rejections together with expired entries swept

@@ -48,8 +48,9 @@ pub trait Expires {
     /// expiry instant is unknown or not tracked by this type.
     ///
     /// The default implementation returns `None`. Override this in types that record a
-    /// concrete deadline to enable observability (logging, metrics) and to allow callers
-    /// to extend or compare deadlines without re-computing them.
+    /// concrete deadline. Without the override this returns `None`, so
+    /// `CacheExpiry::cache_peek_expires_at` reports no deadline for the value and any
+    /// remaining-ttl policy built on it never fires.
     ///
     /// `is_expired()` remains the authoritative liveness check; `expires_at` is advisory
     /// and must not be used as a substitute for `is_expired`.
@@ -2145,6 +2146,7 @@ mod tests {
     // --- expires_at tests ---
 
     /// A type that overrides `expires_at` to return a concrete deadline.
+    #[derive(Clone, Copy, Debug, PartialEq)]
     struct TimedValue {
         deadline: crate::time::Instant,
     }
@@ -2190,6 +2192,7 @@ mod tests {
     /// This type deliberately reports a deadline that is already in the past while
     /// claiming to be live. A correct cache must consult `is_expired` (live), NOT
     /// `expires_at` (past), and therefore keep the entry.
+    #[derive(Clone, Copy, Debug, PartialEq)]
     struct LiveDespitePastDeadline {
         past: crate::time::Instant,
     }
@@ -2296,53 +2299,17 @@ mod tests {
 
     // --- CacheExpiry::cache_peek_expires_at ---
 
-    /// A cloneable value type that overrides `expires_at` with a concrete deadline
-    /// (`CacheExpiry` requires `V: Clone`, so this cannot reuse `TimedValue` above).
+    /// A value type whose `is_expired` reports EXPIRED while `expires_at` (advisory)
+    /// reports a deadline still in the future -- the other direction of disagreement
+    /// from [`LiveDespitePastDeadline`]. Pins that `cache_peek_expires_at` surfaces the
+    /// advisory deadline unreconciled even when it contradicts `is_expired` by claiming
+    /// the entry is still good.
     #[derive(Clone, Copy, Debug, PartialEq)]
-    struct ClonableTimedValue {
-        deadline: crate::time::Instant,
-    }
-
-    impl Expires for ClonableTimedValue {
-        fn is_expired(&self) -> bool {
-            crate::time::Instant::now() >= self.deadline
-        }
-
-        fn expires_at(&self) -> Option<crate::time::Instant> {
-            Some(self.deadline)
-        }
-    }
-
-    /// A cloneable value type whose `is_expired` reports live while `expires_at`
-    /// (advisory) reports a deadline already in the past, pinning that the two may
-    /// disagree (`CacheExpiry` requires `V: Clone`, so this cannot reuse
-    /// `LiveDespitePastDeadline` above).
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct ClonableLiveDespitePastDeadline {
-        past: crate::time::Instant,
-    }
-
-    impl Expires for ClonableLiveDespitePastDeadline {
-        fn is_expired(&self) -> bool {
-            false
-        }
-
-        fn expires_at(&self) -> Option<crate::time::Instant> {
-            Some(self.past)
-        }
-    }
-
-    /// A cloneable value type whose `is_expired` reports EXPIRED while `expires_at`
-    /// (advisory) reports a deadline still in the future -- the other direction of
-    /// disagreement from [`ClonableLiveDespitePastDeadline`]. Pins that
-    /// `cache_peek_expires_at` surfaces the advisory deadline unreconciled even when it
-    /// contradicts `is_expired` by claiming the entry is still good.
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct ClonableExpiredDespiteFutureDeadline {
+    struct ExpiredDespiteFutureDeadline {
         future: crate::time::Instant,
     }
 
-    impl Expires for ClonableExpiredDespiteFutureDeadline {
+    impl Expires for ExpiredDespiteFutureDeadline {
         fn is_expired(&self) -> bool {
             true
         }
@@ -2378,7 +2345,7 @@ mod tests {
         // and (Some(v), Some(t)) with t in the past. The alias must agree with the
         // required method on every one of them, not just the first shape exercised
         // above.
-        let mut c: ExpiringLruCache<u8, ClonableTimedValue> =
+        let mut c: ExpiringLruCache<u8, TimedValue> =
             ExpiringLruCache::builder().max_size(4).build().unwrap();
 
         // Shape 1: (None, None) -- absent key.
@@ -2387,20 +2354,20 @@ mod tests {
 
         // Shape 2: (Some(v), Some(t)) with t in the future -- present, live, deadline known.
         let future = crate::time::Instant::now() + std::time::Duration::from_secs(60);
-        c.cache_set(1, ClonableTimedValue { deadline: future });
+        c.cache_set(1, TimedValue { deadline: future });
         assert_eq!(c.peek_expires_at(&1u8), c.cache_peek_expires_at(&1u8));
         assert_eq!(
             c.peek_expires_at(&1u8),
-            (Some(ClonableTimedValue { deadline: future }), Some(future))
+            (Some(TimedValue { deadline: future }), Some(future))
         );
 
         // Shape 3: (Some(v), Some(t)) with t in the past -- deadline known but stale.
         let past = crate::time::Instant::now() - std::time::Duration::from_secs(60);
-        c.cache_set(2, ClonableTimedValue { deadline: past });
+        c.cache_set(2, TimedValue { deadline: past });
         assert_eq!(c.peek_expires_at(&2u8), c.cache_peek_expires_at(&2u8));
         assert_eq!(
             c.peek_expires_at(&2u8),
-            (Some(ClonableTimedValue { deadline: past }), Some(past))
+            (Some(TimedValue { deadline: past }), Some(past))
         );
 
         // Shape 4: (Some(v), None) -- present, no known deadline.
@@ -2414,12 +2381,12 @@ mod tests {
     #[test]
     fn peek_expires_at_value_overriding_expires_at_returns_its_deadline() {
         let deadline = crate::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut c: ExpiringLruCache<u8, ClonableTimedValue> =
+        let mut c: ExpiringLruCache<u8, TimedValue> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
-        c.cache_set(1, ClonableTimedValue { deadline });
+        c.cache_set(1, TimedValue { deadline });
 
         let (value, expires_at) = c.cache_peek_expires_at(&1u8);
-        assert_eq!(value, Some(ClonableTimedValue { deadline }));
+        assert_eq!(value, Some(TimedValue { deadline }));
         assert_eq!(
             expires_at,
             Some(deadline),
@@ -2470,12 +2437,12 @@ mod tests {
         // cache_peek_expires_at must surface that stale deadline unchanged rather
         // than reconciling it against is_expired().
         let past = crate::time::Instant::now() - std::time::Duration::from_secs(3600);
-        let mut c: ExpiringLruCache<u8, ClonableLiveDespitePastDeadline> =
+        let mut c: ExpiringLruCache<u8, LiveDespitePastDeadline> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
-        c.cache_set(1, ClonableLiveDespitePastDeadline { past });
+        c.cache_set(1, LiveDespitePastDeadline { past });
 
         let (value, expires_at) = c.cache_peek_expires_at(&1u8);
-        assert_eq!(value, Some(ClonableLiveDespitePastDeadline { past }));
+        assert_eq!(value, Some(LiveDespitePastDeadline { past }));
         assert_eq!(
             expires_at,
             Some(past),
@@ -2483,7 +2450,7 @@ mod tests {
         );
         assert_eq!(
             c.cache_peek_with_expiry_status(&1u8),
-            (Some(ClonableLiveDespitePastDeadline { past }), false),
+            (Some(LiveDespitePastDeadline { past }), false),
             "cache_peek_with_expiry_status must still report the entry as live"
         );
     }
@@ -2565,12 +2532,12 @@ mod tests {
         // access (cache_get) must treat the entry as gone despite the future-looking
         // advisory deadline.
         let future = crate::time::Instant::now() + std::time::Duration::from_secs(3600);
-        let mut c: ExpiringLruCache<u8, ClonableExpiredDespiteFutureDeadline> =
+        let mut c: ExpiringLruCache<u8, ExpiredDespiteFutureDeadline> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
-        c.cache_set(1, ClonableExpiredDespiteFutureDeadline { future });
+        c.cache_set(1, ExpiredDespiteFutureDeadline { future });
 
         let (value, expires_at) = c.cache_peek_expires_at(&1u8);
-        assert_eq!(value, Some(ClonableExpiredDespiteFutureDeadline { future }));
+        assert_eq!(value, Some(ExpiredDespiteFutureDeadline { future }));
         assert_eq!(
             expires_at,
             Some(future),
@@ -2578,7 +2545,7 @@ mod tests {
         );
         assert_eq!(
             c.cache_peek_with_expiry_status(&1u8),
-            (Some(ClonableExpiredDespiteFutureDeadline { future }), true),
+            (Some(ExpiredDespiteFutureDeadline { future }), true),
             "cache_peek_with_expiry_status must still report the entry as expired"
         );
         assert_eq!(c.cache_size(), 1, "the peek must not remove the entry");
@@ -2604,19 +2571,19 @@ mod tests {
         // value on every peek rather than caching a stale expires_at snapshot.
         let first_deadline = crate::time::Instant::now() + std::time::Duration::from_secs(60);
         let second_deadline = crate::time::Instant::now() + std::time::Duration::from_secs(120);
-        let mut c: ExpiringLruCache<u8, ClonableTimedValue> =
+        let mut c: ExpiringLruCache<u8, TimedValue> =
             ExpiringLruCache::builder().max_size(3).build().unwrap();
 
         c.cache_set(
             1,
-            ClonableTimedValue {
+            TimedValue {
                 deadline: first_deadline,
             },
         );
         assert_eq!(
             c.cache_peek_expires_at(&1u8),
             (
-                Some(ClonableTimedValue {
+                Some(TimedValue {
                     deadline: first_deadline
                 }),
                 Some(first_deadline)
@@ -2625,19 +2592,58 @@ mod tests {
 
         c.cache_set(
             1,
-            ClonableTimedValue {
+            TimedValue {
                 deadline: second_deadline,
             },
         );
         assert_eq!(
             c.cache_peek_expires_at(&1u8),
             (
-                Some(ClonableTimedValue {
+                Some(TimedValue {
                     deadline: second_deadline
                 }),
                 Some(second_deadline)
             ),
             "an overwrite must replace the visible deadline, not retain the old one"
         );
+    }
+
+    #[test]
+    fn peek_expires_at_reports_absent_after_evict_removes_the_entry() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, 99); // 99 > 10, so is_expired() is true
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u8);
+        assert_eq!(value, Some(99));
+        assert_eq!(expires_at, None, "ExpiredU8 never overrides expires_at");
+
+        assert_eq!(
+            c.evict(),
+            1,
+            "evict must physically remove the expired entry"
+        );
+        let (value, expires_at) = c.cache_peek_expires_at(&1u8);
+        assert!(
+            value.is_none(),
+            "a physically removed entry must be reported as absent"
+        );
+        assert_eq!(expires_at, None);
+    }
+
+    #[test]
+    fn peek_expires_at_reports_absent_after_cache_remove() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(3).build().unwrap();
+        c.cache_set(1, 2); // live: is_expired() is false
+        let removed = c.cache_remove(&1u8);
+        assert_eq!(removed, Some(2));
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u8);
+        assert!(value.is_none());
+        assert_eq!(expires_at, None);
+        let (value, expires_at) = c.peek_expires_at(&1u8);
+        assert!(value.is_none());
+        assert_eq!(expires_at, None);
     }
 }
