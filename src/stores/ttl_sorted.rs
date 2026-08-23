@@ -5202,6 +5202,60 @@ mod test {
         assert_index_lockstep(&cache, "after sweeping past the tie");
     }
 
+    /// `retain_latest_at_protecting` with BOTH a protected stamp and a sweep cutoff. No
+    /// caller pairs them today (`retain_latest_at` protects nothing, `set_and_get_mut`
+    /// passes no cutoff), so this pins the contract the combined branch is written to:
+    /// the protected entry survives even when it is itself expired and sorts first, and
+    /// the sweep still reaches the expired entries behind it.
+    #[test]
+    fn retain_latest_at_protecting_sweeps_around_an_expired_protected_stamp() {
+        // Entry 1 expires before the cutoff and sorts FIRST, so every pop has to skip it;
+        // entry 2 is also expired and must still be swept from behind it.
+        let (mut cache, cutoff) = boundary_population();
+        let protected = cache.map[&1u32].as_stamped();
+
+        // retain_drop_count = 0 (4 entries, keep 4): a pure protected sweep, the branch that
+        // cannot take the `evict_at` fast path because something is protected.
+        assert_eq!(
+            cache.retain_latest_at_protecting(
+                4,
+                Some(cutoff + Duration::from_nanos(1)),
+                Some(&protected)
+            ),
+            1,
+            "only entry 2 is swept: entry 1 is expired but protected"
+        );
+        assert!(
+            cache.map.contains_key(&1u32),
+            "the protected entry survives its own expiry"
+        );
+        assert!(!cache.map.contains_key(&2u32), "the tie behind it is swept");
+        assert!(cache.map.contains_key(&3u32));
+        assert!(cache.map.contains_key(&4u32));
+        assert_index_lockstep(&cache, "after a protected sweep");
+
+        // Size trim and sweep together: the trim takes victims in expiry order, still never
+        // choosing the protected stamp, and the protected row keeps its slot throughout.
+        let (mut cache, cutoff) = boundary_population();
+        let protected = cache.map[&1u32].as_stamped();
+        assert_eq!(
+            cache.retain_latest_at_protecting(2, Some(cutoff), Some(&protected)),
+            2,
+            "two unprotected victims cover the trim"
+        );
+        assert!(
+            cache.map.contains_key(&1u32),
+            "protected across the trim too"
+        );
+        assert!(!cache.map.contains_key(&2u32));
+        assert!(!cache.map.contains_key(&3u32));
+        assert!(
+            cache.map.contains_key(&4u32),
+            "never-expiring entries are still retained last"
+        );
+        assert_index_lockstep(&cache, "after a protected trim with a sweep");
+    }
+
     // --- Coarse `Eq`/`Ord` keys: two distinct values that compare equal ------------------
 
     /// A key whose `Eq`/`Ord`/`Hash` consider only `label`, so two values carrying different

@@ -183,7 +183,7 @@ where
     /// `ShardedLruTtlCache<K, V, DefaultShardHasher>`, so a custom hasher is always introduced
     /// via `hasher`, never a `ShardedLruTtlCache::<_, _, H>` turbofish.
     #[must_use]
-    pub fn builder() -> ShardedLruTtlCacheBuilder<K, V> {
+    pub fn builder() -> ShardedLruTtlCacheBuilder<K, V, DefaultShardHasher> {
         ShardedLruTtlCacheBuilder::default()
     }
 }
@@ -535,6 +535,7 @@ where
     /// When constructed with [`max_size`](ShardedLruTtlCacheBuilder::max_size), this may
     /// be larger than the requested size because per-shard capacity is rounded
     /// up with ceiling division.
+    #[doc(alias = "size")]
     #[doc(alias = "max_size")]
     #[must_use]
     pub fn capacity(&self) -> usize {

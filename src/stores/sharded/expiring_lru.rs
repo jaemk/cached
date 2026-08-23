@@ -491,6 +491,7 @@ where
     /// When constructed with [`max_size`](ShardedExpiringLruCacheBuilder::max_size), this may
     /// be larger than the requested size because per-shard capacity is rounded
     /// up with ceiling division.
+    #[doc(alias = "size")]
     #[doc(alias = "max_size")]
     #[must_use]
     pub fn capacity(&self) -> usize {
