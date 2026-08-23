@@ -76,6 +76,20 @@ or lazy removal. This answers GitHub issue #91 (refresh when the remaining TTL d
 threshold): a threshold predicate needs a deadline, not just the `bool` that
 `cache_peek_with_expiry_status` returns.
 
+`CacheExpiry` also provides `cache_expires_at` (and a defaulted `expires_at` alias), a value-free
+companion returning `(bool, Option<Instant>)`: the `bool` is presence and the `Option<Instant>` is
+the deadline, so `(false, None)` is absent, `(true, None)` is present with no deadline, `(true,
+Some(t))` with a future `t` is live, and `(true, Some(t))` with a past `t` is expired and not
+removed. The presence flag is deliberate: absent and never-expires call for opposite actions in a
+threshold-refresh policy (a cold fetch versus doing nothing), so collapsing them into a bare
+`Option<Instant>` would repeat the mistake a remaining `Duration` already makes for the deadline
+itself. The tuple shape matches the existing `(Option<V>, bool)` and `(Option<V>, Option<Instant>)`
+returns in this family. `cache_expires_at` carries no `V: Clone` bound: that bound moved off this
+trait's impl blocks and onto the value-returning methods (`cache_peek_expires_at` and its
+`peek_expires_at` alias), so a deadline-only read works for a value type that does not implement
+`Clone`. It shares the same side-effect-free contract, and the same advisory-deadline caveat on
+the `Expires`-based stores, as `cache_peek_expires_at` below.
+
 Deliberately a standalone trait rather than a new required method on `CloneCached`: that would
 break external store implementations. Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`,
 `ExpiringCache`, and `ExpiringLruCache`. On the last two, whose deadline comes from

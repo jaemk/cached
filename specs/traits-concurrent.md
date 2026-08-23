@@ -180,6 +180,17 @@ the identical `(None, None)` / `(Some(v), None)` / `(Some(v), Some(t))` result s
 GitHub issue #91 (refresh when the remaining TTL drops below a threshold) for the concurrent
 stores, the same gap TRAIT-6 closes on the single-owner side.
 
+`ConcurrentCacheExpiry` also provides `cache_expires_at(&self, &K) -> (bool, Option<Instant>)`
+plus a defaulted `expires_at` alias, the `&self` mirror of TRAIT-6's value-free companion: the
+`bool` is presence and the `Option<Instant>` is the deadline, giving the same `(false, None)` /
+`(true, None)` / `(true, Some(t))` result shape and the same presence-flag rationale (absent and
+never-expires call for opposite actions in a threshold-refresh policy, so a bare `Option<Instant>`
+would lose that distinction). It carries no `V: Clone` bound: that bound moved off this trait's
+impl blocks and onto the value-returning methods (`cache_peek_expires_at` and its
+`peek_expires_at` alias), so a deadline-only read works for a value type that does not implement
+`Clone`. It shares the identical side-effect-free contract and the same advisory-deadline caveat
+on the `Expires`-based stores described below.
+
 Implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, and
 `ShardedExpiringLruCache`. Not implemented by `RedisCache`, `AsyncRedisCache`, or `RedbCache`
 (none of the three implement `ConcurrentCloneCached`), nor by the non-expiry stores

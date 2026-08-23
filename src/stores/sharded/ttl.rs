@@ -1251,7 +1251,6 @@ where
 impl<K, V, H> ConcurrentCacheExpiry<K, V> for ShardedTtlCache<K, V, H>
 where
     K: Hash + Eq,
-    V: Clone,
     H: ShardHasher<K>,
 {
     /// Returns the stored value and its expiry instant, with no read side effects.
@@ -1263,12 +1262,36 @@ where
     /// **not** removed; the hits/misses counters and the TTL are untouched. The convention is
     /// `now >= t` means expired: a deadline exactly equal to the current instant counts as
     /// already past, matching the liveness check the store itself applies.
-    fn cache_peek_expires_at(&self, k: &K) -> (Option<V>, Option<Instant>) {
+    fn cache_peek_expires_at(&self, k: &K) -> (Option<V>, Option<Instant>)
+    where
+        V: Clone,
+    {
         let shard = self.shard_of(k);
         let guard = shard.lock.read();
         match guard.get(k) {
             None => (None, None),
             Some(entry) => (Some(entry.value.clone()), entry.expires_at),
+        }
+    }
+
+    /// Returns whether the key is present and its expiry instant, without the value.
+    ///
+    /// The value-free counterpart of
+    /// [`cache_peek_expires_at`](ConcurrentCacheExpiry::cache_peek_expires_at): the same shard
+    /// read lock and the same deadline, with no clone and no `V: Clone` bound. `(false, None)`
+    /// when the key is absent, `(true, None)` when the entry never expires (TTL disabled at
+    /// insert time), `(true, Some(t))` otherwise. An extreme ttl is clamped to `u64::MAX`
+    /// nanoseconds rather than overflowing, so it reports a real far-future deadline, never
+    /// `None`. An expired entry reports `(true, Some(t))` with `t` in the past and is **not**
+    /// removed; the hits/misses counters and the TTL are untouched. The convention is
+    /// `now >= t` means expired: a deadline exactly equal to the current instant counts as
+    /// already past, matching the liveness check the store itself applies.
+    fn cache_expires_at(&self, k: &K) -> (bool, Option<Instant>) {
+        let shard = self.shard_of(k);
+        let guard = shard.lock.read();
+        match guard.get(k) {
+            None => (false, None),
+            Some(entry) => (true, entry.expires_at),
         }
     }
 }
@@ -4094,6 +4117,334 @@ mod tests {
         assert!(
             after.expect("still ttl-bearing") > before,
             "peek must observe the writer thread's updated (later) deadline"
+        );
+    }
+
+    // --- ConcurrentCacheExpiry::cache_expires_at (the value-free read) ---
+
+    #[test]
+    fn expires_at_absent_key_returns_false_none() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &1),
+            (false, None)
+        );
+        assert_eq!(ConcurrentCacheExpiry::expires_at(&c, &1), (false, None));
+    }
+
+    #[test]
+    fn expires_at_live_entry_returns_the_stored_future_deadline() {
+        let ttl = Duration::from_secs(60);
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(ttl)
+            .build()
+            .unwrap();
+        let before = Instant::now();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+        let after = Instant::now();
+
+        let (present, expires_at) = ConcurrentCacheExpiry::cache_expires_at(&c, &1);
+        assert!(present, "a stored key must report present");
+        let expires_at = expires_at.expect("a configured ttl must record a deadline");
+        assert!(expires_at > Instant::now(), "a live entry expires later");
+        assert!(expires_at >= before + ttl && expires_at <= after + ttl);
+    }
+
+    #[test]
+    fn expires_at_never_expiring_entry_reports_present_with_no_deadline() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // A zero ttl disables expiry, so the entry is stored without a deadline.
+        c.unset_ttl();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &1),
+            (true, None),
+            "present-with-no-deadline must be distinguishable from absent by the flag"
+        );
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &2),
+            (false, None)
+        );
+    }
+
+    #[test]
+    fn expires_at_expired_entry_returns_a_past_deadline_and_keeps_the_entry() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let (present, expires_at) = ConcurrentCacheExpiry::cache_expires_at(&c, &1);
+        assert!(present, "an expired entry is still reported present");
+        let expires_at = expires_at.expect("an expired entry still carries its deadline");
+        assert!(expires_at <= Instant::now(), "the deadline is in the past");
+        // Not removed by the read: a second read sees the same entry and deadline.
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &1),
+            (true, Some(expires_at))
+        );
+    }
+
+    // The two reads must never disagree: same deadline, and the presence flag must track whether
+    // the value-bearing read returned `Some`.
+    #[test]
+    fn expires_at_agrees_with_peek_expires_at_across_all_return_shapes() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .shards(4)
+            .build()
+            .unwrap();
+
+        let check = |k: u32, label: &str| {
+            let (value, peeked) = ConcurrentCacheExpiry::cache_peek_expires_at(&c, &k);
+            let (present, deadline) = ConcurrentCacheExpiry::cache_expires_at(&c, &k);
+            assert_eq!(
+                present,
+                value.is_some(),
+                "presence flag disagrees ({label})"
+            );
+            assert_eq!(deadline, peeked, "deadline disagrees ({label})");
+            assert_eq!(
+                ConcurrentCacheExpiry::expires_at(&c, &k),
+                ConcurrentCacheExpiry::cache_expires_at(&c, &k),
+                "alias disagrees ({label})"
+            );
+            (present, deadline)
+        };
+
+        // absent
+        assert_eq!(check(1, "absent"), (false, None));
+
+        // live
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+        let (present, deadline) = check(1, "live");
+        assert!(present && deadline.unwrap() > Instant::now());
+
+        // expired, not removed
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let (present, deadline) = check(1, "expired");
+        assert!(present && deadline.unwrap() <= Instant::now());
+
+        // never-expiring
+        c.unset_ttl();
+        SyncConcurrentCached::cache_set(&c, 2, 200).expect("insert must succeed");
+        assert_eq!(check(2, "never-expiring"), (true, None));
+    }
+
+    #[test]
+    fn expires_at_does_not_touch_hit_or_miss_counters() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .shards(4)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+        let metrics = c.metrics();
+
+        let _ = ConcurrentCacheExpiry::cache_expires_at(&c, &1); // present
+        let _ = ConcurrentCacheExpiry::cache_expires_at(&c, &2); // absent
+        let _ = ConcurrentCacheExpiry::expires_at(&c, &1); // through the alias
+
+        let after = c.metrics();
+        assert_eq!(after.hits, metrics.hits, "the read must not count a hit");
+        assert_eq!(
+            after.misses, metrics.misses,
+            "the read must not count a miss"
+        );
+        assert_eq!(
+            after.evictions, metrics.evictions,
+            "the read must not evict an entry"
+        );
+    }
+
+    #[test]
+    fn expires_at_does_not_renew_the_ttl_with_refresh_on_hit() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(200))
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+
+        let (_, first) = ConcurrentCacheExpiry::cache_expires_at(&c, &1);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let (_, second) = ConcurrentCacheExpiry::cache_expires_at(&c, &1);
+        assert_eq!(
+            first, second,
+            "the read must not renew the ttl even with refresh_on_hit enabled"
+        );
+
+        // Control: a real hit does renew, so the assertion above is not vacuous.
+        assert_eq!(c.get(&1), Some(100));
+        let (_, after_hit) = ConcurrentCacheExpiry::cache_expires_at(&c, &1);
+        assert!(
+            after_hit > first,
+            "refresh_on_hit must extend the deadline on a real read"
+        );
+    }
+
+    // The point of moving `V: Clone` off the impl block and onto the value-bearing methods: a
+    // deadline read must work on a cache whose value type is not `Clone` at all. The generic
+    // helper carries no `V: Clone` bound anywhere, so this fails to compile if the bound creeps
+    // back onto either the trait method or the impl.
+    #[test]
+    fn expires_at_reads_a_deadline_for_a_value_type_that_is_not_clone() {
+        #[derive(Debug, PartialEq)]
+        struct NotClone(u32);
+
+        fn deadline<K: Hash + Eq, V>(c: &ShardedTtlCache<K, V>, k: &K) -> (bool, Option<Instant>) {
+            ConcurrentCacheExpiry::cache_expires_at(c, k)
+        }
+
+        let c = ShardedTtlCache::<u32, NotClone>::builder()
+            .ttl(Duration::from_secs(60))
+            .shards(4)
+            .build()
+            .unwrap();
+
+        // Every insert path this store exposes requires `V: Clone`, so seed the shard maps
+        // directly. The read under test is what this exercises.
+        let stored = Instant::now() + Duration::from_secs(60);
+        c.shard_of(&1u32).lock.write().insert(
+            1u32,
+            TimedEntry {
+                expires_at: Some(stored),
+                value: NotClone(100),
+            },
+        );
+        c.shard_of(&2u32).lock.write().insert(
+            2u32,
+            TimedEntry {
+                expires_at: None,
+                value: NotClone(200),
+            },
+        );
+
+        assert_eq!(deadline(&c, &1), (true, Some(stored)), "live entry");
+        assert_eq!(deadline(&c, &2), (true, None), "never-expiring entry");
+        assert_eq!(deadline(&c, &3), (false, None), "absent key");
+        // The alias is equally bound-free.
+        assert!(ConcurrentCacheExpiry::expires_at(&c, &1).0);
+        // The value was never cloned or moved out: it is still in the shard.
+        assert_eq!(
+            c.shard_of(&1u32).lock.read().get(&1u32).map(|e| &e.value),
+            Some(&NotClone(100))
+        );
+    }
+
+    // The value-free read must be reachable through a generic `T: ConcurrentCacheExpiry<K, V>`
+    // bound and through the prelude, exactly like its value-bearing sibling.
+    #[test]
+    fn concurrent_cache_expires_at_is_reachable_through_a_generic_bound_and_the_prelude() {
+        use crate::prelude::*;
+
+        fn deadline_via_bound<T: ConcurrentCacheExpiry<u32, u32>>(
+            store: &T,
+            key: &u32,
+        ) -> (bool, Option<crate::time::Instant>) {
+            store.cache_expires_at(key)
+        }
+
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+
+        let (present, expires_at) = deadline_via_bound(&c, &1);
+        assert!(present);
+        assert!(expires_at.is_some());
+        assert_eq!(
+            deadline_via_bound(&c, &2),
+            (false, None),
+            "absent key via the generic bound"
+        );
+    }
+
+    // Multi-shard routing: the value-free read must find each key in whichever shard it landed in.
+    #[test]
+    fn expires_at_routes_correctly_across_many_shards() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(3600))
+            .shards(8)
+            .build()
+            .unwrap();
+        populate_mixed(&c);
+
+        let distinct_shards: std::collections::HashSet<usize> = (0..24u32)
+            .map(|k| c.shard_of(&k) as *const _ as usize)
+            .collect();
+        assert!(
+            distinct_shards.len() > 1,
+            "fixture must span multiple shards for this test to be meaningful"
+        );
+
+        for i in 0..8u32 {
+            let (present, expires_at) = ConcurrentCacheExpiry::cache_expires_at(&c, &i);
+            assert!(present, "key {i} (expired group) must report present");
+            assert!(
+                expires_at.unwrap() <= Instant::now(),
+                "key {i} must carry a past deadline"
+            );
+        }
+        for i in 8..16u32 {
+            let (present, expires_at) = ConcurrentCacheExpiry::cache_expires_at(&c, &i);
+            assert!(present, "key {i} (live group) must report present");
+            assert!(
+                expires_at.unwrap() > Instant::now(),
+                "key {i} must carry a future deadline"
+            );
+        }
+        for i in 16..24u32 {
+            assert_eq!(
+                ConcurrentCacheExpiry::cache_expires_at(&c, &i),
+                (true, None),
+                "key {i} (never-expiring group)"
+            );
+        }
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &999u32),
+            (false, None),
+            "an absent key must report absent regardless of shard count"
+        );
+    }
+
+    // Physical removal must be reflected as absent, not as present-with-no-deadline.
+    #[test]
+    fn expires_at_reports_absent_after_removal() {
+        let c = ShardedTtlCache::<u32, u32>::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        SyncConcurrentCached::cache_set(&c, 1, 100).expect("insert must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Expired but not yet swept: still present, with a past deadline.
+        let (present, expires_at) = ConcurrentCacheExpiry::cache_expires_at(&c, &1);
+        assert!(present);
+        assert!(expires_at.unwrap() <= Instant::now());
+
+        assert_eq!(c.evict(), 1, "evict must remove the expired entry");
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &1),
+            (false, None),
+            "a physically removed entry must be reported absent"
+        );
+
+        SyncConcurrentCached::cache_set(&c, 2, 200).expect("insert must succeed");
+        assert_eq!(c.remove(&2), Some(200));
+        assert_eq!(
+            ConcurrentCacheExpiry::cache_expires_at(&c, &2),
+            (false, None)
         );
     }
 }

@@ -1488,7 +1488,7 @@ impl<K: Hash + Eq + Ord + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K
     }
 }
 
-impl<K: Hash + Eq + Ord, V: Clone, S: BuildHasher> CacheExpiry<K, V> for TtlSortedCache<K, V, S> {
+impl<K: Hash + Eq + Ord, V, S: BuildHasher> CacheExpiry<K, V> for TtlSortedCache<K, V, S> {
     /// Returns the stored value and its expiry instant, with no read side effects.
     ///
     /// The instant is the entry's own deadline, `None` when the entry never expires (TTL was
@@ -1508,6 +1508,29 @@ impl<K: Hash + Eq + Ord, V: Clone, S: BuildHasher> CacheExpiry<K, V> for TtlSort
         match self.map.get(k) {
             Some(entry) => (Some(entry.value.clone()), entry.expiry),
             None => (None, None),
+        }
+    }
+
+    /// Returns whether the key is present and its expiry instant, without the value.
+    ///
+    /// The value-free counterpart of
+    /// [`cache_peek_expires_at`](CacheExpiry::cache_peek_expires_at): the same lookup and the
+    /// same deadline, with no clone and no `V: Clone` bound. `(false, None)` when the key is
+    /// absent, `(true, None)` when the entry never expires (TTL disabled at insert time, or
+    /// `now + ttl` overflowed `Instant`), `(true, Some(t))` otherwise. An expired entry reports
+    /// `(true, Some(t))` with `t` in the past and is **not** removed. No hit/miss counting, no
+    /// TTL renewal, and the expiry-ordered index is left untouched.
+    ///
+    /// The convention is `now >= t` means expired: a deadline exactly equal to the current
+    /// instant counts as already past, matching the liveness check the store itself applies.
+    fn cache_expires_at<Q>(&self, k: &Q) -> (bool, Option<Instant>)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match self.map.get(k) {
+            Some(entry) => (true, entry.expiry),
+            None => (false, None),
         }
     }
 }
@@ -6346,5 +6369,280 @@ mod test {
             (Some(100), original_deadline),
             "unset_ttl must not retroactively clear an existing entry's deadline"
         );
+    }
+
+    // --- CacheExpiry::cache_expires_at (the value-free read) -------------------
+
+    #[test]
+    fn expires_at_absent_key_returns_false_none() {
+        let c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_expires_at(&1u32), (false, None));
+        assert_eq!(c.expires_at(&1u32), (false, None));
+    }
+
+    #[test]
+    fn expires_at_live_entry_returns_the_stored_future_deadline() {
+        let ttl = Duration::from_secs(60);
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder().ttl(ttl).build().unwrap();
+        let before = Instant::now();
+        c.cache_set(1, 100);
+        let after = Instant::now();
+
+        let stored = c
+            .map
+            .get(&1)
+            .expect("entry must be present")
+            .expiry
+            .expect("a configured ttl must record a deadline");
+
+        let (present, expires_at) = c.cache_expires_at(&1u32);
+        assert!(present, "a stored key must report present");
+        assert_eq!(
+            expires_at,
+            Some(stored),
+            "the reported deadline must be the one the store holds"
+        );
+        let expires_at = expires_at.unwrap();
+        assert!(expires_at > Instant::now(), "a live entry expires later");
+        assert!(expires_at >= before + ttl && expires_at <= after + ttl);
+    }
+
+    #[test]
+    fn expires_at_never_expiring_entry_reports_present_with_no_deadline() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // A zero ttl disables expiry, so the entry is stored without a deadline.
+        c.unset_ttl();
+        c.cache_set(1, 100);
+        assert_eq!(
+            c.cache_expires_at(&1u32),
+            (true, None),
+            "present-with-no-deadline must be distinguishable from absent by the flag"
+        );
+        assert_eq!(c.cache_expires_at(&2u32), (false, None));
+    }
+
+    #[test]
+    fn expires_at_expired_entry_returns_a_past_deadline_and_keeps_the_entry() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let (present, expires_at) = c.cache_expires_at(&1u32);
+        assert!(present, "an expired entry is still reported present");
+        let expires_at = expires_at.expect("an expired entry still carries its deadline");
+        assert!(expires_at <= Instant::now(), "the deadline is in the past");
+        // Not removed by the read: a second read sees the same entry and deadline.
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(c.cache_expires_at(&1u32), (true, Some(expires_at)));
+    }
+
+    // The two reads must never disagree: same deadline, and the presence flag must track
+    // whether the value-bearing read returned `Some`.
+    #[test]
+    fn expires_at_agrees_with_peek_expires_at_across_all_return_shapes() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        let check = |c: &TtlSortedCache<u32, u32>, k: u32, label: &str| {
+            let (value, peeked) = c.cache_peek_expires_at(&k);
+            let (present, deadline) = c.cache_expires_at(&k);
+            assert_eq!(
+                present,
+                value.is_some(),
+                "presence flag disagrees ({label})"
+            );
+            assert_eq!(deadline, peeked, "deadline disagrees ({label})");
+            assert_eq!(
+                c.expires_at(&k),
+                c.cache_expires_at(&k),
+                "alias disagrees ({label})"
+            );
+            (present, deadline)
+        };
+
+        // absent
+        assert_eq!(check(&c, 1, "absent"), (false, None));
+
+        // live
+        c.cache_set(1, 100);
+        let (present, deadline) = check(&c, 1, "live");
+        assert!(present && deadline.unwrap() > Instant::now());
+
+        // expired, not removed
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let (present, deadline) = check(&c, 1, "expired");
+        assert!(present && deadline.unwrap() <= Instant::now());
+
+        // never-expiring
+        c.unset_ttl();
+        c.cache_set(2, 200);
+        assert_eq!(check(&c, 2, "never-expiring"), (true, None));
+    }
+
+    #[test]
+    fn expires_at_does_not_touch_hit_or_miss_counters() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let hits = c.cache_hits();
+        let misses = c.cache_misses();
+
+        let _ = c.cache_expires_at(&1u32); // present
+        let _ = c.cache_expires_at(&2u32); // absent
+        let _ = c.expires_at(&1u32); // through the alias
+
+        assert_eq!(c.cache_hits(), hits, "the read must not count a hit");
+        assert_eq!(c.cache_misses(), misses, "the read must not count a miss");
+    }
+
+    // `TtlSortedCache` deliberately does not implement `CacheRefreshOnHit` (see the note above
+    // its `CachedPeek` impl): its deadline-ordered index cannot refresh an expiry on read, so
+    // there is no `set_refresh_on_hit(true)` real-hit control to run here. Instead this pins
+    // that repeated reads report a stable deadline (nothing ever renews it on this store) and
+    // that the deadline-ordered `keys` index is left completely undisturbed by the read.
+    #[test]
+    fn expires_at_never_renews_and_leaves_the_expiry_index_untouched() {
+        let evicted: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let evicted2 = evicted.clone();
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(60))
+            .on_evict(move |k: &u32, _v: &u32| {
+                evicted2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+
+        let before_stamps: Vec<Option<Instant>> = c.keys.iter().map(|s| s.expiry).collect();
+        let before_len = c.keys.len();
+
+        let (_, first) = c.cache_expires_at(&1u32);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (_, second) = c.cache_expires_at(&1u32);
+        assert_eq!(
+            first, second,
+            "reading must never renew the ttl on this store"
+        );
+
+        let after_stamps: Vec<Option<Instant>> = c.keys.iter().map(|s| s.expiry).collect();
+        assert_eq!(
+            c.keys.len(),
+            before_len,
+            "the read must not change the index size"
+        );
+        assert_eq!(
+            after_stamps, before_stamps,
+            "the read must not disturb the deadline-ordered index"
+        );
+
+        // Prove the non-promotion behaviorally too, as the peek's sibling test does: key 1
+        // was inserted first, so it sorts at the front of the deadline-ordered index. If
+        // reading it had renewed or reordered its deadline, it would no longer be the first
+        // entry a real sweep removes.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            c.evict(),
+            2,
+            "both entries share the same ttl and must have expired by now"
+        );
+        assert_eq!(
+            evicted.lock().unwrap().first().copied(),
+            Some(1),
+            "the read key must still be the first entry the sweep removes"
+        );
+    }
+
+    // The point of moving `V: Clone` off the impl block and onto the value-bearing methods: a
+    // deadline read must work on a cache whose value type is not `Clone` at all. The generic
+    // helper carries no `V: Clone` bound anywhere, so this fails to compile if the bound
+    // creeps back onto either the trait method or the impl.
+    #[test]
+    fn expires_at_reads_a_deadline_for_a_value_type_that_is_not_clone() {
+        #[derive(Debug, PartialEq)]
+        struct NotClone(u32);
+
+        fn deadline<K: Hash + Eq + Ord, V>(
+            c: &TtlSortedCache<K, V>,
+            k: &K,
+        ) -> (bool, Option<Instant>) {
+            c.cache_expires_at(k)
+        }
+
+        let ttl = Duration::from_secs(60);
+        let mut c: TtlSortedCache<u32, NotClone> =
+            TtlSortedCache::builder().ttl(ttl).build().unwrap();
+        c.cache_set(1, NotClone(100));
+
+        let (present, expires_at) = deadline(&c, &1);
+        assert!(present);
+        assert!(
+            expires_at.expect("a configured ttl must record a deadline") > Instant::now(),
+            "a live entry expires later"
+        );
+        assert_eq!(deadline(&c, &2), (false, None), "absent key");
+        // The alias is equally bound-free.
+        assert!(c.expires_at(&1u32).0);
+        // The value was never cloned or moved out: it is still in the store.
+        assert_eq!(c.cache_get(&1u32), Some(&NotClone(100)));
+    }
+
+    // The `now >= t` tie convention: the deadline the value-free read reports must be judged
+    // expired at exactly the instant `cache_peek_with_expiry_status` calls the entry expired.
+    #[test]
+    fn expires_at_boundary_matches_now_ge_expires_at_convention() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let tie = Instant::now();
+        insert_raw(&mut c, 1, 100, Some(tie));
+
+        assert_eq!(c.cache_expires_at(&1u32), (true, Some(tie)));
+        assert_eq!(
+            c.cache_peek_with_expiry_status(&1u32),
+            (Some(100), true),
+            "now == expires_at must be treated as expired, matching the now >= expires_at convention"
+        );
+    }
+
+    // Physical removal must be reflected as absent, not as present-with-no-deadline.
+    #[test]
+    fn expires_at_reports_absent_after_removal() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Expired but not yet swept: still present, with a past deadline.
+        let (present, expires_at) = c.cache_expires_at(&1u32);
+        assert!(present);
+        assert!(expires_at.unwrap() <= Instant::now());
+
+        assert_eq!(c.evict(), 1, "evict must remove the expired entry");
+        assert_eq!(
+            c.cache_expires_at(&1u32),
+            (false, None),
+            "a physically removed entry must be reported absent"
+        );
+
+        c.cache_set(2, 200);
+        assert_eq!(c.cache_remove(&2u32), Some(200));
+        assert_eq!(c.cache_expires_at(&2u32), (false, None));
     }
 }

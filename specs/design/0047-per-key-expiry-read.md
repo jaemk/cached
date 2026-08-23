@@ -21,12 +21,16 @@ Two new standalone public traits, mirroring the `CloneCached` / `ConcurrentClone
 
 ```rust
 pub trait CacheExpiry<K, V> {           // single-owner stores, &self, Borrow<Q> key
-    fn cache_peek_expires_at<Q>(&self, key: &Q) -> (Option<V>, Option<Instant>);
-    fn peek_expires_at<Q>(&self, key: &Q) -> (Option<V>, Option<Instant>);  // defaulted alias
+    fn cache_peek_expires_at<Q>(&self, key: &Q) -> (Option<V>, Option<Instant>) where V: Clone;
+    fn peek_expires_at<Q>(&self, key: &Q) -> (Option<V>, Option<Instant>) where V: Clone;  // defaulted alias
+    fn cache_expires_at<Q>(&self, key: &Q) -> (bool, Option<Instant>);     // value-free, no V: Clone
+    fn expires_at<Q>(&self, key: &Q) -> (bool, Option<Instant>);           // defaulted alias
 }
 pub trait ConcurrentCacheExpiry<K, V> { // sharded stores, &self, &K
-    fn cache_peek_expires_at(&self, key: &K) -> (Option<V>, Option<Instant>);
-    fn peek_expires_at(&self, key: &K) -> (Option<V>, Option<Instant>);     // defaulted alias
+    fn cache_peek_expires_at(&self, key: &K) -> (Option<V>, Option<Instant>) where V: Clone;
+    fn peek_expires_at(&self, key: &K) -> (Option<V>, Option<Instant>) where V: Clone;     // defaulted alias
+    fn cache_expires_at(&self, key: &K) -> (bool, Option<Instant>);        // value-free, no V: Clone
+    fn expires_at(&self, key: &K) -> (bool, Option<Instant>);              // defaulted alias
 }
 ```
 
@@ -36,6 +40,12 @@ the crate. Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `Expiring
 `ShardedExpiringCache`, `ShardedExpiringLruCache`). Not implemented by `RedisCache`,
 `AsyncRedisCache`, or `RedbCache` (they implement neither `CloneCached` nor
 `ConcurrentCloneCached`), and not by the non-expiry stores.
+
+`cache_expires_at` / `expires_at` ship with the same per-store overrides as
+`cache_peek_expires_at` (no shared defaulted body across stores). The `V: Clone` bound moved off
+each trait's impl blocks and onto `cache_peek_expires_at` / `peek_expires_at` specifically, so
+`cache_expires_at` / `expires_at` are callable on a store whose value type does not implement
+`Clone` at all.
 
 Both traits join the crate-root exports and `cached::prelude`, matching `CloneCached` /
 `ConcurrentCloneCached`.
@@ -53,6 +63,17 @@ into an unrelated obligation for no benefit.
 expires" from "already expired" - both collapse to `None` or zero. `Instant` gives `None` = no
 deadline, `Some(past)` = expired, `Some(future)` = live, and it is already the type
 `CacheValue::expires_at()` returns, so the two per-entry deadline surfaces agree.
+
+**`(bool, Option<Instant>)`, not a bare `Option<Instant>`, for the value-free read.** A caller who
+only wants the deadline still needs to distinguish "key absent" from "key present, never expires",
+since a threshold-refresh policy takes opposite actions for the two (a cold fetch versus doing
+nothing). Both collapse to `None` in a bare `Option<Instant>`, the same information loss the
+`Option<Instant>` (rather than `Option<Duration>`) decision above already rejected for the
+deadline itself. A new public enum was considered and rejected too: the crate's existing public
+enums are all error types (`RedbCacheError`, `RedisCacheError`, `BuildError`, `SetMaxSizeError`,
+`SetTtlError`, and similar), not status returns, and a tuple keeps `cache_expires_at` consistent
+with the tuple shape every other read in this family already uses (`(Option<V>, bool)` on
+`cache_peek_with_expiry_status`, `(Option<V>, Option<Instant>)` on `cache_peek_expires_at`).
 
 **`&K`, not `Borrow<Q>`, on the concurrent trait.** Same reasoning already documented on
 `ConcurrentCloneCached`: the concurrent trait family includes external stores that must serialize
@@ -87,6 +108,14 @@ onto every implementor.
 **Remaining `Duration` instead of `Instant`.** Rejected - cannot express "no deadline" versus
 "already expired" as distinct values.
 
+**A bare `Option<Instant>` for the value-free read.** Rejected - collapses "key absent" and "key
+present, never expires" into the same `None`, and a threshold-refresh policy needs to tell them
+apart.
+
+**A new public enum for the value-free read's result.** Rejected - the crate's existing public
+enums are all error types, and a tuple keeps `cache_expires_at` consistent with the tuple shape of
+every other read in this family.
+
 **Macro-level `refresh_ahead` attribute.** Rejected - the macro has the same no-runtime
 constraint as the caller, so it could only generate sugar over `peek_expires_at` plus a caller-
 supplied threshold, for extra attribute surface and no new capability.
@@ -96,7 +125,10 @@ supplied threshold, for extra attribute surface and no new capability.
 - New public traits `CacheExpiry` and `ConcurrentCacheExpiry`, both in `cached::prelude`.
 - `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`,
   `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, and `ShardedExpiringLruCache`
-  each gain `cache_peek_expires_at` / `peek_expires_at`.
+  each gain `cache_peek_expires_at` / `peek_expires_at`, and `cache_expires_at` / `expires_at`.
+- `V: Clone` moved off the `CacheExpiry` / `ConcurrentCacheExpiry` impl blocks and onto
+  `cache_peek_expires_at` / `peek_expires_at` specifically, so `cache_expires_at` / `expires_at`
+  are usable on a value type with no `Clone` impl at all.
 - `examples/refresh_before_expiry.rs` composes the new read with `{fn}_prime_cache`: peek the
   deadline, compare against a threshold, spawn the refresh. It is the first recipe in the crate
   that works against the sharded stores, since they have no enumeration API to fall back to.

@@ -309,9 +309,14 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   normal read-side semantics without recency or refresh mutation.
 - [`CacheExpiry`] is the per-key expiry read for single-owner stores: `cache_peek_expires_at`
   (alias `peek_expires_at`) returns `(Option<V>, Option<Instant>)`, the value plus the instant it
-  expires at, so callers can refresh when the remaining TTL drops below a threshold. It carries the
-  same no-side-effect contract as `cache_peek_with_expiry_status` and is implemented by the
-  expiry-capable single-owner stores ([`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
+  expires at, so callers can refresh when the remaining TTL drops below a threshold.
+  `cache_expires_at` (alias `expires_at`) is the value-free form, returning
+  `(bool, Option<Instant>)`: presence plus the same instant, with no clone and no `V: Clone` bound,
+  so it reads a deadline out of a cache whose value type is not `Clone`. The presence flag keeps an
+  absent key (`(false, None)`) distinct from a present entry that never expires (`(true, None)`).
+  Both carry the same no-side-effect contract as `cache_peek_with_expiry_status` and are
+  implemented by the expiry-capable single-owner stores
+  ([`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
   [`ExpiringCache`], [`ExpiringLruCache`]). On the `Expires`-based stores the instant is advisory
   (it is `None` unless the value type overrides [`Expires::expires_at`], and `is_expired` stays the
   authority); the TTL stores report a real deadline. The Redis and redb stores do not implement it.
@@ -337,12 +342,13 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
   counting, LRU promotion, or TTL renewal). The same four stores implement
   [`ConcurrentCacheExpiry`], the concurrent counterpart of [`CacheExpiry`], whose
-  `cache_peek_expires_at` returns `(Option<V>, Option<Instant>)` under the same no-side-effect
+  `cache_peek_expires_at` returns `(Option<V>, Option<Instant>)` and whose value-free
+  `cache_expires_at` returns `(bool, Option<Instant>)`, both under the same no-side-effect
   contract (advisory instant on the two `Expires`-based stores, a real deadline on the two TTL
   stores). The Redis and redb stores implement neither. `#[concurrent_cached]` selects a supporting
   store under the same configurations as `#[cached]` (`ttl_secs` / `ttl` / `ttl_millis`, with or
   without `max_size`, and `expires = true`). Unlike `set` / `get` / `len` / `contains` / `peek`,
-  `cache_peek_expires_at` has no inherent shim on the sharded types, so it needs
+  neither expiry read has an inherent shim on the sharded types, so both need
   `use cached::ConcurrentCacheExpiry;` in scope.
 
 **Sharded stores: inherent methods shadow the trait methods**
@@ -493,9 +499,10 @@ When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt
 
 Implement [`Expires::expires_at`] too if the entry's deadline should be readable. It defaults to
 `None`, and a value type that implements only `is_expired` makes the per-key expiry read
-([`CacheExpiry`] / [`ConcurrentCacheExpiry`]) return `(Some(v), None)` for live and expired
-entries alike, so a remaining-TTL policy built on that read never fires and never reports an
-error. `is_expired` stays the liveness authority on these stores either way.
+([`CacheExpiry`] / [`ConcurrentCacheExpiry`]) return `(Some(v), None)` (or `(true, None)` from the
+value-free `cache_expires_at`) for live and expired entries alike, so a remaining-TTL policy built
+on that read never fires and never reports an error. `is_expired` stays the liveness authority on
+these stores either way.
 
 The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example uses the same pattern):
 

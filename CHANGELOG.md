@@ -12,6 +12,10 @@
   standalone traits, not new required methods on `CloneCached` / `ConcurrentCloneCached`.
   Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`,
   `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, and `ShardedExpiringLruCache`.
+  Both traits also provide a value-free `cache_expires_at()` / `expires_at()`, returning `(bool,
+  Option<Instant>)` (presence, deadline) instead of cloning the value, for callers who only need
+  the remaining time; it needs no `V: Clone` bound, since that bound moved off the impl blocks and
+  onto the value-returning methods (`cache_peek_expires_at` / `peek_expires_at`).
   On `ExpiringCache`, `ExpiringLruCache`, `ShardedExpiringCache`, and `ShardedExpiringLruCache`
   the deadline comes from `Expires::expires_at()`, whose default body returns `None`: for an
   `Expires` impl that only implements `is_expired` (the crate's own documented recipe), the read
