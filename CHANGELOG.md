@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- New runnable example `examples/stale_while_revalidate.rs`: serve an expired value
+  immediately and refresh it off the critical path, composed from
+  `cache_peek_with_expiry_status` (which returns an expired entry as
+  `(Some(value), true)` without removing it) and `{fn}_prime_cache` (which runs the
+  function body outside the cache write lock). Covers the sync `#[cached]`, async
+  `#[cached]`, and async `#[concurrent_cached]` static shapes, and an in-flight guard
+  that collapses concurrent refreshes for the same key. No API change.
+
 ## [3.0.0 / cached_proc_macro 3.0.0 / cached_proc_macro_types 3.0.0] - 2026-08-22
 
 This entry describes the complete 2.0.2 -> 3.0.0 delta. The ten release candidates
