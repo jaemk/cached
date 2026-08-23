@@ -169,3 +169,26 @@ already callable on any async store with no extension trait imported. Aliasing t
 `async_len` / `async_hits` names on methods that return plain values rather than futures, which
 promises a future that is not there. `async_cache_reset_metrics` is likewise not forwarded,
 matching `ConcurrentCachedExt`.
+
+## CTRAIT-9
+
+`ConcurrentCacheExpiry<K, V>` is the `&self` mirror of `CacheExpiry`
+([traits-core.md](traits-core.md) TRAIT-6): required `cache_peek_expires_at(&self, &K) ->
+(Option<V>, Option<Instant>)` plus a defaulted `peek_expires_at` alias, with the identical
+side-effect-free contract (no LRU promotion, hit/miss counting, TTL renewal, or lazy removal) and
+the identical `(None, None)` / `(Some(v), None)` / `(Some(v), Some(t))` result shape. It answers
+GitHub issue #91 (refresh when the remaining TTL drops below a threshold) for the concurrent
+stores, the same gap TRAIT-6 closes on the single-owner side.
+
+Implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, and
+`ShardedExpiringLruCache`. Not implemented by `RedisCache`, `AsyncRedisCache`, or `RedbCache`
+(none of the three implement `ConcurrentCloneCached`), nor by the non-expiry stores
+`ShardedUnboundCache` / `ShardedLruCache`, matching CTRAIT-2/CTRAIT-3's peek-is-an-in-memory-concept
+rationale ([design/0040-peek-is-an-in-memory-concept.md](design/0040-peek-is-an-in-memory-concept.md)).
+On `ShardedExpiringCache` / `ShardedExpiringLruCache`, whose deadline comes from
+`Expires::expires_at()`, the returned `Instant` is advisory in the same way described at TRAIT-6:
+it can be `None` for an expired entry and can be in the past for an entry `Expires::is_expired()`
+still reports live.
+
+Deliberately a standalone trait rather than a new required method on `ConcurrentCloneCached`: that
+would break external store implementations.

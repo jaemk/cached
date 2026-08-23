@@ -306,6 +306,14 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 - `CachedPeek` provides non-mutating lookups that do not update recency, refresh TTLs, or record
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
+- [`CacheExpiry`] is the per-key expiry read for single-owner stores: `cache_peek_expires_at`
+  (alias `peek_expires_at`) returns `(Option<V>, Option<Instant>)`, the value plus the instant it
+  expires at, so callers can refresh when the remaining TTL drops below a threshold. It carries the
+  same no-side-effect contract as `cache_peek_with_expiry_status` and is implemented by the
+  expiry-capable single-owner stores ([`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
+  [`ExpiringCache`], [`ExpiringLruCache`]). On the `Expires`-based stores the instant is advisory
+  (it is `None` unless the value type overrides [`Expires::expires_at`], and `is_expired` stays the
+  authority); the TTL stores report a real deadline. The Redis and redb stores do not implement it.
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
@@ -321,7 +329,11 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
-  counting, LRU promotion, or TTL renewal).
+  counting, LRU promotion, or TTL renewal). The same four stores implement
+  [`ConcurrentCacheExpiry`], the concurrent counterpart of [`CacheExpiry`], whose
+  `cache_peek_expires_at` returns `(Option<V>, Option<Instant>)` under the same no-side-effect
+  contract (advisory instant on the two `Expires`-based stores, a real deadline on the two TTL
+  stores). The Redis and redb stores implement neither.
 
 **Sharded stores: inherent methods shadow the trait methods**
 
@@ -1161,10 +1173,10 @@ pub mod __private {
 /// (e.g. `use cached::ShardedUnboundCache;`).
 pub mod prelude {
     pub use crate::{
-        CacheEvict, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek, CachedRead,
-        CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCachePeek,
-        ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached, ConcurrentCachedExt,
-        ConcurrentCloneCached, Expires, IntoValues, SerializeCached,
+        CacheEvict, CacheExpiry, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek,
+        CachedRead, CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheExpiry,
+        ConcurrentCachePeek, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached,
+        ConcurrentCachedExt, ConcurrentCloneCached, Expires, IntoValues, SerializeCached,
     };
 
     // Unconditional, like `ConcurrentCacheTtl` above: the traits themselves are
@@ -1970,6 +1982,85 @@ pub trait CloneCached<K, V> {
     }
 }
 
+/// Per-key expiry read for single-owner stores: the value plus the instant it expires at.
+///
+/// [`cache_peek_with_expiry_status`](CloneCached::cache_peek_with_expiry_status) answers only
+/// "expired: yes or no". This trait returns the deadline itself, so a caller can express a
+/// "remaining TTL below a threshold" predicate and refresh early:
+///
+/// ```rust
+/// # #[cfg(feature = "time_stores")]
+/// # {
+/// use cached::{CacheExpiry, CachedExt, TtlCache};
+/// use cached::time::{Duration, Instant};
+///
+/// let mut c = TtlCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
+/// c.set("k".to_string(), 1);
+///
+/// let (value, expires_at) = c.peek_expires_at(&"k".to_string());
+/// assert_eq!(value, Some(1));
+/// let remaining = expires_at.map(|t| t.saturating_duration_since(Instant::now()));
+/// // refresh when less than 10s of the 60s ttl is left
+/// assert!(!remaining.is_some_and(|d| d < Duration::from_secs(10)));
+///
+/// assert_eq!(c.peek_expires_at(&"absent".to_string()), (None, None));
+/// # }
+/// ```
+///
+/// This is a standalone trait rather than a new method on [`CloneCached`]: adding a required
+/// method there would break every external store that implements it. It is also not a supertrait
+/// of [`CloneCached`], which would force implementors to provide `CloneCached` for no benefit.
+///
+/// The deadline is an [`Instant`](crate::time::Instant), not a remaining `Duration`, because a
+/// `Duration` cannot distinguish "never expires" from "already expired". It is the same type
+/// [`Expires::expires_at`] returns.
+///
+/// # Return values
+///
+/// - `(None, None)`: the key is absent.
+/// - `(Some(v), None)`: present, with no known deadline (TTL disabled at insert time, or an
+///   [`Expires`] value type that does not override `expires_at`).
+/// - `(Some(v), Some(t))` with `t` in the future: present and live.
+/// - `(Some(v), Some(t))` with `t` in the past: present but expired. The entry is returned and
+///   **not** removed, consistent with `cache_peek_with_expiry_status` returning `(Some(v), true)`.
+///
+/// # Side effects
+///
+/// None, identical to the peek it parallels: no LRU promotion, no hits/misses counter increment,
+/// no TTL renewal (`refresh_on_hit` does not fire), and no lazy removal of an expired entry.
+///
+/// # Caveat on the `Expires`-based stores
+///
+/// [`TtlCache`], [`LruTtlCache`], and [`TtlSortedCache`] store a real deadline and deliver the
+/// full contract above. On the [`Expires`]-based stores ([`ExpiringCache`], [`ExpiringLruCache`])
+/// the deadline is whatever [`Expires::expires_at`] reports, and there it is advisory only:
+/// the default implementation returns `None`, so it is `None` for any value type that does not
+/// override it (including entries that are expired), and it may be in the past for an entry that
+/// [`Expires::is_expired`] reports as live. `is_expired` is the authority on those stores, so
+/// [`cache_peek_with_expiry_status`](CloneCached::cache_peek_with_expiry_status) remains the
+/// authoritative liveness read there.
+pub trait CacheExpiry<K, V> {
+    /// Peek at the value and the instant it expires at, with no read side effects.
+    ///
+    /// See the [trait docs](CacheExpiry) for the four return shapes and the `Expires`-store
+    /// caveat.
+    fn cache_peek_expires_at<Q>(&self, key: &Q) -> (Option<V>, Option<crate::time::Instant>)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone;
+
+    /// Ergonomic alias for [`cache_peek_expires_at`](Self::cache_peek_expires_at).
+    fn peek_expires_at<Q>(&self, key: &Q) -> (Option<V>, Option<crate::time::Instant>)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        self.cache_peek_expires_at(key)
+    }
+}
+
 /// Concurrent analogue of [`CloneCached`] for the internally-synchronized sharded stores.
 ///
 /// Like [`CloneCached`], [`cache_get_with_expiry_status`](ConcurrentCloneCached::cache_get_with_expiry_status)
@@ -2047,6 +2138,79 @@ pub trait ConcurrentCloneCached<K, V> {
     /// Ergonomic alias for [`cache_peek_with_expiry_status`](Self::cache_peek_with_expiry_status).
     fn peek_with_expiry_status(&self, key: &K) -> (Option<V>, bool) {
         self.cache_peek_with_expiry_status(key)
+    }
+}
+
+/// Concurrent analogue of [`CacheExpiry`] for the internally-synchronized sharded stores.
+///
+/// Returns the value plus the instant it expires at, so a caller can express a "remaining TTL
+/// below a threshold" predicate that
+/// [`cache_peek_with_expiry_status`](ConcurrentCloneCached::cache_peek_with_expiry_status),
+/// which reports only a boolean, cannot:
+///
+/// ```rust
+/// # #[cfg(feature = "time_stores")]
+/// # {
+/// use cached::{ConcurrentCacheExpiry, ShardedTtlCache};
+/// use cached::time::{Duration, Instant};
+///
+/// let c = ShardedTtlCache::builder().ttl(Duration::from_secs(60)).build().unwrap();
+/// c.set("k".to_string(), 1_i32);
+///
+/// let (value, expires_at) = c.peek_expires_at(&"k".to_string());
+/// assert_eq!(value, Some(1_i32));
+/// let remaining = expires_at.map(|t| t.saturating_duration_since(Instant::now()));
+/// // refresh when less than 10s of the 60s ttl is left
+/// assert!(!remaining.is_some_and(|d| d < Duration::from_secs(10)));
+///
+/// assert_eq!(c.peek_expires_at(&"absent".to_string()), (None, None));
+/// # }
+/// ```
+///
+/// Like [`CacheExpiry`], this is a standalone trait rather than a new required method on
+/// [`ConcurrentCloneCached`] (which would break external store implementations) and not a
+/// supertrait of it. The return is a bare tuple, mirroring [`ConcurrentCloneCached`] rather than
+/// the `Result`-returning [`ConcurrentCached`] family.
+///
+/// **Why `&K` instead of `&Q` (`Borrow<Q>`)**: same reason as [`ConcurrentCloneCached`], the
+/// concurrent cache trait family includes external stores that must serialize the key, so the
+/// trait takes `&K` directly rather than a generic `Borrow<Q>` that carries no serialization
+/// guarantee.
+///
+/// # Return values
+///
+/// - `(None, None)`: the key is absent.
+/// - `(Some(v), None)`: present, with no known deadline (TTL disabled at insert time, or an
+///   [`Expires`] value type that does not override `expires_at`).
+/// - `(Some(v), Some(t))` with `t` in the future: present and live.
+/// - `(Some(v), Some(t))` with `t` in the past: present but expired. The entry is returned and
+///   **not** removed, consistent with `cache_peek_with_expiry_status` returning `(Some(v), true)`.
+///
+/// # Side effects
+///
+/// None, identical to the peek it parallels: no LRU promotion, no hits/misses counter increment,
+/// no TTL renewal (`refresh_on_hit` does not fire), and no lazy removal of an expired entry.
+///
+/// # Caveat on the `Expires`-based stores
+///
+/// [`ShardedTtlCache`] and [`ShardedLruTtlCache`] store a real deadline and deliver the full
+/// contract above. On [`ShardedExpiringCache`] and [`ShardedExpiringLruCache`] the deadline is
+/// whatever [`Expires::expires_at`] reports, and there it is advisory only: the default
+/// implementation returns `None`, so it is `None` for any value type that does not override it
+/// (including entries that are expired), and it may be in the past for an entry that
+/// [`Expires::is_expired`] reports as live. `is_expired` is the authority on those stores, so
+/// [`cache_peek_with_expiry_status`](ConcurrentCloneCached::cache_peek_with_expiry_status)
+/// remains the authoritative liveness read there.
+pub trait ConcurrentCacheExpiry<K, V> {
+    /// Peek at the value and the instant it expires at, with no read side effects.
+    ///
+    /// See the [trait docs](ConcurrentCacheExpiry) for the four return shapes and the
+    /// `Expires`-store caveat.
+    fn cache_peek_expires_at(&self, key: &K) -> (Option<V>, Option<crate::time::Instant>);
+
+    /// Ergonomic alias for [`cache_peek_expires_at`](Self::cache_peek_expires_at).
+    fn peek_expires_at(&self, key: &K) -> (Option<V>, Option<crate::time::Instant>) {
+        self.cache_peek_expires_at(key)
     }
 }
 

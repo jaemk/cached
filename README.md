@@ -307,6 +307,14 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 - `CachedPeek` provides non-mutating lookups that do not update recency, refresh TTLs, or record
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
+- [`CacheExpiry`] is the per-key expiry read for single-owner stores: `cache_peek_expires_at`
+  (alias `peek_expires_at`) returns `(Option<V>, Option<Instant>)`, the value plus the instant it
+  expires at, so callers can refresh when the remaining TTL drops below a threshold. It carries the
+  same no-side-effect contract as `cache_peek_with_expiry_status` and is implemented by the
+  expiry-capable single-owner stores ([`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
+  [`ExpiringCache`], [`ExpiringLruCache`]). On the `Expires`-based stores the instant is advisory
+  (it is `None` unless the value type overrides [`Expires::expires_at`], and `is_expired` stays the
+  authority); the TTL stores report a real deadline. The Redis and redb stores do not implement it.
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
@@ -322,7 +330,11 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
-  counting, LRU promotion, or TTL renewal).
+  counting, LRU promotion, or TTL renewal). The same four stores implement
+  [`ConcurrentCacheExpiry`], the concurrent counterpart of [`CacheExpiry`], whose
+  `cache_peek_expires_at` returns `(Option<V>, Option<Instant>)` under the same no-side-effect
+  contract (advisory instant on the two `Expires`-based stores, a real deadline on the two TTL
+  stores). The Redis and redb stores implement neither.
 
 **Sharded stores: inherent methods shadow the trait methods**
 

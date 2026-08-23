@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CacheExpiry` and `ConcurrentCacheExpiry` traits, providing `cache_peek_expires_at()` /
+  `peek_expires_at()`: a side-effect-free per-key read returning `(Option<V>, Option<Instant>)`
+  instead of the `bool` `cache_peek_with_expiry_status` returns, so callers can implement a
+  threshold-based refresh (refresh when the remaining TTL drops below N) directly against the
+  deadline ([#91](https://github.com/jaemk/cached/issues/91)). Additive and non-breaking:
+  standalone traits, not new required methods on `CloneCached` / `ConcurrentCloneCached`.
+  Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`,
+  `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, and `ShardedExpiringLruCache`.
+
 ### Documentation
 
 - New runnable example `examples/stale_while_revalidate.rs`: serve an expired value

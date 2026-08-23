@@ -65,3 +65,4 @@ the item stays here for history.
 | [0044](0044-blanket-shardhasher-over-buildhasher.md) | Blanket `ShardHasher` impl over `BuildHasher` | Implemented |
 | [0045](0045-refresh-on-hit-trait-split.md) | Refresh-on-hit split into its own trait, on both sides | Implemented |
 | [0046](0046-configurable-key-replacement-policy.md) | Key replacement on overwrite is configurable, defaulting to replace | Not implemented (declined) |
+| [0047](0047-per-key-expiry-read.md) | Per-key expiry read: `CacheExpiry` / `ConcurrentCacheExpiry` | Implemented |

@@ -1,6 +1,8 @@
 use crate::time::Duration;
 use crate::time::Instant;
-use crate::{CacheEvict, CacheTtl, Cached, CachedIter, CachedPeek, CachedRead, CloneCached};
+use crate::{
+    CacheEvict, CacheExpiry, CacheTtl, Cached, CachedIter, CachedPeek, CachedRead, CloneCached,
+};
 
 use super::{DefaultHashBuilder, StripedCounter};
 use std::borrow::Borrow;
@@ -1486,6 +1488,27 @@ impl<K: Hash + Eq + Ord + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K
     }
 }
 
+impl<K: Hash + Eq + Ord, V: Clone, S: BuildHasher> CacheExpiry<K, V> for TtlSortedCache<K, V, S> {
+    /// Returns the stored value and its expiry instant, with no read side effects.
+    ///
+    /// The instant is the entry's own deadline, `None` when the entry never expires (TTL was
+    /// disabled at insert time). An expired entry is returned with its past deadline and is
+    /// **not** removed. Uses the same lookup as
+    /// [`cache_peek_with_expiry_status`](CloneCached::cache_peek_with_expiry_status): no
+    /// hit/miss counting, no TTL renewal, and the expiry-ordered index is left untouched.
+    fn cache_peek_expires_at<Q>(&self, k: &Q) -> (Option<V>, Option<Instant>)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        match self.map.get(k) {
+            Some(entry) => (Some(entry.value.clone()), entry.expiry),
+            None => (None, None),
+        }
+    }
+}
+
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, S> CachedGetOrSetAsync<K, V> for TtlSortedCache<K, V, S>
@@ -1581,7 +1604,8 @@ impl<K: std::hash::Hash + Eq + Ord + Clone, V, S: BuildHasher> CacheEvict
 mod test {
     use crate::stores::TtlSortedCache;
     use crate::time::Duration;
-    use crate::{CacheTtl, Cached, CachedExt, CachedRead};
+    use crate::time::Instant;
+    use crate::{CacheExpiry, CacheTtl, Cached, CachedExt, CachedRead, CloneCached};
     use std::cmp::Ordering as CmpOrdering;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
@@ -5946,5 +5970,349 @@ mod test {
             assert_eq!(async_try.cache_evictions(), Some(0));
             assert_index_lockstep(&async_try, "async try cancellation");
         }
+    }
+
+    // --- peek_expires_at -------------------------------------------------------
+
+    #[test]
+    fn peek_expires_at_absent_key_returns_none_none() {
+        let c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_peek_expires_at(&1u32), (None, None));
+        assert_eq!(c.peek_expires_at(&1u32), (None, None));
+    }
+
+    #[test]
+    fn peek_expires_at_live_entry_returns_the_stored_future_deadline() {
+        let ttl = Duration::from_secs(60);
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder().ttl(ttl).build().unwrap();
+        let before = Instant::now();
+        c.cache_set(1, 100);
+        let after = Instant::now();
+
+        let stored = c
+            .map
+            .get(&1)
+            .expect("entry must be present")
+            .expiry
+            .expect("a configured ttl must record a deadline");
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100));
+        assert_eq!(
+            expires_at,
+            Some(stored),
+            "the reported deadline must be the one the store holds"
+        );
+        let expires_at = expires_at.unwrap();
+        assert!(expires_at > Instant::now(), "a live entry expires later");
+        assert!(expires_at >= before + ttl && expires_at <= after + ttl);
+    }
+
+    #[test]
+    fn peek_expires_at_never_expiring_entry_reports_no_deadline() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // A zero ttl disables expiry, so the entry is stored without a deadline.
+        c.unset_ttl();
+        c.cache_set(1, 100);
+        assert_eq!(c.cache_peek_expires_at(&1u32), (Some(100), None));
+        // Distinguishable from an absent key by the value, not by the deadline.
+        assert_eq!(c.cache_peek_with_expiry_status(&1u32), (Some(100), false));
+    }
+
+    #[test]
+    fn peek_expires_at_expired_entry_returns_a_past_deadline_and_keeps_the_entry() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100), "an expired entry is still returned");
+        let expires_at = expires_at.expect("an expired entry still carries its deadline");
+        assert!(expires_at <= Instant::now(), "the deadline is in the past");
+        // Not removed by the peek: a second peek sees the same entry and deadline, and
+        // the raw entry count (which includes not-yet-swept expired entries) is unchanged.
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(100), Some(expires_at))
+        );
+    }
+
+    #[test]
+    fn peek_expires_at_deadline_is_past_exactly_when_peek_reports_expired() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        for _ in 0..2 {
+            let (_, expires_at) = c.cache_peek_expires_at(&1u32);
+            let (_, expired) = c.cache_peek_with_expiry_status(&1u32);
+            assert_eq!(
+                expires_at.is_some_and(|t| t <= Instant::now()),
+                expired,
+                "the deadline must be in the past exactly when the peek reports expired"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        }
+    }
+
+    #[test]
+    fn peek_expires_at_does_not_touch_hit_or_miss_counters() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let hits = c.cache_hits();
+        let misses = c.cache_misses();
+
+        let _ = c.cache_peek_expires_at(&1u32); // present
+        let _ = c.cache_peek_expires_at(&2u32); // absent
+
+        assert_eq!(c.cache_hits(), hits, "a peek must not count a hit");
+        assert_eq!(c.cache_misses(), misses, "a peek must not count a miss");
+    }
+
+    // `TtlSortedCache` deliberately does not implement `CacheRefreshOnHit` (see the note
+    // above its `CachedPeek` impl): its deadline-ordered index cannot refresh an expiry on
+    // read. So instead of a refresh-on-hit control, this pins that repeated peeks report a
+    // stable deadline (no implicit renewal ever happens on this store, hit or not) and that
+    // the deadline-ordered `keys` index is left completely undisturbed by the peek.
+    #[test]
+    fn peek_expires_at_never_renews_and_leaves_the_expiry_index_untouched() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+
+        let before_stamps: Vec<Option<Instant>> = c.keys.iter().map(|s| s.expiry).collect();
+        let before_len = c.keys.len();
+
+        let (_, first) = c.cache_peek_expires_at(&1u32);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let (_, second) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(
+            first, second,
+            "peeking must never renew the ttl on this store"
+        );
+
+        let after_stamps: Vec<Option<Instant>> = c.keys.iter().map(|s| s.expiry).collect();
+        assert_eq!(
+            c.keys.len(),
+            before_len,
+            "peek must not change the index size"
+        );
+        assert_eq!(
+            after_stamps, before_stamps,
+            "peek must not disturb the deadline-ordered index"
+        );
+    }
+
+    /// Gap 3 sanity check: confirm the peeked key (1) really does sort at the FRONT of the
+    /// deadline-ordered `keys` index (it was inserted first, so it has the earliest expiry),
+    /// making `peek_expires_at_never_renews_and_leaves_the_expiry_index_untouched` a genuine
+    /// near-front-of-index case rather than an accidental one.
+    #[test]
+    fn peek_expires_at_front_of_index_key_is_the_one_being_peeked() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        c.cache_set(2, 200);
+
+        let front_key = c
+            .keys
+            .iter()
+            .next()
+            .and_then(|s| s.key.as_ref())
+            .map(|k| *k.0)
+            .expect("index must be non-empty");
+        assert_eq!(
+            front_key, 1,
+            "key 1 was inserted first so it must have the earliest expiry and sort first"
+        );
+
+        // Peeking the front-of-index key must not disturb its front position.
+        let _ = c.cache_peek_expires_at(&1u32);
+        let front_key_after = c
+            .keys
+            .iter()
+            .next()
+            .and_then(|s| s.key.as_ref())
+            .map(|k| *k.0)
+            .expect("index must be non-empty");
+        assert_eq!(front_key_after, 1);
+    }
+
+    /// Gap: peeking an expired-but-not-yet-swept entry, then physically sweeping it with
+    /// `evict()`, must transition the peek's view from "present with a past deadline" to
+    /// fully absent.
+    #[test]
+    fn peek_expires_at_reports_absent_after_evict_sweeps_the_expired_entry() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100));
+        assert!(expires_at.is_some());
+        assert_eq!(c.cache_size(), 1);
+
+        assert_eq!(c.evict(), 1, "the expired entry must be swept");
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (None, None),
+            "after evict() physically removes the entry, peek must report absent"
+        );
+    }
+
+    /// Gap: `retain()` removes expired entries unconditionally while leaving live entries
+    /// the predicate keeps untouched. A peek before/after must track that split exactly.
+    #[test]
+    fn peek_expires_at_interleaved_with_retain_tracks_the_sweep() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        c.cache_set(2, 200);
+
+        assert!(c.cache_peek_expires_at(&1u32).1.is_some());
+        let (_, live_before) = c.cache_peek_expires_at(&2u32);
+        assert!(live_before.is_some());
+
+        let removed = c.retain(|_k, _v| true);
+        assert_eq!(removed, 1);
+
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (None, None),
+            "retain must have swept the expired key"
+        );
+        assert_eq!(
+            c.cache_peek_expires_at(&2u32),
+            (Some(200), live_before),
+            "retain must leave the live, kept key's peek view unchanged"
+        );
+    }
+
+    /// Gap: the defaulted `peek_expires_at` alias must agree with `cache_peek_expires_at`
+    /// across every return shape the contract defines, not just the absent-key case the
+    /// existing alias test covers.
+    #[test]
+    fn peek_expires_at_alias_agrees_with_primary_across_all_shapes() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        // Live.
+        c.cache_set(1, 100);
+        assert_eq!(c.peek_expires_at(&1u32), c.cache_peek_expires_at(&1u32));
+        let (_, live_deadline) = c.cache_peek_expires_at(&1u32);
+        assert!(live_deadline.is_some());
+
+        // Never-expiring.
+        c.unset_ttl();
+        c.cache_set(2, 200);
+        assert_eq!(c.peek_expires_at(&2u32), c.cache_peek_expires_at(&2u32));
+        assert_eq!(c.cache_peek_expires_at(&2u32), (Some(200), None));
+
+        // Expired.
+        c.set_ttl(Duration::from_millis(20));
+        c.cache_set(3, 300);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(c.peek_expires_at(&3u32), c.cache_peek_expires_at(&3u32));
+        let (expired_value, expired_deadline) = c.cache_peek_expires_at(&3u32);
+        assert_eq!(expired_value, Some(300));
+        assert!(expired_deadline.is_some_and(|t| t <= Instant::now()));
+    }
+
+    /// Cross-store consistency: an extreme TTL that overflows `Instant::checked_add`
+    /// must be reported by `cache_peek_expires_at` as never-expiring, exactly like
+    /// `set_with_ttl_overflow_stores_never_expiring_entry` already pins through `cache_get`.
+    #[test]
+    fn peek_expires_at_reports_no_deadline_under_ttl_overflow() {
+        let mut c = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let _ = c.set_with(1u32, 42u32).ttl(Duration::MAX).set();
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(42), None),
+            "a TTL that overflows Instant::checked_add must peek as never-expiring"
+        );
+    }
+
+    /// Pins the `now == expires_at` boundary through `cache_peek_expires_at` directly,
+    /// using `insert_raw` to write an exact tied deadline (companion to
+    /// `entry_is_expired_at_uses_at_or_after_boundary`).
+    #[test]
+    fn peek_expires_at_boundary_matches_now_ge_expires_at_convention() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let tie = Instant::now();
+        insert_raw(&mut c, 1, 100, Some(tie));
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100));
+        assert_eq!(expires_at, Some(tie));
+        assert!(
+            expires_at.is_some_and(|t| t <= Instant::now()),
+            "a tie (now >= expires_at) must be reported as already past"
+        );
+        assert_eq!(
+            c.cache_peek_with_expiry_status(&1u32),
+            (Some(100), true),
+            "the tie must also be flagged expired by the sibling peek method"
+        );
+    }
+
+    /// Gap: `set_ttl` / `unset_ttl` change the store-wide TTL used for *future* writes; an
+    /// already-stored entry's own deadline must not retroactively change.
+    #[test]
+    fn peek_expires_at_ignores_later_set_ttl_and_unset_ttl_changes() {
+        let mut c: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let (_, original_deadline) = c.cache_peek_expires_at(&1u32);
+        assert!(original_deadline.is_some());
+
+        c.set_ttl(Duration::from_secs(600));
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(100), original_deadline),
+            "set_ttl must not retroactively change an existing entry's deadline"
+        );
+
+        c.unset_ttl();
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(100), original_deadline),
+            "unset_ttl must not retroactively clear an existing entry's deadline"
+        );
     }
 }
