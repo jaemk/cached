@@ -10,7 +10,9 @@
   `(Some(value), true)` without removing it) and `{fn}_prime_cache` (which runs the
   function body outside the cache write lock). Covers the sync `#[cached]`, async
   `#[cached]`, and async `#[concurrent_cached]` static shapes, and an in-flight guard
-  that collapses concurrent refreshes for the same key. No API change.
+  that collapses concurrent refreshes for the same key, and a single-flight section
+  adding `sync_writes = "by_key"` so the cold path deduplicates while stale reads still
+  never block. No API change.
 
 ## [3.0.0 / cached_proc_macro 3.0.0 / cached_proc_macro_types 3.0.0] - 2026-08-22
 
