@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-24
+
 ### Added
 
 - `CacheExpiry` and `ConcurrentCacheExpiry` traits, providing `cache_peek_expires_at()` /
@@ -40,6 +42,13 @@
   that collapses concurrent refreshes for the same key, and a single-flight section
   adding `sync_writes = "by_key"` so the cold path deduplicates while stale reads still
   never block. No API change.
+
+### Fixed
+
+- `examples/stale_while_revalidate.rs` released its in-flight refresh claim only when the
+  refresh returned normally, so a panicking or aborted refresh left the key claimed for the
+  rest of the process and pinned it to a stale value with no way back. The claim is now
+  released from `Drop`. Example code only; no API change.
 
 ## [3.0.0 / cached_proc_macro 3.0.0 / cached_proc_macro_types 3.0.0] - 2026-08-22
 
