@@ -6,7 +6,7 @@ use std::hash::Hash;
 #[cfg(feature = "async_core")]
 use {super::CachedGetOrSetAsync, std::future::Future};
 
-use crate::{CachedIter, CachedPeek, CloneCached};
+use crate::{CacheExpiry, CachedIter, CachedPeek, CloneCached};
 
 use super::{CacheEvict, Cached, DefaultHashBuilder, LruCache, TimedEntry};
 use std::hash::BuildHasher;
@@ -1128,6 +1128,57 @@ impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
             (Some(entry.value.clone()), expired)
         } else {
             (None, false)
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> CacheExpiry<K, V> for LruTtlCache<K, V, S> {
+    /// Returns the stored value and its expiry instant, with no read side effects.
+    ///
+    /// The instant is the entry's own deadline, `None` when the entry never expires (TTL was
+    /// disabled at insert time). `None` also when `now + ttl` overflowed `Instant` at insert
+    /// time, so no deadline could be recorded. An expired entry is returned with its past
+    /// deadline and is **not** removed. Uses the same non-promoting lookup as
+    /// [`cache_peek_with_expiry_status`](CloneCached::cache_peek_with_expiry_status): no
+    /// hit/miss counting, no LRU promotion, no TTL renewal.
+    ///
+    /// The convention is `now >= t` means expired: a deadline exactly equal to the current
+    /// instant counts as already past, matching the liveness check the store itself applies.
+    fn cache_peek_expires_at<Q>(&self, k: &Q) -> (Option<V>, Option<Instant>)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        // Use the inner LruCache's `cache_peek` to avoid LRU promotion.
+        if let Some(entry) = self.store.cache_peek(k) {
+            (Some(entry.value.clone()), entry.expires_at)
+        } else {
+            (None, None)
+        }
+    }
+
+    /// Returns whether the key is present and its expiry instant, without the value.
+    ///
+    /// The value-free counterpart of
+    /// [`cache_peek_expires_at`](CacheExpiry::cache_peek_expires_at): the same non-promoting
+    /// lookup and the same deadline, with no clone and no `V: Clone` bound. `(false, None)` when
+    /// the key is absent, `(true, None)` when the entry never expires (TTL disabled at insert
+    /// time, or `now + ttl` overflowed `Instant`), `(true, Some(t))` otherwise. An expired entry
+    /// reports `(true, Some(t))` with `t` in the past and is **not** removed. No hit/miss
+    /// counting, no LRU promotion, no TTL renewal.
+    ///
+    /// The convention is `now >= t` means expired: a deadline exactly equal to the current
+    /// instant counts as already past, matching the liveness check the store itself applies.
+    fn cache_expires_at<Q>(&self, k: &Q) -> (bool, Option<Instant>)
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        // Use the inner LruCache's `cache_peek` to avoid LRU promotion.
+        match self.store.cache_peek(k) {
+            Some(entry) => (true, entry.expires_at),
+            None => (false, None),
         }
     }
 }
@@ -3472,5 +3523,692 @@ mod tests {
         assert_eq!(c.key_order(), vec![2, 1]);
         assert_eq!(c.cache_set(3, 333), None);
         assert_eq!(c.key_order(), vec![3, 2, 1]);
+    }
+
+    // --- peek_expires_at -------------------------------------------------------
+
+    #[test]
+    fn peek_expires_at_absent_key_returns_none_none() {
+        let c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_peek_expires_at(&1u32), (None, None));
+        assert_eq!(c.peek_expires_at(&1u32), (None, None));
+    }
+
+    #[test]
+    fn peek_expires_at_live_entry_returns_the_stored_future_deadline() {
+        let ttl = Duration::from_secs(60);
+        let mut c: LruTtlCache<u32, u32> =
+            LruTtlCache::builder().max_size(4).ttl(ttl).build().unwrap();
+        let before = Instant::now();
+        c.cache_set(1, 100);
+        let after = Instant::now();
+
+        let stored = stored_expiry(&c, 1).expect("a configured ttl must record a deadline");
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100));
+        assert_eq!(
+            expires_at,
+            Some(stored),
+            "the reported deadline must be the one the store holds"
+        );
+        let expires_at = expires_at.unwrap();
+        assert!(expires_at > Instant::now(), "a live entry expires later");
+        assert!(expires_at >= before + ttl && expires_at <= after + ttl);
+    }
+
+    #[test]
+    fn peek_expires_at_never_expiring_entry_reports_no_deadline() {
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // A zero ttl disables expiry, so the entry is stored without a deadline.
+        c.unset_ttl();
+        c.cache_set(1, 100);
+        assert_eq!(c.cache_peek_expires_at(&1u32), (Some(100), None));
+        // Distinguishable from an absent key by the value, not by the deadline.
+        assert_eq!(c.cache_peek_with_expiry_status(&1u32), (Some(100), false));
+    }
+
+    #[test]
+    fn peek_expires_at_expired_entry_returns_a_past_deadline_and_keeps_the_entry() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100), "an expired entry is still returned");
+        let expires_at = expires_at.expect("an expired entry still carries its deadline");
+        assert!(expires_at <= Instant::now(), "the deadline is in the past");
+        // Not removed by the peek: a second peek sees the same entry and deadline, and
+        // the raw entry count (which includes not-yet-swept expired entries) is unchanged.
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(100), Some(expires_at))
+        );
+    }
+
+    #[test]
+    fn peek_expires_at_deadline_is_past_exactly_when_peek_reports_expired() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        for _ in 0..2 {
+            let (_, expires_at) = c.cache_peek_expires_at(&1u32);
+            let (_, expired) = c.cache_peek_with_expiry_status(&1u32);
+            assert_eq!(
+                expires_at.is_some_and(|t| t <= Instant::now()),
+                expired,
+                "the deadline must be in the past exactly when the peek reports expired"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        }
+    }
+
+    #[test]
+    fn peek_expires_at_does_not_touch_hit_or_miss_counters() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let hits = c.cache_hits();
+        let misses = c.cache_misses();
+
+        let _ = c.cache_peek_expires_at(&1u32); // present
+        let _ = c.cache_peek_expires_at(&2u32); // absent
+
+        assert_eq!(c.cache_hits(), hits, "a peek must not count a hit");
+        assert_eq!(c.cache_misses(), misses, "a peek must not count a miss");
+    }
+
+    #[test]
+    fn peek_expires_at_does_not_renew_the_ttl_with_refresh_on_hit() {
+        use crate::CacheRefreshOnHit;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        c.set_refresh_on_hit(true);
+        c.cache_set(1, 100);
+
+        let (_, first) = c.cache_peek_expires_at(&1u32);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let (_, second) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(
+            first, second,
+            "peeking must not renew the ttl even with refresh_on_hit enabled"
+        );
+
+        // Control: a real hit does renew, so the assertion above is not vacuous.
+        assert_eq!(c.cache_get(&1u32), Some(&100));
+        let (_, after_hit) = c.cache_peek_expires_at(&1u32);
+        assert!(
+            after_hit > first,
+            "refresh_on_hit must extend the deadline on a real read"
+        );
+    }
+
+    #[test]
+    fn peek_expires_at_does_not_promote_recency() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+
+        // Peeking a non-MRU key must leave the recency order untouched.
+        assert_eq!(c.cache_peek_expires_at(&1u32).0, Some(10));
+        assert_eq!(
+            c.key_order(),
+            vec![3, 2, 1],
+            "peek_expires_at must not promote"
+        );
+
+        // Control: a real hit on the same key DOES promote, so the assertion above
+        // is not vacuous.
+        assert_eq!(c.cache_get(&1u32), Some(&10));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
+    }
+
+    /// Strengthens `peek_expires_at_does_not_promote_recency`: a `key_order()` listing could
+    /// in principle be wrong while the real LRU chain is right (or vice versa). Drive the
+    /// cache past `max_size` after the peek and confirm the peeked entry is actually the one
+    /// physically evicted -- proof through the store's real eviction behavior, not just an
+    /// order-listing helper.
+    #[test]
+    fn peek_expires_at_leaves_the_peeked_entry_as_the_next_eviction_victim() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        // LRU tail is key 1.
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+
+        // Peeking the tail key must not save it from being the next eviction victim.
+        assert_eq!(c.cache_peek_expires_at(&1u32).0, Some(10));
+
+        // Push past capacity: if the peek had (incorrectly) promoted key 1, key 2 would be
+        // evicted instead.
+        c.cache_set(4, 40);
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (None, None),
+            "the peeked-but-not-promoted key must be the one physically evicted"
+        );
+        assert_eq!(
+            c.cache_peek_expires_at(&2u32).0,
+            Some(20),
+            "key 2 must have survived -- it was never the LRU victim"
+        );
+        assert_eq!(c.key_order(), vec![4, 3, 2]);
+    }
+
+    /// Gap: peeking an expired-but-not-yet-swept entry, then physically sweeping it with
+    /// `evict()`, must transition the peek's view from "present with a past deadline" to
+    /// fully absent -- `evict()` must not somehow leave the peek's answer stale.
+    #[test]
+    fn peek_expires_at_reports_absent_after_evict_sweeps_the_expired_entry() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Before the sweep: present, expired, not removed.
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100));
+        assert!(expires_at.is_some());
+        assert_eq!(c.cache_size(), 1);
+
+        assert_eq!(c.evict(), 1, "the expired entry must be swept");
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (None, None),
+            "after evict() physically removes the entry, peek must report absent"
+        );
+    }
+
+    /// Gap: `retain()` removes expired entries unconditionally (regardless of the predicate)
+    /// while leaving live entries the predicate keeps untouched. A peek before/after must
+    /// track that split exactly: absent for the swept expired key, unchanged for the
+    /// surviving live key.
+    #[test]
+    fn peek_expires_at_interleaved_with_retain_tracks_the_sweep() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        c.cache_set(2, 200);
+
+        // Key 1 has expired but is not yet swept; key 2 is live.
+        assert!(c.cache_peek_expires_at(&1u32).1.is_some());
+        let (_, live_before) = c.cache_peek_expires_at(&2u32);
+        assert!(live_before.is_some());
+
+        // `keep` always returns true: only the already-expired entry (key 1) is removed.
+        let removed = c.retain(|_k, _v| true);
+        assert_eq!(removed, 1);
+
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (None, None),
+            "retain must have swept the expired key"
+        );
+        assert_eq!(
+            c.cache_peek_expires_at(&2u32),
+            (Some(200), live_before),
+            "retain must leave the live, kept key's peek view unchanged"
+        );
+    }
+
+    /// Gap: the defaulted `peek_expires_at` alias must agree with `cache_peek_expires_at`
+    /// across every return shape the contract defines, not just the absent-key case the
+    /// existing alias test covers.
+    #[test]
+    fn peek_expires_at_alias_agrees_with_primary_across_all_shapes() {
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        // Live.
+        c.cache_set(1, 100);
+        assert_eq!(c.peek_expires_at(&1u32), c.cache_peek_expires_at(&1u32));
+        let (_, live_deadline) = c.cache_peek_expires_at(&1u32);
+        assert!(live_deadline.is_some());
+
+        // Never-expiring.
+        c.unset_ttl();
+        c.cache_set(2, 200);
+        assert_eq!(c.peek_expires_at(&2u32), c.cache_peek_expires_at(&2u32));
+        assert_eq!(c.cache_peek_expires_at(&2u32), (Some(200), None));
+
+        // Expired.
+        c.set_ttl(Duration::from_millis(20));
+        c.cache_set(3, 300);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(c.peek_expires_at(&3u32), c.cache_peek_expires_at(&3u32));
+        let (expired_value, expired_deadline) = c.cache_peek_expires_at(&3u32);
+        assert_eq!(expired_value, Some(300));
+        assert!(expired_deadline.is_some_and(|t| t <= Instant::now()));
+    }
+
+    /// Cross-store consistency: an extreme TTL that overflows `Instant::checked_add`
+    /// (see `compute_expires_at`) must be reported by `cache_peek_expires_at` as
+    /// never-expiring, exactly like `cache_set` / `iter_order` already pin. Companion to
+    /// `cache_set_with_ttl_overflow_stores_never_expiring_entry`, but exercised through the
+    /// `CacheExpiry` read path.
+    #[test]
+    fn peek_expires_at_reports_no_deadline_under_ttl_overflow() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::MAX)
+            .build()
+            .unwrap();
+        c.cache_set(1, 42);
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(42), None),
+            "a TTL that overflows Instant::checked_add must peek as never-expiring"
+        );
+    }
+
+    /// Pins the exact raw passthrough of `expires_at` at the `now == expires_at` boundary:
+    /// `cache_peek_expires_at` must return the untouched stored tie value, not merely
+    /// something `<=` the current clock. The tie-sensitive agreement with
+    /// `cache_peek_with_expiry_status`'s expired flag is already covered by
+    /// `peek_expires_at_deadline_is_past_exactly_when_peek_reports_expired`.
+    #[test]
+    fn peek_expires_at_boundary_matches_now_ge_expires_at_convention() {
+        let mut c = long_ttl_cache(8);
+        let tie = Instant::now();
+        put_raw(&mut c, 1, 100, Some(tie));
+
+        let (value, expires_at) = c.cache_peek_expires_at(&1u32);
+        assert_eq!(value, Some(100));
+        assert_eq!(expires_at, Some(tie));
+        assert!(
+            expires_at.is_some_and(|t| t <= Instant::now()),
+            "a tie (now >= expires_at) must be reported as already past"
+        );
+        assert_eq!(
+            c.cache_peek_with_expiry_status(&1u32),
+            (Some(100), true),
+            "the tie must also be flagged expired by the sibling peek method"
+        );
+    }
+
+    /// Gap: `set_ttl` / `unset_ttl` change the store-wide TTL used for *future* writes; an
+    /// already-stored entry's own deadline must not retroactively change. `peek_expires_at`
+    /// reads the entry's own field, so it must keep reporting the original deadline
+    /// through both a `set_ttl` bump and an `unset_ttl` call.
+    #[test]
+    fn peek_expires_at_ignores_later_set_ttl_and_unset_ttl_changes() {
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let (_, original_deadline) = c.cache_peek_expires_at(&1u32);
+        assert!(original_deadline.is_some());
+
+        // Growing the store-wide TTL must not extend the already-stored entry's deadline.
+        c.set_ttl(Duration::from_secs(600));
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(100), original_deadline),
+            "set_ttl must not retroactively change an existing entry's deadline"
+        );
+
+        // Disabling expiry for future writes must not clear the existing entry's deadline.
+        c.unset_ttl();
+        assert_eq!(
+            c.cache_peek_expires_at(&1u32),
+            (Some(100), original_deadline),
+            "unset_ttl must not retroactively clear an existing entry's deadline"
+        );
+    }
+
+    // --- CacheExpiry::cache_expires_at (the value-free read) -------------------
+
+    #[test]
+    fn expires_at_absent_key_returns_false_none() {
+        let c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(c.cache_expires_at(&1u32), (false, None));
+        assert_eq!(c.expires_at(&1u32), (false, None));
+    }
+
+    #[test]
+    fn expires_at_live_entry_returns_the_stored_future_deadline() {
+        let ttl = Duration::from_secs(60);
+        let mut c: LruTtlCache<u32, u32> =
+            LruTtlCache::builder().max_size(4).ttl(ttl).build().unwrap();
+        let before = Instant::now();
+        c.cache_set(1, 100);
+        let after = Instant::now();
+
+        let stored = stored_expiry(&c, 1).expect("a configured ttl must record a deadline");
+
+        let (present, expires_at) = c.cache_expires_at(&1u32);
+        assert!(present, "a stored key must report present");
+        assert_eq!(
+            expires_at,
+            Some(stored),
+            "the reported deadline must be the one the store holds"
+        );
+        let expires_at = expires_at.unwrap();
+        assert!(expires_at > Instant::now(), "a live entry expires later");
+        assert!(expires_at >= before + ttl && expires_at <= after + ttl);
+    }
+
+    #[test]
+    fn expires_at_never_expiring_entry_reports_present_with_no_deadline() {
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        // A zero ttl disables expiry, so the entry is stored without a deadline.
+        c.unset_ttl();
+        c.cache_set(1, 100);
+        assert_eq!(
+            c.cache_expires_at(&1u32),
+            (true, None),
+            "present-with-no-deadline must be distinguishable from absent by the flag"
+        );
+        assert_eq!(c.cache_expires_at(&2u32), (false, None));
+    }
+
+    #[test]
+    fn expires_at_expired_entry_returns_a_past_deadline_and_keeps_the_entry() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        let (present, expires_at) = c.cache_expires_at(&1u32);
+        assert!(present, "an expired entry is still reported present");
+        let expires_at = expires_at.expect("an expired entry still carries its deadline");
+        assert!(expires_at <= Instant::now(), "the deadline is in the past");
+        // Not removed by the read: a second read sees the same entry and deadline.
+        assert_eq!(c.cache_size(), 1);
+        assert_eq!(c.cache_expires_at(&1u32), (true, Some(expires_at)));
+    }
+
+    // The two reads must never disagree: same deadline, and the presence flag must track
+    // whether the value-bearing read returned `Some`.
+    #[test]
+    fn expires_at_agrees_with_peek_expires_at_across_all_return_shapes() {
+        use crate::CacheTtl;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+
+        let check = |c: &LruTtlCache<u32, u32>, k: u32, label: &str| {
+            let (value, peeked) = c.cache_peek_expires_at(&k);
+            let (present, deadline) = c.cache_expires_at(&k);
+            assert_eq!(
+                present,
+                value.is_some(),
+                "presence flag disagrees ({label})"
+            );
+            assert_eq!(deadline, peeked, "deadline disagrees ({label})");
+            assert_eq!(
+                c.expires_at(&k),
+                c.cache_expires_at(&k),
+                "alias disagrees ({label})"
+            );
+            (present, deadline)
+        };
+
+        // absent
+        assert_eq!(check(&c, 1, "absent"), (false, None));
+
+        // live
+        c.cache_set(1, 100);
+        let (present, deadline) = check(&c, 1, "live");
+        assert!(present && deadline.unwrap() > Instant::now());
+
+        // expired, not removed
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let (present, deadline) = check(&c, 1, "expired");
+        assert!(present && deadline.unwrap() <= Instant::now());
+
+        // never-expiring
+        c.unset_ttl();
+        c.cache_set(2, 200);
+        assert_eq!(check(&c, 2, "never-expiring"), (true, None));
+    }
+
+    #[test]
+    fn expires_at_does_not_touch_hit_or_miss_counters() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        let hits = c.cache_hits();
+        let misses = c.cache_misses();
+
+        let _ = c.cache_expires_at(&1u32); // present
+        let _ = c.cache_expires_at(&2u32); // absent
+        let _ = c.expires_at(&1u32); // through the alias
+
+        assert_eq!(c.cache_hits(), hits, "the read must not count a hit");
+        assert_eq!(c.cache_misses(), misses, "the read must not count a miss");
+    }
+
+    #[test]
+    fn expires_at_does_not_renew_the_ttl_with_refresh_on_hit() {
+        use crate::CacheRefreshOnHit;
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        c.set_refresh_on_hit(true);
+        c.cache_set(1, 100);
+
+        let (_, first) = c.cache_expires_at(&1u32);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let (_, second) = c.cache_expires_at(&1u32);
+        assert_eq!(
+            first, second,
+            "the read must not renew the ttl even with refresh_on_hit enabled"
+        );
+
+        // Control: a real hit does renew, so the assertion above is not vacuous.
+        assert_eq!(c.cache_get(&1u32), Some(&100));
+        let (_, after_hit) = c.cache_expires_at(&1u32);
+        assert!(
+            after_hit > first,
+            "refresh_on_hit must extend the deadline on a real read"
+        );
+    }
+
+    #[test]
+    fn expires_at_does_not_promote_recency() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+
+        // Reading a non-MRU key's deadline must leave the recency order untouched.
+        assert!(c.cache_expires_at(&1u32).0);
+        assert_eq!(
+            c.key_order(),
+            vec![3, 2, 1],
+            "cache_expires_at must not promote"
+        );
+
+        // Control: a real hit on the same key DOES promote, so the assertion above
+        // is not vacuous.
+        assert_eq!(c.cache_get(&1u32), Some(&10));
+        assert_eq!(c.key_order(), vec![1, 3, 2]);
+    }
+
+    /// Strengthens `expires_at_does_not_promote_recency` behaviorally: after reading the
+    /// LRU-tail key's deadline, force a capacity eviction and assert that same key is the
+    /// one physically evicted -- proof through the store's real eviction behavior, not just
+    /// an order-listing helper.
+    #[test]
+    fn expires_at_leaves_the_read_entry_as_the_next_eviction_victim() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(3)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+        // LRU tail is key 1.
+        assert_eq!(c.key_order(), vec![3, 2, 1]);
+
+        // Reading the tail key's deadline must not save it from being the next eviction victim.
+        assert!(c.cache_expires_at(&1u32).0);
+
+        // Push past capacity: if the read had (incorrectly) promoted key 1, key 2 would be
+        // evicted instead.
+        c.cache_set(4, 40);
+        assert_eq!(
+            c.cache_expires_at(&1u32),
+            (false, None),
+            "the read-but-not-promoted key must be the one physically evicted"
+        );
+        assert!(
+            c.cache_expires_at(&2u32).0,
+            "key 2 must have survived -- it was never the LRU victim"
+        );
+        assert_eq!(c.key_order(), vec![4, 3, 2]);
+    }
+
+    // The point of moving `V: Clone` off the impl block and onto the value-bearing methods: a
+    // deadline read must work on a cache whose value type is not `Clone` at all. The generic
+    // helper carries no `V: Clone` bound anywhere, so this fails to compile if the bound
+    // creeps back onto either the trait method or the impl.
+    #[test]
+    fn expires_at_reads_a_deadline_for_a_value_type_that_is_not_clone() {
+        #[derive(Debug, PartialEq)]
+        struct NotClone(u32);
+
+        fn deadline<K: Hash + Eq + Clone, V>(
+            c: &LruTtlCache<K, V>,
+            k: &K,
+        ) -> (bool, Option<Instant>) {
+            c.cache_expires_at(k)
+        }
+
+        let ttl = Duration::from_secs(60);
+        let mut c: LruTtlCache<u32, NotClone> =
+            LruTtlCache::builder().max_size(4).ttl(ttl).build().unwrap();
+        c.cache_set(1, NotClone(100));
+
+        let (present, expires_at) = deadline(&c, &1);
+        assert!(present);
+        assert!(
+            expires_at.expect("a configured ttl must record a deadline") > Instant::now(),
+            "a live entry expires later"
+        );
+        assert_eq!(deadline(&c, &2), (false, None), "absent key");
+        // The alias is equally bound-free.
+        assert!(c.expires_at(&1u32).0);
+        // The value was never cloned or moved out: it is still in the store.
+        assert_eq!(c.cache_get(&1u32), Some(&NotClone(100)));
+    }
+
+    // The `now >= t` tie convention: the deadline the value-free read reports must be judged
+    // expired at exactly the instant `cache_peek_with_expiry_status` calls the entry expired.
+    #[test]
+    fn expires_at_boundary_matches_now_ge_expires_at_convention() {
+        let mut c = long_ttl_cache(8);
+        let tie = Instant::now();
+        put_raw(&mut c, 1, 100, Some(tie));
+
+        assert_eq!(c.cache_expires_at(&1u32), (true, Some(tie)));
+        assert_eq!(
+            c.cache_peek_with_expiry_status(&1u32),
+            (Some(100), true),
+            "now == expires_at must be treated as expired, matching the now >= expires_at convention"
+        );
+    }
+
+    // Physical removal must be reflected as absent, not as present-with-no-deadline.
+    #[test]
+    fn expires_at_reports_absent_after_removal() {
+        let mut c: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        c.cache_set(1, 100);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Expired but not yet swept: still present, with a past deadline.
+        let (present, expires_at) = c.cache_expires_at(&1u32);
+        assert!(present);
+        assert!(expires_at.unwrap() <= Instant::now());
+
+        assert_eq!(c.evict(), 1, "evict must remove the expired entry");
+        assert_eq!(
+            c.cache_expires_at(&1u32),
+            (false, None),
+            "a physically removed entry must be reported absent"
+        );
+
+        c.cache_set(2, 200);
+        assert_eq!(c.cache_remove(&2u32), Some(200));
+        assert_eq!(c.cache_expires_at(&2u32), (false, None));
     }
 }

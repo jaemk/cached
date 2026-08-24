@@ -62,3 +62,42 @@ satisfied the bound with a `set_refresh_on_hit` that ignored its argument and re
 which a generic caller cannot distinguish from "the flag was already off". Every remaining
 implementor honours the documented contract: the setter returns the state the store was actually
 in, and the new state takes effect for subsequent hits.
+
+## TRAIT-6
+
+`CacheExpiry<K, V>` provides `cache_peek_expires_at` (and a defaulted `peek_expires_at` alias), a
+side-effect-free per-key expiry read returning `(Option<V>, Option<Instant>)`: `(None, None)` when
+the key is absent, `(Some(v), None)` when present with no known deadline, and `(Some(v), Some(t))`
+otherwise, where a past `t` means the entry is already expired (it is returned rather than
+removed, the same as `cache_peek_with_expiry_status` returning `(Some(v), true)`; TRAIT-3). It
+returns `Instant` rather than a remaining `Duration`, since a `Duration` cannot distinguish "never
+expires" from "already expired". The read does no LRU promotion, hit/miss counting, TTL renewal,
+or lazy removal. This answers GitHub issue #91 (refresh when the remaining TTL drops below a
+threshold): a threshold predicate needs a deadline, not just the `bool` that
+`cache_peek_with_expiry_status` returns.
+
+`CacheExpiry` also provides `cache_expires_at` (and a defaulted `expires_at` alias), a value-free
+companion returning `(bool, Option<Instant>)`: the `bool` is presence and the `Option<Instant>` is
+the deadline, so `(false, None)` is absent, `(true, None)` is present with no deadline, `(true,
+Some(t))` with a future `t` is live, and `(true, Some(t))` with a past `t` is expired and not
+removed. The presence flag is deliberate: absent and never-expires call for opposite actions in a
+threshold-refresh policy (a cold fetch versus doing nothing), so collapsing them into a bare
+`Option<Instant>` would repeat the mistake a remaining `Duration` already makes for the deadline
+itself. The tuple shape matches the existing `(Option<V>, bool)` and `(Option<V>, Option<Instant>)`
+returns in this family. `cache_expires_at` carries no `V: Clone` bound: that bound moved off this
+trait's impl blocks and onto the value-returning methods (`cache_peek_expires_at` and its
+`peek_expires_at` alias), so a deadline-only read works for a value type that does not implement
+`Clone`. It shares the same side-effect-free contract, and the same advisory-deadline caveat on
+the `Expires`-based stores, as `cache_peek_expires_at` below.
+
+Deliberately a standalone trait rather than a new required method on `CloneCached`: that would
+break external store implementations. Implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`,
+`ExpiringCache`, and `ExpiringLruCache`. On the last two, whose deadline comes from
+`Expires::expires_at()` (TRAIT-4), the returned `Instant` is advisory: `expires_at()`'s default
+body returns `None`, so the pair can be `(Some(v), None)` for an entry that is in fact expired.
+The two can disagree in both directions: `t` can be in the past for an entry `Expires::is_expired`
+reports live, and `t` can be in the future for an entry `is_expired` reports expired (a token with
+a fixed deadline that is also revocable). A future `t` is therefore not evidence that the entry is
+live on these stores. `cache_peek_with_expiry_status` remains the authoritative liveness read on
+those two stores. The concurrent mirror is `ConcurrentCacheExpiry`, see
+[traits-concurrent.md](traits-concurrent.md) CTRAIT-9.

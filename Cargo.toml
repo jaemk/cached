@@ -225,6 +225,10 @@ name = "stale_while_revalidate"
 required-features = ["time_stores", "proc_macro", "async"]
 
 [[example]]
+name = "refresh_before_expiry"
+required-features = ["time_stores", "proc_macro", "async"]
+
+[[example]]
 name = "disk"
 required-features = ["redb_store", "proc_macro"]
 

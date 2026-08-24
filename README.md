@@ -307,6 +307,24 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 - `CachedPeek` provides non-mutating lookups that do not update recency, refresh TTLs, or record
   metrics. `CachedRead` is narrower and is only implemented where shared-lock lookups can preserve
   normal read-side semantics without recency or refresh mutation.
+- [`CacheExpiry`] is the per-key expiry read for single-owner stores: `cache_peek_expires_at`
+  (alias `peek_expires_at`) returns `(Option<V>, Option<Instant>)`, the value plus the instant it
+  expires at, so callers can refresh when the remaining TTL drops below a threshold.
+  `cache_expires_at` (alias `expires_at`) is the value-free form, returning
+  `(bool, Option<Instant>)`: presence plus the same instant, with no clone and no `V: Clone` bound,
+  so it reads a deadline out of a cache whose value type is not `Clone`. The presence flag keeps an
+  absent key (`(false, None)`) distinct from a present entry that never expires (`(true, None)`).
+  Both carry the same no-side-effect contract as `cache_peek_with_expiry_status` and are
+  implemented by the expiry-capable single-owner stores
+  ([`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`],
+  [`ExpiringCache`], [`ExpiringLruCache`]). On the `Expires`-based stores the instant is advisory
+  (it is `None` unless the value type overrides [`Expires::expires_at`], and `is_expired` stays the
+  authority); the TTL stores report a real deadline. The Redis and redb stores do not implement it.
+  The macro configurations that produce a supporting store are `ttl_secs` / `ttl` / `ttl_millis`
+  (with or without `max_size`) and `expires = true`; on any other configuration the call fails to
+  compile with an `E0599` that names the guard type rather than the missing trait. See the
+  [`refresh_before_expiry`](https://github.com/jaemk/cached/blob/master/examples/refresh_before_expiry.rs)
+  example for a runnable threshold-refresh recipe over both traits.
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
@@ -322,7 +340,16 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   [`ShardedExpiringCache`], [`ShardedExpiringLruCache`]) implement [`ConcurrentCloneCached`],
   which provides `cache_get_with_expiry_status` for reading stale entries without evicting them, and
   `cache_peek_with_expiry_status` as a side-effect-free counterpart (a read with no hit/miss
-  counting, LRU promotion, or TTL renewal).
+  counting, LRU promotion, or TTL renewal). The same four stores implement
+  [`ConcurrentCacheExpiry`], the concurrent counterpart of [`CacheExpiry`], whose
+  `cache_peek_expires_at` returns `(Option<V>, Option<Instant>)` and whose value-free
+  `cache_expires_at` returns `(bool, Option<Instant>)`, both under the same no-side-effect
+  contract (advisory instant on the two `Expires`-based stores, a real deadline on the two TTL
+  stores). The Redis and redb stores implement neither. `#[concurrent_cached]` selects a supporting
+  store under the same configurations as `#[cached]` (`ttl_secs` / `ttl` / `ttl_millis`, with or
+  without `max_size`, and `expires = true`). Unlike `set` / `get` / `len` / `contains` / `peek`,
+  neither expiry read has an inherent shim on the sharded types, so both need
+  `use cached::ConcurrentCacheExpiry;` in scope.
 
 **Sharded stores: inherent methods shadow the trait methods**
 
@@ -469,6 +496,13 @@ This approach is highly useful when caching payloads like OAuth tokens, HTTP res
 It is also the idiomatic way to give entries a **dynamic, per-entry TTL** — a lifetime computed at call time rather than the single uniform duration that `ttl = N` applies to every entry. Because the value carries its own expiry, each entry can be given a different lifetime derived from a function argument, runtime configuration, or a response header. (`expires = true` is mutually exclusive with `ttl`.) See the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example for a runnable demonstration.
 
 When using the `#[cached]` or `#[once]` proc macros, add `expires = true` to opt into per-value expiry automatically. For `#[cached]`, this selects `ExpiringCache` (unbounded) by default or `ExpiringLruCache` when `max_size` is also specified. For `#[once]`, this stores a single value whose expiry is polled on each call.
+
+Implement [`Expires::expires_at`] too if the entry's deadline should be readable. It defaults to
+`None`, and a value type that implements only `is_expired` makes the per-key expiry read
+([`CacheExpiry`] / [`ConcurrentCacheExpiry`]) return `(Some(v), None)` (or `(true, None)` from the
+value-free `cache_expires_at`) for live and expired entries alike, so a remaining-TTL policy built
+on that read never fires and never reports an error. `is_expired` stays the liveness authority on
+these stores either way.
 
 The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example uses the same pattern):
 

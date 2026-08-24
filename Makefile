@@ -14,6 +14,7 @@ CACHED_BASIC_EXAMPLES = async_std \
                         basic \
                         expires_per_key \
                         kitchen_sink \
+                        refresh_before_expiry \
                         resilience \
                         stale_while_revalidate \
                         struct_method \

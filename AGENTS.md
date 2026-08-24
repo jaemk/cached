@@ -138,13 +138,15 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `CacheTtl` | `ttl()` / `set_ttl()` / `try_set_ttl()` / `unset_ttl()` on single-owner timed stores |
 | `ConcurrentCacheRefreshOnHit` | `&self` `refresh_on_hit()`/`set_refresh_on_hit()` on concurrent TTL stores; implemented by `RedisCache`, `AsyncRedisCache`, `RedbCache`, `ShardedTtlCache`, `ShardedLruTtlCache` |
 | `CacheRefreshOnHit` | `refresh_on_hit()` / `set_refresh_on_hit()` on single-owner timed stores; implemented by `TtlCache` and `LruTtlCache`, deliberately not by `TtlSortedCache` (its deadline-ordered index cannot refresh an entry's expiry on read) |
+| `CacheExpiry` | `cache_peek_expires_at()` / `peek_expires_at()`: side-effect-free per-key expiry read returning `(Option<V>, Option<Instant>)`; `cache_expires_at()` / `expires_at()`: value-free deadline read returning `(bool, Option<Instant>)` (presence, deadline), no `V: Clone` bound; implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache` |
+| `ConcurrentCacheExpiry` | `&self` mirror of `CacheExpiry`, including `cache_expires_at()` / `expires_at()`; implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache` |
 
-**Peek is an in-memory concept.** Both peek traits are implemented by the six sharded stores only
-(`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and `AsyncRedisCache` deliberately
-implement neither: an IO-backed store has no client-side recency or TTL state to skip and the
-hit/miss-metrics distinction is meaningless, while the read remains a full round trip. Generic
-code bounded on either peek trait therefore accepts only the sharded stores. See
-`specs/design/0040-peek-is-an-in-memory-concept.md`.
+**Peek is an in-memory concept.** `CachedPeek` and `ConcurrentCachePeek` are implemented by the
+six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and
+`AsyncRedisCache` deliberately implement neither: an IO-backed store has no client-side recency
+or TTL state to skip and the hit/miss-metrics distinction is meaningless, while the read remains
+a full round trip. Generic code bounded on either peek trait therefore accepts only the sharded
+stores. See `specs/design/0040-peek-is-an-in-memory-concept.md`.
 
 **`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
 expiry-aware stores the count folds predicate rejections together with expired entries swept
