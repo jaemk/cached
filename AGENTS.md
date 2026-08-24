@@ -27,6 +27,15 @@ Follow with a one-sentence summary (e.g. "Pushing 2 commits touching src/lib.rs 
 yet on crates.io. The commit message is irrelevant, and so is the merge strategy: bump the
 version, land it on master, and the release runs.
 
+**The pipeline tags and publishes. Do not run `bin/tag-release.sh` or `bin/publish.sh` by
+hand.** They exist to be called by `release.yml`, and merging the version bump is the whole
+release: the tag, the GitHub release, and the crates.io upload all follow from it with no
+further step. A release that looks unfinished is almost always one still running or waiting on
+the `environment: release` approval gate, so check `gh run list --workflow=release.yml` before
+concluding anything is stuck. Running the scripts locally is a fallback for the case where
+Actions itself cannot run them (an outage, or a run that died in a way `gh workflow run` cannot
+retry), not part of a normal release.
+
 Two consequences worth knowing:
 
 - **Merging a version bump releases it.** There is no separate confirmation beyond the
@@ -46,7 +55,11 @@ rejecting the upload itself (which is what a re-run after a partial publish hits
 is half-bumped. The publish trigger looks at the root version alone, so it cannot see a stale
 `cached_proc_macro*` pin: those resolve against the index, where the previous version really does
 exist, and a stable `cached` would go out depending on pre-release subcrates with every step
-reporting green. Bump all three `Cargo.toml` versions and the two dependency pins together.
+reporting green. What it enforces is narrower than "bump everything": each
+`[dependencies.cached_proc_macro*]` pin must equal that subcrate's own package version, and a
+stable root may not depend on a pre-release subcrate. So a subcrate that did not change stays
+where it is, pin included, and only `cached` moves. Bump a subcrate and you must bump its pin
+in the same commit.
 `tests/release_scripts.rs` runs the same script against the committed workspace, so a half-bumped
 state fails the test suite long before it reaches a release.
 

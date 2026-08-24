@@ -124,7 +124,16 @@ Run the helper script to detect which crates need bumping:
 .agents/skills/release/detect-crates.sh
 ```
 
-This outputs one crate name per line based on `git diff origin/master`. When in doubt, bump `cached` and `cached_proc_macro` together (the common case); `cached_proc_macro_types` rarely changes.
+This outputs one crate name per line based on `git diff origin/master`. Its diff base is only
+as good as the branch, so cross-check against the last release tag when the branch has been
+merged into already, e.g. `git diff --name-only v3.0.0..HEAD -- cached_proc_macro/`.
+
+A subcrate that did not change stays at its current version, and its `[dependencies.*]` pin in
+the root `Cargo.toml` stays with it. `bin/check-versions.sh` does not require the three crates
+to move together; it requires each pin to equal that subcrate's own package version, and it
+forbids a stable root depending on a pre-release subcrate. A `cached`-only bump is normal and
+has shipped before (`[2.0.2]`, `[0.58.0]`). Do not bump a subcrate just to keep the numbers
+aligned: that publishes a new version of an unchanged crate.
 
 ### 2. Update `Cargo.toml` versions
 
@@ -207,3 +216,22 @@ Tell the user:
 - Whether `cached_proc_macro_types` was left unchanged and why
 - That README was regenerated
 - The resulting commit SHA
+
+### 9. Stop here
+
+Preparing the bump is the whole job. **Do not tag, do not `cargo publish`, and do not run
+`bin/tag-release.sh` or `bin/publish.sh`.** `.github/workflows/release.yml` does all of it once
+the version bump lands on master: it publishes in dependency order, tags, and creates the GitHub
+release. Merging the bump is the release.
+
+So do not report tagging or publishing as outstanding work, and do not offer to run either by
+hand. If the user asks whether a release went out, check it rather than assuming:
+
+```bash
+gh run list --workflow=release.yml --limit 3
+```
+
+A run can also be sitting on the `environment: release` approval gate, which looks identical to
+nothing having happened. Running the `bin/` scripts locally is a fallback for the case where
+Actions cannot run them at all (an outage, or a run that died in a way `gh workflow run
+release.yml --ref master` cannot retry), not a normal step.
