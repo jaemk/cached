@@ -63,6 +63,12 @@ your PR. The `release` agent skill (`/release X.Y.Z` in Claude Code) handles the
 full release prep: version bumps across all `Cargo.toml` files, CHANGELOG promotion,
 migration guide creation, and README regeneration.
 
+Merging the bump is the release. `.github/workflows/release.yml` publishes to crates.io,
+tags, and creates the GitHub release once the new root version lands on master, so there
+is nothing to run by hand: the scripts in `bin/` exist for the workflow to call. Only a
+crate that actually changed gets bumped, along with its dependency pin in the root
+`Cargo.toml`; leave the others where they are.
+
 For self-review before submitting, the `pr-cycle` agent skill (`/pr-cycle` in
 Claude Code) runs a full review → fix → push → re-request loop: it fetches open PR
 comments, spawns independent code-review and library-consumer sub-agents, applies
