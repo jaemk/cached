@@ -1,6 +1,33 @@
 # 0054 - Triage of stale PRs and issues
 
-Status: Not implemented
+Status: Partly implemented
+
+## Outcome
+
+Worked through on 2026-08-24. What actually happened, which differs from the verdicts below in
+two places:
+
+- #200, #196, #203, #236: closed with a comment, as recorded.
+- #64: answered and left OPEN, not closed. The record called it "answer and leave open, linked
+  to 0009", which held up, but the reasoning changed. The thread has a 2025 comment working
+  around the clone cost with `Box::leak`, and nobody in five years had suggested returning
+  `Arc<T>`. That is now the answer given, and the `Arc` behavior is pinned by two tests in
+  `tests/v3_macros.rs`, closing one of the two doc gaps this record flagged. See 0009, which
+  gained a scope section: references already work where they can, and the macro path can never
+  return one.
+- #220 (moka): NOT closed as out of scope. Investigating it produced
+  `examples/moka_custom_store.rs` instead. The finding that changed the verdict: implementing
+  the traits on a foreign cache type directly is an orphan-rule error, so a local newtype is
+  mandatory for any third-party store, and the adapter is about 66 lines. The crate does not
+  need to ship a wrapper, but the example and a doc paragraph were worth more than a close.
+- #239: left open, untouched, and deliberately deferred. The verdict below ("ask for rebase or
+  close") was reached from code and GitHub state alone and does not capture why it was actually
+  held. Do not act on it without asking.
+- #147/#228: no action, as recorded.
+
+The general lesson for the next triage: every verdict here was reached from code and GitHub
+state, which is enough to say whether a PR still applies, but not enough to know why a
+maintainer held it. Check that before acting on a close.
 
 ## Current state
 

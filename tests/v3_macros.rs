@@ -2611,3 +2611,66 @@ fn once_valid_name_compiles_and_caches() {
         "valid custom name on #[once]: second call must be a cache hit"
     );
 }
+
+// ── (#64): returning `Arc<T>` so a hit clones a pointer, not `T` ───────────
+// The crate documents `Arc<T>` as the answer for a return value that is
+// expensive to clone. Nothing pinned it, so this asserts the property that
+// makes the advice true: a cache hit hands back the SAME allocation, not a
+// deep copy. `Arc::ptr_eq` is the whole point, `assert_eq!` on the contents
+// would pass just as well against a full clone and prove nothing.
+
+static ARC_CACHED_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ARC_ONCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cached]
+fn arc_cached_fn(n: usize) -> std::sync::Arc<Vec<usize>> {
+    ARC_CACHED_CALLS.fetch_add(1, Ordering::SeqCst);
+    std::sync::Arc::new((0..n).collect())
+}
+
+#[once]
+fn arc_once_fn() -> std::sync::Arc<Vec<usize>> {
+    ARC_ONCE_CALLS.fetch_add(1, Ordering::SeqCst);
+    std::sync::Arc::new(vec![1, 2, 3])
+}
+
+#[test]
+fn returning_arc_hands_back_the_same_allocation_on_a_hit() {
+    ARC_CACHED_CALLS.store(0, Ordering::SeqCst);
+
+    let first = arc_cached_fn(4);
+    let second = arc_cached_fn(4);
+    assert_eq!(
+        ARC_CACHED_CALLS.load(Ordering::SeqCst),
+        1,
+        "#[cached] returning Arc: the second call must be a cache hit"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "#[cached] returning Arc: a hit must clone the pointer, not the Vec"
+    );
+
+    // A different key is a different entry, so a different allocation.
+    let other = arc_cached_fn(5);
+    assert!(!std::sync::Arc::ptr_eq(&first, &other));
+}
+
+#[test]
+fn returning_arc_from_once_hands_back_the_same_allocation() {
+    // `#[once]` requires the value type to be `Clone`; `Arc<T>` satisfies that
+    // for any `T`, including a `T` that is not itself `Clone`, which is what
+    // makes it usable here without leaking a `&'static`.
+    ARC_ONCE_CALLS.store(0, Ordering::SeqCst);
+
+    let first = arc_once_fn();
+    let second = arc_once_fn();
+    assert_eq!(
+        ARC_ONCE_CALLS.load(Ordering::SeqCst),
+        1,
+        "#[once] returning Arc: the second call must be a cache hit"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "#[once] returning Arc: a hit must clone the pointer, not the Vec"
+    );
+}
