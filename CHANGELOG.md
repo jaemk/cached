@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-08-25
+
+Documentation and tests only. There is no API or behavior change.
+
 ### Documentation
 
 - Document that a custom `ty` on `#[concurrent_cached]` requires the cached function to
