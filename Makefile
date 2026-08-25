@@ -21,6 +21,7 @@ CACHED_BASIC_EXAMPLES = async_std \
                         tokio \
                         sharded \
                         sharded_expiring \
+                        moka_custom_store \
                         expiring_sized_cache \
                         disk \
                         disk_async
