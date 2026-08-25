@@ -3044,6 +3044,69 @@ pub trait ConcurrentCachePeekAsync<K, V>: ConcurrentCacheBase {
 /// assert_eq!(store.get(&"k".to_string()).expect("MyStore is infallible"), Some(7));
 /// assert_eq!(store.remove(&"k".to_string()).expect("MyStore is infallible"), Some(7));
 /// ```
+///
+/// **Using a custom store with `#[concurrent_cached]`**:
+///
+/// A custom `ty` always takes the fallible code path, because the macro cannot see your
+/// `Error` type at expansion time. The cached function must return `Result<T, E>`, and `E`
+/// has to be reachable from the store's `Error`, either through a `From` impl or with
+/// `map_error`. A plain or `Option<T>` return is rejected with an error spanned at the
+/// return type. This applies to every custom store, not just this one.
+///
+/// ```rust
+/// # #[cfg(feature = "proc_macro")]
+/// # {
+/// # use cached::{ConcurrentCacheBase, ConcurrentCached};
+/// # use cached::macros::concurrent_cached;
+/// # use std::collections::HashMap;
+/// # use std::sync::Mutex;
+/// # struct MyStore(Mutex<HashMap<String, u32>>);
+/// # impl ConcurrentCacheBase for MyStore {
+/// #     type Error = std::convert::Infallible;
+/// # }
+/// # impl ConcurrentCached<String, u32> for MyStore {
+/// #     fn cache_get(&self, k: &String) -> Result<Option<u32>, Self::Error> {
+/// #         Ok(self.0.lock().unwrap().get(k).copied())
+/// #     }
+/// #     fn cache_set(&self, k: String, v: u32) -> Result<Option<u32>, Self::Error> {
+/// #         Ok(self.0.lock().unwrap().insert(k, v))
+/// #     }
+/// #     fn cache_remove(&self, k: &String) -> Result<Option<u32>, Self::Error> {
+/// #         Ok(self.0.lock().unwrap().remove(k))
+/// #     }
+/// #     fn cache_remove_entry(&self, k: &String) -> Result<Option<(String, u32)>, Self::Error> {
+/// #         Ok(self.0.lock().unwrap().remove_entry(k))
+/// #     }
+/// #     fn cache_clear(&self) -> Result<(), Self::Error> {
+/// #         self.0.lock().unwrap().clear();
+/// #         Ok(())
+/// #     }
+/// #     fn cache_reset(&self) -> Result<(), Self::Error> {
+/// #         self.0.lock().unwrap().clear();
+/// #         Ok(())
+/// #     }
+/// #     fn cache_contains(&self, k: &String) -> Result<bool, Self::Error> {
+/// #         Ok(self.0.lock().unwrap().contains_key(k))
+/// #     }
+/// # }
+/// #[concurrent_cached(
+///     ty = "MyStore",
+///     create = r#"{ MyStore(Mutex::new(HashMap::new())) }"#,
+///     key = "String",
+///     convert = r#"{ k.to_string() }"#,
+///     map_error = "|e| e"
+/// )]
+/// fn lookup(k: &str) -> Result<u32, std::convert::Infallible> {
+///     Ok(k.len() as u32)
+/// }
+///
+/// assert_eq!(lookup("abcd"), Ok(4));
+/// # }
+/// ```
+///
+/// See `examples/moka_custom_store.rs` for the same pattern against a third-party cache,
+/// including what a store whose API does not line up method-for-method costs to adapt.
+///
 /// **Async counterpart**:
 ///
 /// The asynchronous [`ConcurrentCachedAsync`] trait names its core operations with an `async_`

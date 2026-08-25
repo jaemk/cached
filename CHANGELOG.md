@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- Document that a custom `ty` on `#[concurrent_cached]` requires the cached function to
+  return `Result<T, E>`, with a compiling example on the `ConcurrentCached` trait. The macro
+  cannot see the store's `Error` type at expansion time, so it always emits the fallible
+  path. Previously this was only discoverable by hitting the compile error, which is now
+  also pinned by a `tests/ui` case.
+- New example `examples/moka_custom_store.rs`: adapting a third-party cache (`moka`) to
+  `ConcurrentCached`. The orphan rule makes a local newtype mandatory for any foreign store,
+  and the example records what an API that does not line up method-for-method costs to
+  adapt, including returning the replaced value from `cache_set` without a get-then-set
+  race. `moka` is a dev-dependency for the example only; it is not a dependency of the
+  crate ([#220](https://github.com/jaemk/cached/issues/220)).
+
 ## [3.1.0] - 2026-08-24
 
 ### Added
