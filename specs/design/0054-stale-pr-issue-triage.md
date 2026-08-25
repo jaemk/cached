@@ -15,11 +15,15 @@ two places:
   `tests/v3_macros.rs`, closing one of the two doc gaps this record flagged. See 0009, which
   gained a scope section: references already work where they can, and the macro path can never
   return one.
-- #220 (moka): NOT closed as out of scope. Investigating it produced
-  `examples/moka_custom_store.rs` instead. The finding that changed the verdict: implementing
-  the traits on a foreign cache type directly is an orphan-rule error, so a local newtype is
-  mandatory for any third-party store, and the adapter is about 66 lines. The crate does not
-  need to ship a wrapper, but the example and a doc paragraph were worth more than a close.
+- #220 (moka): closed, but as answered-by-example rather than out of scope, which is what the
+  verdict below says. Investigating it produced `examples/moka_custom_store.rs` first, and the
+  issue was closed pointing at that. The finding that changed the reasoning: implementing the
+  traits on a foreign cache type directly is an orphan-rule error, so a local newtype is
+  mandatory for any third-party store, and the adapter is about 66 lines. That cuts both ways.
+  It means moka already works through `ty` / `create`, and it means a built-in backend would
+  not save a user the newtype anyway. Investigating also surfaced a gap that had nothing to do
+  with moka: a custom `ty` forces the cached function to return `Result`, which now has a doc
+  section and a `tests/ui` case.
 - #239: left open, untouched, and deliberately deferred. The verdict below ("ask for rebase or
   close") was reached from code and GitHub state alone and does not capture why it was actually
   held. Do not act on it without asking.
