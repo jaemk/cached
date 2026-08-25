@@ -32,6 +32,7 @@ feature-gated store type is emitted, so `proc_macro` alone is sufficient (no
 #[test]
 fn compile_fail_v3_macros() {
     let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/concurrent_cached_custom_ty_requires_result.rs");
     t.compile_fail("tests/ui/cached_ttl_and_ttl_millis_exclusive.rs");
     t.compile_fail("tests/ui/cached_ttl_millis_zero.rs");
     t.compile_fail("tests/ui/once_ttl_millis_zero.rs");
