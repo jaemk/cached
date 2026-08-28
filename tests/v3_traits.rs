@@ -881,7 +881,9 @@ fn ttl_sorted_cache_try_set_succeeds_normal_ttl() {
 /// `validate_ttl` only rejects a *zero* ttl, so a near-`Duration::MAX` ttl passes
 /// `build()` and then overflows `Instant::checked_add` on every platform (no real
 /// `Instant` is anywhere near `Duration::MAX` from the epoch). The entry must be
-/// stored with no expiry, matching the sharded TTL stores.
+/// stored with no expiry. Note the sharded TTL stores do NOT behave this way: they
+/// clamp the ttl before computing a deadline, so they stamp a real far-future
+/// `Instant` instead. See `specs/design/0048-ttl-overflow-vs-clamp.md`.
 #[cfg(feature = "time_stores")]
 #[test]
 fn ttl_sorted_cache_try_set_overflow_stores_never_expiring_entry() {

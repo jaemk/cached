@@ -407,8 +407,14 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruTtlCache<K, V, S> {
     /// Compute the expiry instant for a new or refreshed entry given the current TTL.
     /// Returns `None` when `ttl` is zero (expiry disabled), or `Some(now + ttl)`.
     /// On overflow (`now + ttl` exceeds `Instant`'s representable range, a TTL on the
-    /// order of hundreds of years) returns `None`: the entry never expires, matching
-    /// the sharded TTL stores.
+    /// order of hundreds of years) returns `None`: the entry never expires.
+    ///
+    /// This does NOT match the sharded TTL stores, which clamp the configured ttl to
+    /// `u64::MAX` nanoseconds (~584 years) before computing a deadline, so their
+    /// `checked_add` is practically unreachable and they stamp a real far-future
+    /// `Instant` instead of `None`. See `specs/design/0048-ttl-overflow-vs-clamp.md`;
+    /// `extreme_ttl_diverges_between_single_owner_and_sharded_ttl_families` in
+    /// `tests/v3_per_key_expiry_read.rs` pins both sides.
     #[inline]
     pub(super) fn compute_expires_at(ttl: Duration, now: Instant) -> Option<Instant> {
         if ttl.is_zero() {

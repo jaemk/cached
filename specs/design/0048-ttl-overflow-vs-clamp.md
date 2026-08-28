@@ -1,6 +1,16 @@
 # 0048 - Extreme TTL: overflow-to-never-expires vs. clamp-to-real-deadline
 
-Status: Not implemented
+Status: Partly implemented
+
+## Outcome so far
+
+The doc half shipped: the false "matching the sharded TTL stores" claims are corrected and now
+state the divergence explicitly, pointing at this record and at the cross-family test. The
+behavior half (whether to reconcile the two families) is NOT done and remains an open decision.
+
+The record found two wrong comments. There were four. `src/stores/ttl.rs:629` made the same
+claim on `cache_set`, and `tests/v3_traits.rs:884` repeated it in a test doc comment. Both are
+fixed. Worth remembering that a grep for the exact phrase found more sites than the analysis did.
 
 ## Current state
 
