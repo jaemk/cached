@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- `cached::claim::{ClaimRegistry, Claim}`: a single-flight claim on a key, for collapsing
+  concurrent refreshes of one key onto a single caller. `ClaimRegistry::claim(key)` returns
+  `Some(Claim<K>)` to the first caller and `None` to every later caller until that `Claim` is
+  dropped; the key is released from `Drop`, so completion, a panic, and cancellation (an
+  aborted async task) all release it, unlike a hand-rolled guard released at the end of the
+  body. This is not background refresh: the registry spawns nothing and awaits nothing, and
+  spawning the refresh stays with the caller, same as today. Additive, ungated (no new
+  dependency, no feature flag), and reachable via `cached::claim::` or `cached::prelude`, not
+  the crate root, to keep `Claim` and `ClaimRegistry` out of rustc's nearest-match suggestions
+  for mistyped imports ([design/0053](specs/design/0053-refresh-claim-guard.md)).
+
 ## [3.1.1] - 2026-08-25
 
 Documentation and tests only. There is no API or behavior change.
