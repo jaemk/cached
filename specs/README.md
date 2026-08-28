@@ -30,6 +30,7 @@ live in the [design records](design/README.md), not as rows here.
 | Store builders and eviction callbacks | done | [builders.md](builders.md) |
 | Cache metrics | done | [metrics.md](metrics.md) |
 | Cargo feature flags | done | [cargo-features.md](cargo-features.md) |
+| Refresh-claim guard | done | [claim-registry.md](claim-registry.md) |
 
 ## Conventions
 

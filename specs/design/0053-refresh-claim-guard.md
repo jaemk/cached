@@ -1,6 +1,28 @@
 # 0053 - A first-class refresh-claim guard
 
-Status: Not implemented
+Status: Implemented
+
+## Outcome
+
+Shipped as `src/claim.rs`: `ClaimRegistry<K>` (`K: Eq + Hash + Clone`), `Claim<K>`, and the
+`#[must_use]` `claim`/`is_claimed`/`len`/`is_empty` surface, matching the proposed surface in
+"Desired work" exactly, including the `Clone`-over-`Arc<K>` tradeoff and `parking_lot::Mutex`.
+
+Two points the record left open:
+
+- **Crate-root naming.** The record said "consider exporting only through `cached::claim::` plus
+  the prelude" (Pitfalls). That is what shipped: `pub mod claim;` at `src/lib.rs:915`, with
+  `Claim`/`ClaimRegistry` re-exported through `cached::prelude` (`src/lib.rs:1203`) and nowhere at
+  the crate root, for the same `KeyedCache` nearest-match-suggestion reason recorded at
+  `src/lib.rs:1143-1145`.
+- **Capacity: shrink on empty vs. document the high-water mark.** The record posed this as a
+  decision to make (Pitfalls, "Capacity is a high-water mark"). It shipped documented and left
+  alone, not shrunk: the module doc's "Capacity" section (`src/claim.rs:87-93`) states the set
+  keeps its peak allocation for the life of the registry and recommends a registry per key space
+  where that bound matters, rather than calling `shrink_to_fit` on drain to empty.
+
+`examples/stale_while_revalidate.rs` and `examples/refresh_before_expiry.rs` are being rewritten
+onto the shipped type in a separate change; not evaluated here.
 
 ## Current state
 

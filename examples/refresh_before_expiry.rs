@@ -69,10 +69,11 @@ Two macro forms this recipe does NOT apply to:
 
 Section 0 is the policy itself; sections 1 to 3 cover the read side per store shape;
 section 4 covers `expires = true`, where the deadline comes from the value rather
-than from a store-wide ttl; section 5 collapses concurrent refreshes onto one caller
-and makes the in-flight claim panic-safe; section 6 asserts the property this example
-exists for: across a window spanning the threshold, every read is served a live
-value, no read waits for the recompute, and the value is replaced exactly once.
+than from a store-wide ttl; section 5 collapses concurrent refreshes onto one
+caller with `cached::claim::ClaimRegistry`; section 6 asserts the property this
+example exists for: across a window spanning the threshold, every read is served
+a live value, no read waits for the recompute, and the value is replaced exactly
+once.
 
 The timing assertions compare against NO_WAIT, a budget well under COMPUTE, so they
 separate "served from the cache" from "waited for the recompute" with room to spare
@@ -82,11 +83,10 @@ Run:
     cargo run --example refresh_before_expiry --features "proc_macro,time_stores,async"
 */
 
-use std::collections::HashSet;
-use std::sync::Mutex;
-use std::sync::PoisonError;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use cached::claim::ClaimRegistry;
 use cached::macros::{cached, concurrent_cached};
 use cached::time::{Duration, Instant};
 use cached::{CacheExpiry, ConcurrentCacheExpiry, Expires};
@@ -455,57 +455,22 @@ fn opaque_deadline(id: &str) -> (bool, Option<Instant>) {
 // what deduplicates that, and section 5 of `examples/stale_while_revalidate.rs`
 // composes the two.
 //
-// The claim is an RAII guard rather than a `release_refresh(id)` call at the end
-// of the spawned task, because that call is skipped when the refresh body panics.
-// The key would then stay claimed for the life of the process, and since the peek
-// deliberately never removes an expired entry, it would be served past its
-// deadline forever with no caller able to recompute it: strictly worse than the
-// stale-while-revalidate fallback. `main` asserts the guard.
+// `cached::claim::ClaimRegistry` is that set of keys. `claim` hands the first
+// caller a `Claim` and every later caller `None`, until that claim is dropped.
+//
+// The release comes from the claim's `Drop` rather than from a `release(id)`
+// statement at the end of the spawned task, because such a statement is skipped
+// when the refresh body panics or the task is aborted. The key would then stay
+// claimed for the life of the process, and since the peek deliberately never
+// removes an expired entry, it would be served past its deadline forever with no
+// caller able to recompute it: strictly worse than the stale-while-revalidate
+// fallback. `main` asserts the panicking and the cancelled path.
+//
+// `ClaimRegistry::new` is not `const`, so a `static` registry needs `LazyLock`.
+// The registry is also cheap to clone, so it can live in a struct field instead.
 // ============================================================================
 
-static REFRESHING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-
-/// An in-flight refresh claim on one key, released when dropped.
-struct RefreshClaim {
-    key: String,
-}
-
-impl RefreshClaim {
-    fn key(&self) -> &str {
-        &self.key
-    }
-}
-
-impl Drop for RefreshClaim {
-    fn drop(&mut self) {
-        release_refresh(&self.key);
-    }
-}
-
-/// Returns a claim if this caller is the one that must refresh `key`, or `None` if
-/// a refresh is already in flight.
-fn claim_refresh(key: &str) -> Option<RefreshClaim> {
-    let mut guard = REFRESHING.lock().expect("refresh set poisoned");
-    if guard
-        .get_or_insert_with(HashSet::new)
-        .insert(key.to_string())
-    {
-        Some(RefreshClaim {
-            key: key.to_string(),
-        })
-    } else {
-        None
-    }
-}
-
-fn release_refresh(key: &str) {
-    // Reached from `Drop`, including while a panic unwinds, where a second panic
-    // would abort the process. So recover a poisoned lock instead of unwrapping it.
-    let mut guard = REFRESHING.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(set) = guard.as_mut() {
-        set.remove(key);
-    }
-}
+static REFRESHING: LazyLock<ClaimRegistry<String>> = LazyLock::new(ClaimRegistry::new);
 
 async fn async_lookup_refreshed_deduped(id: &str) -> String {
     let (value, expires_at) = {
@@ -515,15 +480,17 @@ async fn async_lookup_refreshed_deduped(id: &str) -> String {
 
     match value {
         Some(v) => {
-            // `claim_refresh` runs only past the threshold, so the uncontended
-            // path never touches the mutex.
+            // `claim` runs only past the threshold, so the uncontended path never
+            // touches the registry's mutex.
             if needs_refresh((true, expires_at))
-                && let Some(claim) = claim_refresh(id)
+                && let Some(claim) = REFRESHING.claim(id.to_string())
             {
                 tokio::spawn(async move {
-                    // `claim` is dropped when this task ends - on its own
-                    // completion or on an unwind out of the refresh - and the key
-                    // is released either way.
+                    // `claim` is dropped when this task ends, on its own completion,
+                    // on an unwind out of the refresh, or on cancellation, and the
+                    // key is released in all three cases. Borrowing the key out of
+                    // the guard is what keeps it alive for exactly the refresh: the
+                    // guard cannot be dropped early without a borrow error.
                     async_lookup_prime_cache(claim.key()).await;
                 });
             }
@@ -550,16 +517,16 @@ async fn flaky_lookup(id: &str) -> String {
 /// The spawn shape above, reduced to the claim and the refresh, so `main` can
 /// await the outcome. Returns `None` when a refresh is already in flight.
 fn spawn_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
-    let claim = claim_refresh(id)?;
+    let claim = REFRESHING.claim(id.to_string())?;
     Some(tokio::spawn(async move {
         flaky_lookup_prime_cache(claim.key()).await;
     }))
 }
 
 /// A body slow enough that `main` can reliably abort its task mid-flight, to prove the
-/// RAII claim also releases when the task is CANCELLED rather than unwound by a panic.
+/// claim also releases when the task is CANCELLED rather than unwound by a panic.
 /// `claim` lives inside the spawned future's own captured state, so `JoinHandle::abort`
-/// dropping that future in place runs `RefreshClaim::drop` exactly the same as an unwind
+/// dropping that future in place runs the `Claim`'s `Drop` exactly the same as an unwind
 /// or a normal return does - there is no separate "cancellation" case in the guard itself,
 /// only in how the future stops running.
 #[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
@@ -571,7 +538,7 @@ async fn stuck_lookup(id: &str) -> String {
 
 /// The spawn shape above, over `stuck_lookup`, so `main` can abort the handle mid-flight.
 fn spawn_stuck_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
-    let claim = claim_refresh(id)?;
+    let claim = REFRESHING.claim(id.to_string())?;
     Some(tokio::spawn(async move {
         stuck_lookup_prime_cache(claim.key()).await;
     }))
@@ -905,9 +872,9 @@ async fn main() {
         "the in-flight guard must collapse the refreshes to one"
     );
 
-    // The claim is RAII, so a refresh that panics still releases its key. Were it
-    // released by a statement at the end of the task instead, `g` would stay
-    // claimed for the life of the process and could never be refreshed again.
+    // The claim releases from `Drop`, so a refresh that panics still releases its
+    // key. Were it released by a statement at the end of the task instead, `g` would
+    // stay claimed for the life of the process and could never be refreshed again.
     let cold = flaky_lookup("g").await;
     PANIC_NEXT_REFRESH.store(true, Ordering::SeqCst);
     let previous_hook = std::panic::take_hook();
@@ -950,7 +917,7 @@ async fn main() {
         cancelled.as_ref().is_err_and(|e| e.is_cancelled()),
         "the task must have been cancelled, not merely finished on its own: {cancelled:?}"
     );
-    let retry_claim = claim_refresh("h");
+    let retry_claim = REFRESHING.claim("h".to_string());
     println!(
         "  an aborted refresh released its claim: retry claim succeeded {}",
         retry_claim.is_some()
@@ -960,6 +927,10 @@ async fn main() {
         "an aborted refresh must release its claim, not wedge the key forever"
     );
     drop(retry_claim);
+    assert!(
+        !REFRESHING.is_claimed("h"),
+        "the registry must drain the key once the retry claim is dropped too"
+    );
 
     // --- 6. never expired, never blocked ------------------------------------
     println!("\nnever expired, never blocked");
@@ -1005,42 +976,6 @@ async fn main() {
         0,
         "no read in this example may observe an expired entry"
     );
-
-    // --- 7. a poisoned REFRESHING mutex --------------------------------------
-    //
-    // `release_refresh` is reached from `Drop`, including while a panic is already
-    // unwinding a spawned task, so a plain `.lock().unwrap()` there would panic a
-    // SECOND time on a poisoned mutex - and a panic during an unwind aborts the whole
-    // process instead of merely losing one claim. `claim_refresh` never runs from a
-    // Drop / unwind context, so it is allowed to keep propagating poison via
-    // `.expect()`; only the release path needs to recover. Poison the mutex directly
-    // (independent of any claim) and confirm the drop path recovers instead of
-    // aborting.
-    //
-    // Run last: recovering the guard's data does not clear the poisoned flag, so every
-    // `claim_refresh` call after this point would itself panic via its own `.expect()`.
-    println!("\npoisoned refresh-claim mutex");
-    {
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // the panic below is deliberate
-        let poisoned = std::panic::catch_unwind(|| {
-            let _guard = REFRESHING.lock().unwrap();
-            panic!("deliberately poison REFRESHING");
-        });
-        std::panic::set_hook(previous_hook);
-        assert!(poisoned.is_err(), "the poisoning panic must have happened");
-    }
-    assert!(
-        REFRESHING.lock().is_err(),
-        "the mutex must now be reported as poisoned"
-    );
-    // Constructed directly rather than through `claim_refresh`, which still panics on
-    // a poisoned mutex by design (it never runs from a Drop / unwind context).
-    let claim = RefreshClaim {
-        key: "poison-test".to_string(),
-    };
-    drop(claim); // must recover the poisoned lock, not panic a second time
-    println!("  a claim dropped over a poisoned mutex released cleanly");
 
     println!("\nrefresh-before-expiry ok");
 }
