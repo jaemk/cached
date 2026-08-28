@@ -66,7 +66,7 @@ the item stays here for history.
 | [0045](0045-refresh-on-hit-trait-split.md) | Refresh-on-hit split into its own trait, on both sides | Implemented |
 | [0046](0046-configurable-key-replacement-policy.md) | Key replacement on overwrite is configurable, defaulting to replace | Not implemented (declined) |
 | [0047](0047-per-key-expiry-read.md) | Per-key expiry read: `CacheExpiry` / `ConcurrentCacheExpiry` | Implemented |
-| [0048](0048-ttl-overflow-vs-clamp.md) | Extreme TTL: overflow to never-expires vs clamp to a real deadline | Not implemented |
+| [0048](0048-ttl-overflow-vs-clamp.md) | Extreme TTL: overflow to never-expires vs clamp to a real deadline | Partly implemented |
 | [0049](0049-pin-cargo-readme.md) | Pin the cargo-readme version CI installs | Not implemented |
 | [0050](0050-capability-traits-for-inherent-only-ops.md) | Capability traits for `set_max_size` and `cache_clear_with_on_evict` | Not implemented |
 | [0051](0051-cached-skip-parameter.md) | Exclude a parameter from the generated cache key | Not implemented |
