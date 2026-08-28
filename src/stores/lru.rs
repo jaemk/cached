@@ -1033,6 +1033,25 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> CachedPeek<K, V> for LruCache<K, V
     }
 }
 
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheSetMaxSize for LruCache<K, V, S> {
+    fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
+        LruCache::set_max_size(self, max_size)
+    }
+
+    fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
+        LruCache::try_set_max_size(self, max_size)
+    }
+}
+
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheClearWithOnEvict for LruCache<K, V, S> {
+    fn cache_clear_with_on_evict(&mut self) {
+        LruCache::cache_clear_with_on_evict(self);
+    }
+}
+
 #[cfg(feature = "async_core")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async_core")))]
 impl<K, V, S> CachedGetOrSetAsync<K, V> for LruCache<K, V, S>
@@ -3135,5 +3154,104 @@ mod tests {
             );
             assert_store_and_order_agree(&c);
         }
+    }
+
+    // `set_max_size` / `try_set_max_size` / `cache_clear_with_on_evict` are also inherent
+    // methods, and inherent methods win at a concrete call site. These helpers take a generic
+    // bound, so they can only reach the trait method: they are the reachability the traits add.
+    fn resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Option<usize> {
+        cache.set_max_size(max_size)
+    }
+
+    fn try_resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError> {
+        cache.try_set_max_size(max_size)
+    }
+
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn set_max_size_through_trait_grows_like_the_inherent_method() {
+        let mut c: LruCache<u32, u32> = LruCache::new(2);
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        assert_eq!(resize_through_trait(&mut c, 4), Some(2));
+        assert_eq!(c.capacity(), 4);
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.cache_get(&1), Some(&10));
+    }
+
+    #[test]
+    fn set_max_size_through_trait_shrinks_eagerly_and_fires_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let evicted2 = evicted.clone();
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                evicted2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_set(2u32, 20u32);
+        c.cache_set(3u32, 30u32);
+        c.cache_set(4u32, 40u32);
+        assert_eq!(c.cache_get(&3), Some(&30));
+        assert_eq!(c.cache_get(&4), Some(&40));
+
+        assert_eq!(resize_through_trait(&mut c, 2), Some(4));
+        assert_eq!(c.capacity(), 2);
+        // Eviction happens before the call returns, not on the next insert.
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(evicted.load(AOrdering::Relaxed), 2);
+        assert_eq!(c.cache_evictions(), Some(2));
+        assert_eq!(c.cache_get(&3), Some(&30));
+        assert_eq!(c.cache_get(&4), Some(&40));
+        assert_eq!(c.cache_get(&1), None);
+        assert_eq!(c.cache_get(&2), None);
+    }
+
+    #[test]
+    fn try_set_max_size_through_trait_rejects_zero() {
+        let mut c: LruCache<u32, u32> = LruCache::new(2);
+        assert_eq!(
+            try_resize_through_trait(&mut c, 0),
+            Err(crate::SetMaxSizeError::ZeroMaxSize)
+        );
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(try_resize_through_trait(&mut c, 3), Ok(Some(2)));
+        assert_eq!(c.capacity(), 3);
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let evicted2 = evicted.clone();
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                evicted2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_set(2u32, 20u32);
+        c.cache_set(3u32, 30u32);
+
+        clear_with_on_evict_through_trait(&mut c);
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(evicted.load(AOrdering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
     }
 }

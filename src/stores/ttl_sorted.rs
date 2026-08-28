@@ -1626,6 +1626,29 @@ impl<K: std::hash::Hash + Eq + Ord + Clone, V, S: BuildHasher> CacheEvict
     }
 }
 
+impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> crate::CacheSetMaxSize
+    for TtlSortedCache<K, V, S>
+{
+    fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
+        TtlSortedCache::set_max_size(self, max_size)
+    }
+
+    fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
+        TtlSortedCache::try_set_max_size(self, max_size)
+    }
+}
+
+impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> crate::CacheClearWithOnEvict
+    for TtlSortedCache<K, V, S>
+{
+    fn cache_clear_with_on_evict(&mut self) {
+        TtlSortedCache::cache_clear_with_on_evict(self);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::stores::TtlSortedCache;
@@ -6644,5 +6667,109 @@ mod test {
         c.cache_set(2, 200);
         assert_eq!(c.cache_remove(&2u32), Some(200));
         assert_eq!(c.cache_expires_at(&2u32), (false, None));
+    }
+
+    // Generic bounds, so these can only reach the trait methods: the inherent methods of the
+    // same name win at a concrete call site.
+    fn resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Option<usize> {
+        cache.set_max_size(max_size)
+    }
+
+    fn try_resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError> {
+        cache.try_set_max_size(max_size)
+    }
+
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn set_max_size_through_trait_reports_the_absent_previous_bound() {
+        // The one built-in store that can be built unbounded, so the one that can report `None`.
+        let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(cache.capacity(), None);
+        assert_eq!(resize_through_trait(&mut cache, 3), None);
+        assert_eq!(cache.capacity(), Some(3));
+        assert_eq!(resize_through_trait(&mut cache, 5), Some(3));
+        assert_eq!(cache.capacity(), Some(5));
+    }
+
+    #[test]
+    fn set_max_size_through_trait_shrinks_eagerly_and_fires_on_evict() {
+        let evicted_keys: Arc<std::sync::Mutex<Vec<u32>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let evicted_keys2 = evicted_keys.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(4)
+            .on_evict(move |k: &u32, _v: &u32| {
+                evicted_keys2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+        cache.cache_set(4, 40);
+
+        assert_eq!(resize_through_trait(&mut cache, 2), Some(4));
+        assert_eq!(cache.capacity(), Some(2));
+        // Eviction happens before the call returns, not on the next insert.
+        assert_eq!(cache.cache_size(), 2);
+        assert_eq!(cache.cache_evictions(), Some(2));
+        // Deadline order, so the two earliest-inserted entries go first.
+        let mut fired: Vec<u32> = evicted_keys.lock().unwrap().clone();
+        fired.sort_unstable();
+        assert_eq!(fired, vec![1, 2]);
+        assert_eq!(cache.cache_get(&3), Some(&30));
+        assert_eq!(cache.cache_get(&4), Some(&40));
+        assert_eq!(cache.cache_get(&1), None);
+    }
+
+    #[test]
+    fn try_set_max_size_through_trait_rejects_zero() {
+        let mut cache: TtlSortedCache<u32, u32> = TtlSortedCache::builder()
+            .ttl(Duration::from_secs(60))
+            .max_size(4)
+            .build()
+            .unwrap();
+        assert_eq!(
+            try_resize_through_trait(&mut cache, 0),
+            Err(crate::SetMaxSizeError::ZeroMaxSize)
+        );
+        assert_eq!(cache.capacity(), Some(4));
+        assert_eq!(try_resize_through_trait(&mut cache, 2), Ok(Some(4)));
+        assert_eq!(cache.capacity(), Some(2));
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+
+        clear_with_on_evict_through_trait(&mut cache);
+        assert_eq!(cache.cache_size(), 0);
+        assert_eq!(cache.keys.len(), 0);
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(cache.cache_evictions(), Some(3));
     }
 }

@@ -292,8 +292,12 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   callback to fire for every removed entry (e.g., to release resources tracked via `on_evict`).
   Note: `cache_clear` is a required method on `ConcurrentCached` (and `async_cache_clear` on
   the async counterpart), with the short `clear()` alias on `ConcurrentCachedExt`, so generic
-  code over `ConcurrentCached` can clear. `cache_clear_with_on_evict()` is the exception: it is
-  inherent-only on each concrete sharded store type and is not callable through the trait.
+  code over `ConcurrentCached` can clear. `cache_clear_with_on_evict()` has its own trait per
+  receiver family, [`CacheClearWithOnEvict`] (`&mut self`) and
+  [`ConcurrentCacheClearWithOnEvict`] (`&self`), implemented by every in-memory store that has an
+  `on_evict` callback: all seven single-owner stores and all six sharded ones. The concrete types
+  keep the inherent method, which takes call-site priority; the traits only add the route through
+  a generic bound. The Redis and redb stores have no `on_evict` mechanism and implement neither.
 - Bounded caches enforce capacity on insertion. Time-bounded caches enforce freshness on lookup.
 - Redis and disk stores serialize values and return owned values. Non-sharded in-memory stores
   return references from direct store APIs; sharded stores return owned `Option<V>` values
@@ -325,6 +329,17 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   compile with an `E0599` that names the guard type rather than the missing trait. See the
   [`refresh_before_expiry`](https://github.com/jaemk/cached/blob/master/examples/refresh_before_expiry.rs)
   example for a runnable threshold-refresh recipe over both traits.
+- [`CacheSetMaxSize`] is the capacity resize for the bounded single-owner stores
+  ([`LruCache`], [`LruTtlCache`], [`ExpiringLruCache`], [`TtlSortedCache`]): `set_max_size`
+  returns the previous bound, `try_set_max_size` returns [`SetMaxSizeError::ZeroMaxSize`]
+  instead of panicking on a zero bound, and shrinking evicts eagerly, firing `on_evict` and
+  counting an eviction per removed entry. [`ConcurrentCacheSetMaxSize`] is the `&self` mirror on
+  [`ShardedLruCache`], [`ShardedLruTtlCache`], and [`ShardedExpiringLruCache`], which add
+  [`SetMaxSizeError::CapacityOverflow`] for a bound that overflows when split across shards.
+  The unbounded and time-only stores ([`UnboundCache`], [`TtlCache`], [`ExpiringCache`], and
+  their sharded forms) have no live bound and implement neither trait, so the bound is a compile
+  error rather than a silent no-op. Reading the bound needs no extra trait: `cache_capacity` is
+  already required on [`Cached`] and [`ConcurrentCacheBase`].
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
