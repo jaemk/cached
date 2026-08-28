@@ -1,6 +1,6 @@
 # 0049 - Pin the cargo-readme version CI installs
 
-Status: Not implemented
+Status: Implemented
 
 ## Current state
 
