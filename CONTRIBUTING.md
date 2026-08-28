@@ -8,7 +8,10 @@ Thanks for contributing!
 
 - [Rust toolchain](https://www.rust-lang.org/en-US/install.html)
 - [`cargo-readme`](https://github.com/livioribeiro/cargo-readme) (`cargo install
-  cargo-readme`)
+  cargo-readme --version 3.4.0 --locked`). Install the pinned version rather than the
+  latest: `make check/readme` byte-compares the generated file, and cargo-readme has
+  changed its output between releases, so a newer local install produces a README that
+  fails CI.
 - [GNU Make](https://www.gnu.org/software/make/)
 - [Docker](https://www.docker.com/) or another Docker-compatible container
   engine

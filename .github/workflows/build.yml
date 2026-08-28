@@ -82,7 +82,11 @@ jobs:
           ${{ runner.os }}-build-
           ${{ runner.os }}-
 
-    - run: cargo install cargo-readme
+    # Pinned: `make check/readme` byte-compares the generated README, so an
+    # unpinned install fails the build whenever cargo-readme changes its output,
+    # with nothing in the diff to explain it. Bump this together with a
+    # regenerated README.md. See specs/design/0049-pin-cargo-readme.md.
+    - run: cargo install cargo-readme --version 3.4.0 --locked
 
     - run: make ci
       name: 'Running `make ci`'

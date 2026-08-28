@@ -272,10 +272,16 @@ This runs: `make check` (`check/fmt` + `check/readme` + `check/clippy` + `check/
 ## README Sync
 `README.md` is generated from `src/lib.rs` doc comments by `cargo-readme` — **never edit `README.md` directly**. Any change to the README (wording, tables, examples) must be made in the `src/lib.rs` doc comments and then regenerated; a hand-edit to `README.md` is overwritten on the next regeneration and will fail `make check/readme`.
 ```bash
-cargo install cargo-readme   # one-time, if not already installed
+cargo install cargo-readme --version 3.4.0 --locked   # one-time; pin matches CI
 make docs          # regenerate README.md from src/lib.rs via cargo-readme (cargo readme)
 make check/readme  # verify README.md matches the generated output
 ```
+
+Install the pinned version, not the latest. `check/readme` byte-compares the generated file, and
+cargo-readme has changed its output between releases before (3.4.0 dropped the hidden `# pub fn
+main` lines 3.3.3 kept), so a newer local install regenerates a README that fails CI with nothing
+in the diff to explain it. To move the pin deliberately, see
+`specs/design/0049-pin-cargo-readme.md`.
 
 ---
 

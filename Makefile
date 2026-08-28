@@ -364,7 +364,11 @@ check/fmt:
 	@echo [$@]: Checking code format...
 	$(FMT_CC) $(FMT_CCFLAGS)
 
-# Checks if the README.md file is up-to-date
+# Checks if the README.md file is up-to-date.
+# Byte-compares against `cargo readme` output, so it is sensitive to the
+# cargo-readme version. CI installs 3.4.0 (.github/workflows/build.yml); install
+# the same one locally or this fails on a formatting difference alone. See
+# specs/design/0049-pin-cargo-readme.md to move the pin.
 check/readme:
 	@echo [$@]: Checking README.md...
 	$(README_CC) $(README_CCFLAGS) > _tmp_readme.md
