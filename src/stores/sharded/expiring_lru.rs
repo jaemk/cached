@@ -4661,6 +4661,94 @@ mod borrowed_key_and_capability_tests {
         (c, seen)
     }
 
+    /// A value that counts how many times `is_expired()` is called on it.
+    ///
+    /// `Expires::is_expired` is arbitrary user code with no purity guarantee, so which operations
+    /// invoke it is part of the observable contract, not an implementation detail.
+    #[derive(Clone, Debug)]
+    struct Counted {
+        expired: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::Expires for Counted {
+        fn is_expired(&self) -> bool {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.expired
+        }
+    }
+
+    /// Build a store holding one live `Counted` entry, plus the shared call counter.
+    ///
+    /// `max_size` is far above the entry count so no capacity eviction runs, and no `on_evict` is
+    /// configured, so nothing but the operation under test can touch the counter.
+    fn store_with_one_counted_value() -> (
+        ShardedExpiringLruCache<String, Counted>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = ShardedExpiringLruCache::<String, Counted>::builder()
+            .shards(8)
+            .max_size(1024)
+            .build()
+            .unwrap();
+        c.set(
+            "k".to_string(),
+            Counted {
+                expired: false,
+                calls: calls.clone(),
+            },
+        );
+        (c, calls)
+    }
+
+    /// `remove_entry` and `delete` hand the caller an entry that is leaving the cache either way,
+    /// so neither consults `is_expired()`. Both route through `pop_in`, which does not call it;
+    /// only `remove_in` does, because `remove` alone filters an expired value back out to `None`.
+    ///
+    /// Before `pop_in` was split from the expiry check, `remove_entry` and `delete` both invoked
+    /// this user code on every call. Nothing else pins that, so a regression would be silent.
+    #[test]
+    fn remove_entry_and_delete_do_not_consult_is_expired() {
+        let load =
+            |c: &Arc<std::sync::atomic::AtomicUsize>| c.load(std::sync::atomic::Ordering::Relaxed);
+
+        let (c, calls) = store_with_one_counted_value();
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            c.remove_entry("k").is_some(),
+            "the entry must actually be present, or the count below is vacuous"
+        );
+        assert_eq!(
+            load(&calls),
+            0,
+            "`remove_entry` must not call `is_expired()` on the value it hands back"
+        );
+
+        let (c, calls) = store_with_one_counted_value();
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(c.delete("k"), "the entry must actually be present");
+        assert_eq!(
+            load(&calls),
+            0,
+            "`delete` must not call `is_expired()` on the removed value"
+        );
+
+        // The contrast case: `remove` does filter on expiry, so it calls the user code exactly
+        // once. A change making `pop_in` consult expiry again would push this above 1.
+        let (c, calls) = store_with_one_counted_value();
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            c.remove("k").is_some(),
+            "the entry must actually be present"
+        );
+        assert_eq!(
+            load(&calls),
+            1,
+            "`remove` filters expired values, so it calls `is_expired()` exactly once"
+        );
+    }
+
     /// The expired-on-access branch of `get_in`: the read lock finds no live value, `pop_raw`
     /// removes the still-stored expired entry under the write lock, an eviction is counted,
     /// `on_evict` fires and the call still reports a miss. Only owned-key tests reached that
