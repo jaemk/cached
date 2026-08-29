@@ -2091,6 +2091,7 @@ mod tests {
         assert_eq!(c.cache_get(&2), Some(&20));
         assert_eq!(c.cache_get(&3), None);
         assert_eq!(c.cache_get(&4), None);
+        assert_store_and_order_agree(&c);
     }
 
     #[test]
@@ -3218,6 +3219,7 @@ mod tests {
         assert_eq!(c.cache_get(&4), Some(&40));
         assert_eq!(c.cache_get(&1), None);
         assert_eq!(c.cache_get(&2), None);
+        assert_store_and_order_agree(&c);
     }
 
     #[test]

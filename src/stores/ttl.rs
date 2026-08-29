@@ -3502,5 +3502,6 @@ mod tests {
         c.cache_set(4, 40);
         c.cache_clear();
         assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
     }
 }

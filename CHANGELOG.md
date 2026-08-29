@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- A sharded store (`ShardedLruCache`, `ShardedUnboundCache`, `ShardedTtlCache`,
+  `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) built over a
+  hand-written `ShardHasher` that does not also implement `BuildHasher` loses its inherent `get`,
+  `remove`, `remove_entry`, `delete`, `contains`, and `peek` methods. Those six methods are now
+  generic over `Borrow<Q>` and bounded on `H: BuildHasher` (named `BorrowedKeyRouting` in the
+  trait bound so the compile error explains itself), because owned-key and borrowed-key shard
+  routing are only provably equal for the blanket `ShardHasher` impl every `BuildHasher` receives;
+  a hand-rolled `ShardHasher` carries no such guarantee. There is no method-resolution fallback:
+  the inherent method is selected by name first and then fails its bound, so importing a trait
+  does not rescue the call at the same call site.
+  Migration is mechanical: replace the inherent call with the trait's owned-key form, which still
+  takes `&K`. `cache.get(&k)` becomes `ConcurrentCachedExt::get(&cache, &k).unwrap()`; same for
+  `remove`, `remove_entry`, and `delete` (`ConcurrentCachedExt::remove(&cache, &k).unwrap()`, and
+  so on) and for `contains` (`ConcurrentCachedExt::contains(&cache, &k).unwrap()`). `peek` moves to
+  `ConcurrentCachePeek::peek(&cache, &k).unwrap()` instead, since its alias lives on
+  `ConcurrentCachePeek`, not `ConcurrentCachedExt`.
+  Accepted deliberately in a MINOR release: 3.0.0 shipped 2026-08-22, so adoption of a custom
+  `ShardHasher` router is assumed to be effectively zero, and the alternative (relaxing
+  `ShardHasher<K>` to `K: ?Sized` and bounding the new methods on `H: ShardHasher<Q>` instead of
+  `H: BuildHasher`) would have introduced an unchecked cross-impl consistency contract
+  (`shard_hash(&k) == shard_hash(k.borrow())`) that the type system cannot verify, whose failure
+  mode is a silent phantom miss on an entry that is actually present.
+- Argument-inference breakage: `cache.get(&k)` where `k: &K` (for example, `for k in &keys {
+  cache.get(&k) }`) previously compiled through deref coercion. It no longer does: `Q` unifies to
+  `&K` first, and the call fails with ``the trait bound `String: Borrow<&String>` is not
+  satisfied``; same for `k: &Box<K>` and `k: &Arc<K>`. The `BorrowedKeyRouting` diagnostic above
+  does not fire for this case, since the `H` bound is satisfied and only the `Borrow` impl is
+  missing, so the error is opaque. Migration: drop the extra `&` (`cache.get(k)`), or deref
+  explicitly (`cache.get(&*boxed)`).
+- Generic-helper breakage: a downstream helper bounded only on the hasher type, for example
+  `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> {
+  c.get(k) }`, now fails to compile at its own definition, regardless of which hasher its call
+  sites use: `ShardHasher<K>` alone no longer implies the bound the inherent methods need.
+  Migration: add `H: BorrowedKeyRouting` (or the equivalent `H: BuildHasher`) to the helper's own
+  bound.
+
 ### Added
 
 - `cached::claim::{ClaimRegistry, Claim}`: a single-flight claim on a key, for collapsing
@@ -35,33 +73,24 @@
   stores: `sharded_cache.get("a")` now works on a `ShardedLruCache<String, _>` without allocating
   a `String` first. Bounded on `H: BuildHasher`, surfaced in a failed bound as
   `BorrowedKeyRouting` rather than a bare `BuildHasher` error. `set` and `get_or_set_with` are
-  unchanged: they take the key by value because they insert it. See "Breaking Changes" below for
-  the one case this is not additive for.
+  unchanged: they take the key by value because they insert it. See "Breaking Changes" above for
+  the three cases this is not additive for.
 
-### Breaking Changes
+### Fixed
 
-- A sharded store (`ShardedLruCache`, `ShardedUnboundCache`, `ShardedTtlCache`,
-  `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) built over a
-  hand-written `ShardHasher` that does not also implement `BuildHasher` loses its inherent `get`,
-  `remove`, `remove_entry`, `delete`, `contains`, and `peek` methods. Those six methods are now
-  generic over `Borrow<Q>` and bounded on `H: BuildHasher` (named `BorrowedKeyRouting` in the
-  trait bound so the compile error explains itself), because owned-key and borrowed-key shard
-  routing are only provably equal for the blanket `ShardHasher` impl every `BuildHasher` receives;
-  a hand-rolled `ShardHasher` carries no such guarantee. There is no method-resolution fallback:
-  the inherent method is selected by name first and then fails its bound, so importing a trait
-  does not rescue the call at the same call site.
-  Migration is mechanical: replace the inherent call with the trait's owned-key form, which still
-  takes `&K`. `cache.get(&k)` becomes `ConcurrentCachedExt::get(&cache, &k).unwrap()`; same for
-  `remove`, `remove_entry`, and `delete` (`ConcurrentCachedExt::remove(&cache, &k).unwrap()`, and
-  so on) and for `contains` (`ConcurrentCachedExt::contains(&cache, &k).unwrap()`). `peek` moves to
-  `ConcurrentCachePeek::peek(&cache, &k).unwrap()` instead, since its alias lives on
-  `ConcurrentCachePeek`, not `ConcurrentCachedExt`.
-  Accepted deliberately in a MINOR release: 3.0.0 is a week old, so adoption of a custom
-  `ShardHasher` router is assumed to be effectively zero, and the alternative (relaxing
-  `ShardHasher<K>` to `K: ?Sized` and bounding the new methods on `H: ShardHasher<Q>` instead of
-  `H: BuildHasher`) would have introduced an unchecked cross-impl consistency contract
-  (`shard_hash(&k) == shard_hash(k.borrow())`) that the type system cannot verify, whose failure
-  mode is a silent phantom miss on an entry that is actually present.
+- `TtlSortedCache::cache_clear_with_on_evict` now counts an eviction per removed entry even when
+  no `on_evict` callback is configured, matching the trait contract and the other implementors.
+  Previously it took an early-return fast path that cleared the store without counting anything.
+  Observable to anyone metering evictions on that store.
+
+### Documentation
+
+- Gate the per-entry-expiry macro example in the crate doc on the `proc_macro` feature. The fence
+  used `cached::macros`, which does not exist without that feature, so
+  `cargo test --no-default-features --doc` failed to compile it; CI's no-default-features row
+  runs `--tests` only, so this went uncaught there. Gated rather than marked `ignore` (like its
+  two neighboring macro fences), so it still compiles when the feature is on; the rendered
+  README is unchanged, since cargo-readme strips the hidden lines.
 
 ## [3.1.1] - 2026-08-25
 

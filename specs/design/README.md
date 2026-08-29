@@ -11,7 +11,11 @@ the item stays here for history.
 
 ## Status legend
 
-- **Implemented** - landed on the 3.0 branch.
+- **Implemented** - the code has landed in this repository. This does NOT mean it has shipped in
+  a release: records opened for a later cycle land ahead of their release (0050, 0052, 0053 are
+  Implemented for the unreleased 3.2 cycle while the published crate is at 3.1.1). Check
+  `CHANGELOG.md` for which released version (if any) actually carries an item before relying on it
+  from outside this repository.
 - **Not implemented** - agreed direction, not yet built (or a conscious decision not to build).
 - **Needs research** - direction is plausible but unresolved; do not build until scoped.
 

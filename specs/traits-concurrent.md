@@ -31,12 +31,15 @@ required with no `V: Clone + Send` bound (its get-based implementors are `AsyncR
 `try_get_or_set_with`, `len`, `is_empty`, `hits`, `misses`, `capacity`, `evictions`); it does not
 forward `cache_reset_metrics` directly. `try_get_or_set_with` delegates to
 `ConcurrentCached::cache_try_get_or_set_with`. `ConcurrentCachedAsyncExt` is its async
-counterpart, see CTRAIT-7. The six sharded concrete types also expose
-inherent `contains<Q>(&self, &Q) -> bool` and `peek<Q>(&self, &Q) -> Option<V>` (both peek-based:
-no recency, TTL, or metrics effects; `peek` clones the live value), generic since design 0052 over
-any borrowed form of the key (`K: Borrow<Q>`, bounded on `H: BuildHasher`; see
-[store-sharded.md](store-sharded.md)), and taking call-site priority over the ext-trait aliases,
-consistent with the other inherent shims (`get`, `set`, `reset`).
+counterpart, see CTRAIT-7. The six sharded concrete types also expose inherent
+`get<Q>(&self, &Q) -> Option<V>`, `remove<Q>(&self, &Q) -> Option<V>`,
+`remove_entry<Q>(&self, &Q) -> Option<(K, V)>`, `delete<Q>(&self, &Q) -> bool`,
+`contains<Q>(&self, &Q) -> bool`, and `peek<Q>(&self, &Q) -> Option<V>` (`contains` and `peek` are
+peek-based: no recency, TTL, or metrics effects; `peek` clones the live value), generic since
+design 0052 over any borrowed form of the key (`K: Borrow<Q>`, bounded on `H: BorrowedKeyRouting`,
+exactly equivalent to `H: BuildHasher` but exported at the crate root and deliberately not in the
+prelude so a failed bound names the real cause; see [store-sharded.md](store-sharded.md)
+SHARD-15), and taking call-site priority over the ext-trait aliases.
 They likewise expose inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` (see
 [store-sharded.md](store-sharded.md) SHARD-6). It is deliberately not a `ConcurrentCached*` trait
 method: it is generic over `F`, so a trait method would need `where Self: Sized` to stay object
@@ -214,28 +217,39 @@ would break external store implementations.
 ([traits-core.md](traits-core.md) TRAIT-7): `set_max_size(&self, max_size: usize) ->
 Option<usize>` and `try_set_max_size(&self, max_size: usize) -> Result<Option<usize>,
 SetMaxSizeError>`. Both methods already existed as inherent-only methods on every implementor; the
-trait adds no new capability, only the generic-code route. Taking `&self` rather than `&mut self`
-matches every other concurrent-side trait in this file, since the sharded stores are internally
-synchronized. Implemented by `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache`,
-the three sharded stores with a live, resizable capacity. `try_set_max_size` on these three can
+trait adds no new capability, only the generic-code route. The requested bound is ceiling-divided
+across shards with a floor of 16 per shard (`checked_per_shard_cap_from_total`,
+`src/stores/sharded/mod.rs:~127-139`), so `set_max_size(4)` on a 16-shard cache leaves an effective
+bound of 256. The returned previous bound is the previous EFFECTIVE TOTAL, not the previously
+requested value, and is always `Some` on all three sharded implementors. The resize is not atomic
+across shards: shards are updated one at a time, so two concurrent resizes can blend into a mix of
+the two targets. Taking `&self` rather than `&mut self` matches every other concurrent-side trait
+in this file, since the sharded stores are internally synchronized. Implemented by
+`ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache`, the three sharded stores
+with a live, resizable capacity. `try_set_max_size` on these three can
 additionally return `SetMaxSizeError::CapacityOverflow`, when `max_size` is close enough to
 `usize::MAX` that dividing it across shards and multiplying back overflows; TRAIT-7's single-owner
 implementors never construct that variant. Not implemented by the unbounded sharded stores
 (`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) or the IO stores, matching
-TRAIT-7's exclusions. See
+TRAIT-7's exclusions. It is in `cached::prelude` and the trait is ungated (only the built-in impls
+are gated on their store's feature). See
 [design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).
 
 ## CTRAIT-11
 
 `ConcurrentCacheClearWithOnEvict` is the `&self` mirror of `CacheClearWithOnEvict`
 ([traits-core.md](traits-core.md) TRAIT-8): `cache_clear_with_on_evict(&self)`, clearing the store
-while firing `on_evict` (and counting an eviction) for every removed entry. The method already
-existed as inherent-only on every implementor; the trait adds no new capability. Coverage is
-total, matching TRAIT-8: all six sharded stores implement it (`ShardedUnboundCache`,
-`ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`,
-`ShardedExpiringLruCache`), since every one of them has an `on_evict` callback. The split from
+while firing `on_evict` for every removed entry, and counting an eviction per removed entry on the
+stores that track evictions at all. `ShardedUnboundCache` has no evictions counter at all
+(`metrics().evictions` is always `None`) and is the sole exception: `on_evict` still fires for
+every entry, but no counter moves. The method already existed as inherent-only on every
+implementor; the trait adds no new capability. Coverage is total, matching TRAIT-8: all six
+sharded stores implement it (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`,
+`ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`), since every one of them
+has an `on_evict` callback. The split from
 `CacheClearWithOnEvict` is for receiver-family symmetry, not because coverage differs, following
 CTRAIT-6's rationale for splitting `ConcurrentCacheRefreshOnHit` out even with an identical
 implementor set. `RedisCache`, `AsyncRedisCache`, and `RedbCache` have no `on_evict` mechanism and
-implement neither trait. See
+implement neither trait. It is in `cached::prelude` and the trait is ungated (only the built-in
+impls are gated on their store's feature). See
 [design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).

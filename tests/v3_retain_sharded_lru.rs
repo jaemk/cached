@@ -608,7 +608,7 @@ mod sharded_expiring_lru_cache {
         cache.set(4, live(400));
         // Trait form: `KeyIsShardHasher` is not a `BuildHasher`, so borrowed-key inherent
         // lookups do not exist here. See the note in
-        // `retain_preserves_recency_independently_across_shards`.
+        // `sharded_lru_cache::retain_preserves_recency_independently_across_shards`.
         assert_eq!(
             ConcurrentCachedExt::get(&cache, &0).unwrap().map(|v| v.v),
             Some(100)
@@ -997,7 +997,7 @@ mod sharded_lru_ttl_cache {
         cache.set(4, 400);
         // Trait form: `KeyIsShardHasher` is not a `BuildHasher`, so borrowed-key inherent
         // lookups do not exist here. See the note in
-        // `retain_preserves_recency_independently_across_shards`.
+        // `sharded_lru_cache::retain_preserves_recency_independently_across_shards`.
         assert_eq!(ConcurrentCachedExt::get(&cache, &0).unwrap(), Some(100));
 
         cache.set(1, 1000);

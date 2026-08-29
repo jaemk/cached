@@ -288,11 +288,21 @@ inherent path agree. Run the crate's existing `cargo test --all-features` (prefi
 
 ## Outcome
 
-Implemented as recommended: four new traits (`CacheSetMaxSize`, `ConcurrentCacheSetMaxSize`,
-`CacheClearWithOnEvict`, `ConcurrentCacheClearWithOnEvict`) in `src/stores/mod.rs`, re-exported at
-the crate root and added to `cached::prelude`, over exactly the implementor sets in "Desired
-work". The implementor sets, `try_set_max_size` error handling, and the additive/non-breaking
-shape all landed as designed; no deviation to record.
+Implemented over exactly the implementor sets in "Desired work", with the implementor sets,
+`try_set_max_size` error handling, and the additive/non-breaking shape all landing as designed.
+One deviation from the "Recommended shape" above: the four traits (`CacheSetMaxSize`,
+`ConcurrentCacheSetMaxSize`, `CacheClearWithOnEvict`, `ConcurrentCacheClearWithOnEvict`) are
+defined directly in `src/lib.rs` (`:2644`, `:3068`, `:2717`, `:3106` respectively, as of this
+writing), not in `src/stores/mod.rs` next to `CacheEvict` as recommended, and so are not
+re-exported from `stores` at all - they are plain `pub trait` items in `src/lib.rs`, added to
+`cached::prelude` as planned. This matches where the crate's other single-owner/concurrent
+capability trait pairs already live (`CacheExpiry`/`ConcurrentCacheExpiry`, `CacheTtl`,
+`CacheRefreshOnHit`/`ConcurrentCacheRefreshOnHit` are all `pub trait` items in `src/lib.rs`, not
+`src/stores/mod.rs`), rather than the `CacheEvict`/`ConcurrentCacheEvict` precedent this record
+cited for the recommendation. It was also inconsistent with `specs/traits-core.md:3-4`'s "most are
+defined in `src/lib.rs`; `CacheEvict` and `Expires` are defined under `src/stores/` and
+re-exported" framing at the time this Outcome was first written, since that framing already
+correctly described where these four traits landed.
 
 Allocated `specs/traits-core.md` `TRAIT-7` (`CacheSetMaxSize`) and `TRAIT-8`
 (`CacheClearWithOnEvict`), split per the two-trait-pairs-not-one rule in "Pitfalls", and

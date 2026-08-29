@@ -157,6 +157,7 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ConcurrentCacheSetMaxSize` | `&self` mirror of `CacheSetMaxSize`; implemented by `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache` |
 | `CacheClearWithOnEvict` | `cache_clear_with_on_evict()`, reaching the existing inherent method from generic code; no new capability. Implemented by all 7 single-owner in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`) |
 | `ConcurrentCacheClearWithOnEvict` | `&self` mirror of `CacheClearWithOnEvict`; implemented by all 6 sharded stores (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) |
+| `BorrowedKeyRouting` | Exactly equivalent to `BuildHasher`: a marker supertrait of it, blanket-implemented for every `BuildHasher`. Exported at the crate root but deliberately not in the prelude. Name it as the bound in a generic helper over a sharded store's hasher type parameter (`H: BorrowedKeyRouting`) to keep the six borrowed-key-capable inherent methods (`get`/`remove`/`remove_entry`/`delete`/`contains`/`peek`) available |
 
 **Peek is an in-memory concept.** `CachedPeek` and `ConcurrentCachePeek` are implemented by the
 six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and
@@ -172,9 +173,18 @@ diagnostic (`src/stores/sharded/mod.rs`). `DefaultShardHasher` and every `BuildH
 automatically. A hand-written `ShardHasher` that is not also a `BuildHasher` loses these six
 inherent methods (owned-key shard routing carries no proven agreement with borrowed-key routing
 for an arbitrary hasher); it keeps owned-key access through
-`ConcurrentCachedExt::get(&cache, &key)` and friends, and `ConcurrentCachePeek::peek(&cache, &key)`
-for `peek`. `set` and `get_or_set_with` stay owned-key on every hasher. See
+`ConcurrentCachedExt::get(&cache, &key).unwrap()` and friends (`remove`/`remove_entry`/`delete`/
+`contains`), and `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek` --
+`ConcurrentCachedExt` has no `peek` of its own. These trait forms return `Result<_, Infallible>`,
+so the `.unwrap()` is required to be drop-in for the inherent methods' bare `Option<V>`. `set` and
+`get_or_set_with` stay owned-key on every hasher. See
 `specs/design/0052-sharded-borrowed-key-lookups.md`.
+
+**Generic-helper break class.** A downstream helper bounded only on `H: ShardHasher<K>`, e.g.
+`fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> { c.get(k) }`,
+now fails at its own definition regardless of which hasher the call sites use, because the six
+inherent methods above require `H: BorrowedKeyRouting` unconditionally. The remedy is to add
+`H: BorrowedKeyRouting` (or `H: BuildHasher`) to the helper's own bound.
 
 **`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
 expiry-aware stores the count folds predicate rejections together with expired entries swept

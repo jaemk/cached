@@ -229,6 +229,10 @@ For sharded LRU variants, eviction is enforced independently per shard. `max_siz
 Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
 > **Custom shard hashers:** Every sharded store carries a third, defaulted type parameter for its [`ShardHasher`] — `ShardedUnboundCache<K, V, H = DefaultShardHasher>`, `ShardedLruCache<K, V, H = DefaultShardHasher>`, and so on — mirroring `std::collections::HashMap<K, V, S = RandomState>`. Writing `ShardedLruCache<K, V>` therefore gets the default hasher, which is what most users want; name the third parameter only when routing keys through a custom `ShardHasher`. Construct such a cache through the builder's `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `ShardedLruCache<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher instantiation, so a custom hasher is always introduced through `hasher`, never a `ShardedLruCache::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
+>
+> A hand-written `ShardHasher` that does not also implement `BuildHasher` loses the six inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` lookups entirely — coherence keeps one type from implementing both, so there is no partial support. The escape hatch is the trait form: `ConcurrentCachedExt::get(&cache, &key).unwrap()` (and the matching `remove`/`remove_entry`/`delete`/`contains`), plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek` (`ConcurrentCachedExt` has no `peek` of its own). Both trait forms return `Result<_, Infallible>`, hence the `.unwrap()`.
+>
+> Naming that third type parameter in your own generic helpers has a sharp edge: a helper written as `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> { c.get(k) }` fails to compile **at its own definition**, regardless of which hasher any call site uses — the inherent `get` needs `H: BorrowedKeyRouting`, and a bare `ShardHasher<K>` bound does not imply it. Add `H: BorrowedKeyRouting` (or `H: BuildHasher`) to the helper's own bound to fix it. `BorrowedKeyRouting` is exported at the crate root (`use cached::BorrowedKeyRouting;`) but deliberately left out of the `prelude` module — it exists to be named in a bound like this one, not to be glob-imported.
 
 **Behavioral guarantees**
 
@@ -259,13 +263,19 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   guarantee. The six sharded stores' own **inherent** `get`/`remove`/`remove_entry`/`delete`/
   `contains`/`peek` are the exception: they accept any borrowed form of the key too
   (`sharded.get("a")` works on a `ShardedLruCache<String, _>` with no allocation), bounded on
-  `H: BuildHasher` (named as [`BorrowedKeyRouting`] in the bound's diagnostic, since owned- and
+  `H: BuildHasher` (named as
+  [`BorrowedKeyRouting`](https://docs.rs/cached/latest/cached/trait.BorrowedKeyRouting.html) in
+  the bound's diagnostic, since owned- and
   borrowed-key shard routing only provably agree for the blanket `ShardHasher` impl every
   `BuildHasher` gets). A store built on a hand-written, non-`BuildHasher` `ShardHasher` loses
-  these six inherent methods and falls back to the trait's owned-key form, e.g.
-  `ConcurrentCachedExt::get(&cache, &key)`. `set` and `get_or_set_with` stay owned-key on every
-  hasher, since they insert the key rather than look it up. A prelude glob can bring both families
-  into scope without collision.
+  these six inherent methods entirely. There is **no method-resolution fallback**: the inherent
+  method is selected by name first and then fails its bound, so importing a trait does not rescue
+  the call at the same call site. The replacement is the trait form, e.g.
+  `ConcurrentCachedExt::get(&cache, &key).unwrap()` (and the matching `remove`/`remove_entry`/
+  `delete`/`contains`), and `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek`, since
+  `ConcurrentCachedExt` has no `peek`. `set` and `get_or_set_with` stay owned-key on every hasher,
+  since they insert the key rather than look it up. A prelude glob can bring both families into
+  scope without collision.
 - **The inherent-method asymmetry between the two families is deliberate.** On a sharded store the
   short `set`/`get`/`len` calls resolve to *inherent* methods (infallible, `&self`), so
   `ShardedLruCache::new(100)` is usable bare. A single-owner `LruCache::new(100)` has no such
@@ -302,8 +312,11 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   Note: `cache_clear` is a required method on `ConcurrentCached` (and `async_cache_clear` on
   the async counterpart), with the short `clear()` alias on `ConcurrentCachedExt`, so generic
   code over `ConcurrentCached` can clear. `cache_clear_with_on_evict()` has its own trait per
-  receiver family, [`CacheClearWithOnEvict`] (`&mut self`) and
-  [`ConcurrentCacheClearWithOnEvict`] (`&self`), implemented by every in-memory store that has an
+  receiver family,
+  [`CacheClearWithOnEvict`](https://docs.rs/cached/latest/cached/trait.CacheClearWithOnEvict.html)
+  (`&mut self`) and
+  [`ConcurrentCacheClearWithOnEvict`](https://docs.rs/cached/latest/cached/trait.ConcurrentCacheClearWithOnEvict.html)
+  (`&self`), implemented by every in-memory store that has an
   `on_evict` callback: all seven single-owner stores and all six sharded ones. The concrete types
   keep the inherent method, which takes call-site priority; the traits only add the route through
   a generic bound. The Redis and redb stores have no `on_evict` mechanism and implement neither.
@@ -338,17 +351,23 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   compile with an `E0599` that names the guard type rather than the missing trait. See the
   [`refresh_before_expiry`](https://github.com/jaemk/cached/blob/master/examples/refresh_before_expiry.rs)
   example for a runnable threshold-refresh recipe over both traits.
-- [`CacheSetMaxSize`] is the capacity resize for the bounded single-owner stores
+- [`CacheSetMaxSize`](https://docs.rs/cached/latest/cached/trait.CacheSetMaxSize.html) is the
+  capacity resize for the bounded single-owner stores
   ([`LruCache`], [`LruTtlCache`], [`ExpiringLruCache`], [`TtlSortedCache`]): `set_max_size`
-  returns the previous bound, `try_set_max_size` returns [`SetMaxSizeError::ZeroMaxSize`]
+  returns the previous bound, `try_set_max_size` returns
+  [`SetMaxSizeError::ZeroMaxSize`](https://docs.rs/cached/latest/cached/enum.SetMaxSizeError.html#variant.ZeroMaxSize)
   instead of panicking on a zero bound, and shrinking evicts eagerly, firing `on_evict` and
-  counting an eviction per removed entry. [`ConcurrentCacheSetMaxSize`] is the `&self` mirror on
-  [`ShardedLruCache`], [`ShardedLruTtlCache`], and [`ShardedExpiringLruCache`], which add
-  [`SetMaxSizeError::CapacityOverflow`] for a bound that overflows when split across shards.
+  counting an eviction per removed entry.
+  [`ConcurrentCacheSetMaxSize`](https://docs.rs/cached/latest/cached/trait.ConcurrentCacheSetMaxSize.html)
+  is the `&self` mirror on [`ShardedLruCache`], [`ShardedLruTtlCache`], and
+  [`ShardedExpiringLruCache`], which add
+  [`SetMaxSizeError::CapacityOverflow`](https://docs.rs/cached/latest/cached/enum.SetMaxSizeError.html#variant.CapacityOverflow)
+  for a bound that overflows when split across shards.
   The unbounded and time-only stores ([`UnboundCache`], [`TtlCache`], [`ExpiringCache`], and
   their sharded forms) have no live bound and implement neither trait, so the bound is a compile
   error rather than a silent no-op. Reading the bound needs no extra trait: `cache_capacity` is
-  already required on [`Cached`] and [`ConcurrentCacheBase`].
+  already a method on [`Cached`] and [`ConcurrentCacheBase`] (defaulted to `None`, overridden by
+  every bounded store).
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
