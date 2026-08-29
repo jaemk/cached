@@ -13,8 +13,8 @@
 //!    build without the blanket impl).
 //! 2. `DefaultShardHasher` travels the same road in reverse: it implements `BuildHasher`, so it
 //!    is a valid hash builder for a non-sharded store and for a plain `HashMap`.
-//! 3. Routing through `hash_one` actually spreads keys. Shard selection reads the **upper** 32
-//!    bits of the hash, so a hasher that only varied the low half would pile every key onto
+//! 3. Routing through the blanket impl actually spreads keys. Shard selection reads the **upper**
+//!    32 bits of the hash, so a hasher that only varied the low half would pile every key onto
 //!    shard 0; `shard_sizes()` shows the real spread.
 
 use std::collections::HashMap;
@@ -192,7 +192,11 @@ fn default_shard_hasher_is_usable_as_a_build_hasher() {
         .expect("build must succeed");
     assert_eq!(cache.cache_size(), 0);
 
-    // `shard_hash` is the blanket impl forwarding to `hash_one`, not a second, separate impl.
+    // `shard_hash` is the blanket impl, not a second, separate impl. It builds a `Hasher`, feeds
+    // the key to it and finishes it, which is exactly what the provided `BuildHasher::hash_one`
+    // body does; `DefaultShardHasher` does not override `hash_one`, so the two agree here.
+    // Routing does not go through `hash_one`: `hash_one` may dispatch on its static type
+    // argument, which is what would let an owned key and a borrowed one reach different shards.
     let hasher = DefaultShardHasher::new();
     assert_eq!(hasher.shard_hash(&99u64), hasher.hash_one(99u64));
 }

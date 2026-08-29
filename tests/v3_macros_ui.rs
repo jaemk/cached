@@ -89,6 +89,10 @@ fn compile_fail_v3_macros() {
     // `#[diagnostic::on_unimplemented]` text, which nothing else would catch if it stopped
     // rendering.
     t.compile_fail("tests/ui/sharded_borrowed_key_requires_build_hasher.rs");
+    // Negative surface for owned-key lookups: the same bound is unconditional, so the plain
+    // owned-key call `cache.get(&k)` on a hand-written `ShardHasher` fails identically. This is
+    // the dominant real-world break (see the fixture's own comment), and is otherwise unpinned.
+    t.compile_fail("tests/ui/sharded_owned_key_requires_build_hasher.rs");
     // Item 9: `#[cached]`-only attributes rejected on other macros
     t.compile_fail("tests/ui/once_sync_lock_unsupported.rs");
     t.compile_fail("tests/ui/once_unsync_reads_unsupported.rs");

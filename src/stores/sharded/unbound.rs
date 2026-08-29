@@ -120,18 +120,28 @@ where
     /// Route a borrowed key to the shard that owns the equivalent owned key.
     ///
     /// Only callable when `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`. For such
-    /// an `H` the `ShardHasher` impl is the blanket one, whose `shard_hash(&K)` is exactly
-    /// `hash_one(&K)`, and coherence forbids a second, hand-written impl. The routing hash for
-    /// `&Q` therefore equals the routing hash for the owned `K` by the `Borrow` contract (equal
-    /// keys hash equally), the same guarantee `HashMap::get(&str)` on a `String` key already
-    /// relies on.
+    /// an `H` the `ShardHasher` impl is the blanket one, and coherence forbids a second,
+    /// hand-written impl. This function and that blanket `shard_hash` run the identical
+    /// construction: build a `Hasher` from the store's hash builder, feed the key to it, finish
+    /// it. Neither dispatches on the static type of what it hashes, so the routing hash for `&Q`
+    /// equals the routing hash for the owned `K` by the `Borrow` contract alone (equal keys hash
+    /// equally), the same guarantee `HashMap::get(&str)` on a `String` key already relies on.
+    ///
+    /// Routing either side through `BuildHasher::hash_one` would forfeit that: `hash_one` is an
+    /// overridable provided method allowed to dispatch on its static type argument, and
+    /// `ahash::RandomState` does. See the blanket `ShardHasher` impl in `super` for the details.
+    // Not `hash_one`: see the paragraph above.
+    #[allow(clippy::manual_hash_one)]
     #[inline]
     fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, RandomState>>>
     where
         Q: Hash + ?Sized,
         H: BorrowedKeyRouting,
     {
-        let h = self.inner.hasher.hash_one(k);
+        use std::hash::Hasher as _;
+        let mut hasher = self.inner.hasher.build_hasher();
+        k.hash(&mut hasher);
+        let h = hasher.finish();
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
 }
@@ -286,11 +296,15 @@ where
     /// assert_eq!(cache.get("a"), Some(1));
     /// ```
     ///
-    /// The borrowed form requires `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`
+    /// This method requires `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`
     /// (the alias exists so the compile error names the fix). Every hasher that reaches
     /// [`ShardHasher`] through the blanket impl satisfies it, including the default
-    /// [`DefaultShardHasher`]; a hand-written `ShardHasher` (which coherence keeps from also
-    /// being a `BuildHasher`) supports the owned-key form only, `get(&k)`.
+    /// [`DefaultShardHasher`]. The bound is unconditional, not predicated on `Q != K`, so on a
+    /// store built with a hand-written `ShardHasher` (which coherence keeps from also being a
+    /// `BuildHasher`) this inherent method disappears entirely: the owned-key call
+    /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
+    /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
+    /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -1377,7 +1391,6 @@ mod tests {
 mod borrowed_key_and_capability_tests {
     use super::*;
     use std::collections::HashSet;
-    use std::hash::BuildHasher;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
 
@@ -1407,33 +1420,147 @@ mod borrowed_key_and_capability_tests {
         (c, ks)
     }
 
-    /// The shard the owned key routes to, and the shard the borrowed key routes to. A silent
+    /// Position of `shard` within the store's shard array, found by address.
+    ///
+    /// Used only so the parity assertions below can report that they spanned several shards. The
+    /// assertions themselves compare what the store's own `shard_of` and `shard_of_borrowed`
+    /// return, by address. Recomputing the routing formula in the test instead would assert a
+    /// property of `DefaultShardHasher` rather than of this store, and would keep passing if
+    /// `shard_of_borrowed`'s body were replaced with `&self.inner.shards[0]`.
+    fn shard_position<S>(shards: &[CachePadded<Shard<S>>], shard: &CachePadded<Shard<S>>) -> usize {
+        shards
+            .iter()
+            .position(|s| std::ptr::eq(s, shard))
+            .expect("a shard returned by the store's own router must be one of its shards")
+    }
+
+    /// An owned key and the equivalent borrowed key must select the same shard. A silent
     /// mismatch here is exactly the failure mode this feature risks: the entry is present, the
     /// lookup lands on the wrong shard, and the store reports a miss.
-    fn owned_route(c: &ShardedUnboundCache<String, u32>, k: &String) -> usize {
-        shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask)
-    }
-
-    fn borrowed_route(c: &ShardedUnboundCache<String, u32>, k: &str) -> usize {
-        shard_index(c.inner.hasher.hash_one(k), c.inner.shard_mask)
-    }
-
     #[test]
     fn owned_and_borrowed_keys_route_to_the_same_shard() {
         let (c, ks) = filled();
         let mut seen = HashSet::new();
         for k in &ks {
-            let owned = owned_route(&c, k);
-            assert_eq!(
-                owned,
-                borrowed_route(&c, k.as_str()),
+            let owned = c.shard_of(k);
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(k.as_str())),
                 "`{k}` routes to a different shard as `&str` than as `String`"
             );
-            seen.insert(owned);
+            seen.insert(shard_position(&c.inner.shards, owned));
         }
         assert!(
             seen.len() > 1,
             "routing parity must be checked across shards, saw {seen:?}"
+        );
+    }
+
+    /// Routing parity for a newtype over a primitive: `UserId(u64)` with `Borrow<u64>`.
+    ///
+    /// This is the key shape that `BuildHasher::hash_one` cannot be trusted with. `hash_one` is
+    /// an overridable provided method allowed to dispatch on its static type argument, and
+    /// `ahash::RandomState` does: with its `specialize` cfg on (its build.rs enables it on any
+    /// nightly rustc) it has a specialized `CallHasher` impl for `&u64` and none for `&UserId`,
+    /// so `hash_one::<&UserId>` and `hash_one::<&u64>` can return different hashes for two values
+    /// that `Hash` identically. Routing both sides through `build_hasher` + `Hash::hash` +
+    /// `Hasher::finish` removes the possibility. On a stable toolchain that cfg is off, so this
+    /// is a structural guard rather than a live detector. The end-to-end version lives in
+    /// `tests/sharded_newtype_key_routing_parity.rs`; this one compares the routers directly.
+    #[test]
+    fn newtype_over_primitive_routes_the_same_owned_and_borrowed() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct UserId(u64);
+        impl std::hash::Hash for UserId {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+        impl std::borrow::Borrow<u64> for UserId {
+            fn borrow(&self) -> &u64 {
+                &self.0
+            }
+        }
+
+        let c = ShardedUnboundCache::<UserId, u32>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        for id in 0..200u64 {
+            c.set(UserId(id), id as u32);
+        }
+
+        let mut seen = HashSet::new();
+        for id in 0..200u64 {
+            let owned = c.shard_of(&UserId(id));
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(&id)),
+                "`UserId({id})` routes to a different shard than its borrowed `u64`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+            assert_eq!(
+                c.get(&id),
+                Some(id as u32),
+                "borrowed `get` with a `&u64` missed `UserId({id})`"
+            );
+        }
+        assert!(
+            seen.len() > 1,
+            "newtype routing parity must be checked across shards, saw {seen:?}"
+        );
+    }
+
+    /// Routing parity for a plain `BuildHasher` that is not `DefaultShardHasher`.
+    ///
+    /// The cases above only ever exercise `DefaultShardHasher`, which is in-tree. This one pins
+    /// the same agreement for `std::hash::RandomState`, which reaches `ShardHasher` through the
+    /// blanket impl and nothing else, and follows it with a borrowed `get` / `remove` round trip
+    /// so the parity is observed through the public surface as well as by address.
+    #[test]
+    fn owned_and_borrowed_keys_route_together_for_a_plain_build_hasher() {
+        let c = ShardedUnboundCache::<String, u32>::builder()
+            .shards(8)
+            .hasher(std::hash::RandomState::new())
+            .build()
+            .unwrap();
+        let ks = keys();
+        for (i, k) in ks.iter().enumerate() {
+            c.set(k.clone(), val(i));
+        }
+        assert!(
+            c.shard_sizes().iter().filter(|n| **n > 0).count() > 1,
+            "the parity check is only meaningful across several shards: {:?}",
+            c.shard_sizes()
+        );
+
+        let mut seen = HashSet::new();
+        for (i, k) in ks.iter().enumerate() {
+            let owned = c.shard_of(k);
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(k.as_str())),
+                "`{k}` routes to a different shard as `&str` than as `String` under `RandomState`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+            assert_eq!(
+                c.get(k.as_str()),
+                Some(val(i)),
+                "borrowed `get` missed `{k}` under a plain `BuildHasher`"
+            );
+        }
+        assert!(
+            seen.len() > 1,
+            "routing parity must be checked across shards, saw {seen:?}"
+        );
+
+        for (i, k) in ks.iter().enumerate() {
+            assert_eq!(
+                c.remove(k.as_str()),
+                Some(val(i)),
+                "borrowed `remove` missed `{k}` under a plain `BuildHasher`"
+            );
+        }
+        assert!(
+            c.is_empty(),
+            "every entry must have been removed through the borrowed key"
         );
     }
 
@@ -1458,13 +1585,12 @@ mod borrowed_key_and_capability_tests {
 
         let mut seen = HashSet::new();
         for (i, k) in ks.iter().enumerate() {
-            let owned = shard_index(c.inner.hasher.shard_hash(k), c.inner.shard_mask);
-            let borrowed = shard_index(c.inner.hasher.hash_one(k.as_slice()), c.inner.shard_mask);
-            assert_eq!(
-                owned, borrowed,
+            let owned = c.shard_of(k);
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(k.as_slice())),
                 "`{k:?}` routes to a different shard as `&[u8]` than as `Vec<u8>`"
             );
-            seen.insert(owned);
+            seen.insert(shard_position(&c.inner.shards, owned));
             assert_eq!(
                 c.get(k.as_slice()),
                 Some(val(i)),

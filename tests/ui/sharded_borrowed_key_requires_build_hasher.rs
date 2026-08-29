@@ -3,10 +3,15 @@
 // `BuildHasher`. A store built on a hand-written `ShardHasher` carries no agreement between the
 // owned key's routing hash and a borrowed key's, so those methods must not resolve for it.
 //
+// The bound is unconditional rather than predicated on `Q != K`, so the owned-key call
+// `cache.get(&k)` fails the same way. That case has its own golden in
+// `sharded_owned_key_requires_build_hasher.rs`; this one covers the borrowed key.
+//
 // This golden pins the `#[diagnostic::on_unimplemented]` text on `BorrowedKeyRouting`: without
 // it, a regression that drops the attribute would silently degrade the error to a bare `E0277`
-// naming `BuildHasher`, which says nothing about shard routing or about the owned-key call
-// (`ConcurrentCachedExt::get(&cache, &key)`) that does work.
+// naming `BuildHasher`, which says nothing about shard routing or about the trait calls
+// (`ConcurrentCachedExt::get(&cache, &key).unwrap()` and
+// `ConcurrentCachePeek::peek(&cache, &key).unwrap()`) that do work.
 use cached::{ShardHasher, ShardedUnboundCache};
 
 /// A hand-written `ShardHasher`. Coherence keeps it from also being a `BuildHasher`, which is

@@ -1,13 +1,13 @@
 error[E0277]: the inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` on a sharded store need a `BuildHasher`-based shard hasher
-  --> tests/ui/sharded_borrowed_key_requires_build_hasher.rs:35:19
+  --> tests/ui/sharded_owned_key_requires_build_hasher.rs:31:19
    |
-35 |     let _ = cache.get("a");
+31 |     let _ = cache.get(&k);
    |                   ^^^ `ByteSumHasher` implements `ShardHasher` directly, so this store has no inherent key lookups
    |
 help: the trait `BuildHasher` is not implemented for `ByteSumHasher`
-  --> tests/ui/sharded_borrowed_key_requires_build_hasher.rs:20:1
+  --> tests/ui/sharded_owned_key_requires_build_hasher.rs:15:1
    |
-20 | struct ByteSumHasher;
+15 | struct ByteSumHasher;
    | ^^^^^^^^^^^^^^^^^^^^
    = note: this applies to the owned-key call `cache.get(&key)` too, not just borrowed keys such as `cache.get(key.as_str())`
    = note: use the trait methods instead: `ConcurrentCachedExt::get(&cache, &key).unwrap()` and the matching `remove`/`remove_entry`/`delete`/`contains`, plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek`

@@ -180,7 +180,8 @@ silently discard `H` still fails to compile; a custom hasher is introduced only 
 ## SHARD-14
 
 `ShardHasher<K>` is blanket-implemented for every `std::hash::BuildHasher` that is
-`Clone + Send + Sync + 'static`, for every `K: Hash`, forwarding to `BuildHasher::hash_one`. The
+`Clone + Send + Sync + 'static`, for every `K: Hash`, hashing the key explicitly: build a
+`Hasher` with `build_hasher()`, feed the key to it with `Hash::hash`, then `finish()` it. The
 same hasher value therefore works on both cache families: `std::hash::RandomState`,
 `ahash::RandomState`, and any other thread-safe `BuildHasher` accepted by the single-owner
 builders' `hasher` method (see [store-lru.md](store-lru.md),
@@ -190,9 +191,10 @@ that blanket impl and no longer carries its own; it implements `BuildHasher` ins
 symmetrically usable as the hash builder of a non-sharded store or a plain `HashMap`.
 
 The upper-32-bit distribution contract of [SHARD-1](#shard-1) is unchanged and is not implied by
-`BuildHasher`: `hash_one` on `std::hash::RandomState` (SipHash-1-3) and on `ahash::RandomState`
-diffuse key entropy across all 64 bits and satisfy it, but a hand-written `BuildHasher` whose
-`finish` leaves the high bits constant still routes every key to shard 0.
+`BuildHasher`: the `Hasher` finished by `std::hash::RandomState` (SipHash-1-3) and by
+`ahash::RandomState` (ahash's own) diffuse key entropy across all 64 bits and satisfy it, but a
+hand-written `BuildHasher` whose `finish` leaves the high bits constant still routes every key to
+shard 0.
 
 Coherence makes the blanket impl exclusive: a type that implements `BuildHasher` can no longer
 also carry a hand-written `ShardHasher` impl. Custom shard routing belongs on a type that does
@@ -211,10 +213,12 @@ Each of the six methods is additionally bounded on `H: BuildHasher`, surfaced as
 (`src/stores/sharded/mod.rs`, a `#[diagnostic::on_unimplemented]` alias exactly equivalent to
 `BuildHasher`) so a failed bound names the real cause instead of a bare `BuildHasher` error. The
 bound is required because owned-key and borrowed-key shard routing are only provably equal when
-the store's `ShardHasher` impl is the blanket one every `BuildHasher` receives (`hash_one(&k) ==
-hash_one(k.borrow())` for `K: Borrow<Q>`, the same guarantee `HashMap::get` already depends on);
-an arbitrary hand-written `ShardHasher` (see [SHARD-1](#shard-1)) carries no such guarantee, since
-two unrelated `ShardHasher` impls share no consistency contract at all.
+the store's `ShardHasher` impl is the blanket one every `BuildHasher` receives, which builds a
+`Hasher` and feeds it the key explicitly rather than going through `BuildHasher::hash_one` (the
+routing then agrees for `K: Borrow<Q>` because `Hash::hash` on the owned and borrowed forms already
+must agree, the same guarantee `HashMap::get` already depends on); an arbitrary hand-written
+`ShardHasher` (see [SHARD-1](#shard-1)) carries no such guarantee, since two unrelated
+`ShardHasher` impls share no consistency contract at all.
 
 This is a BREAKING change for a store built on a hand-written, non-`BuildHasher` `ShardHasher`:
 `DefaultShardHasher` and every ordinary `BuildHasher` satisfy `BorrowedKeyRouting` automatically,
