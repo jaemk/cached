@@ -633,7 +633,7 @@ impl cached::ShardHasher<u32> for KeyIsShardHasher {
 
 #[test]
 fn sharded_unbound_cache_new_hasher_matches_builder() {
-    use cached::{ShardedUnboundCache, ShardedUnboundCacheBuilder};
+    use cached::{ConcurrentCachedExt, ShardedUnboundCache, ShardedUnboundCacheBuilder};
 
     let a: ShardedUnboundCache<u32, u32, KeyIsShardHasher> = ShardedUnboundCacheBuilder::new()
         .shards(4)
@@ -657,7 +657,15 @@ fn sharded_unbound_cache_new_hasher_matches_builder() {
     assert_eq!(a.shard_sizes(), b.shard_sizes());
     assert_eq!(a.shard_sizes(), vec![4, 4, 4, 4]);
 
+    // `KeyIsShardHasher` implements `ShardHasher` by hand, not `BuildHasher`, so it is not
+    // `BorrowedKeyRouting` and the inherent borrowed-key `get` does not exist on these stores.
+    // The trait method takes `&K` and is the owned-key lookup that stays available; do not swap
+    // the hasher for a `BuildHasher` to get the inherent form back, the custom router is the
+    // point of this test.
     for k in 0..16u32 {
-        assert_eq!(a.get(&k), b.get(&k));
+        assert_eq!(
+            ConcurrentCachedExt::get(&a, &k).unwrap(),
+            ConcurrentCachedExt::get(&b, &k).unwrap()
+        );
     }
 }

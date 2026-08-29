@@ -101,3 +101,37 @@ a fixed deadline that is also revocable). A future `t` is therefore not evidence
 live on these stores. `cache_peek_with_expiry_status` remains the authoritative liveness read on
 those two stores. The concurrent mirror is `ConcurrentCacheExpiry`, see
 [traits-concurrent.md](traits-concurrent.md) CTRAIT-9.
+
+## TRAIT-7
+
+`CacheSetMaxSize` provides `set_max_size(&mut self, max_size: usize) -> Option<usize>` (returns
+the previous capacity; panics on `max_size == 0`) and `try_set_max_size(&mut self, max_size:
+usize) -> Result<Option<usize>, SetMaxSizeError>` (returns `Err(SetMaxSizeError::ZeroMaxSize)`
+instead of panicking). Both methods already existed as inherent-only methods on every implementor;
+the trait adds no new capability, only a route reachable from generic code holding a `T:
+CacheSetMaxSize` bound rather than a concrete store type. Shrinking evicts eagerly, firing
+`on_evict` and counting an eviction per removed entry, matching the pre-existing inherent
+behavior. Implemented by `LruCache`, `LruTtlCache`, `ExpiringLruCache`, and `TtlSortedCache`, the
+four single-owner stores with a live, resizable capacity. Not implemented by the unbounded stores
+(`UnboundCache`, `TtlCache`, `ExpiringCache`), which have no capacity field to resize, nor by the
+IO stores (`RedisCache`, `AsyncRedisCache`, `RedbCache`), which have no client-side capacity.
+`SetMaxSizeError` is `#[non_exhaustive]` and shared with the concurrent mirror,
+`ConcurrentCacheSetMaxSize` ([traits-concurrent.md](traits-concurrent.md) CTRAIT-10), which adds
+`SetMaxSizeError::CapacityOverflow` for a bound that overflows when divided across shards; a
+single-owner implementation of `try_set_max_size` never constructs that variant. See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).
+
+## TRAIT-8
+
+`CacheClearWithOnEvict` provides `cache_clear_with_on_evict(&mut self)`, which clears the store
+like `cache_clear()` but fires `on_evict` (and counts an eviction) for every removed entry. The
+method already existed as inherent-only on every single-owner in-memory store; the trait adds no
+new capability, only the generic-code route. Unlike TRAIT-7, coverage is total, not partial: all
+seven single-owner in-memory stores implement it (`UnboundCache`, `LruCache`, `TtlCache`,
+`LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`), since every one of them has
+an `on_evict` callback. The single-owner/concurrent split still exists for receiver-family
+symmetry with `ConcurrentCacheClearWithOnEvict`
+([traits-concurrent.md](traits-concurrent.md) CTRAIT-11), not because coverage differs. The IO
+stores (`RedisCache`, `AsyncRedisCache`, `RedbCache`) have no `on_evict` mechanism and implement
+neither trait. See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).

@@ -84,6 +84,11 @@ fn compile_fail_v3_macros() {
     // implement `ConcurrentCacheTtl`, so `set_ttl` does not exist on them even under
     // the prelude glob.
     t.compile_fail("tests/ui/sharded_unbound_no_set_ttl.rs");
+    // Negative surface for borrowed-key lookups: a store built on a hand-written `ShardHasher`
+    // is not `BorrowedKeyRouting`, so `cache.get("a")` does not resolve. The golden pins the
+    // `#[diagnostic::on_unimplemented]` text, which nothing else would catch if it stopped
+    // rendering.
+    t.compile_fail("tests/ui/sharded_borrowed_key_requires_build_hasher.rs");
     // Item 9: `#[cached]`-only attributes rejected on other macros
     t.compile_fail("tests/ui/once_sync_lock_unsupported.rs");
     t.compile_fail("tests/ui/once_unsync_reads_unsupported.rs");

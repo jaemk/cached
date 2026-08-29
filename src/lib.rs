@@ -251,11 +251,20 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   The concurrent family returns owned values because its implementors include IO stores that
   serialize entries and cannot hand out a borrow into the store, and it is fallible because those
   stores can fail; the single-owner family stays infallible and borrow-returning. Lookup keys
-  differ the same way: single-owner `cache_get` accepts any borrowed form of the key
-  (`&Q where K: Borrow<Q>`, so `cache.get("a")` works on an `LruCache<String, _>`), while the
-  concurrent family takes `&K` exactly (`store.get(&"a".to_string())` on a sharded store) because
-  its IO-store implementors serialize the full key. A prelude glob
-  can bring both families into scope without collision.
+  differ the same way on the trait: single-owner `Cached::cache_get` accepts any borrowed form of
+  the key (`&Q where K: Borrow<Q>`, so `cache.get("a")` works on an `LruCache<String, _>`), while
+  `ConcurrentCached::cache_get` takes `&K` exactly, because its IO-store implementors
+  (`RedisCache`, `RedbCache`) serialize the full key and a generic `&Q` carries no serialization
+  guarantee. The six sharded stores' own **inherent** `get`/`remove`/`remove_entry`/`delete`/
+  `contains`/`peek` are the exception: they accept any borrowed form of the key too
+  (`sharded.get("a")` works on a `ShardedLruCache<String, _>` with no allocation), bounded on
+  `H: BuildHasher` (named as [`BorrowedKeyRouting`] in the bound's diagnostic, since owned- and
+  borrowed-key shard routing only provably agree for the blanket `ShardHasher` impl every
+  `BuildHasher` gets). A store built on a hand-written, non-`BuildHasher` `ShardHasher` loses
+  these six inherent methods and falls back to the trait's owned-key form, e.g.
+  `ConcurrentCachedExt::get(&cache, &key)`. `set` and `get_or_set_with` stay owned-key on every
+  hasher, since they insert the key rather than look it up. A prelude glob can bring both families
+  into scope without collision.
 - **The inherent-method asymmetry between the two families is deliberate.** On a sharded store the
   short `set`/`get`/`len` calls resolve to *inherent* methods (infallible, `&self`), so
   `ShardedLruCache::new(100)` is usable bare. A single-owner `LruCache::new(100)` has no such
@@ -901,12 +910,13 @@ pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 // preempt it. The requirement is documented on each capability feature in Cargo.toml: pair it
 // with a `redis_tokio*` or `redis_smol*` runtime feature.
 pub use stores::{
-    BuildError, CacheEvict, CacheValue, ConcurrentCacheEvict, DefaultHashBuilder,
-    DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
-    ExpiringLruCacheBuilder, IntoValues, LruCache, LruCacheBuilder, SetMaxSizeError, SetTtlError,
-    ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBuilder, ShardedExpiringLruCache,
-    ShardedExpiringLruCacheBuilder, ShardedLruCache, ShardedLruCacheBuilder, ShardedUnboundCache,
-    ShardedUnboundCacheBuilder, UnboundCache, UnboundCacheBuilder,
+    BorrowedKeyRouting, BuildError, CacheEvict, CacheValue, ConcurrentCacheEvict,
+    DefaultHashBuilder, DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder,
+    ExpiringLruCache, ExpiringLruCacheBuilder, IntoValues, LruCache, LruCacheBuilder,
+    SetMaxSizeError, SetTtlError, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBuilder,
+    ShardedExpiringLruCache, ShardedExpiringLruCacheBuilder, ShardedLruCache,
+    ShardedLruCacheBuilder, ShardedUnboundCache, ShardedUnboundCacheBuilder, UnboundCache,
+    UnboundCacheBuilder,
 };
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
@@ -3322,14 +3332,18 @@ pub trait ConcurrentCachePeekAsync<K, V>: ConcurrentCacheBase {
 /// **Why key-lookup methods take `&K` instead of `&Q` (`Borrow<Q>`)**:
 ///
 /// [`Cached`] uses `Borrow<Q>` for all key-lookup methods (e.g. look up a `String` key with a
-/// `&str`). `ConcurrentCached` cannot follow the same pattern for two reasons. The sharded
-/// in-memory stores must hash the key with the shard hasher to select the correct shard; a
-/// borrowed `&Q` may hash differently from the stored `K`, routing the lookup to the wrong shard.
-/// The IO stores (`RedbCache`, `RedisCache`) must serialize the key to perform a lookup; a generic
-/// `&Q` where only `K: Borrow<Q>` carries no serialization guarantee, and adding a `Q: Serialize`
-/// bound would bleed a serde dependency into every `ConcurrentCached` implementation. Both cases
-/// require the lookup key to produce the same result as the stored `K`; the concrete `&K` is
-/// the only type that guarantees this. All key-lookup methods therefore take `&K` directly.
+/// `&str`). `ConcurrentCached` cannot follow the same pattern, for two reasons that no longer
+/// weigh the same on the sharded stores as they do on the trait. For an *arbitrary* shard hasher,
+/// a borrowed `&Q` may hash differently from the stored `K`, routing the lookup to the wrong
+/// shard; that risk is why the trait keeps `&K`. It does not hold for the six sharded stores'
+/// `H: BuildHasher` instantiations, where owned- and borrowed-key routing provably agree (see
+/// [`BorrowedKeyRouting`]) — those stores expose `Borrow<Q>` on their own **inherent**
+/// `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek`, bypassing this trait, for exactly
+/// that reason. The trait itself still cannot follow, because its implementor set is wider than
+/// the sharded stores: the IO stores (`RedbCache`, `RedisCache`) must serialize the key to perform
+/// a lookup, and a generic `&Q` where only `K: Borrow<Q>` carries no serialization guarantee;
+/// adding a `Q: Serialize` bound would bleed a serde dependency into every `ConcurrentCached`
+/// implementation. All key-lookup methods therefore take `&K` directly at the trait level.
 pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// Attempt to retrieve a cached value
     ///

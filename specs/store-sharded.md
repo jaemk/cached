@@ -30,7 +30,10 @@ methods. Each of the six concrete sharded types also exposes inherent shims that
 values and take call-site priority over the `ConcurrentCachedExt` aliases: `get`, `set`, `remove`,
 `remove_entry`, `delete`, `reset`, `contains`, and `peek` (`contains` and `peek` are peek-based,
 infallible, `&self`; `peek` returns a clone of the live value with no recency/TTL/metrics
-effects). The same `peek` contract is also reachable generically through the `ConcurrentCachePeek`
+effects). `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek` (every inherent lookup
+except `set` and `get_or_set_with`, which insert the key) accept any borrowed form of the key
+(`K: Borrow<Q>`), bounded on `H: BuildHasher`; see [SHARD-15](#shard-15). The same `peek` contract
+is also reachable generically through the `ConcurrentCachePeek`
 trait (`cache_peek` plus a defaulted `peek` alias, `Result<Option<V>, Infallible>` on these six
 stores); the inherent shim keeps call-site priority on the concrete types.
 Metrics are exposed through the trait per
@@ -195,3 +198,30 @@ Coherence makes the blanket impl exclusive: a type that implements `BuildHasher`
 also carry a hand-written `ShardHasher` impl. Custom shard routing belongs on a type that does
 not implement `BuildHasher`. This is a BREAKING change. See
 [design/0044-blanket-shardhasher-over-buildhasher.md](design/0044-blanket-shardhasher-over-buildhasher.md).
+
+## SHARD-15
+
+The six sharded stores' inherent `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek`
+are generic over `Q` and take any borrowed form of the key (`K: Borrow<Q>`, `Q: Hash + Eq +
+?Sized`), matching the single-owner stores' `Cached` methods: `sharded_cache.get("a")` now works
+on a `ShardedLruCache<String, _>` without allocating a `String`. `set` and `get_or_set_with` are
+unchanged and stay owned-key, since they insert the key rather than look it up.
+
+Each of the six methods is additionally bounded on `H: BuildHasher`, surfaced as `BorrowedKeyRouting`
+(`src/stores/sharded/mod.rs`, a `#[diagnostic::on_unimplemented]` alias exactly equivalent to
+`BuildHasher`) so a failed bound names the real cause instead of a bare `BuildHasher` error. The
+bound is required because owned-key and borrowed-key shard routing are only provably equal when
+the store's `ShardHasher` impl is the blanket one every `BuildHasher` receives (`hash_one(&k) ==
+hash_one(k.borrow())` for `K: Borrow<Q>`, the same guarantee `HashMap::get` already depends on);
+an arbitrary hand-written `ShardHasher` (see [SHARD-1](#shard-1)) carries no such guarantee, since
+two unrelated `ShardHasher` impls share no consistency contract at all.
+
+This is a BREAKING change for a store built on a hand-written, non-`BuildHasher` `ShardHasher`:
+`DefaultShardHasher` and every ordinary `BuildHasher` satisfy `BorrowedKeyRouting` automatically,
+but a store parameterized over a custom `ShardHasher` router loses these six inherent methods
+outright, with no method-resolution fallback (the inherent method is selected by name first, then
+fails its bound). The owned-key form remains available through the trait on every hasher:
+`ConcurrentCachedExt::get(&cache, &key)` (and the matching `remove`/`remove_entry`/`delete`/
+`contains`), and `ConcurrentCachePeek::peek(&cache, &key)` for `peek`, since its alias is not on
+`ConcurrentCachedExt`. See
+[design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md).

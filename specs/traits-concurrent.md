@@ -32,9 +32,11 @@ required with no `V: Clone + Send` bound (its get-based implementors are `AsyncR
 forward `cache_reset_metrics` directly. `try_get_or_set_with` delegates to
 `ConcurrentCached::cache_try_get_or_set_with`. `ConcurrentCachedAsyncExt` is its async
 counterpart, see CTRAIT-7. The six sharded concrete types also expose
-inherent `contains(&self, &K) -> bool` and `peek(&self, &K) -> Option<V>` (both peek-based: no
-recency, TTL, or metrics effects; `peek` clones the live value) that take call-site priority over
-the ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `reset`).
+inherent `contains<Q>(&self, &Q) -> bool` and `peek<Q>(&self, &Q) -> Option<V>` (both peek-based:
+no recency, TTL, or metrics effects; `peek` clones the live value), generic since design 0052 over
+any borrowed form of the key (`K: Borrow<Q>`, bounded on `H: BuildHasher`; see
+[store-sharded.md](store-sharded.md)), and taking call-site priority over the ext-trait aliases,
+consistent with the other inherent shims (`get`, `set`, `reset`).
 They likewise expose inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` (see
 [store-sharded.md](store-sharded.md) SHARD-6). It is deliberately not a `ConcurrentCached*` trait
 method: it is generic over `F`, so a trait method would need `where Self: Sized` to stay object
@@ -205,3 +207,35 @@ is therefore not evidence that the entry is live on these stores.
 
 Deliberately a standalone trait rather than a new required method on `ConcurrentCloneCached`: that
 would break external store implementations.
+
+## CTRAIT-10
+
+`ConcurrentCacheSetMaxSize` is the `&self` mirror of `CacheSetMaxSize`
+([traits-core.md](traits-core.md) TRAIT-7): `set_max_size(&self, max_size: usize) ->
+Option<usize>` and `try_set_max_size(&self, max_size: usize) -> Result<Option<usize>,
+SetMaxSizeError>`. Both methods already existed as inherent-only methods on every implementor; the
+trait adds no new capability, only the generic-code route. Taking `&self` rather than `&mut self`
+matches every other concurrent-side trait in this file, since the sharded stores are internally
+synchronized. Implemented by `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache`,
+the three sharded stores with a live, resizable capacity. `try_set_max_size` on these three can
+additionally return `SetMaxSizeError::CapacityOverflow`, when `max_size` is close enough to
+`usize::MAX` that dividing it across shards and multiplying back overflows; TRAIT-7's single-owner
+implementors never construct that variant. Not implemented by the unbounded sharded stores
+(`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) or the IO stores, matching
+TRAIT-7's exclusions. See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).
+
+## CTRAIT-11
+
+`ConcurrentCacheClearWithOnEvict` is the `&self` mirror of `CacheClearWithOnEvict`
+([traits-core.md](traits-core.md) TRAIT-8): `cache_clear_with_on_evict(&self)`, clearing the store
+while firing `on_evict` (and counting an eviction) for every removed entry. The method already
+existed as inherent-only on every implementor; the trait adds no new capability. Coverage is
+total, matching TRAIT-8: all six sharded stores implement it (`ShardedUnboundCache`,
+`ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`,
+`ShardedExpiringLruCache`), since every one of them has an `on_evict` callback. The split from
+`CacheClearWithOnEvict` is for receiver-family symmetry, not because coverage differs, following
+CTRAIT-6's rationale for splitting `ConcurrentCacheRefreshOnHit` out even with an identical
+implementor set. `RedisCache`, `AsyncRedisCache`, and `RedbCache` have no `on_evict` mechanism and
+implement neither trait. See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).

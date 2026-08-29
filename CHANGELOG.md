@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CacheSetMaxSize` and `ConcurrentCacheSetMaxSize` traits, reaching `set_max_size` /
+  `try_set_max_size` from generic code holding a `T: CacheSetMaxSize` (or
+  `ConcurrentCacheSetMaxSize`) bound instead of a concrete store type. No new capability: both
+  methods already existed as inherent-only methods and already evicted eagerly on shrink, firing
+  `on_evict` per removed entry; this only adds a route through a generic bound. Implemented by
+  `LruCache`, `LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache` (single-owner) and
+  `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache` (sharded). Not implemented by
+  the unbounded stores (`UnboundCache`, `TtlCache`, `ExpiringCache` and their sharded forms), which
+  have no live capacity to resize, or by `RedisCache` / `AsyncRedisCache` / `RedbCache`, which have
+  no client-side capacity.
+- `CacheClearWithOnEvict` and `ConcurrentCacheClearWithOnEvict` traits, reaching
+  `cache_clear_with_on_evict` from generic code the same way. Implemented by all 7 single-owner
+  in-memory stores and all 6 sharded stores (every in-memory store that has an `on_evict`
+  callback); not implemented by the three IO stores, which have no `on_evict` mechanism. The crate
+  doc previously described this method as inherent-only and unreachable from generic code; that
+  gap is now closed.
+- The six sharded stores' inherent `get`, `remove`, `remove_entry`, `delete`, `contains`, and
+  `peek` now accept any borrowed form of the key (`K: Borrow<Q>`), matching the single-owner
+  stores: `sharded_cache.get("a")` now works on a `ShardedLruCache<String, _>` without allocating
+  a `String` first. Bounded on `H: BuildHasher`, surfaced in a failed bound as
+  `BorrowedKeyRouting` rather than a bare `BuildHasher` error. `set` and `get_or_set_with` are
+  unchanged: they take the key by value because they insert it. See "Breaking Changes" below for
+  the one case this is not additive for.
+
+### Breaking Changes
+
+- A sharded store (`ShardedLruCache`, `ShardedUnboundCache`, `ShardedTtlCache`,
+  `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) built over a
+  hand-written `ShardHasher` that does not also implement `BuildHasher` loses its inherent `get`,
+  `remove`, `remove_entry`, `delete`, `contains`, and `peek` methods. Those six methods are now
+  generic over `Borrow<Q>` and bounded on `H: BuildHasher` (named `BorrowedKeyRouting` in the
+  trait bound so the compile error explains itself), because owned-key and borrowed-key shard
+  routing are only provably equal for the blanket `ShardHasher` impl every `BuildHasher` receives;
+  a hand-rolled `ShardHasher` carries no such guarantee. There is no method-resolution fallback:
+  the inherent method is selected by name first and then fails its bound, so importing a trait
+  does not rescue the call at the same call site.
+  Migration is mechanical: replace the inherent call with the trait's owned-key form, which still
+  takes `&K`. `cache.get(&k)` becomes `ConcurrentCachedExt::get(&cache, &k).unwrap()`; same for
+  `remove`, `remove_entry`, and `delete` (`ConcurrentCachedExt::remove(&cache, &k).unwrap()`, and
+  so on) and for `contains` (`ConcurrentCachedExt::contains(&cache, &k).unwrap()`). `peek` moves to
+  `ConcurrentCachePeek::peek(&cache, &k).unwrap()` instead, since its alias lives on
+  `ConcurrentCachePeek`, not `ConcurrentCachedExt`.
+  Accepted deliberately in a MINOR release: 3.0.0 is a week old, so adoption of a custom
+  `ShardHasher` router is assumed to be effectively zero, and the alternative (relaxing
+  `ShardHasher<K>` to `K: ?Sized` and bounding the new methods on `H: ShardHasher<Q>` instead of
+  `H: BuildHasher`) would have introduced an unchecked cross-impl consistency contract
+  (`shard_hash(&k) == shard_hash(k.borrow())`) that the type system cannot verify, whose failure
+  mode is a silent phantom miss on an entry that is actually present.
+
 ## [3.1.1] - 2026-08-25
 
 Documentation and tests only. There is no API or behavior change.

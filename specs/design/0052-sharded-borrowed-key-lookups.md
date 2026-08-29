@@ -1,6 +1,6 @@
 # 0052 - Borrowed-key lookups on the sharded inherent methods
 
-Status: Not implemented
+Status: Implemented
 
 ## Current state
 
@@ -262,3 +262,43 @@ sharded expiry stores expose them only as trait methods (there is no inherent `p
 - If this lands, `specs/store-sharded.md` needs a new statement for the borrowed-key methods and
   `specs/traits-concurrent.md:35` ("inherent `contains(&self, &K)` and `peek(&self, &K)`") needs
   correcting.
+
+## Outcome
+
+Implemented as recommended: `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek`
+became generic over `Borrow<Q>` on all six sharded stores, bounded on `H: BorrowedKeyRouting`
+(the diagnostic alias for `BuildHasher` proposed above), with one `&Q`-generic core per store that
+both the inherent method and the trait method (at `Q = K`) call. `set` and `get_or_set_with` stay
+owned-key, as scoped. `specs/store-sharded.md` (SHARD-15) and `specs/traits-concurrent.md`
+(CTRAIT-2) were corrected as flagged above, and the crate-doc family comparison
+(`src/lib.rs`, near the old `253-258`) was rewritten to state the inherent/trait split precisely.
+
+Two claims in this record's own reasoning did not hold up and are corrected here rather than
+silently fixed:
+
+- **"Coherence makes the blanket impl exclusive" overstated what that exclusivity means.**
+  Coherence does forbid one type from implementing both `BuildHasher` and a hand-written
+  `ShardHasher<K>` (0044), but the record's use of "exclusive" reads as though hand-written
+  `ShardHasher` impls were consequently a marginal or unsupported path. They are not: `ShardHasher`
+  is a normal, actively documented trait, and its own rustdoc examples (`FibHasher`, the
+  `IdentityHasher` anti-pattern warning, `src/stores/sharded/mod.rs`) are written entirely around
+  hand-rolled, non-`BuildHasher` implementations as the trait's primary illustrated use. Coherence
+  restricts one type from doing both at once; it does not restrict custom shard routing in
+  general, and this record should not have implied otherwise.
+- **"A custom hasher keeps working for owned lookups" was false for the shape actually shipped.**
+  The record proposed one `&Q`-generic method per name (`get<Q>`, etc.) bounded on `H: BuildHasher`
+  regardless of `Q`, which is what shipped. Because there is only one method named `get` and its
+  bound covers every caller including `Q = K`, a hand-written `ShardHasher` that is not a
+  `BuildHasher` loses `get` entirely, not just its borrowed form; there is no separate owned-key
+  `get` left to fall back to on the inherent surface. Owned-key access survives only through the
+  trait (`ConcurrentCachedExt::get(&cache, &key)`, `ConcurrentCachePeek::peek(&cache, &key)` for
+  `peek`), which was already true before this change and is unaffected by it. The CHANGELOG and
+  crate doc were written to state this plainly rather than repeat the record's original claim.
+
+Both corrections point the same direction: the `H: BuildHasher` route was chosen anyway, deliberate
+tradeoffs and all, because the alternative (relaxing `ShardHasher<K>` to `K: ?Sized` and bounding
+on `H: ShardHasher<Q>`) trades a compile-time-enforced restriction for a runtime-silent one - a
+cross-impl consistency contract the type system cannot check, whose failure is a phantom miss on
+an entry that is actually present. A documented, discoverable compile error for the (assumed
+near-zero, one-week-old) custom-router population was judged the better failure mode than a
+correctness landmine for everyone else.

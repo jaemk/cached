@@ -309,6 +309,29 @@ where
     }
 }
 
+/// Exactly equivalent to [`BuildHasher`](std::hash::BuildHasher): a blanket impl covers every
+/// `BuildHasher` and nothing else can implement it.
+///
+/// It is the bound on the borrowed-key inherent lookups (`get`, `remove`, `remove_entry`,
+/// `delete`, `contains`, `peek`) of the six sharded stores. Those methods route a `&Q` with
+/// [`hash_one`](std::hash::BuildHasher::hash_one), which agrees with the owned key's routing
+/// only when the store's `ShardHasher` impl is the blanket `BuildHasher` one. A store built on a
+/// hand-written [`ShardHasher`] carries no such agreement and has no borrowed-key lookups; it
+/// keeps the owned-key forms through the trait, e.g.
+/// `ConcurrentCachedExt::get(&cache, &key)`.
+///
+/// The trait exists only so that failure explains itself. Bounding the methods on `BuildHasher`
+/// directly produces a bare `E0277` naming `BuildHasher`, which says nothing about shard routing
+/// or about the owned-key call that does work.
+#[diagnostic::on_unimplemented(
+    message = "borrowed-key lookups need a `BuildHasher`-based shard hasher",
+    label = "`{Self}` implements `ShardHasher` directly, so it has no borrowed-key routing",
+    note = "for owned-key lookups use `ConcurrentCachedExt::get(&cache, &key)` (and the matching `remove`/`contains`/`peek`)"
+)]
+pub trait BorrowedKeyRouting: std::hash::BuildHasher {}
+
+impl<T: std::hash::BuildHasher> BorrowedKeyRouting for T {}
+
 /// Default shard hasher backed by `ahash::RandomState` (or `std::collections::hash_map::RandomState`
 /// when the `ahash` feature is disabled).
 ///

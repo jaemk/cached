@@ -153,6 +153,10 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `CacheRefreshOnHit` | `refresh_on_hit()` / `set_refresh_on_hit()` on single-owner timed stores; implemented by `TtlCache` and `LruTtlCache`, deliberately not by `TtlSortedCache` (its deadline-ordered index cannot refresh an entry's expiry on read) |
 | `CacheExpiry` | `cache_peek_expires_at()` / `peek_expires_at()`: side-effect-free per-key expiry read returning `(Option<V>, Option<Instant>)`; `cache_expires_at()` / `expires_at()`: value-free deadline read returning `(bool, Option<Instant>)` (presence, deadline), no `V: Clone` bound; implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache` |
 | `ConcurrentCacheExpiry` | `&self` mirror of `CacheExpiry`, including `cache_expires_at()` / `expires_at()`; implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache` |
+| `CacheSetMaxSize` | `set_max_size()` / `try_set_max_size()` capacity resize, reaching the existing inherent methods from generic code; no new capability. Implemented by `LruCache`, `LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache` |
+| `ConcurrentCacheSetMaxSize` | `&self` mirror of `CacheSetMaxSize`; implemented by `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache` |
+| `CacheClearWithOnEvict` | `cache_clear_with_on_evict()`, reaching the existing inherent method from generic code; no new capability. Implemented by all 7 single-owner in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`) |
+| `ConcurrentCacheClearWithOnEvict` | `&self` mirror of `CacheClearWithOnEvict`; implemented by all 6 sharded stores (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) |
 
 **Peek is an in-memory concept.** `CachedPeek` and `ConcurrentCachePeek` are implemented by the
 six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and
@@ -160,6 +164,17 @@ six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`,
 or TTL state to skip and the hit/miss-metrics distinction is meaningless, while the read remains
 a full round trip. Generic code bounded on either peek trait therefore accepts only the sharded
 stores. See `specs/design/0040-peek-is-an-in-memory-concept.md`.
+
+**Sharded borrowed-key lookups require `H: BuildHasher`.** The six sharded stores' inherent
+`get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` accept any borrowed form of the key
+(`K: Borrow<Q>`), bounded on `H: BuildHasher`, named `BorrowedKeyRouting` in the bound's
+diagnostic (`src/stores/sharded/mod.rs`). `DefaultShardHasher` and every `BuildHasher` satisfy it
+automatically. A hand-written `ShardHasher` that is not also a `BuildHasher` loses these six
+inherent methods (owned-key shard routing carries no proven agreement with borrowed-key routing
+for an arbitrary hasher); it keeps owned-key access through
+`ConcurrentCachedExt::get(&cache, &key)` and friends, and `ConcurrentCachePeek::peek(&cache, &key)`
+for `peek`. `set` and `get_or_set_with` stay owned-key on every hasher. See
+`specs/design/0052-sharded-borrowed-key-lookups.md`.
 
 **`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
 expiry-aware stores the count folds predicate rejections together with expired entries swept

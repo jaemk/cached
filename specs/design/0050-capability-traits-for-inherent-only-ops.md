@@ -1,6 +1,6 @@
 # 0050 - Capability traits for `set_max_size` and `cache_clear_with_on_evict`
 
-Status: Not implemented
+Status: Implemented
 
 ## Current state
 
@@ -285,3 +285,17 @@ inherent path agree. Run the crate's existing `cargo test --all-features` (prefi
   entries) and `specs/traits-concurrent.md` `CTRAIT-10` (and `CTRAIT-11` if split) - confirm
   against the files directly before allocating, since sibling 3.2 work may have already claimed
   the next ID by the time this is picked up.
+
+## Outcome
+
+Implemented as recommended: four new traits (`CacheSetMaxSize`, `ConcurrentCacheSetMaxSize`,
+`CacheClearWithOnEvict`, `ConcurrentCacheClearWithOnEvict`) in `src/stores/mod.rs`, re-exported at
+the crate root and added to `cached::prelude`, over exactly the implementor sets in "Desired
+work". The implementor sets, `try_set_max_size` error handling, and the additive/non-breaking
+shape all landed as designed; no deviation to record.
+
+Allocated `specs/traits-core.md` `TRAIT-7` (`CacheSetMaxSize`) and `TRAIT-8`
+(`CacheClearWithOnEvict`), split per the two-trait-pairs-not-one rule in "Pitfalls", and
+`specs/traits-concurrent.md` `CTRAIT-10` / `CTRAIT-11` for their concurrent mirrors. Updated the
+crate-doc trait overview (`src/lib.rs`) and the `AGENTS.md` Key Traits table with four new rows.
+`README.md` regenerated via `make docs/readme` and verified with `make check/readme`.

@@ -500,9 +500,9 @@ pub use ttl_sorted::{TtlSortedCache, TtlSortedCacheBuilder, TtlSortedSetBuilder}
 pub use unbound::{UnboundCache, UnboundCacheBuilder};
 
 pub use sharded::{
-    DefaultShardHasher, ShardHasher, ShardedExpiringCache, ShardedExpiringCacheBuilder,
-    ShardedExpiringLruCache, ShardedExpiringLruCacheBuilder, ShardedLruCache,
-    ShardedLruCacheBuilder, ShardedUnboundCache, ShardedUnboundCacheBuilder,
+    BorrowedKeyRouting, DefaultShardHasher, ShardHasher, ShardedExpiringCache,
+    ShardedExpiringCacheBuilder, ShardedExpiringLruCache, ShardedExpiringLruCacheBuilder,
+    ShardedLruCache, ShardedLruCacheBuilder, ShardedUnboundCache, ShardedUnboundCacheBuilder,
 };
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]

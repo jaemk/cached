@@ -11,7 +11,7 @@
 //! nothing about survivor recency still leaves the correct LRU victim for a later capacity
 //! eviction.
 
-use cached::{Expires, ShardHasher, ShardedExpiringLruCache, ShardedLruCache};
+use cached::{ConcurrentCachedExt, Expires, ShardHasher, ShardedExpiringLruCache, ShardedLruCache};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -210,13 +210,18 @@ mod sharded_lru_cache {
         cache.set(0, 100);
         cache.set(2, 200);
         cache.set(4, 400);
-        assert_eq!(cache.get(&0), Some(100));
+        // `KeyIsShardHasher` implements `ShardHasher` by hand, not `BuildHasher`, so it is not
+        // `BorrowedKeyRouting` and the inherent borrowed-key `get` does not exist on stores built
+        // with it. `ConcurrentCachedExt::get` takes `&K`, promotes recency exactly like the
+        // inherent form, and stays available. Do not swap in a `BuildHasher` to get the inherent
+        // call back: pinning keys to known shards is the point of these tests.
+        assert_eq!(ConcurrentCachedExt::get(&cache, &0).unwrap(), Some(100));
 
         // Shard 1 (odd keys): insert 1, 3, 5 then promote 1 -> LRU victim becomes 3.
         cache.set(1, 1000);
         cache.set(3, 3000);
         cache.set(5, 5000);
-        assert_eq!(cache.get(&1), Some(1000));
+        assert_eq!(ConcurrentCachedExt::get(&cache, &1).unwrap(), Some(1000));
 
         // No-op retain across both shards must not disturb either shard's recency order.
         cache.retain(|_, _| true);
@@ -601,12 +606,21 @@ mod sharded_expiring_lru_cache {
         cache.set(0, live(100));
         cache.set(2, live(200));
         cache.set(4, live(400));
-        assert_eq!(cache.get(&0).map(|v| v.v), Some(100));
+        // Trait form: `KeyIsShardHasher` is not a `BuildHasher`, so borrowed-key inherent
+        // lookups do not exist here. See the note in
+        // `retain_preserves_recency_independently_across_shards`.
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &0).unwrap().map(|v| v.v),
+            Some(100)
+        );
 
         cache.set(1, live(1000));
         cache.set(3, live(3000));
         cache.set(5, live(5000));
-        assert_eq!(cache.get(&1).map(|v| v.v), Some(1000));
+        assert_eq!(
+            ConcurrentCachedExt::get(&cache, &1).unwrap().map(|v| v.v),
+            Some(1000)
+        );
 
         cache.retain(|_, _| true);
         assert!(events.lock().unwrap().is_empty());
@@ -981,12 +995,15 @@ mod sharded_lru_ttl_cache {
         cache.set(0, 100);
         cache.set(2, 200);
         cache.set(4, 400);
-        assert_eq!(cache.get(&0), Some(100));
+        // Trait form: `KeyIsShardHasher` is not a `BuildHasher`, so borrowed-key inherent
+        // lookups do not exist here. See the note in
+        // `retain_preserves_recency_independently_across_shards`.
+        assert_eq!(ConcurrentCachedExt::get(&cache, &0).unwrap(), Some(100));
 
         cache.set(1, 1000);
         cache.set(3, 3000);
         cache.set(5, 5000);
-        assert_eq!(cache.get(&1), Some(1000));
+        assert_eq!(ConcurrentCachedExt::get(&cache, &1).unwrap(), Some(1000));
 
         cache.retain(|_, _| true);
         assert!(events.lock().unwrap().is_empty());
