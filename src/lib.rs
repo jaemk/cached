@@ -491,6 +491,28 @@ assert_eq!(c.len(), 2);
 # }
 ```
 
+**Single-flight refresh claims**
+
+[`claim::ClaimRegistry`] collapses concurrent refreshes of one key onto a single caller:
+`claim(key)` hands the first caller a [`claim::Claim`] and every later caller `None` until that
+`Claim` is dropped, which happens on normal completion, on a panic, and on cancellation (a
+dropped async task) alike, so a claim can never wedge a key the way a hand-released guard can. It
+is independent of any store and is not background refresh: the registry spawns nothing and awaits
+nothing, so it composes with the stale-while-revalidate recipe (`examples/stale_while_revalidate.rs`,
+`examples/refresh_before_expiry.rs`) without taking over where the refresh runs. See the
+[`claim` module docs](claim) for the full contract, including why it is reachable through
+`cached::claim::` and the prelude rather than the crate root.
+
+```rust
+use cached::claim::ClaimRegistry;
+
+let registry: ClaimRegistry<String> = ClaimRegistry::new();
+let claim = registry.claim("user:1".to_string()).expect("first caller wins");
+assert!(registry.claim("user:1".to_string()).is_none(), "already in flight");
+drop(claim);
+assert!(registry.claim("user:1".to_string()).is_some(), "released, so claimable again");
+```
+
 **Performance**
 
 v3 reworks the hot paths of the in-memory and sharded stores. Steady-state `O(1)` reads and
@@ -941,6 +963,7 @@ pub use stores::{
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
 pub use stores::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
 
+pub mod claim;
 mod lru_list;
 #[cfg(feature = "proc_macro")]
 #[cfg_attr(docsrs, doc(cfg(feature = "proc_macro")))]
@@ -1222,7 +1245,13 @@ pub mod __private {
 /// Traits and the `CacheMetrics` snapshot struct are re-exported here; concrete store types
 /// are intentionally omitted to avoid name clashes. Import those directly
 /// (e.g. `use cached::ShardedUnboundCache;`).
+///
+/// [`claim::ClaimRegistry`] and [`claim::Claim`] are re-exported here as well. They are not at the crate root, where their generic names would
+/// be offered as nearest-match suggestions for unrelated mistyped imports (the reason
+/// `KeyedCache` moved off the root); a glob of this module is opt-in, and a `Claim` the user
+/// defines or imports directly shadows the glob rather than colliding with it.
 pub mod prelude {
+    pub use crate::claim::{Claim, ClaimRegistry};
     pub use crate::{
         CacheClearWithOnEvict, CacheEvict, CacheExpiry, CacheMetrics, CacheSetMaxSize, Cached,
         CachedExt, CachedIter, CachedPeek, CachedRead, CloneCached, ConcurrentCacheBase,

@@ -29,19 +29,19 @@ The static's shape depends on the macro, on whether the function is async, and o
     sync_writes = "by_key"     ..wrapped in KeyedCache<Lock, _>       derefs to the lock
 
 Sections 1 to 3 cover the read side per shape; section 4 collapses concurrent refreshes
-onto one caller; section 5 combines that with `sync_writes = "by_key"` so the cold path
-deduplicates too, which is per-key write synchronization that serves stale instead of
-blocking.
+onto one caller with `cached::claim::ClaimRegistry`; section 5 combines that with
+`sync_writes = "by_key"` so the cold path deduplicates too, which is per-key write
+synchronization that serves stale instead of blocking.
 
 Run:
     cargo run --example stale_while_revalidate --features "proc_macro,time_stores,async"
 */
 
-use std::collections::HashSet;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use cached::claim::ClaimRegistry;
 use cached::macros::{cached, concurrent_cached};
 use cached::{CloneCached, ConcurrentCloneCached};
 
@@ -170,57 +170,22 @@ async fn sharded_lookup_swr(id: &str) -> String {
 // what keeps a refresh from blocking readers). When the recompute is expensive,
 // track the keys already being refreshed and let the first caller win.
 //
-// The claim is an RAII guard rather than a `release_refresh(id)` call at the end
-// of the spawned task, because that call is skipped when the refresh body panics
-// or the task is aborted. The key would then stay claimed for the life of the
-// process, and since the peek deliberately never removes an expired entry, it
-// would be served stale forever with no caller able to recompute it: strictly
-// worse than not deduplicating at all. `main` asserts the guard.
+// `cached::claim::ClaimRegistry` is that set of keys. `claim` hands the first
+// caller a `Claim` and every later caller `None`, until that claim is dropped.
+//
+// The release comes from the claim's `Drop` rather than from a `release(id)`
+// statement at the end of the spawned task, because such a statement is skipped
+// when the refresh body panics or the task is aborted. The key would then stay
+// claimed for the life of the process, and since the peek deliberately never
+// removes an expired entry, it would be served stale forever with no caller able
+// to recompute it: strictly worse than not deduplicating at all. `main` asserts
+// the panicking and the cancelled path.
+//
+// `ClaimRegistry::new` is not `const`, so a `static` registry needs `LazyLock`.
+// The registry is also cheap to clone, so it can live in a struct field instead.
 // ============================================================================
 
-static REFRESHING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-
-/// An in-flight refresh claim on one key, released when dropped.
-struct RefreshClaim {
-    key: String,
-}
-
-impl RefreshClaim {
-    fn key(&self) -> &str {
-        &self.key
-    }
-}
-
-impl Drop for RefreshClaim {
-    fn drop(&mut self) {
-        release_refresh(&self.key);
-    }
-}
-
-/// Returns a claim if this caller is the one that must refresh `key`, or `None` if
-/// a refresh is already in flight.
-fn claim_refresh(key: &str) -> Option<RefreshClaim> {
-    let mut guard = REFRESHING.lock().expect("refresh set poisoned");
-    if guard
-        .get_or_insert_with(HashSet::new)
-        .insert(key.to_string())
-    {
-        Some(RefreshClaim {
-            key: key.to_string(),
-        })
-    } else {
-        None
-    }
-}
-
-fn release_refresh(key: &str) {
-    // Reached from `Drop`, including while a panic unwinds, where a second panic
-    // would abort the process. So recover a poisoned lock instead of unwrapping it.
-    let mut guard = REFRESHING.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(set) = guard.as_mut() {
-        set.remove(key);
-    }
-}
+static REFRESHING: LazyLock<ClaimRegistry<String>> = LazyLock::new(ClaimRegistry::new);
 
 async fn async_lookup_swr_deduped(id: &str) -> String {
     let (value, expired) = {
@@ -231,12 +196,15 @@ async fn async_lookup_swr_deduped(id: &str) -> String {
     match value {
         Some(v) if !expired => v,
         Some(stale) => {
-            if let Some(claim) = claim_refresh(id) {
+            if let Some(claim) = REFRESHING.claim(id.to_string()) {
                 tokio::spawn(async move {
                     // `claim` lives until this task ends, so a caller arriving
                     // mid-refresh sees the claim rather than starting a second one.
-                    // It is dropped, and the key released, on completion, on an
-                    // unwind out of the refresh, and on cancellation alike.
+                    // Borrowing the key out of the guard is what keeps it alive for
+                    // exactly the refresh: the guard cannot be dropped early without
+                    // a borrow error. It is dropped, and the key released, on
+                    // completion, on an unwind out of the refresh, and on
+                    // cancellation alike.
                     async_lookup_prime_cache(claim.key()).await;
                 });
             }
@@ -293,16 +261,16 @@ async fn flaky_lookup(id: &str) -> String {
 /// The spawn shape above, reduced to the claim and the refresh, so `main` can await
 /// the outcome. Returns `None` when a refresh is already in flight.
 fn spawn_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
-    let claim = claim_refresh(id)?;
+    let claim = REFRESHING.claim(id.to_string())?;
     Some(tokio::spawn(async move {
         flaky_lookup_prime_cache(claim.key()).await;
     }))
 }
 
 /// A body slow enough that `main` can reliably abort its task mid-flight, to prove the
-/// RAII claim also releases when the task is CANCELLED rather than unwound by a panic.
+/// claim also releases when the task is CANCELLED rather than unwound by a panic.
 /// `claim` lives inside the spawned future's own captured state, so `JoinHandle::abort`
-/// dropping that future in place runs `RefreshClaim::drop` exactly the same as an unwind
+/// dropping that future in place runs the `Claim`'s `Drop` exactly the same as an unwind
 /// or a normal return does.
 #[cached(ttl_secs = 2, key = "String", convert = r#"{ id.to_string() }"#)]
 async fn stuck_lookup(id: &str) -> String {
@@ -313,7 +281,7 @@ async fn stuck_lookup(id: &str) -> String {
 
 /// The spawn shape above, over `stuck_lookup`, so `main` can abort the handle mid-flight.
 fn spawn_stuck_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
-    let claim = claim_refresh(id)?;
+    let claim = REFRESHING.claim(id.to_string())?;
     Some(tokio::spawn(async move {
         stuck_lookup_prime_cache(claim.key()).await;
     }))
@@ -362,9 +330,9 @@ async fn single_flight_swr(id: &str) -> String {
     match value {
         Some(v) if !expired => v,
         Some(stale) => {
-            // The same RAII claim as section 4: released by drop, so a refresh that
+            // The same registry as section 4: released by drop, so a refresh that
             // panics or is cancelled cannot wedge the key.
-            if let Some(claim) = claim_refresh(id) {
+            if let Some(claim) = REFRESHING.claim(id.to_string()) {
                 tokio::spawn(async move {
                     single_flight_prime_cache(claim.key()).await;
                 });
@@ -377,8 +345,8 @@ async fn single_flight_swr(id: &str) -> String {
 }
 
 /// Set to make the next `flaky_single_flight` body panic. Section 4's `flaky_lookup`
-/// already proves the RAII claim releases under `#[cached]`; this is the same proof
-/// under `sync_writes = "by_key"`, the other call site the fix touched, so a
+/// already proves the claim releases under `#[cached]`; this is the same proof
+/// under `sync_writes = "by_key"`, the other call site that takes a claim, so a
 /// regression specific to that site (say, a `by_key` bucket lock held across the
 /// panic instead of released with the claim) would not go unnoticed.
 static PANIC_NEXT_SINGLE_FLIGHT_REFRESH: AtomicBool = AtomicBool::new(false);
@@ -400,7 +368,7 @@ async fn flaky_single_flight(id: &str) -> String {
 
 /// `spawn_refresh`'s shape, over `flaky_single_flight`.
 fn spawn_flaky_single_flight_refresh(id: &str) -> Option<tokio::task::JoinHandle<()>> {
-    let claim = claim_refresh(id)?;
+    let claim = REFRESHING.claim(id.to_string())?;
     Some(tokio::spawn(async move {
         flaky_single_flight_prime_cache(claim.key()).await;
     }))
@@ -486,9 +454,9 @@ async fn main() {
         "the in-flight guard must collapse the refreshes to one"
     );
 
-    // The claim is RAII, so a refresh that panics still releases its key. Were it
-    // released by a statement at the end of the task instead, `g` would stay claimed
-    // for the life of the process and could never be refreshed again.
+    // The claim releases from `Drop`, so a refresh that panics still releases its key.
+    // Were it released by a statement at the end of the task instead, `g` would stay
+    // claimed for the life of the process and could never be refreshed again.
     let cold = flaky_lookup("g").await;
     PANIC_NEXT_REFRESH.store(true, Ordering::SeqCst);
     let outcome = {
@@ -529,7 +497,7 @@ async fn main() {
         cancelled.as_ref().is_err_and(|e| e.is_cancelled()),
         "the task must have been cancelled, not merely finished on its own: {cancelled:?}"
     );
-    let retry_claim = claim_refresh("h");
+    let retry_claim = REFRESHING.claim("h".to_string());
     println!(
         "  an aborted refresh released its claim: retry claim succeeded {}",
         retry_claim.is_some()
@@ -539,6 +507,10 @@ async fn main() {
         "an aborted refresh must release its claim, not wedge the key forever"
     );
     drop(retry_claim);
+    assert!(
+        !REFRESHING.is_claimed("h"),
+        "the registry must drain the key once the retry claim is dropped too"
+    );
 
     // --- 5. single-flight revalidation --------------------------------------
     println!("\nsingle-flight revalidation");
@@ -635,41 +607,6 @@ async fn main() {
         stored.as_deref(),
         Some(cold_flaky.as_str()),
         "the retry must have replaced the value the panicking refresh failed to"
-    );
-
-    // Poison recovery: `release_refresh` runs from `Drop`, including mid-unwind, where
-    // a second panic would abort the process, so it recovers a poisoned `REFRESHING`
-    // instead of unwrapping it. Nothing above ever poisons the lock, so poison it here
-    // directly. This must run last - poisoning is permanent for the mutex's lifetime,
-    // and `claim_refresh` (unlike `release_refresh`) still `.expect`s a healthy lock, so
-    // any assertion after this point would panic there instead of testing what it means to.
-    let claim = claim_refresh("poison-me").expect("the first claim on a fresh key must succeed");
-    let poisoned = {
-        let _silence = SilencedPanic::new(); // the panic below is deliberate
-        std::panic::catch_unwind(|| {
-            let _guard = REFRESHING.lock().expect("not yet poisoned");
-            panic!("deliberately poison REFRESHING while a guard is held");
-        })
-    };
-    assert!(
-        poisoned.is_err(),
-        "the deliberate panic must have propagated"
-    );
-    assert!(REFRESHING.is_poisoned(), "REFRESHING must now be poisoned");
-
-    // Runs `RefreshClaim::drop` -> `release_refresh` against the now-poisoned mutex.
-    // Were `release_refresh` still `.expect`-ing a healthy lock, this drop would panic
-    // during a `Drop`, and if it happened during an unwind, that second panic would
-    // abort the process rather than merely failing this assertion.
-    drop(claim);
-    let recovered = REFRESHING.lock().unwrap_or_else(PoisonError::into_inner);
-    let still_claimed = recovered
-        .as_ref()
-        .is_some_and(|set| set.contains("poison-me"));
-    println!("  release_refresh recovered a poisoned lock: still claimed = {still_claimed}");
-    assert!(
-        !still_claimed,
-        "release_refresh must remove the key even from a poisoned set"
     );
 
     println!("\nstale-while-revalidate ok");
