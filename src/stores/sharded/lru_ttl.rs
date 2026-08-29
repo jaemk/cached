@@ -451,6 +451,13 @@ where
     /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
     /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
     /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it; see
+    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
+    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -554,6 +561,10 @@ where
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
     /// `H: BorrowedKeyRouting` restriction that carries.
+    ///
+    /// On a store whose `H` is not a `BuildHasher` the replacement is
+    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get` form
+    /// named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where

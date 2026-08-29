@@ -305,6 +305,13 @@ where
     /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
     /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
     /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it; see
+    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
+    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -408,6 +415,10 @@ where
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
     /// `H: BorrowedKeyRouting` restriction that carries.
+    ///
+    /// On a store whose `H` is not a `BuildHasher` the replacement is
+    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get` form
+    /// named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
@@ -2061,15 +2072,14 @@ mod borrowed_key_and_capability_tests {
 
     /// Routing parity for a newtype over a primitive: `UserId(u64)` with `Borrow<u64>`.
     ///
-    /// This is the key shape that `BuildHasher::hash_one` cannot be trusted with. `hash_one` is
-    /// an overridable provided method allowed to dispatch on its static type argument, and
-    /// `ahash::RandomState` does: with its `specialize` cfg on (its build.rs enables it on any
-    /// nightly rustc) it has a specialized `CallHasher` impl for `&u64` and none for `&UserId`,
-    /// so `hash_one::<&UserId>` and `hash_one::<&u64>` can return different hashes for two values
-    /// that `Hash` identically. Routing both sides through `build_hasher` + `Hash::hash` +
-    /// `Hasher::finish` removes the possibility. On a stable toolchain that cfg is off, so this
-    /// is a structural guard rather than a live detector. The end-to-end version lives in
-    /// `tests/sharded_newtype_key_routing_parity.rs`; this one compares the routers directly.
+    /// Compares what this store's own `shard_of` and `shard_of_borrowed` return, by address, the
+    /// same way `owned_and_borrowed_keys_route_to_the_same_shard` above does. This store builds
+    /// with the default hasher, and routing goes through `routing_hash` (`build_hasher` +
+    /// `Hash::hash` + `Hasher::finish`), which never calls `BuildHasher::hash_one`, so the
+    /// `hash_one` specialization hazard -- `ahash::RandomState` dispatching a different
+    /// `CallHasher` impl for `&UserId` than for `&u64` under nightly's `specialize` cfg -- is not
+    /// reachable from here. That hazard is covered by a dedicated hasher-override case in
+    /// `tests/sharded_newtype_key_routing_parity.rs`.
     #[test]
     fn newtype_over_primitive_routes_the_same_owned_and_borrowed() {
         #[derive(Clone, Debug, PartialEq, Eq)]

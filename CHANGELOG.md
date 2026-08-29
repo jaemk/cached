@@ -36,9 +36,24 @@
 - Generic-helper breakage: a downstream helper bounded only on the hasher type, for example
   `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> {
   c.get(k) }`, now fails to compile at its own definition, regardless of which hasher its call
-  sites use: `ShardHasher<K>` alone no longer implies the bound the inherent methods need.
-  Migration: add `H: BorrowedKeyRouting` (or the equivalent `H: BuildHasher`) to the helper's own
-  bound.
+  sites use: `ShardHasher<K>` alone no longer implies the bound the inherent methods need. The
+  inherent `get` lives in `impl<K, V, H: ShardHasher<K>> ShardedLruCache<K, V, H> where K: Hash +
+  Eq + Clone, V: Clone`, so the helper also needs the key/value bounds too, not just a hasher
+  bound; rustc reports those key/value bounds first (E0599) and never names `BorrowedKeyRouting`.
+  Migration: add the full bound set to the helper's own definition:
+  ```rust
+  fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V>
+  where K: Hash + Eq + Clone, V: Clone, H: ShardHasher<K> + BorrowedKeyRouting
+  { c.get(k) }
+  ```
+- Shard routing no longer consults `BuildHasher::hash_one`. The blanket `ShardHasher` impl for a
+  `BuildHasher` and every store's borrowed-key routing build a `Hasher` with `build_hasher()`,
+  hash the key and finish it, and `DefaultShardHasher`'s `hash_one` override was removed so it
+  uses the provided default too. An overridden `hash_one` is no longer consulted for routing, and
+  the upper-32-bit distribution contract for a custom hasher applies to the `Hasher` returned by
+  `build_hasher()`. This matters for a `BuildHasher` whose `hash_one` dispatches on the static
+  type of its argument (`ahash::RandomState` does, on any nightly compiler): an owned newtype key
+  and its borrowed primitive form would otherwise route to different shards.
 
 ### Added
 
@@ -75,9 +90,27 @@
   `BorrowedKeyRouting` rather than a bare `BuildHasher` error. `set` and `get_or_set_with` are
   unchanged: they take the key by value because they insert it. See "Breaking Changes" above for
   the three cases this is not additive for.
+- `cached::BorrowedKeyRouting` (`use cached::BorrowedKeyRouting;`): a new public export at the
+  crate root, deliberately not in the prelude. Previously it was only mentioned in
+  breaking-change prose above, so a user with `use cached::prelude::*;` who follows that
+  migration advice hit E0405 (unresolved name) and had to guess the path.
+- `cached::prelude` now also exports `CacheSetMaxSize`, `CacheClearWithOnEvict`,
+  `ConcurrentCacheSetMaxSize`, and `ConcurrentCacheClearWithOnEvict`. Note that a downstream
+  extension trait offering `set_max_size` or `cache_clear_with_on_evict` for the same stores,
+  combined with `use cached::prelude::*`, now yields E0034 (multiple applicable items in scope);
+  fixable with UFCS.
 
 ### Fixed
 
+- `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache` backed their shards with
+  `HashMap<K, V, ahash::RandomState>`, whose intra-shard probe goes through `BuildHasher::hash_one`.
+  On a nightly compiler, where ahash enables its `specialize` cfg, an entry inserted under an
+  owned newtype key was unreachable through its borrowed primitive form: `get`, `contains`, and
+  `peek` reported a miss, and `remove` and `delete` silently no-opped. They now use
+  `DefaultShardHasher`, which has no `hash_one` override, so the probe depends only on `Hash`.
+- `TtlSortedCache::cache_clear_with_on_evict` drained every entry into a `Vec` even with no
+  `on_evict` callback configured, where only the removed count is observable. It now clears in
+  place in that case.
 - `TtlSortedCache::cache_clear_with_on_evict` now counts an eviction per removed entry even when
   no `on_evict` callback is configured, matching the trait contract and the other implementors.
   Previously it took an early-return fast path that cleared the store without counting anything.

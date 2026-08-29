@@ -227,5 +227,13 @@ outright, with no method-resolution fallback (the inherent method is selected by
 fails its bound). The owned-key form remains available through the trait on every hasher:
 `ConcurrentCachedExt::get(&cache, &key)` (and the matching `remove`/`remove_entry`/`delete`/
 `contains`), and `ConcurrentCachePeek::peek(&cache, &key)` for `peek`, since its alias is not on
-`ConcurrentCachedExt`. See
+`ConcurrentCachedExt`.
+
+It is also a BREAKING change for the case most likely to hit a user who never wrote a custom
+hasher at all: `for k in &keys { cache.get(&k) }` where `k: &K` (so `&k` is `&&K`; same for
+`&Box<K>` and `&Arc<K>`) previously compiled through deref coercion. It no longer does, since `Q`
+now unifies to `&K` first and the call fails with ``the trait bound `String: Borrow<&String>` is
+not satisfied``. The `BorrowedKeyRouting` diagnostic above does not fire for this case, since the
+`H` bound is satisfied and only the `Borrow` impl is missing, so the error is opaque. Migration:
+drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&*boxed)`). See
 [design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md).

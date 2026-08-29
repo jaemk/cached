@@ -201,7 +201,8 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// Error returned by `try_set_max_size` methods.
+/// Error returned by [`CacheSetMaxSize::try_set_max_size`](crate::CacheSetMaxSize::try_set_max_size)
+/// and [`ConcurrentCacheSetMaxSize::try_set_max_size`](crate::ConcurrentCacheSetMaxSize::try_set_max_size).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetMaxSizeError {

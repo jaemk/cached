@@ -232,7 +232,9 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
 >
 > A hand-written `ShardHasher` that does not also implement `BuildHasher` loses the six inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` lookups entirely — coherence keeps one type from implementing both, so there is no partial support. The escape hatch is the trait form: `ConcurrentCachedExt::get(&cache, &key).unwrap()` (and the matching `remove`/`remove_entry`/`delete`/`contains`), plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek` (`ConcurrentCachedExt` has no `peek` of its own). Both trait forms return `Result<_, Infallible>`, hence the `.unwrap()`.
 >
-> Naming that third type parameter in your own generic helpers has a sharp edge: a helper written as `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> { c.get(k) }` fails to compile **at its own definition**, regardless of which hasher any call site uses — the inherent `get` needs `H: BorrowedKeyRouting`, and a bare `ShardHasher<K>` bound does not imply it. Add `H: BorrowedKeyRouting` (or `H: BuildHasher`) to the helper's own bound to fix it. `BorrowedKeyRouting` is exported at the crate root (`use cached::BorrowedKeyRouting;`) but deliberately left out of the `prelude` module — it exists to be named in a bound like this one, not to be glob-imported.
+> Naming that third type parameter in your own generic helpers has a sharp edge: a helper written as `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> { c.get(k) }` fails to compile **at its own definition**, regardless of which hasher any call site uses — the inherent `get` needs `H: BorrowedKeyRouting`, and a bare `ShardHasher<K>` bound does not imply it. Adding just `H: BorrowedKeyRouting` is not enough by itself, though: the inherent `get` lives in an `impl` block that also requires `K: Hash + Eq + Clone` and `V: Clone`, so a generic helper needs those bounds too, and it is rustc's E0599 that surfaces first — it lists the four missing bounds (`K: Hash + Eq + Clone`, `V: Clone`) and never names `BorrowedKeyRouting` at all. The working signature is `fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> where K: Hash + Eq + Clone, V: Clone, H: ShardHasher<K> + BorrowedKeyRouting { c.get(k) }`. `BorrowedKeyRouting` is exported at the crate root (`use cached::BorrowedKeyRouting;`) but deliberately left out of the `prelude` module — it exists to be named in a bound like this one, not to be glob-imported.
+>
+> The same inherent-method resolution also breaks argument inference for callers that used to pass a double-reference. Before this crate's borrowed-key routing existed, `for k in &keys { cache.get(&k) }` on a `ShardedLruCache<String, _>` happened to compile with `k: &String`, because `get`'s `&Q` parameter unified `Q = String` through an auto-deref that masked the extra `&`. With `Q` now constrained by `K: Borrow<Q>`, that same call infers `Q = &String` and fails with "the trait bound `String: Borrow<&String>` is not satisfied" — a plain `E0277` that does not mention `BorrowedKeyRouting` and gives no "remove the extra `&`" hint, because the fix is not a missing bound but an extra reference at the call site. The same shape shows up through any extra layer of reference or smart pointer around the loop variable — `&&K`, `&Box<K>`, `&Arc<K>` — anywhere the old code relied on deref coercion to paper over a mismatched borrow type. The fix in every case is to drop the extra `&`/indirection so `Q` infers as the type actually stored, not a reference to it: `cache.get(k)` instead of `cache.get(&k)`.
 
 **Behavioral guarantees**
 
@@ -362,12 +364,17 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   is the `&self` mirror on [`ShardedLruCache`], [`ShardedLruTtlCache`], and
   [`ShardedExpiringLruCache`], which add
   [`SetMaxSizeError::CapacityOverflow`](https://docs.rs/cached/latest/cached/enum.SetMaxSizeError.html#variant.CapacityOverflow)
-  for a bound that overflows when split across shards.
+  for a bound that overflows when split across shards, and which round the requested total up to a
+  multiple of the shard count (further up to the 16-per-shard floor on a multi-shard store) — both
+  the effective bound and the previous bound `set_max_size`/`try_set_max_size` return are the
+  rounded totals, not the requested number.
   The unbounded and time-only stores ([`UnboundCache`], [`TtlCache`], [`ExpiringCache`], and
   their sharded forms) have no live bound and implement neither trait, so the bound is a compile
-  error rather than a silent no-op. Reading the bound needs no extra trait: `cache_capacity` is
-  already a method on [`Cached`] and [`ConcurrentCacheBase`] (defaulted to `None`, overridden by
-  every bounded store).
+  error rather than a silent no-op. Reading the bound needs no extra trait on a concrete store;
+  generic code that also reads the bound needs `T: Cached<K, V>` or `T: ConcurrentCacheBase`
+  alongside `CacheSetMaxSize`/`ConcurrentCacheSetMaxSize`, since `CacheSetMaxSize` itself is
+  un-parameterized and does not carry `cache_capacity`. `cache_capacity` is already a method on
+  [`Cached`] and [`ConcurrentCacheBase`] (defaulted to `None`, overridden by every bounded store).
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.

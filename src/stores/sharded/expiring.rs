@@ -3,11 +3,6 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
-
 use std::collections::HashMap;
 
 use crate::{
@@ -30,7 +25,7 @@ type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
 #[allow(clippy::type_complexity)]
 struct ExpiringInner<K, V, H> {
-    shards: Box<[CachePadded<Shard<HashMap<K, V, RandomState>>>]>,
+    shards: Box<[CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>]>,
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
@@ -138,7 +133,7 @@ where
     H: ShardHasher<K>,
 {
     #[inline]
-    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, RandomState>>> {
+    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>> {
         let h = self.inner.hasher.shard_hash(k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
@@ -153,7 +148,7 @@ where
     /// `HashMap::get(&str)` on a `String` key already relies on. See `routing_hash` for why the
     /// construction is written out rather than delegated to `BuildHasher::hash_one`.
     #[inline]
-    fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, RandomState>>>
+    fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>
     where
         K: Borrow<Q>,
         Q: Hash + ?Sized,
@@ -223,7 +218,11 @@ where
     K: Hash + Eq,
     V: Clone + Expires,
 {
-    fn get_in<Q>(&self, shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>, k: &Q) -> Option<V>
+    fn get_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -281,7 +280,7 @@ where
     /// `remove` differs from `remove_entry` only in dropping an expired value on the way out.
     fn remove_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<V>
     where
@@ -294,7 +293,7 @@ where
 
     fn remove_entry_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<(K, V)>
     where
@@ -311,7 +310,11 @@ where
         removed
     }
 
-    fn contains_in<Q>(&self, shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>, k: &Q) -> bool
+    fn contains_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -319,7 +322,11 @@ where
         shard.lock.read().get(k).is_some_and(|v| !v.is_expired())
     }
 
-    fn peek_in<Q>(&self, shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>, k: &Q) -> Option<V>
+    fn peek_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -368,6 +375,13 @@ where
     /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
     /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
     /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it; see
+    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
+    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -471,6 +485,10 @@ where
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
     /// `H: BorrowedKeyRouting` restriction that carries.
+    ///
+    /// On a store whose `H` is not a `BuildHasher` the replacement is
+    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get`
+    /// form named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
@@ -1093,7 +1111,7 @@ impl<K, V, H> ShardedExpiringCacheBuilder<K, V, H> {
             .map(|_| {
                 CachePadded(Shard::new(HashMap::with_capacity_and_hasher(
                     per_shard_capacity,
-                    RandomState::new(),
+                    DefaultShardHasher::new(),
                 )))
             })
             .collect::<Vec<_>>()
@@ -4381,6 +4399,87 @@ mod borrowed_key_and_capability_tests {
             },
         );
         (c, seen)
+    }
+
+    /// A value that counts how many times `is_expired()` is called on it.
+    ///
+    /// `Expires::is_expired` is arbitrary user code with no purity guarantee, so which operations
+    /// invoke it is part of the observable contract, not an implementation detail.
+    #[derive(Clone, Debug)]
+    struct Counted {
+        expired: bool,
+        calls: Arc<AtomicUsize>,
+    }
+    impl crate::Expires for Counted {
+        fn is_expired(&self) -> bool {
+            self.calls.fetch_add(1, AOrd::Relaxed);
+            self.expired
+        }
+    }
+
+    /// Build a store holding one live `Counted` entry, plus the shared call counter.
+    ///
+    /// No `on_evict` is configured, so nothing but the operation under test can touch the
+    /// counter.
+    fn store_with_one_counted_value() -> (ShardedExpiringCache<String, Counted>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = ShardedExpiringCache::<String, Counted>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        c.set(
+            "k".to_string(),
+            Counted {
+                expired: false,
+                calls: calls.clone(),
+            },
+        );
+        (c, calls)
+    }
+
+    /// `remove_entry` and `delete` hand the caller an entry that is leaving the cache either way,
+    /// so neither consults `is_expired()`. Both route through `remove_entry_in`, which does not
+    /// call it; only `remove_in` does, because `remove` alone filters an expired value back out
+    /// to `None`. Nothing else pins this, so a regression that reintroduces the call in
+    /// `remove_entry_in` would be silent.
+    #[test]
+    fn remove_entry_and_delete_do_not_consult_is_expired() {
+        let load = |c: &Arc<AtomicUsize>| c.load(AOrd::Relaxed);
+
+        let (c, calls) = store_with_one_counted_value();
+        calls.store(0, AOrd::Relaxed);
+        assert!(
+            c.remove_entry("k").is_some(),
+            "the entry must actually be present, or the count below is vacuous"
+        );
+        assert_eq!(
+            load(&calls),
+            0,
+            "`remove_entry` must not call `is_expired()` on the value it hands back"
+        );
+
+        let (c, calls) = store_with_one_counted_value();
+        calls.store(0, AOrd::Relaxed);
+        assert!(c.delete("k"), "the entry must actually be present");
+        assert_eq!(
+            load(&calls),
+            0,
+            "`delete` must not call `is_expired()` on the removed value"
+        );
+
+        // The contrast case: `remove` does filter on expiry, so it calls the user code exactly
+        // once. A change making `remove_entry_in` consult expiry again would push this above 1.
+        let (c, calls) = store_with_one_counted_value();
+        calls.store(0, AOrd::Relaxed);
+        assert!(
+            c.remove("k").is_some(),
+            "the entry must actually be present"
+        );
+        assert_eq!(
+            load(&calls),
+            1,
+            "`remove` filters expired values, so it calls `is_expired()` exactly once"
+        );
     }
 
     /// The expired-on-access branch of `get_in`: the read lock sees an expired value, the lock is

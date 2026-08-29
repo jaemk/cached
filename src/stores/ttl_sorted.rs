@@ -1047,16 +1047,25 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     /// and increments `evictions`. The evictions counter is incremented for every removed entry
     /// regardless of whether an `on_evict` callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
+        let Some(on_evict) = &self.on_evict else {
+            // No callback: only the removed *count* is observable, so clear both indexes in
+            // place instead of draining every entry into a `Vec` just to drop it.
+            let count = self.map.len() as u64;
+            self.map.clear();
+            self.keys.clear();
+            if count > 0 {
+                self.evictions.fetch_add(count, AtomicOrdering::Relaxed);
+            }
+            return;
+        };
         let entries: Vec<(K, Entry<K, V>)> = self.map.drain().collect();
         self.keys.clear();
         let count = entries.len() as u64;
         if count > 0 {
             self.evictions.fetch_add(count, AtomicOrdering::Relaxed);
         }
-        if let Some(on_evict) = &self.on_evict {
-            for (_k, entry) in &entries {
-                on_evict(entry.key.0.as_ref(), &entry.value);
-            }
+        for (_k, entry) in &entries {
+            on_evict(entry.key.0.as_ref(), &entry.value);
         }
     }
 }
@@ -2347,6 +2356,27 @@ mod test {
         assert_eq!(cache.cache_size(), 0);
         assert_eq!(cache.keys.len(), 0);
         assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(cache.cache_evictions(), Some(3));
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_counts_and_clears_without_callback() {
+        // No `.on_evict(...)` configured: `cache_clear_with_on_evict` takes the fast path that
+        // clears `map`/`keys` in place instead of draining into a `Vec`. Must still count an
+        // eviction per removed entry and leave both indexes empty.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+        assert_eq!(cache.cache_evictions(), Some(0));
+
+        cache.cache_clear_with_on_evict();
+
+        assert_eq!(cache.cache_size(), 0);
+        assert_eq!(cache.keys.len(), 0);
         assert_eq!(cache.cache_evictions(), Some(3));
     }
 

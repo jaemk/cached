@@ -287,7 +287,7 @@ where
     /// Deliberately does not consult [`Expires::is_expired`](crate::Expires::is_expired):
     /// `remove_entry` and `delete` report
     /// the stored pair whether or not it had expired, and `is_expired` is arbitrary user code
-    /// with no purity guarantee. Only `remove_in`, which does filter on expiry, calls it.
+    /// with no purity guarantee. Of `pop_in`'s three callers, only `remove_in` consults it.
     fn pop_in<Q>(&self, shard: &CachePadded<Shard<LruCache<K, V>>>, k: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
@@ -390,6 +390,13 @@ where
     /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
     /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
     /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it; see
+    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
+    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -493,6 +500,10 @@ where
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
     /// `H: BorrowedKeyRouting` restriction that carries.
+    ///
+    /// On a store whose `H` is not a `BuildHasher` the replacement is
+    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get` form
+    /// named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
@@ -4406,6 +4417,65 @@ mod borrowed_key_and_capability_tests {
         );
     }
 
+    /// Routing parity for a newtype over a primitive: `UserId(u64)` with `Borrow<u64>`.
+    ///
+    /// Compares what this store's own `shard_of` and `shard_of_borrowed` return, by address, the
+    /// same way `owned_and_borrowed_keys_route_to_the_same_shard` above does. This store builds
+    /// with the default hasher, and routing goes through `routing_hash` (`build_hasher` +
+    /// `Hash::hash` + `Hasher::finish`), which never calls `BuildHasher::hash_one`, so the
+    /// `hash_one` specialization hazard -- `ahash::RandomState` dispatching a different
+    /// `CallHasher` impl for `&UserId` than for `&u64` under nightly's `specialize` cfg -- is not
+    /// reachable from here. That hazard is covered by a dedicated hasher-override case in
+    /// `tests/sharded_newtype_key_routing_parity.rs`.
+    ///
+    /// The `String`/`&str` and `Vec<u8>`/`&[u8]` cases above only ever exercise ahash's generic
+    /// `CallHasher` path: ahash has no specialized impl for either shape, so those two cases would
+    /// pass identically even if `shard_of_borrowed` regressed to `BuildHasher::hash_one`. A
+    /// newtype over `u64` is the only key shape here that discriminates.
+    #[test]
+    fn newtype_over_primitive_routes_the_same_owned_and_borrowed() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct UserId(u64);
+        impl std::hash::Hash for UserId {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+        impl std::borrow::Borrow<u64> for UserId {
+            fn borrow(&self) -> &u64 {
+                &self.0
+            }
+        }
+
+        let c = ShardedExpiringLruCache::<UserId, Live>::builder()
+            .shards(8)
+            .max_size(1024)
+            .build()
+            .unwrap();
+        for id in 0..200u64 {
+            c.set(UserId(id), val(id as usize));
+        }
+
+        let mut seen = HashSet::new();
+        for id in 0..200u64 {
+            let owned = c.shard_of(&UserId(id));
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(&id)),
+                "`UserId({id})` routes to a different shard than its borrowed `u64`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+            assert_eq!(
+                c.get(&id),
+                Some(val(id as usize)),
+                "borrowed `get` with a `&u64` missed `UserId({id})`"
+            );
+        }
+        assert!(
+            seen.len() > 1,
+            "newtype routing parity must be checked across shards, saw {seen:?}"
+        );
+    }
+
     /// Routing parity for a plain `BuildHasher` that is not `DefaultShardHasher`.
     ///
     /// The cases above only ever exercise `DefaultShardHasher`, which is in-tree. This one pins
@@ -4705,9 +4775,8 @@ mod borrowed_key_and_capability_tests {
     /// `remove_entry` and `delete` hand the caller an entry that is leaving the cache either way,
     /// so neither consults `is_expired()`. Both route through `pop_in`, which does not call it;
     /// only `remove_in` does, because `remove` alone filters an expired value back out to `None`.
-    ///
-    /// Before `pop_in` was split from the expiry check, `remove_entry` and `delete` both invoked
-    /// this user code on every call. Nothing else pins that, so a regression would be silent.
+    /// Nothing else pins this, so a regression that reintroduces the call in `pop_in` would be
+    /// silent.
     #[test]
     fn remove_entry_and_delete_do_not_consult_is_expired() {
         let load =

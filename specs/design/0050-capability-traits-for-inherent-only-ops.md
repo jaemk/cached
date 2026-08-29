@@ -292,10 +292,9 @@ Implemented over exactly the implementor sets in "Desired work", with the implem
 `try_set_max_size` error handling, and the additive/non-breaking shape all landing as designed.
 One deviation from the "Recommended shape" above: the four traits (`CacheSetMaxSize`,
 `ConcurrentCacheSetMaxSize`, `CacheClearWithOnEvict`, `ConcurrentCacheClearWithOnEvict`) are
-defined directly in `src/lib.rs` (`:2644`, `:3068`, `:2717`, `:3106` respectively, as of this
-writing), not in `src/stores/mod.rs` next to `CacheEvict` as recommended, and so are not
-re-exported from `stores` at all - they are plain `pub trait` items in `src/lib.rs`, added to
-`cached::prelude` as planned. This matches where the crate's other single-owner/concurrent
+defined directly in `src/lib.rs`, not in `src/stores/mod.rs` next to `CacheEvict` as recommended,
+and so are not re-exported from `stores` at all - they are plain `pub trait` items in
+`src/lib.rs`, added to `cached::prelude` as planned. This matches where the crate's other single-owner/concurrent
 capability trait pairs already live (`CacheExpiry`/`ConcurrentCacheExpiry`, `CacheTtl`,
 `CacheRefreshOnHit`/`ConcurrentCacheRefreshOnHit` are all `pub trait` items in `src/lib.rs`, not
 `src/stores/mod.rs`), rather than the `CacheEvict`/`ConcurrentCacheEvict` precedent this record

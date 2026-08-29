@@ -182,6 +182,14 @@ pub(crate) fn shard_index(hash: u64, mask: usize) -> usize {
 /// becomes unreachable through the form it was not inserted with. Routing them through a single
 /// function is what makes that hold: the two paths cannot drift, because there is only one path.
 ///
+/// The guarantee is not limited to *selecting* the shard. Once inside the shard, the store still
+/// has to probe its own `HashMap`, and that probe needs to agree with routing for the same reason
+/// -- a `HashMap::get` that hashes a borrowed key differently from how the owned key was routed
+/// and inserted would defeat the point of matching shards. Every sharded store therefore builds
+/// its `HashMap`'s own hasher from [`DefaultShardHasher`] as well, so the intra-shard probe goes
+/// through this exact construction too, not through a second, independently-specializing
+/// `BuildHasher::hash_one` call.
+///
 /// Deliberately not [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one). That is an
 /// overridable provided method whose implementation may dispatch on its static type argument, so
 /// `hash_one::<&K>` and `hash_one::<&Q>` are not required to agree even when the two values hash
@@ -373,10 +381,16 @@ pub trait ShardHasher<K>: Clone + Send + Sync + 'static {
 /// this shard-routing behavior, since coherence rejects a second, hand-written `ShardHasher`
 /// impl for the same type.
 ///
-/// Routing goes through [`routing_hash`], the same function each store's `shard_of_borrowed`
-/// calls, so an owned key and a borrowed key that compare equal cannot land on different shards.
-/// See that function for why the construction is written out rather than delegated to
-/// [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one).
+/// Routing builds a [`Hasher`](std::hash::Hasher) with
+/// [`build_hasher`](std::hash::BuildHasher::build_hasher), feeds the key to it with
+/// [`Hash::hash`](std::hash::Hash::hash), then [`finish`](std::hash::Hasher::finish)s it -- the
+/// same construction each store's `shard_of_borrowed` uses for a borrowed key, so an owned key
+/// and a borrowed key that compare equal cannot land on different shards. This is deliberately
+/// not [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one): that is an overridable
+/// provided method whose implementation may dispatch on its static type argument (`ahash`'s does,
+/// under nightly's `specialize` cfg), so `hash_one::<&K>` and `hash_one::<&Q>` are not required to
+/// agree even when the two values hash identically. Building the `Hasher` explicitly depends only
+/// on the `Hash` impl, which the `Borrow` contract already requires to agree.
 impl<K, S> ShardHasher<K> for S
 where
     K: std::hash::Hash,
@@ -409,11 +423,39 @@ where
 ///
 /// The trait exists only so that failure explains itself. Bounding the methods on `BuildHasher`
 /// directly produces a bare `E0277` naming `BuildHasher`, which says nothing about shard routing
-/// or about the owned-key calls that do work.
+/// or about the owned-key trait calls that do work.
+///
+/// # Why this needs `BuildHasher` at all
+///
+/// A borrowed-key lookup hashes the `&Q` argument with the store's own hash builder: build a
+/// [`Hasher`](std::hash::Hasher), feed it the key with [`Hash::hash`](std::hash::Hash::hash), then
+/// [`finish`](std::hash::Hasher::finish) it. That construction only exists when `H: BuildHasher`,
+/// and it must be the exact construction the owned-key insert used to route to a shard, or the
+/// borrowed lookup can land on a different shard than the one holding the entry.
+///
+/// # The `Borrow` contract is load-bearing here
+///
+/// This holds only because the `Borrow<Q>` contract requires `k.hash() == k.borrow().hash()` for
+/// equal keys. A `Borrow` impl that violates that -- a type whose `Hash` disagrees with the
+/// `Hash` of the type it borrows as -- still compiles, but the consequence is worse with sharding
+/// than with a single hash table. In a single unsharded map, a `Hash`/`Borrow` mismatch usually
+/// just misses the intended bucket. Sharded, a mismatch routes the borrowed lookup to a different
+/// **shard**: `get`/`peek`/`contains` report a miss (and bump the `misses` counter) on an entry
+/// that is present, and `remove`/`delete` silently no-op instead of removing it. There is no
+/// panic and no error -- only a cache that appears to lose entries it still holds.
+///
+/// # Shard selection and the intra-shard probe use the same hash
+///
+/// The same reasoning applies twice over: once to pick a shard, and again for the `HashMap` probe
+/// inside that shard. Both go through the identical hash construction described above, so an
+/// owned key and any borrowed form that compares equal to it agree on both the shard and the
+/// bucket within it.
 #[diagnostic::on_unimplemented(
     message = "the inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` on a sharded store need a `BuildHasher`-based shard hasher",
-    label = "`{Self}` implements `ShardHasher` directly, so this store has no inherent key lookups",
+    label = "`{Self}` is not a `BuildHasher`, so this store has no inherent key lookups",
     note = "this applies to the owned-key call `cache.get(&key)` too, not just borrowed keys such as `cache.get(key.as_str())`",
+    note = "if `{Self}` is a type parameter of your own function, add `H: BorrowedKeyRouting` to its bound",
+    note = "`BorrowedKeyRouting` is exported at the crate root (`use cached::BorrowedKeyRouting;`) and is deliberately not in the prelude",
     note = "use the trait methods instead: `ConcurrentCachedExt::get(&cache, &key).unwrap()` and the matching `remove`/`remove_entry`/`delete`/`contains`, plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek`",
     note = "they return `Result<_, Infallible>`, so `.unwrap()` recovers the inherent method's plain return type"
 )]

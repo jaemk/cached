@@ -3,11 +3,6 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
-
 use std::collections::HashMap;
 
 use crate::{CacheMetrics, ConcurrentCacheBase, ConcurrentCachePeek, ConcurrentCached};
@@ -26,7 +21,7 @@ type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
 #[allow(clippy::type_complexity)]
 struct UnboundInner<K, V, H> {
-    shards: Box<[CachePadded<Shard<HashMap<K, V, RandomState>>>]>,
+    shards: Box<[CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>]>,
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
@@ -112,7 +107,7 @@ where
     H: ShardHasher<K>,
 {
     #[inline]
-    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, RandomState>>> {
+    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>> {
         let h = self.inner.hasher.shard_hash(k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
@@ -127,7 +122,7 @@ where
     /// `HashMap::get(&str)` on a `String` key already relies on. See `routing_hash` for why the
     /// construction is written out rather than delegated to `BuildHasher::hash_one`.
     #[inline]
-    fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, RandomState>>>
+    fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>
     where
         K: Borrow<Q>,
         Q: Hash + ?Sized,
@@ -141,12 +136,20 @@ where
 /// Shared lookup bodies. Routing is the caller's job (`shard_of` for an owned key,
 /// `shard_of_borrowed` for a borrowed one), so the owned and borrowed entry points run one
 /// implementation and cannot drift on metrics or `on_evict`.
-impl<K, V, H> ShardedUnboundCache<K, V, H>
+///
+/// `get_in`, `contains_in` and `peek_in` take a `&self` they never use; only `remove_entry_in`
+/// needs it, for `on_evict`. Kept for call-site symmetry (every `*_in` method is called as
+/// `self.*_in(shard, k)`) rather than dropped per-method.
+impl<K, V, H: ShardHasher<K>> ShardedUnboundCache<K, V, H>
 where
     K: Hash + Eq,
     V: Clone,
 {
-    fn get_in<Q>(&self, shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>, k: &Q) -> Option<V>
+    fn get_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -168,7 +171,7 @@ where
 
     fn remove_entry_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<(K, V)>
     where
@@ -184,7 +187,11 @@ where
         removed
     }
 
-    fn contains_in<Q>(&self, shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>, k: &Q) -> bool
+    fn contains_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -192,7 +199,11 @@ where
         shard.lock.read().contains_key(k)
     }
 
-    fn peek_in<Q>(&self, shard: &CachePadded<Shard<HashMap<K, V, RandomState>>>, k: &Q) -> Option<V>
+    fn peek_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -297,6 +308,13 @@ where
     /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
     /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
     /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it; see
+    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
+    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -400,6 +418,10 @@ where
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
     /// `H: BorrowedKeyRouting` restriction that carries.
+    ///
+    /// On a store whose `H` is not a `BuildHasher` the replacement is
+    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get`
+    /// form named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
@@ -840,7 +862,7 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
             .map(|_| {
                 CachePadded(Shard::new(HashMap::with_capacity_and_hasher(
                     per_shard_capacity,
-                    RandomState::new(),
+                    DefaultShardHasher::new(),
                 )))
             })
             .collect::<Vec<_>>()
@@ -1454,10 +1476,15 @@ mod borrowed_key_and_capability_tests {
     /// `ahash::RandomState` does: with its `specialize` cfg on (its build.rs enables it on any
     /// nightly rustc) it has a specialized `CallHasher` impl for `&u64` and none for `&UserId`,
     /// so `hash_one::<&UserId>` and `hash_one::<&u64>` can return different hashes for two values
-    /// that `Hash` identically. Routing both sides through `build_hasher` + `Hash::hash` +
-    /// `Hasher::finish` removes the possibility. On a stable toolchain that cfg is off, so this
-    /// is a structural guard rather than a live detector. The end-to-end version lives in
-    /// `tests/sharded_newtype_key_routing_parity.rs`; this one compares the routers directly.
+    /// that `Hash` identically. Shard selection routes both sides through `build_hasher` +
+    /// `Hash::hash` + `Hasher::finish` (`routing_hash`), which removes that possibility from
+    /// `shard_of`/`shard_of_borrowed` on every toolchain, so the pointer-equality assertion below
+    /// is a structural guard. The `c.get(&id)` assertion is not purely structural: it also
+    /// exercises the per-shard `HashMap`'s own intra-shard probe. That probe hashes through the
+    /// map's `H`, which is [`DefaultShardHasher`] and does not override `hash_one`; before the
+    /// per-shard maps were switched from `ahash::RandomState` to `DefaultShardHasher`, this same
+    /// assertion could fail on nightly for exactly this key shape. The end-to-end version lives
+    /// in `tests/sharded_newtype_key_routing_parity.rs`.
     #[test]
     fn newtype_over_primitive_routes_the_same_owned_and_borrowed() {
         #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1499,6 +1526,47 @@ mod borrowed_key_and_capability_tests {
             seen.len() > 1,
             "newtype routing parity must be checked across shards, saw {seen:?}"
         );
+    }
+
+    /// Pins the coupling this fix set up: the per-shard `HashMap`s are now parameterized on
+    /// `DefaultShardHasher`, the same type shard selection uses, so a `hash_one` override added
+    /// back to `DefaultShardHasher` would silently reintroduce the newtype-over-primitive miss in
+    /// both places at once. `hash_one`'s provided default body is exactly `build_hasher` +
+    /// `Hash::hash` + `Hasher::finish`, so this holds on every toolchain today and only breaks if
+    /// `DefaultShardHasher` starts overriding `hash_one`.
+    // The `&UserId(7)` / `&7u64` borrows are the point: ahash's `CallHasher` specialization keys
+    // on the reference type argument to `hash_one`, so hashing the owned values would not
+    // exercise the hazard this test pins.
+    #[allow(clippy::needless_borrows_for_generic_args)]
+    #[test]
+    fn default_shard_hasher_hash_one_agrees_for_newtype_and_primitive() {
+        use std::hash::BuildHasher;
+
+        #[derive(Hash)]
+        struct UserId(u64);
+
+        let h = DefaultShardHasher::new();
+        assert_eq!(h.hash_one(&UserId(7)), h.hash_one(&7u64));
+    }
+
+    /// The other half of the same guard: a bare `HashMap<UserId, u32, DefaultShardHasher>`,
+    /// with no shard routing involved at all, must find an owned-key insert through a borrowed
+    /// `&u64` lookup. This is exactly the intra-shard probe `H1` found broken when the per-shard
+    /// maps were parameterized on `ahash::RandomState` directly.
+    #[test]
+    fn bare_hashmap_with_default_shard_hasher_finds_owned_insert_via_borrowed_get() {
+        #[derive(Hash, PartialEq, Eq)]
+        struct UserId(u64);
+        impl std::borrow::Borrow<u64> for UserId {
+            fn borrow(&self) -> &u64 {
+                &self.0
+            }
+        }
+
+        let mut map: HashMap<UserId, u32, DefaultShardHasher> =
+            HashMap::with_hasher(DefaultShardHasher::new());
+        map.insert(UserId(7), 70);
+        assert_eq!(map.get(&7u64), Some(&70));
     }
 
     /// Routing parity for a plain `BuildHasher` that is not `DefaultShardHasher`.

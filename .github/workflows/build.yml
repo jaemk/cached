@@ -93,3 +93,19 @@ jobs:
 
     - run: make clean/docker
       name: Cleaning Docker services
+
+  nightly-routing:
+
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: dtolnay/rust-toolchain@nightly
+
+    # ahash enables its `specialize` cfg on any nightly, which is the only
+    # configuration where owned/borrowed key routing and the per-shard map
+    # probe can disagree. Default features only, so no redis service is needed.
+    - run: cargo test --lib --test sharded_newtype_key_routing_parity
+      name: 'Owned/borrowed key routing parity on nightly'

@@ -3,11 +3,6 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
-
 use std::collections::HashMap;
 
 use crate::time::{Duration, Instant};
@@ -31,7 +26,7 @@ type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
 #[allow(clippy::type_complexity)]
 struct TtlInner<K, V, H> {
-    shards: Box<[CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>]>,
+    shards: Box<[CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>]>,
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
@@ -167,7 +162,10 @@ where
     H: ShardHasher<K>,
 {
     #[inline]
-    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>> {
+    fn shard_of(
+        &self,
+        k: &K,
+    ) -> &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>> {
         let h = self.inner.hasher.shard_hash(k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
@@ -185,7 +183,7 @@ where
     fn shard_of_borrowed<Q>(
         &self,
         k: &Q,
-    ) -> &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>
+    ) -> &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>
     where
         K: Borrow<Q>,
         Q: Hash + ?Sized,
@@ -270,7 +268,7 @@ where
 {
     fn get_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<V>
     where
@@ -379,7 +377,7 @@ where
 
     fn remove_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<V>
     where
@@ -392,8 +390,7 @@ where
             if let Some(cb) = &self.inner.on_evict {
                 cb(&stored_k, &entry.value);
             }
-            // expired = Some(t) and now >= t; None (never-expires) or now < t -> live
-            if entry.expires_at.is_some_and(|t| Instant::now() >= t) {
+            if self.is_expired(&entry) {
                 None
             } else {
                 Some(entry.value)
@@ -405,7 +402,7 @@ where
 
     fn remove_entry_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<(K, V)>
     where
@@ -424,7 +421,7 @@ where
 
     fn contains_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>,
         k: &Q,
     ) -> bool
     where
@@ -437,7 +434,7 @@ where
 
     fn peek_in<Q>(
         &self,
-        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, RandomState>>>,
+        shard: &CachePadded<Shard<HashMap<K, TimedEntry<V>, DefaultShardHasher>>>,
         k: &Q,
     ) -> Option<V>
     where
@@ -484,6 +481,13 @@ where
     /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
     /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
     /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it; see
+    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
+    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -587,6 +591,10 @@ where
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
     /// `H: BorrowedKeyRouting` restriction that carries.
+    ///
+    /// On a store whose `H` is not a `BuildHasher` the replacement is
+    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get`
+    /// form named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
@@ -1252,7 +1260,7 @@ impl<K, V, H> ShardedTtlCacheBuilder<K, V, H> {
             .map(|_| {
                 CachePadded(Shard::new(HashMap::with_capacity_and_hasher(
                     per_shard_capacity,
-                    RandomState::new(),
+                    DefaultShardHasher::new(),
                 )))
             })
             .collect::<Vec<_>>()

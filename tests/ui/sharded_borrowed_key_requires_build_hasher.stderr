@@ -2,7 +2,7 @@ error[E0277]: the inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`pe
   --> tests/ui/sharded_borrowed_key_requires_build_hasher.rs:35:19
    |
 35 |     let _ = cache.get("a");
-   |                   ^^^ `ByteSumHasher` implements `ShardHasher` directly, so this store has no inherent key lookups
+   |                   ^^^ `ByteSumHasher` is not a `BuildHasher`, so this store has no inherent key lookups
    |
 help: the trait `BuildHasher` is not implemented for `ByteSumHasher`
   --> tests/ui/sharded_borrowed_key_requires_build_hasher.rs:20:1
@@ -10,6 +10,8 @@ help: the trait `BuildHasher` is not implemented for `ByteSumHasher`
 20 | struct ByteSumHasher;
    | ^^^^^^^^^^^^^^^^^^^^
    = note: this applies to the owned-key call `cache.get(&key)` too, not just borrowed keys such as `cache.get(key.as_str())`
+   = note: if `ByteSumHasher` is a type parameter of your own function, add `H: BorrowedKeyRouting` to its bound
+   = note: `BorrowedKeyRouting` is exported at the crate root (`use cached::BorrowedKeyRouting;`) and is deliberately not in the prelude
    = note: use the trait methods instead: `ConcurrentCachedExt::get(&cache, &key).unwrap()` and the matching `remove`/`remove_entry`/`delete`/`contains`, plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek`
    = note: they return `Result<_, Infallible>`, so `.unwrap()` recovers the inherent method's plain return type
    = note: required for `ByteSumHasher` to implement `BorrowedKeyRouting`
