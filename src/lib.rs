@@ -533,6 +533,9 @@ these stores either way.
 The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example uses the same pattern):
 
 ```rust,no_run
+# #[cfg(feature = "proc_macro")]
+# #[allow(dead_code)]
+# mod example {
 use cached::macros::cached;
 use cached::Expires;
 use cached::time::{Duration, Instant};
@@ -552,6 +555,7 @@ fn fetch_token(user_id: u64, ttl_secs: u64) -> Token {
         expires_at: Instant::now() + Duration::from_secs(ttl_secs),
     }
 }
+# }
 # fn main() {}
 ```
 
