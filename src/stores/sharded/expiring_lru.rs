@@ -15,7 +15,7 @@ use core::future::Future;
 use super::{
     BorrowedKeyRouting, CachePadded, DefaultShardHasher, Shard, ShardHasher,
     checked_per_shard_cap_from_total, checked_shard_count, default_shard_count_for_capacity,
-    per_shard_cap_from_total, shard_index,
+    per_shard_cap_from_total, routing_hash, shard_index,
 };
 use crate::Cached;
 use crate::ConcurrentCacheEvict;
@@ -176,27 +176,19 @@ where
     ///
     /// Only callable when `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`. For such
     /// an `H` the `ShardHasher` impl is the blanket one, and coherence forbids a second,
-    /// hand-written impl. This function and that blanket `shard_hash` run the identical
-    /// construction: build a `Hasher` from the store's hash builder, feed the key to it, finish
-    /// it. Neither dispatches on the static type of what it hashes, so the routing hash for `&Q`
-    /// equals the routing hash for the owned `K` by the `Borrow` contract alone (equal keys hash
-    /// equally), the same guarantee `HashMap::get(&str)` on a `String` key already relies on.
-    ///
-    /// Routing either side through `BuildHasher::hash_one` would forfeit that: `hash_one` is an
-    /// overridable provided method allowed to dispatch on its static type argument, and
-    /// `ahash::RandomState` does. See the blanket `ShardHasher` impl in `super` for the details.
-    // Not `hash_one`: see the paragraph above.
-    #[allow(clippy::manual_hash_one)]
+    /// hand-written impl. Both that blanket `shard_hash` and this function route through
+    /// [`routing_hash`](super::routing_hash), so the hash for `&Q` equals the hash for the owned
+    /// `K` by the `Borrow` contract alone (equal keys hash equally), the same guarantee
+    /// `HashMap::get(&str)` on a `String` key already relies on. See `routing_hash` for why the
+    /// construction is written out rather than delegated to `BuildHasher::hash_one`.
     #[inline]
     fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<LruCache<K, V>>>
     where
+        K: Borrow<Q>,
         Q: Hash + ?Sized,
         H: BorrowedKeyRouting,
     {
-        use std::hash::Hasher as _;
-        let mut hasher = self.inner.hasher.build_hasher();
-        k.hash(&mut hasher);
-        let h = hasher.finish();
+        let h = routing_hash(&self.inner.hasher, k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
 }

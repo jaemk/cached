@@ -175,6 +175,37 @@ pub(crate) fn shard_index(hash: u64, mask: usize) -> usize {
     (hash >> 32) as usize & mask
 }
 
+/// The one hash construction every shard-routing path uses, for both owned and borrowed keys.
+///
+/// Owned routing (the blanket [`ShardHasher`] impl) and borrowed routing (`shard_of_borrowed` on
+/// each sharded store) must produce the same value for keys that compare equal, or an entry
+/// becomes unreachable through the form it was not inserted with. Routing them through a single
+/// function is what makes that hold: the two paths cannot drift, because there is only one path.
+///
+/// Deliberately not [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one). That is an
+/// overridable provided method whose implementation may dispatch on its static type argument, so
+/// `hash_one::<&K>` and `hash_one::<&Q>` are not required to agree even when the two values hash
+/// identically. `ahash::RandomState` does dispatch that way, through a `CallHasher` table with
+/// specialized impls for some reference types (`&u8`..`&i64`, `&u128`/`&i128`/`&usize`/`&isize`)
+/// and not others (`&str`, `&String`, `&[u8]`, `&Vec<u8>`), active whenever its `specialize` cfg
+/// is on (any nightly compiler). A newtype key such as `struct UserId(u64)` with `Borrow<u64>`
+/// would then route its owned inserts and its borrowed lookups to different shards. Building the
+/// `Hasher` explicitly depends only on the `Hash` impl, which the `Borrow` contract already
+/// requires to agree.
+// `manual_hash_one` fires on exactly the construction this function exists to guarantee.
+#[allow(clippy::manual_hash_one)]
+#[inline]
+pub(crate) fn routing_hash<H, Q>(hasher: &H, k: &Q) -> u64
+where
+    H: std::hash::BuildHasher,
+    Q: std::hash::Hash + ?Sized,
+{
+    use std::hash::Hasher as _;
+    let mut hasher = hasher.build_hasher();
+    k.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Encode a TTL into a nanosecond atomic. A zero duration encodes as `0`
 /// (expiry disabled / no expiry).
 #[cfg(feature = "time_stores")]
@@ -342,33 +373,17 @@ pub trait ShardHasher<K>: Clone + Send + Sync + 'static {
 /// this shard-routing behavior, since coherence rejects a second, hand-written `ShardHasher`
 /// impl for the same type.
 ///
-/// The construction is written out rather than delegated to
-/// [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one) on purpose.
-/// `hash_one` is an overridable provided method whose implementation is allowed to dispatch on
-/// its static type argument `T`, so `hash_one::<&K>` and `hash_one::<&Q>` are not required to
-/// agree even when `K: Borrow<Q>` and the two values hash identically. `ahash::RandomState` does
-/// exactly that: it routes through a `CallHasher` table with specialized impls for some reference
-/// types (`&u8`..`&i64`, `&u128`/`&i128`/`&usize`/`&isize`) and not others (`&str`, `&String`,
-/// `&[u8]`, `&Vec<u8>`), enabled whenever its `specialize` cfg is on. A newtype key such as
-/// `struct UserId(u64)` with `Borrow<u64>` would then route its owned inserts and its borrowed
-/// lookups to different shards. Building the `Hasher` explicitly depends only on the `Hash` impl,
-/// which the `Borrow` contract already requires to agree, so owned and borrowed routing match for
-/// every `BuildHasher`. The `shard_of_borrowed` helper on each sharded store uses the identical
-/// construction.
+/// Routing goes through [`routing_hash`], the same function each store's `shard_of_borrowed`
+/// calls, so an owned key and a borrowed key that compare equal cannot land on different shards.
+/// See that function for why the construction is written out rather than delegated to
+/// [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one).
 impl<K, S> ShardHasher<K> for S
 where
     K: std::hash::Hash,
     S: std::hash::BuildHasher + Clone + Send + Sync + 'static,
 {
-    // Deliberately not `hash_one`, for the reason spelled out in the impl docs above: it may
-    // dispatch on its static type argument, which is what would let an owned key and an
-    // equivalent borrowed key route to different shards.
-    #[allow(clippy::manual_hash_one)]
     fn shard_hash(&self, key: &K) -> u64 {
-        use std::hash::Hasher as _;
-        let mut hasher = self.build_hasher();
-        key.hash(&mut hasher);
-        hasher.finish()
+        routing_hash(self, key)
     }
 }
 
