@@ -1044,12 +1044,9 @@ impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> TtlSortedCache<K, V, S> {
     ///
     /// Unlike [`cache_clear`](crate::Cached::cache_clear) (which removes entries silently),
     /// this method invokes `on_evict` for every removed entry (whether or not they had expired)
-    /// and increments `evictions`. If no `on_evict` callback was configured, it falls back to
-    /// the plain `cache_clear`.
+    /// and increments `evictions`. The evictions counter is incremented for every removed entry
+    /// regardless of whether an `on_evict` callback is configured.
     pub fn cache_clear_with_on_evict(&mut self) {
-        if self.on_evict.is_none() {
-            return self.cache_clear();
-        }
         let entries: Vec<(K, Entry<K, V>)> = self.map.drain().collect();
         self.keys.clear();
         let count = entries.len() as u64;
@@ -6770,6 +6767,27 @@ mod test {
         assert_eq!(cache.cache_size(), 0);
         assert_eq!(cache.keys.len(), 0);
         assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(cache.cache_evictions(), Some(3));
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_counts_evictions_without_callback() {
+        // No `.on_evict(...)` configured. `cache_clear_with_on_evict` must still count an
+        // eviction per removed entry, matching the trait contract and the other five
+        // implementors: the count must not depend on whether a callback is configured.
+        let mut cache = TtlSortedCache::<u32, u32>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+        assert_eq!(cache.cache_evictions(), Some(0));
+
+        clear_with_on_evict_through_trait(&mut cache);
+
+        assert_eq!(cache.cache_size(), 0);
+        assert_eq!(cache.keys.len(), 0);
         assert_eq!(cache.cache_evictions(), Some(3));
     }
 }
