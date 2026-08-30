@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `String: Borrow<&String>` is not satisfied
-  --> tests/ui/sharded_double_reference_key_inference.rs:20:27
+  --> tests/ui/sharded_double_reference_key_inference.rs:26:27
    |
-20 |         let _ = cache.get(&k);
+26 |         let _ = cache.get(&k);
    |                       --- ^^ the trait `Borrow<&String>` is not implemented for `String`
    |                       |
    |                       required by a bound introduced by this call

@@ -8,6 +8,12 @@
 // (`cache.get(k)`). This golden pins the failing form, so the documented migration text cannot
 // drift from the compiler's actual output, and so a future change that alters the shape of this
 // break -- fixing it, or making it fail differently -- is visible rather than silent.
+//
+// Requires the `rust-src` component. The expected output includes the standard-library source
+// snippet rustc renders inside the "but trait `Borrow<str>` is implemented for it" help, and
+// rustc can only print that snippet when it can read the `alloc` source. Without the component
+// the help still appears but the snippet does not, and this golden mismatches. Run
+// `rustup component add rust-src` (CI installs it in the `build` job for the same reason).
 use cached::ShardedLruCache;
 
 fn main() {

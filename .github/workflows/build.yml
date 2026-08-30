@@ -53,9 +53,14 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
+    # `rust-src` is not needed to build. It is needed so rustc can render the
+    # standard-library source snippet inside the "but trait `Borrow<str>` is
+    # implemented for it" help, which `tests/ui/sharded_double_reference_key_inference.stderr`
+    # pins. Without the component rustc prints the help without the snippet and
+    # that golden mismatches, so dropping this changes trybuild output.
     - uses: dtolnay/rust-toolchain@1.96.0
       with:
-        components: rustfmt, clippy
+        components: rustfmt, clippy, rust-src
         targets: wasm32-unknown-unknown
 
     - name: Cache cargo dir
