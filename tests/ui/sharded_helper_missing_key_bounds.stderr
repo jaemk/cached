@@ -1,0 +1,15 @@
+error[E0599]: the method `get` exists for reference `&ShardedLruCache<K, V, H>`, but its trait bounds were not satisfied
+  --> tests/ui/sharded_helper_missing_key_bounds.rs:14:7
+   |
+14 |     c.get(k)
+   |       ^^^ method cannot be called on `&ShardedLruCache<K, V, H>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `K: Hash`
+           `K: Eq`
+           `K: Clone`
+           `V: Clone`
+help: consider restricting the type parameters to satisfy the trait bounds
+   |
+13 | fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> where K: Clone, K: Eq, K: Hash, V: Clone {
+   |                                                                                      ++++++++++++++++++++++++++++++++++++++++

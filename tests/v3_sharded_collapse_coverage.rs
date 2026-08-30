@@ -170,12 +170,11 @@ fn sharded_unbound_copy_from_rehashes_through_target_hasher() {
         "copy_from must re-hash every entry through the TARGET's hasher, not preserve the \
          source's (all-shard-0) layout"
     );
-    // `EvenSpreadHasher` / `AllShardZeroHasher` implement `ShardHasher` by hand, not
-    // `BuildHasher`, so they are not `BorrowedKeyRouting` and the inherent borrowed-key lookups
-    // do not exist on stores built with them. `ConcurrentCachedExt::get` takes `&K` and is the
-    // owned-key lookup that stays available. Do not swap either hasher for a `BuildHasher` to
-    // recover `cache.get(..)`: the deterministic shard routing is what this file pins.
+    // `EvenSpreadHasher` / `AllShardZeroHasher` implement `ShardHasher<u32>` only, so the
+    // inherent owned-key lookup (`&K`) works on stores built with them (design 0055); exercise
+    // it alongside `ConcurrentCachedExt::get`'s trait path.
     for k in 0..16u32 {
+        assert_eq!(target.get(&k), Some(k * 10));
         assert_eq!(ConcurrentCachedExt::get(&target, &k).unwrap(), Some(k * 10));
     }
 }

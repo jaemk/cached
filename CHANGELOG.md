@@ -4,48 +4,19 @@
 
 ### Breaking Changes
 
-- A sharded store (`ShardedLruCache`, `ShardedUnboundCache`, `ShardedTtlCache`,
-  `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) built over a
-  hand-written `ShardHasher` that does not also implement `BuildHasher` loses its inherent `get`,
-  `remove`, `remove_entry`, `delete`, `contains`, and `peek` methods. Those six methods are now
-  generic over `Borrow<Q>` and bounded on `H: BuildHasher` (named `BorrowedKeyRouting` in the
-  trait bound so the compile error explains itself), because owned-key and borrowed-key shard
-  routing are only provably equal for the blanket `ShardHasher` impl every `BuildHasher` receives;
-  a hand-rolled `ShardHasher` carries no such guarantee. There is no method-resolution fallback:
-  the inherent method is selected by name first and then fails its bound, so importing a trait
-  does not rescue the call at the same call site.
-  Migration is mechanical: replace the inherent call with the trait's owned-key form, which still
-  takes `&K`. `cache.get(&k)` becomes `ConcurrentCachedExt::get(&cache, &k).unwrap()`; same for
-  `remove`, `remove_entry`, and `delete` (`ConcurrentCachedExt::remove(&cache, &k).unwrap()`, and
-  so on) and for `contains` (`ConcurrentCachedExt::contains(&cache, &k).unwrap()`). `peek` moves to
-  `ConcurrentCachePeek::peek(&cache, &k).unwrap()` instead, since its alias lives on
-  `ConcurrentCachePeek`, not `ConcurrentCachedExt`.
-  Accepted deliberately in a MINOR release: 3.0.0 shipped 2026-08-22, so adoption of a custom
-  `ShardHasher` router is assumed to be effectively zero, and the alternative (relaxing
-  `ShardHasher<K>` to `K: ?Sized` and bounding the new methods on `H: ShardHasher<Q>` instead of
-  `H: BuildHasher`) would have introduced an unchecked cross-impl consistency contract
-  (`shard_hash(&k) == shard_hash(k.borrow())`) that the type system cannot verify, whose failure
-  mode is a silent phantom miss on an entry that is actually present.
-- Argument-inference breakage: `cache.get(&k)` where `k: &K` (for example, `for k in &keys {
-  cache.get(&k) }`) previously compiled through deref coercion. It no longer does: `Q` unifies to
-  `&K` first, and the call fails with ``the trait bound `String: Borrow<&String>` is not
-  satisfied``; same for `k: &Box<K>` and `k: &Arc<K>`. The `BorrowedKeyRouting` diagnostic above
-  does not fire for this case, since the `H` bound is satisfied and only the `Borrow` impl is
-  missing, so the error is opaque. Migration: drop the extra `&` (`cache.get(k)`), or deref
-  explicitly (`cache.get(&*boxed)`).
-- Generic-helper breakage: a downstream helper bounded only on the hasher type, for example
-  `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> {
-  c.get(k) }`, now fails to compile at its own definition, regardless of which hasher its call
-  sites use: `ShardHasher<K>` alone no longer implies the bound the inherent methods need. The
-  inherent `get` lives in `impl<K, V, H: ShardHasher<K>> ShardedLruCache<K, V, H> where K: Hash +
-  Eq + Clone, V: Clone`, so the helper also needs the key/value bounds too, not just a hasher
-  bound; rustc reports those key/value bounds first (E0599) and never names `BorrowedKeyRouting`.
-  Migration: add the full bound set to the helper's own definition:
-  ```rust
-  fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V>
-  where K: Hash + Eq + Clone, V: Clone, H: ShardHasher<K> + BorrowedKeyRouting
-  { c.get(k) }
-  ```
+- Argument-inference breakage on the six sharded stores' inherent lookup methods
+  (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`,
+  `ShardedExpiringCache`, `ShardedExpiringLruCache`): `get`, `remove`, `remove_entry`, `delete`,
+  `contains`, and `peek` are all generic over the looked-up key form `Q`. `cache.get(&k)` where
+  `k: &K` (for example, `for k in &keys { cache.get(&k) }`) previously compiled through deref
+  coercion. It no longer does: `Q` unifies to `&K` first, and the call fails with ``the trait
+  bound `String: Borrow<&String>` is not satisfied``; same for `k: &Box<K>` and `k: &Arc<K>`, and
+  the same shape applies to `remove`, `remove_entry`, `delete`, `contains`, and `peek`. Migration:
+  drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&*boxed)`). Single-owner
+  `Cached` methods (e.g. `LruCache::cache_get`) are unchanged.
+- `ShardHasher<K>`'s key parameter is relaxed to `ShardHasher<K: ?Sized>`. Existing impls compile
+  unchanged, since this only widens what the trait accepts. But `H: ShardHasher<K>` no longer
+  implies `K: Sized` at a use site, which can shift inference in rare downstream generic code.
 - Shard routing no longer consults `BuildHasher::hash_one`. The blanket `ShardHasher` impl for a
   `BuildHasher` and every store's borrowed-key routing build a `Hasher` with `build_hasher()`,
   hash the key and finish it, and `DefaultShardHasher`'s `hash_one` override was removed so it
@@ -67,6 +38,10 @@
   dependency, no feature flag), and reachable via `cached::claim::` or `cached::prelude`, not
   the crate root, to keep `Claim` and `ClaimRegistry` out of rustc's nearest-match suggestions
   for mistyped imports ([design/0053](specs/design/0053-refresh-claim-guard.md)).
+  `Debug for ClaimRegistry<K>` requires `K: Debug + Clone`: it copies the key set out from
+  under the registry mutex and formats after releasing it, so no user `Debug` code and no
+  writer lock is held while the registry is locked. `ClaimRegistry::new` already requires
+  `K: Clone`, so this only constrains generic code that names the type without building one.
 - `CacheSetMaxSize` and `ConcurrentCacheSetMaxSize` traits, reaching `set_max_size` /
   `try_set_max_size` from generic code holding a `T: CacheSetMaxSize` (or
   `ConcurrentCacheSetMaxSize`) bound instead of a concrete store type. No new capability: both
@@ -86,14 +61,10 @@
 - The six sharded stores' inherent `get`, `remove`, `remove_entry`, `delete`, `contains`, and
   `peek` now accept any borrowed form of the key (`K: Borrow<Q>`), matching the single-owner
   stores: `sharded_cache.get("a")` now works on a `ShardedLruCache<String, _>` without allocating
-  a `String` first. Bounded on `H: BuildHasher`, surfaced in a failed bound as
-  `BorrowedKeyRouting` rather than a bare `BuildHasher` error. `set` and `get_or_set_with` are
-  unchanged: they take the key by value because they insert it. See "Breaking Changes" above for
-  the three cases this is not additive for.
-- `cached::BorrowedKeyRouting` (`use cached::BorrowedKeyRouting;`): a new public export at the
-  crate root, deliberately not in the prelude. Previously it was only mentioned in
-  breaking-change prose above, so a user with `use cached::prelude::*;` who follows that
-  migration advice hit E0405 (unresolved name) and had to guess the path.
+  a `String` first. Bounded on `H: ShardHasher<Q>`, so a hand-written `ShardHasher` router keeps
+  these six methods at every key type it implements, not just where it also implements
+  `BuildHasher`. `set` and `get_or_set_with` are unchanged: they take the key by value because
+  they insert it. See "Breaking Changes" above for the one case this is not additive for.
 - `cached::prelude` now also exports `CacheSetMaxSize`, `CacheClearWithOnEvict`,
   `ConcurrentCacheSetMaxSize`, and `ConcurrentCacheClearWithOnEvict`. Note that a downstream
   extension trait offering `set_max_size` or `cache_clear_with_on_evict` for the same stores,
@@ -102,15 +73,15 @@
 
 ### Fixed
 
-- `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache` backed their shards with
-  `HashMap<K, V, ahash::RandomState>`, whose intra-shard probe goes through `BuildHasher::hash_one`.
-  On a nightly compiler, where ahash enables its `specialize` cfg, an entry inserted under an
-  owned newtype key was unreachable through its borrowed primitive form: `get`, `contains`, and
-  `peek` reported a miss, and `remove` and `delete` silently no-opped. They now use
-  `DefaultShardHasher`, which has no `hash_one` override, so the probe depends only on `Hash`.
-- `TtlSortedCache::cache_clear_with_on_evict` drained every entry into a `Vec` even with no
-  `on_evict` callback configured, where only the removed count is observable. It now clears in
-  place in that case.
+- The sharded map stores (`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) now
+  route their intra-shard probe through `DefaultShardHasher` instead of a shard `HashMap`'s own
+  `BuildHasher::hash_one`. `hash_one` is an overridable provided method that can dispatch on the
+  static type of its argument (`ahash::RandomState`'s does, on a nightly compiler that enables
+  ahash's `specialize` cfg), so an owned newtype key and its borrowed primitive form were not
+  guaranteed to route to the same shard. Known limitation: the single-owner stores
+  (`UnboundCache`, `TtlCache`, `ExpiringCache`, `LruCache`) still back their maps with
+  `DefaultHashBuilder = ahash::RandomState` by default and are not covered by this fix; on an
+  affected nightly compiler, work around it by building with `.hasher(std::hash::RandomState::new())`.
 - `TtlSortedCache::cache_clear_with_on_evict` now counts an eviction per removed entry even when
   no `on_evict` callback is configured, matching the trait contract and the other implementors.
   Previously it took an early-return fast path that cleared the store without counting anything.

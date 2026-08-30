@@ -97,15 +97,57 @@ jobs:
   nightly-routing:
 
     runs-on: ubuntu-latest
+    # Advisory only: nightly is unpinned upstream (see the toolchain step below) and can go
+    # red on its own toolchain regressions or flakiness that have nothing to do with this
+    # crate. `continue-on-error` keeps that noise from blocking merges to master; this job is
+    # informational and its result must not be treated as a required check.
     continue-on-error: true
+
+    permissions:
+      contents: read
 
     steps:
     - uses: actions/checkout@v6
 
-    - uses: dtolnay/rust-toolchain@nightly
+    # Pinned to a commit, not the mutable `nightly` branch ref, even though this job only
+    # ever runs informationally: the workflow declares no `permissions:` above job level, so
+    # on the `push: branches: [master]` trigger this step runs with the repository-default
+    # GITHUB_TOKEN, and a push to master is what drives the release pipeline.
+    - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+
+    - name: Cache cargo dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-cargo-dir
+      with:
+        path: ~/.cargo
+        key: ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-
+          ${{ runner.os }}-nightly-routing-
+          ${{ runner.os }}-
+
+    - name: Cache target dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-target-dir
+      with:
+        path: ./target
+        key: ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-
+          ${{ runner.os }}-nightly-routing-
+          ${{ runner.os }}-
 
     # ahash enables its `specialize` cfg on any nightly, which is the only
     # configuration where owned/borrowed key routing and the per-shard map
     # probe can disagree. Default features only, so no redis service is needed.
-    - run: cargo test --lib --test sharded_newtype_key_routing_parity
+    # All five design-0055 routing suites run here; `sharded_generic_helper_bounds` is the
+    # helper-bound compile-time surface, the rest exercise runtime routing agreement.
+    - run: cargo test --lib
+        --test sharded_newtype_key_routing_parity
+        --test sharded_custom_router_lookups
+        --test sharded_router_agreement_per_store
+        --test sharded_unsized_key_lookups
+        --test sharded_generic_helper_bounds
       name: 'Owned/borrowed key routing parity on nightly'

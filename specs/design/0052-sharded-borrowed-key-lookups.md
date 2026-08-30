@@ -1,6 +1,11 @@
 # 0052 - Borrowed-key lookups on the sharded inherent methods
 
-Status: Implemented
+Status: Implemented, then superseded
+
+Superseded by [0055](0055-shard-hasher-q-over-borrowed-key-routing.md), which replaces this
+record's route choice (`H: BorrowedKeyRouting`, a diagnostic alias for `BuildHasher`) with
+`H: ShardHasher<Q>`. This record stays as history and is not rewritten; only the "Outcome" section
+below carries a correction pointing at 0055.
 
 ## Current state
 
@@ -281,9 +286,15 @@ sharded expiry stores expose them only as trait methods (there is no inherent `p
 
 ## Outcome
 
+Superseded by [0055](0055-shard-hasher-q-over-borrowed-key-routing.md): the route choice recorded
+below was reversed. `H: ShardHasher<Q>` is the bound that ships today, not `H: BorrowedKeyRouting`,
+and `BorrowedKeyRouting` no longer exists in the tree. The rest of this section is kept as history.
+
 Implemented as recommended: `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek`
 became generic over `Borrow<Q>` on all six sharded stores, bounded on `H: BorrowedKeyRouting`
-(the diagnostic alias for `BuildHasher` proposed above), with one `&Q`-generic core per store that
+(the diagnostic alias for `BuildHasher` proposed above) at the time this record shipped. 0055
+later relaxed that bound to `H: ShardHasher<Q>` and deleted `BorrowedKeyRouting`; see the
+supersession note above the "Outcome" heading. There was one `&Q`-generic core per store that
 both the inherent method and the trait method (at `Q = K`) call. `set` and `get_or_set_with` stay
 owned-key, as scoped. `specs/store-sharded.md` (SHARD-15) and `specs/traits-concurrent.md`
 (CTRAIT-2) were corrected as flagged above, and the crate-doc family comparison
@@ -340,20 +351,20 @@ an entry that is actually present. A documented, discoverable compile error for 
 near-zero, one-week-old) custom-router population was judged the better failure mode than a
 correctness landmine for everyone else.
 
-**Release blocker for 3.2:** this change ships three breaking-change classes for anyone moving
-from the published 3.1.1 to the unreleased 3.2 cycle: (1) a sharded store built over a
-hand-written, non-`BuildHasher` `ShardHasher` loses its inherent `get`/`remove`/`remove_entry`/
-`delete`/`contains`/`peek` entirely (owned-key calls included, not just borrowed ones), with the
-trait's owned-key form (`ConcurrentCachedExt`/`ConcurrentCachePeek`, both needing `.unwrap()`) as
-the only remaining route; (2) argument-inference breakage, where a call like `cache.get(&k)` with
-`k: &K` (or `&Box<K>`/`&Arc<K>`) that previously compiled via deref coercion now fails on a missing
-`Borrow` impl, with no diagnostic hint; (3) generic-helper breakage, where a downstream helper
-bounded only on `H: ShardHasher<K>` fails to compile at its own definition and needs
-`H: BorrowedKeyRouting` (or `H: BuildHasher`) added to its own bound. `CHANGELOG.md` documents all
-three under `### Breaking Changes` for the 3.2 entry. That is not sufficient on its own:
+**Release blocker for 3.2, corrected by 0055:** this section originally listed three
+breaking-change classes for anyone moving from the published 3.1.1 to the unreleased 3.2 cycle.
+0055 reversed the route this record shipped (`H: BorrowedKeyRouting` -> `H: ShardHasher<Q>`),
+which closes two of the three: a hand-written, non-`BuildHasher` router now keeps its inherent
+owned-key `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` (the class-1 loss above no
+longer happens), and a downstream helper bounded only on `H: ShardHasher<K>` compiles unchanged
+for owned lookups without adding any extra bound (the class-3 breakage above no longer happens).
+One class survives unchanged under 0055: argument-inference breakage, where a call like
+`cache.get(&k)` with `k: &K` (or `&Box<K>`/`&Arc<K>`) that previously compiled via deref coercion
+now fails on a missing `Borrow` impl, with no diagnostic hint. `CHANGELOG.md` documents this
+surviving class under `### Breaking Changes` for the 3.2 entry. That is not sufficient on its own:
 `specs/` is excluded from the published crate (`Cargo.toml:15`), and the repo's convention is a
 dedicated migration guide per release, `docs/migrations/PREV-to-X.Y.Z.md` plus its `-human.md`
 companion (`AGENTS.md:411`). Per that same convention, migration guides are authored in the
 release PR, not ahead of it, so no guide is added by this record. Before 3.2 ships,
 `docs/migrations/3.1.1-to-3.2.md` (and `-human.md`) must be written in the 3.2 release PR, covering
-all three break classes above.
+the one surviving break class above.

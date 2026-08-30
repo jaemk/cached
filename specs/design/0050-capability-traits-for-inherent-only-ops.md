@@ -298,10 +298,12 @@ and so are not re-exported from `stores` at all - they are plain `pub trait` ite
 capability trait pairs already live (`CacheExpiry`/`ConcurrentCacheExpiry`, `CacheTtl`,
 `CacheRefreshOnHit`/`ConcurrentCacheRefreshOnHit` are all `pub trait` items in `src/lib.rs`, not
 `src/stores/mod.rs`), rather than the `CacheEvict`/`ConcurrentCacheEvict` precedent this record
-cited for the recommendation. It was also inconsistent with `specs/traits-core.md:3-4`'s "most are
-defined in `src/lib.rs`; `CacheEvict` and `Expires` are defined under `src/stores/` and
-re-exported" framing at the time this Outcome was first written, since that framing already
-correctly described where these four traits landed.
+cited for the recommendation. This record's own "Recommended shape" (place the four traits in
+`src/stores/mod.rs`, re-exported) was itself inconsistent with `specs/traits-core.md:3-4`'s "most
+are defined in `src/lib.rs`; `CacheEvict` and `Expires` are defined under `src/stores/` and
+re-exported" framing: that framing already correctly described where these four traits would land
+if implemented as `src/lib.rs` items, so the shipped placement matches the existing framing and it
+was the recommendation, not the outcome, that would have broken it.
 
 Allocated `specs/traits-core.md` `TRAIT-7` (`CacheSetMaxSize`) and `TRAIT-8`
 (`CacheClearWithOnEvict`), split per the two-trait-pairs-not-one rule in "Pitfalls", and

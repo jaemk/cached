@@ -65,11 +65,10 @@ fn sharded_unbound_cache_names_its_hasher_as_a_type_argument() {
         EVEN_SPREAD,
         "the hasher passed to `.hasher()` must drive shard routing"
     );
-    // `KeyIsShardHasher` implements `ShardHasher` by hand, not `BuildHasher`, so it is not
-    // `BorrowedKeyRouting` and the inherent borrowed-key lookups do not exist on these stores.
-    // `ConcurrentCachedExt::get` takes `&K` and is the owned-key lookup that stays available.
-    // Do not swap the hasher for a `BuildHasher` to recover `cache.get(..)`: the custom shard
-    // router is exactly what this file pins.
+    // `KeyIsShardHasher` implements `ShardHasher<u32>` only (design 0055), so both the inherent
+    // owned-key `get(&K)` and the `ConcurrentCachedExt::get` trait path resolve on this store;
+    // assert through both to exercise `shard_of_borrowed` at `Q = K` as well as the trait path.
+    assert_eq!(cache.get(&7), Some(70));
     assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
@@ -86,6 +85,7 @@ fn sharded_lru_cache_names_its_hasher_as_a_type_argument() {
         cache.set(k, k * 10);
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
+    assert_eq!(cache.get(&7), Some(70));
     assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
@@ -103,6 +103,7 @@ fn sharded_ttl_cache_names_its_hasher_as_a_type_argument() {
         cache.set(k, k * 10);
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
+    assert_eq!(cache.get(&7), Some(70));
     assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
@@ -121,6 +122,7 @@ fn sharded_lru_ttl_cache_names_its_hasher_as_a_type_argument() {
         cache.set(k, k * 10);
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
+    assert_eq!(cache.get(&7), Some(70));
     assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
@@ -136,6 +138,7 @@ fn sharded_expiring_cache_names_its_hasher_as_a_type_argument() {
         cache.set(k, Val(k * 10));
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
+    assert_eq!(cache.get(&7), Some(Val(70)));
     assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(Val(70)));
 }
 
@@ -153,6 +156,7 @@ fn sharded_expiring_lru_cache_names_its_hasher_as_a_type_argument() {
         cache.set(k, Val(k * 10));
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
+    assert_eq!(cache.get(&7), Some(Val(70)));
     assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(Val(70)));
 }
 

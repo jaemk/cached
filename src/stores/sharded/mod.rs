@@ -175,7 +175,14 @@ pub(crate) fn shard_index(hash: u64, mask: usize) -> usize {
     (hash >> 32) as usize & mask
 }
 
-/// The one hash construction every shard-routing path uses, for both owned and borrowed keys.
+/// The one hash construction every [`BuildHasher`](std::hash::BuildHasher)-backed shard-routing
+/// path uses, for both owned and borrowed keys.
+///
+/// It is not every routing path: a hand-written [`ShardHasher`] routes through its own
+/// `shard_hash` bodies and never reaches this function. Such a router keeps owned and borrowed
+/// routing in agreement by satisfying the cross-impl contract documented on [`ShardHasher`],
+/// which the compiler cannot check. What follows applies to hashers that reach `ShardHasher`
+/// through the blanket `BuildHasher` impl, which is every default-path store.
 ///
 /// Owned routing (the blanket [`ShardHasher`] impl) and borrowed routing (`shard_of_borrowed` on
 /// each sharded store) must produce the same value for keys that compare equal, or an entry
@@ -183,12 +190,23 @@ pub(crate) fn shard_index(hash: u64, mask: usize) -> usize {
 /// function is what makes that hold: the two paths cannot drift, because there is only one path.
 ///
 /// The guarantee is not limited to *selecting* the shard. Once inside the shard, the store still
-/// has to probe its own `HashMap`, and that probe needs to agree with routing for the same reason
+/// has to probe its own map, and that probe needs to agree with routing for the same reason
 /// -- a `HashMap::get` that hashes a borrowed key differently from how the owned key was routed
-/// and inserted would defeat the point of matching shards. Every sharded store therefore builds
-/// its `HashMap`'s own hasher from [`DefaultShardHasher`] as well, so the intra-shard probe goes
-/// through this exact construction too, not through a second, independently-specializing
-/// `BuildHasher::hash_one` call.
+/// and inserted would defeat the point of matching shards. Two separate mechanisms hold that
+/// line, one per shard payload, and both are load-bearing:
+///
+/// * `ShardedUnboundCache`, `ShardedTtlCache` and `ShardedExpiringCache` hold a `HashMap` whose
+///   own hash builder is [`DefaultShardHasher`], so the intra-shard probe goes through this
+///   exact construction too, not through a second, independently-specializing
+///   `BuildHasher::hash_one` call.
+/// * `ShardedLruCache`, `ShardedLruTtlCache` and `ShardedExpiringLruCache` hold a
+///   [`LruCache`](crate::LruCache), whose hash builder is
+///   [`DefaultHashBuilder`](crate::DefaultHashBuilder), a different type. They are safe because
+///   `LruCache::hash` (`src/stores/lru.rs`) hand-builds its `Hasher` exactly the way this
+///   function does instead of calling `hash_one`. Rewriting that body into `hash_one` (the same
+///   cleanup clippy's `manual_hash_one` lint asks for here, hence the `allow` below)
+///   reintroduces the misroute on nightly for these three stores; the note on `LruCache::hash`
+///   says so at the site.
 ///
 /// Deliberately not [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one). That is an
 /// overridable provided method whose implementation may dispatch on its static type argument, so
@@ -236,13 +254,17 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 
 /// Trait for types that deterministically map a key to a `u64` shard hash.
 ///
-/// No `K: Hash` bound on the trait itself — custom impls can partition by
-/// arbitrary logic (e.g. numeric range, string prefix, etc.).
+/// No `K: Hash` bound on the trait itself, so custom impls can partition by arbitrary logic
+/// (numeric range, string prefix, tenant id). That relaxation is about the routing logic only:
+/// every sharded store's own `impl` block still requires `K: Hash + Eq` (plus `K: Clone` on the
+/// three LRU-bounded stores), so a non-`Hash` key type remains unusable no matter what the
+/// router does.
 ///
 /// # Any `BuildHasher` is a `ShardHasher`
 ///
 /// A blanket impl covers every [`std::hash::BuildHasher`] that is `Clone + Send + Sync +
-/// 'static`, for every `K: Hash`, hashing the key explicitly: build a
+/// 'static`, for every `K: Hash + ?Sized` (unsized key types such as `str` and `[u8]`
+/// included), hashing the key explicitly: build a
 /// [`Hasher`](std::hash::Hasher) with
 /// [`build_hasher`](std::hash::BuildHasher::build_hasher), feed the key to it with
 /// [`Hash::hash`](std::hash::Hash::hash), then [`finish`](std::hash::Hasher::finish) it. The same
@@ -270,45 +292,184 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 /// routing (numeric range, string prefix, tenant id) therefore belongs on a type that does
 /// **not** implement `BuildHasher`.
 ///
-/// # Cost of a hand-written impl: the inherent lookups disappear
+/// # A hand-written impl keeps the inherent lookups
 ///
-/// A hand-written `ShardHasher` is the supported way to control shard routing, but it is not
-/// free. The six inherent lookups on every sharded store (`get`, `remove`, `remove_entry`,
-/// `delete`, `contains`, `peek`) are bounded on [`BorrowedKeyRouting`], which is exactly
-/// `BuildHasher`. On a store whose `H` does not implement `BuildHasher` those inherent methods
-/// do not exist at all -- not just the borrowed-key form `get(&"k"[..])`, but the plain owned-key
-/// call `cache.get(&key)` too, since the bound is unconditional rather than predicated on
-/// `Q != K`. There is no method-resolution fallback: the inherent method is picked by name and
-/// then fails its bound, so importing a trait does not rescue the same call site.
+/// A hand-written `ShardHasher` is the supported way to control shard routing, and it costs
+/// nothing on the owned-key path. The six inherent lookups on every sharded store (`get`,
+/// `remove`, `remove_entry`, `delete`, `contains`, `peek`) take a `&Q where K: Borrow<Q>` and
+/// are bounded on `H: ShardHasher<Q>`. At `Q = K` that bound is exactly the one the store
+/// already carries, so a router implementing `ShardHasher<K>` keeps all six: `cache.get(&key)`
+/// compiles and routes through the custom `shard_hash`; no `.unwrap()`-returning trait call is
+/// needed to reach it.
 ///
-/// The escape hatch is to call the trait forms, which take an owned-key reference and return
-/// `Result<_, Infallible>`:
+/// Borrowed keys stop at those six. Everything else on the sharded surface still takes `&K`:
+/// the trait methods (`ConcurrentCached::cache_get` and friends, `ConcurrentCachedExt::get`) and
+/// the expiry accessors (`peek_expires_at`, `expires_at`). A `String`-keyed store is looked up by
+/// `&str` through `get`/`peek`/`contains`/`remove`/`remove_entry`/`delete` and by `&String`
+/// everywhere else.
+///
+/// Borrowed-key lookups are the opt-in part. `cache.get(&q)` for some `Q` other than `K` needs
+/// a *second* impl, `ShardHasher<Q>`, on the same router; without it that one call site does not
+/// compile while the owned-key ones still do. Each impl a router adds is one more key type the
+/// store can be looked up by, and coherence permits the whole set because a hand-written router
+/// is deliberately not a `BuildHasher`.
+///
+/// Read the error for that missing second impl carefully. When the router implements exactly one
+/// `ShardHasher<K>`, inference resolves `Q` to that single impl and rustc reports a type mismatch
+/// rather than an unsatisfied bound -- `expected &UserId, found &u64` at the `cache.get(&7u64)`
+/// argument, not "`TenantRouter: ShardHasher<u64>` is not satisfied". The fix is still to add
+/// `impl ShardHasher<u64> for TenantRouter`.
 ///
 /// ```rust
-/// use cached::{ConcurrentCachePeek, ConcurrentCachedExt, ShardHasher, ShardedUnboundCache};
+/// use cached::{ShardHasher, ShardedUnboundCache};
+/// use std::borrow::Borrow;
 ///
-/// #[derive(Clone)]
-/// struct TenantHasher;
-/// impl ShardHasher<u64> for TenantHasher {
-///     fn shard_hash(&self, key: &u64) -> u64 {
-///         key.wrapping_mul(0x9e3779b97f4a7c15)
+/// #[derive(Hash, PartialEq, Eq)]
+/// struct UserId(u64);
+///
+/// impl Borrow<u64> for UserId {
+///     fn borrow(&self) -> &u64 {
+///         &self.0
 ///     }
 /// }
 ///
-/// let cache = ShardedUnboundCache::<u64, u64>::builder()
-///     .hasher(TenantHasher)
+/// /// A random seed sampled once per process. Without it the routing is a published
+/// /// function of the key and an attacker who picks the keys can put them all on one
+/// /// shard; see the unkeyed-router warning below.
+/// fn shard_seed() -> u64 {
+///     use std::hash::{BuildHasher, Hasher};
+///     static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+///     *SEED.get_or_init(|| std::hash::RandomState::new().build_hasher().finish())
+/// }
+///
+/// /// Deliberately not a `BuildHasher`: routing, not hashing, is the point.
+/// #[derive(Clone)]
+/// struct TenantRouter;
+///
+/// impl TenantRouter {
+///     /// The one routing body both impls call, so they cannot disagree.
+///     fn route(&self, raw: u64) -> u64 {
+///         (raw ^ shard_seed()).wrapping_mul(0x9e3779b97f4a7c15)
+///     }
+/// }
+///
+/// impl ShardHasher<UserId> for TenantRouter {
+///     fn shard_hash(&self, key: &UserId) -> u64 {
+///         self.route(key.0)
+///     }
+/// }
+///
+/// // The opt-in second impl. It agrees with the first on keys that compare equal, which is
+/// // the contract described below.
+/// impl ShardHasher<u64> for TenantRouter {
+///     fn shard_hash(&self, key: &u64) -> u64 {
+///         self.route(*key)
+///     }
+/// }
+///
+/// let cache = ShardedUnboundCache::<UserId, u64>::builder()
+///     .hasher(TenantRouter)
 ///     .build()
 ///     .unwrap();
-/// cache.set(7, 70);
+/// cache.set(UserId(7), 70);
 ///
-/// // `cache.get(&7)` does not compile here: the inherent method needs `H: BuildHasher`.
-/// assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
-/// assert_eq!(ConcurrentCachePeek::peek(&cache, &7).unwrap(), Some(70));
+/// // Owned key: the inherent method, resolved through `ShardHasher<UserId>`.
+/// assert_eq!(cache.get(&UserId(7)), Some(70));
+/// // Borrowed key: the same entry, resolved through `ShardHasher<u64>`.
+/// assert_eq!(cache.get(&7u64), Some(70));
 /// ```
 ///
 /// If shard routing is not the point and only the hash function is, pass a `BuildHasher`
 /// (for example `std::hash::RandomState` or `ahash::RandomState`) to the builder's `hasher`
-/// instead and keep all six inherent lookups.
+/// instead: the blanket impl covers every key type at once, so no per-`Q` impl is ever needed.
+///
+/// # Contract: a router's impls must agree with each other
+///
+/// If a type implements `ShardHasher` for more than one key type, all of those impls must agree
+/// on keys that compare equal. Concretely, for `K: Borrow<Q>`, `shard_hash(&k)` must return the
+/// same value as `shard_hash(k.borrow())`.
+///
+/// Violating this routes an owned insert and an equivalent borrowed lookup to different shards:
+/// `get`/`peek`/`contains` report a miss on an entry the cache still holds, and
+/// `remove`/`delete` silently no-op instead of removing it. There is no panic and no error, only
+/// a cache that appears to lose entries it has. Only `get` bumps the `misses` counter while it
+/// does so; `peek` and `contains` are peek-based and touch no counters at all, so
+/// `metrics().misses` staying flat under those two probes is not evidence that routing agrees. This is the same species of
+/// requirement as [`Borrow`](std::borrow::Borrow)'s own -- that equal keys hash equally -- and
+/// the compiler cannot check either one.
+///
+/// Types reaching `ShardHasher` through the blanket [`BuildHasher`](std::hash::BuildHasher)
+/// impl satisfy the contract automatically: one impl covers every key type, its body depends
+/// only on the key's [`Hash`](std::hash::Hash) impl, and the `Borrow` contract already requires
+/// those to agree. Only a router that hand-writes two or more impls can break it.
+///
+/// A guard test pins the property for one specific router. Substitute your own router, key type
+/// and borrowed form, and paste the whole `#[test]` into your own test suite. Keep both halves:
+/// the `assert_eq!` loop alone passes for a router whose impls both return a constant, which
+/// agrees with itself while routing every key to shard 0, so the `assert_ne!` is what separates
+/// "agrees" from "does nothing".
+///
+/// ```rust,test_harness
+/// use cached::ShardHasher;
+/// use std::borrow::Borrow;
+///
+/// #[derive(Hash, PartialEq, Eq)]
+/// struct UserId(u64);
+///
+/// impl Borrow<u64> for UserId {
+///     fn borrow(&self) -> &u64 {
+///         &self.0
+///     }
+/// }
+///
+/// /// A random seed sampled once per process; see the unkeyed-router warning below.
+/// fn shard_seed() -> u64 {
+///     use std::hash::{BuildHasher, Hasher};
+///     static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+///     *SEED.get_or_init(|| std::hash::RandomState::new().build_hasher().finish())
+/// }
+///
+/// #[derive(Clone)]
+/// struct TenantRouter;
+///
+/// impl TenantRouter {
+///     fn route(&self, raw: u64) -> u64 {
+///         (raw ^ shard_seed()).wrapping_mul(0x9e3779b97f4a7c15)
+///     }
+/// }
+///
+/// impl ShardHasher<UserId> for TenantRouter {
+///     fn shard_hash(&self, key: &UserId) -> u64 {
+///         self.route(key.0)
+///     }
+/// }
+///
+/// impl ShardHasher<u64> for TenantRouter {
+///     fn shard_hash(&self, key: &u64) -> u64 {
+///         self.route(*key)
+///     }
+/// }
+///
+/// #[test]
+/// fn owned_and_borrowed_route_together() {
+///     let router = TenantRouter;
+///     // Every owned key must route exactly where its borrowed form routes.
+///     for raw in [0u64, 1, 7, 0x9e37_79b9, u64::MAX] {
+///         let owned = UserId(raw);
+///         let borrowed: &u64 = owned.borrow();
+///         assert_eq!(
+///             ShardHasher::<UserId>::shard_hash(&router, &owned),
+///             ShardHasher::<u64>::shard_hash(&router, borrowed),
+///             "shard_hash disagrees between UserId({raw}) and its borrowed u64"
+///         );
+///     }
+///     // And keys that are not equal must not all collapse onto one shard.
+///     assert_ne!(
+///         ShardHasher::<UserId>::shard_hash(&router, &UserId(7)),
+///         ShardHasher::<u64>::shard_hash(&router, &8u64)
+///     );
+/// }
+/// ```
 ///
 /// # Shard selection
 ///
@@ -348,6 +509,41 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 ///
 /// Always mix or multiply the value so entropy is spread into the upper 32 bits.
 ///
+/// # Warning: an unkeyed router is invertible
+///
+/// A router whose body is a fixed expression of the key (`key.wrapping_mul(CONST)`, a bare
+/// multiply-shift, a prefix table) is a published function: the constant, the `>> 32` and the
+/// shard mask are all in this documentation. An attacker who influences the keys (a tenant id
+/// from a header, a request path, a user-supplied id) can solve offline for keys that all land
+/// on one shard. The result is not a wrong answer but a collapse: every request serializes on
+/// that shard's `RwLock` (a write lock even for reads, on the three LRU-bounded stores), and on
+/// a bounded store the usable capacity drops to `max_size / shards` because the other shards
+/// stay empty.
+///
+/// Mix in a random seed sampled once per process, as the examples above do:
+///
+/// ```rust
+/// use std::hash::{BuildHasher, Hasher};
+/// use std::sync::OnceLock;
+///
+/// fn shard_seed() -> u64 {
+///     static SEED: OnceLock<u64> = OnceLock::new();
+///     *SEED.get_or_init(|| std::hash::RandomState::new().build_hasher().finish())
+/// }
+///
+/// // Keyed: the same multiply, over a value the attacker cannot predict.
+/// fn route(raw: u64) -> u64 {
+///     (raw ^ shard_seed()).wrapping_mul(0x9e3779b97f4a7c15)
+/// }
+/// # assert_ne!(route(7), route(8));
+/// ```
+///
+/// The seed has to be shared by every impl on the router (route through one private helper, as
+/// above) or the impls disagree and the cross-impl contract breaks. This warning does not apply
+/// to the default path: [`DefaultShardHasher`] is randomly seeded per instance already, as is
+/// any `BuildHasher` reaching `ShardHasher` through the blanket impl that seeds itself
+/// (`std::hash::RandomState::new`, `ahash::RandomState::new`).
+///
 /// # Example
 ///
 /// ```rust
@@ -355,6 +551,9 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 ///
 /// /// Distributes `u64` keys using Fibonacci hashing (`key * 2^64/φ`).
 /// /// Ensures the upper 32 bits (used for shard selection) are well-distributed.
+/// ///
+/// /// Unkeyed, so this is for keys you choose yourself. On attacker-influenced keys, xor in a
+/// /// per-process random seed first (see the unkeyed-router warning above).
 /// #[derive(Clone)]
 /// struct FibHasher;
 /// impl ShardHasher<u64> for FibHasher {
@@ -368,7 +567,16 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 /// and the `Arc` is cloned across threads — a borrowed or lifetime-parameterized hasher
 /// would prevent the cache from being `'static` and therefore from being shared via
 /// `thread::spawn` or stored in a `static`.
-pub trait ShardHasher<K>: Clone + Send + Sync + 'static {
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot route keys of type `{K}` to a shard",
+    label = "`{Self}` has no `ShardHasher<{K}>` impl",
+    note = "a hand-written router implements `ShardHasher` once per key type it routes; on a concrete router type, add `impl ShardHasher<{K}> for {Self}`",
+    note = "if `{Self}` is a type parameter of your own generic code it cannot carry an impl: add `{Self}: ShardHasher<{K}>` to that function's where clause, in addition to (not instead of) the store's own `ShardHasher<K>` bound",
+    note = "borrowed-key lookups need their own impl: `cache.get(&q)` on a store keyed by `K` resolves through `ShardHasher<Q>`, not `ShardHasher<K>`",
+    note = "every impl on one router must agree on keys that compare equal -- for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`",
+    note = "a `BuildHasher` that is `Clone + Send + Sync + 'static` covers every key type at once through the blanket impl and needs no per-key impl; that is an alternative only for a type carrying no hand-written `ShardHasher` impls, since coherence rejects both on one type"
+)]
+pub trait ShardHasher<K: ?Sized>: Clone + Send + Sync + 'static {
     fn shard_hash(&self, key: &K) -> u64;
 }
 
@@ -383,17 +591,22 @@ pub trait ShardHasher<K>: Clone + Send + Sync + 'static {
 ///
 /// Routing builds a [`Hasher`](std::hash::Hasher) with
 /// [`build_hasher`](std::hash::BuildHasher::build_hasher), feeds the key to it with
-/// [`Hash::hash`](std::hash::Hash::hash), then [`finish`](std::hash::Hasher::finish)s it -- the
-/// same construction each store's `shard_of_borrowed` uses for a borrowed key, so an owned key
-/// and a borrowed key that compare equal cannot land on different shards. This is deliberately
-/// not [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one): that is an overridable
+/// [`Hash::hash`](std::hash::Hash::hash), then [`finish`](std::hash::Hasher::finish)s it. Each
+/// store's `shard_of_borrowed` reaches a borrowed key's shard by calling `shard_hash` itself, so
+/// for a `BuildHasher` the owned and borrowed paths are not merely the same construction, they
+/// are the same call, and an owned key and a borrowed key that compare equal cannot land on
+/// different shards. This is deliberately not
+/// [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one): that is an overridable
 /// provided method whose implementation may dispatch on its static type argument (`ahash`'s does,
 /// under nightly's `specialize` cfg), so `hash_one::<&K>` and `hash_one::<&Q>` are not required to
 /// agree even when the two values hash identically. Building the `Hasher` explicitly depends only
 /// on the `Hash` impl, which the `Borrow` contract already requires to agree.
+///
+/// The key parameter is `?Sized`, so unsized keys are covered too: a `String`-keyed store routes
+/// a `&str` lookup through `ShardHasher<str>` on the very same hasher value.
 impl<K, S> ShardHasher<K> for S
 where
-    K: std::hash::Hash,
+    K: std::hash::Hash + ?Sized,
     S: std::hash::BuildHasher + Clone + Send + Sync + 'static,
 {
     fn shard_hash(&self, key: &K) -> u64 {
@@ -401,73 +614,11 @@ where
     }
 }
 
-/// Exactly equivalent to [`BuildHasher`](std::hash::BuildHasher): a blanket impl covers every
-/// `BuildHasher` and nothing else can implement it.
-///
-/// It is the bound on the six inherent lookups (`get`, `remove`, `remove_entry`, `delete`,
-/// `contains`, `peek`) of the six sharded stores. Those methods take a `&Q where K: Borrow<Q>`
-/// and hash the `&Q` with the store's own hash builder, which agrees with the owned key's
-/// routing only when the store's `ShardHasher` impl is the blanket `BuildHasher` one.
-///
-/// The bound is unconditional, not predicated on `Q != K`, so on a store built with a
-/// hand-written [`ShardHasher`] all six inherent methods disappear entirely: the owned-key call
-/// `cache.get(&key)` fails exactly like the borrowed-key call `cache.get(&key[..])`. There is no
-/// method-resolution fallback either, because the inherent method is selected by name before its
-/// bound is checked, so importing a trait does not rescue the same call site. Such a store is
-/// used through the owned-key trait methods instead, which return `Result<_, Infallible>`:
-/// [`ConcurrentCachedExt`](crate::ConcurrentCachedExt) supplies
-/// `get`/`remove`/`remove_entry`/`delete`/`contains` and
-/// [`ConcurrentCachePeek`](crate::ConcurrentCachePeek) supplies `peek`, e.g.
-/// `ConcurrentCachedExt::get(&cache, &key).unwrap()` and
-/// `ConcurrentCachePeek::peek(&cache, &key).unwrap()`.
-///
-/// The trait exists only so that failure explains itself. Bounding the methods on `BuildHasher`
-/// directly produces a bare `E0277` naming `BuildHasher`, which says nothing about shard routing
-/// or about the owned-key trait calls that do work.
-///
-/// # Why this needs `BuildHasher` at all
-///
-/// A borrowed-key lookup hashes the `&Q` argument with the store's own hash builder: build a
-/// [`Hasher`](std::hash::Hasher), feed it the key with [`Hash::hash`](std::hash::Hash::hash), then
-/// [`finish`](std::hash::Hasher::finish) it. That construction only exists when `H: BuildHasher`,
-/// and it must be the exact construction the owned-key insert used to route to a shard, or the
-/// borrowed lookup can land on a different shard than the one holding the entry.
-///
-/// # The `Borrow` contract is load-bearing here
-///
-/// This holds only because the `Borrow<Q>` contract requires `k.hash() == k.borrow().hash()` for
-/// equal keys. A `Borrow` impl that violates that -- a type whose `Hash` disagrees with the
-/// `Hash` of the type it borrows as -- still compiles, but the consequence is worse with sharding
-/// than with a single hash table. In a single unsharded map, a `Hash`/`Borrow` mismatch usually
-/// just misses the intended bucket. Sharded, a mismatch routes the borrowed lookup to a different
-/// **shard**: `get`/`peek`/`contains` report a miss (and bump the `misses` counter) on an entry
-/// that is present, and `remove`/`delete` silently no-op instead of removing it. There is no
-/// panic and no error -- only a cache that appears to lose entries it still holds.
-///
-/// # Shard selection and the intra-shard probe use the same hash
-///
-/// The same reasoning applies twice over: once to pick a shard, and again for the `HashMap` probe
-/// inside that shard. Both go through the identical hash construction described above, so an
-/// owned key and any borrowed form that compares equal to it agree on both the shard and the
-/// bucket within it.
-#[diagnostic::on_unimplemented(
-    message = "the inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` on a sharded store need a `BuildHasher`-based shard hasher",
-    label = "`{Self}` is not a `BuildHasher`, so this store has no inherent key lookups",
-    note = "this applies to the owned-key call `cache.get(&key)` too, not just borrowed keys such as `cache.get(key.as_str())`",
-    note = "if `{Self}` is a type parameter of your own function, add `H: BorrowedKeyRouting` to its bound",
-    note = "`BorrowedKeyRouting` is exported at the crate root (`use cached::BorrowedKeyRouting;`) and is deliberately not in the prelude",
-    note = "use the trait methods instead: `ConcurrentCachedExt::get(&cache, &key).unwrap()` and the matching `remove`/`remove_entry`/`delete`/`contains`, plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek`",
-    note = "they return `Result<_, Infallible>`, so `.unwrap()` recovers the inherent method's plain return type"
-)]
-pub trait BorrowedKeyRouting: std::hash::BuildHasher {}
-
-impl<T: std::hash::BuildHasher> BorrowedKeyRouting for T {}
-
 /// Default shard hasher backed by `ahash::RandomState` (or `std::collections::hash_map::RandomState`
 /// when the `ahash` feature is disabled).
 ///
 /// It implements [`BuildHasher`](std::hash::BuildHasher) and picks up
-/// [`ShardHasher<K>`] for every `K: Hash` through the blanket impl above, so it is also a valid
+/// [`ShardHasher<K>`] for every `K: Hash + ?Sized` through the blanket impl above, so it is also a valid
 /// hash builder for the non-sharded stores and for a plain
 /// [`HashMap`](std::collections::HashMap).
 #[derive(Clone)]
@@ -496,6 +647,17 @@ impl DefaultShardHasher {
     }
 }
 
+/// Do not override [`hash_one`](std::hash::BuildHasher::hash_one) here, however tempting it is to
+/// forward it to the inner `ahash::RandomState` for its specialized path. `hash_one` may dispatch
+/// on its static type argument, and ahash's does under nightly's `specialize` cfg: it specializes
+/// some reference types (`&u8`..`&i64`, `&u128`/`&i128`/`&usize`/`&isize`) and not others
+/// (`&str`, `&String`, `&[u8]`), so `hash_one::<&K>` and `hash_one::<&Q>` are not required to
+/// agree even when the two values hash identically. With an override in place, a newtype key such
+/// as `struct UserId(u64)` with `Borrow<u64>` routes its owned inserts and its borrowed lookups to
+/// different shards on any nightly compiler, with no panic and no error. Leaving `hash_one`
+/// un-overridden keeps it equal to the provided body, which is the same construction as
+/// `routing_hash` above. `default_shard_hasher_routes_through_build_hasher` in this module's tests
+/// pins the equality.
 impl std::hash::BuildHasher for DefaultShardHasher {
     type Hasher = <crate::stores::DefaultHashBuilder as std::hash::BuildHasher>::Hasher;
 
@@ -552,7 +714,8 @@ mod tests {
     /// `DefaultShardHasher` reaches `ShardHasher` through the `BuildHasher` blanket impl and
     /// nothing else. `shard_hash` builds a `Hasher`, feeds the key to it and finishes it, which
     /// is exactly the provided `BuildHasher::hash_one` body; `DefaultShardHasher` does not
-    /// override `hash_one`, so the two agree here. A second, explicit
+    /// override `hash_one`, so the two agree here. Coherence still makes the blanket impl
+    /// exclusive after the relaxation to `K: ?Sized`: a second, explicit
     /// `ShardHasher for DefaultShardHasher` impl alongside the blanket one would be a
     /// duplicate-impl error, so this compiling is itself the single-path check.
     #[test]
@@ -561,6 +724,76 @@ mod tests {
         let h = DefaultShardHasher::new();
         assert_eq!(h.shard_hash(&42u64), h.hash_one(42u64));
         assert_eq!(h.shard_hash(&"key"), h.hash_one("key"));
+    }
+
+    /// The blanket impl covers unsized key types, which is what lets a borrowed lookup route
+    /// through `ShardHasher<Q>` (`Q = str` here) rather than bypassing the trait. Before
+    /// `ShardHasher<K: ?Sized>` this did not compile at all, and the value it produces must
+    /// match the owned key's routing or the entry becomes unreachable through its borrowed form.
+    #[test]
+    fn blanket_impl_covers_unsized_keys() {
+        let h = DefaultShardHasher::new();
+        let owned = String::from("key");
+        let borrowed: &str = std::borrow::Borrow::borrow(&owned);
+        assert_eq!(
+            ShardHasher::<String>::shard_hash(&h, &owned),
+            ShardHasher::<str>::shard_hash(&h, borrowed)
+        );
+        assert_ne!(
+            ShardHasher::<str>::shard_hash(&h, borrowed),
+            ShardHasher::<str>::shard_hash(&h, "other")
+        );
+    }
+
+    /// One router type carries a hand-written `ShardHasher` impl per key type it routes, and
+    /// both impls are reachable from the same value. Coherence permits the set because
+    /// `TwoWayRouter` is deliberately not a `BuildHasher`, so nothing overlaps the blanket impl.
+    /// This is the shape a store uses to serve an owned `get(&UserId(..))` through
+    /// `ShardHasher<UserId>` and a borrowed `get(&7u64)` through `ShardHasher<u64>`.
+    #[test]
+    fn hand_written_router_carries_one_impl_per_key_type() {
+        use std::borrow::Borrow;
+
+        #[derive(Hash, PartialEq, Eq)]
+        struct UserId(u64);
+
+        impl Borrow<u64> for UserId {
+            fn borrow(&self) -> &u64 {
+                &self.0
+            }
+        }
+
+        #[derive(Clone)]
+        struct TwoWayRouter;
+
+        impl ShardHasher<UserId> for TwoWayRouter {
+            fn shard_hash(&self, key: &UserId) -> u64 {
+                key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            }
+        }
+
+        impl ShardHasher<u64> for TwoWayRouter {
+            fn shard_hash(&self, key: &u64) -> u64 {
+                key.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            }
+        }
+
+        let router = TwoWayRouter;
+        for raw in [0u64, 1, 7, 0x9e37_79b9, u64::MAX] {
+            let owned = UserId(raw);
+            let borrowed: &u64 = owned.borrow();
+            // Both impls resolve off the one value, and they agree: the cross-impl
+            // consistency contract documented on `ShardHasher`.
+            assert_eq!(
+                ShardHasher::<UserId>::shard_hash(&router, &owned),
+                ShardHasher::<u64>::shard_hash(&router, borrowed),
+                "shard_hash disagrees between UserId({raw}) and its borrowed u64"
+            );
+        }
+        assert_ne!(
+            ShardHasher::<UserId>::shard_hash(&router, &UserId(7)),
+            ShardHasher::<u64>::shard_hash(&router, &8u64)
+        );
     }
 
     /// A `Clone`-implementing custom `ShardHasher` satisfies the `ShardHasher: Clone`

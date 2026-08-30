@@ -12,12 +12,15 @@ the item stays here for history.
 ## Status legend
 
 - **Implemented** - the code has landed in this repository. This does NOT mean it has shipped in
-  a release: records opened for a later cycle land ahead of their release (0050, 0052, 0053 are
+  a release: records opened for a later cycle land ahead of their release (0050, 0053, 0055 are
   Implemented for the unreleased 3.2 cycle while the published crate is at 3.1.1). Check
   `CHANGELOG.md` for which released version (if any) actually carries an item before relying on it
   from outside this repository.
 - **Not implemented** - agreed direction, not yet built (or a conscious decision not to build).
 - **Needs research** - direction is plausible but unresolved; do not build until scoped.
+- **Superseded by NNNN** - the code landed but a later record (NNNN) replaced its route choice.
+  The original record stays as history and is not edited beyond a correction pointing at the
+  superseding record; treat the superseding record's row as current.
 
 ## Index
 
@@ -74,6 +77,7 @@ the item stays here for history.
 | [0049](0049-pin-cargo-readme.md) | Pin the cargo-readme version CI installs | Implemented |
 | [0050](0050-capability-traits-for-inherent-only-ops.md) | Capability traits for `set_max_size` and `cache_clear_with_on_evict` | Implemented |
 | [0051](0051-cached-skip-parameter.md) | Exclude a parameter from the generated cache key | Not implemented |
-| [0052](0052-sharded-borrowed-key-lookups.md) | Borrowed-key lookups on the sharded inherent methods | Implemented |
+| [0052](0052-sharded-borrowed-key-lookups.md) | Borrowed-key lookups on the sharded inherent methods | Superseded by 0055 |
 | [0053](0053-refresh-claim-guard.md) | A first-class refresh-claim guard | Implemented |
 | [0054](0054-stale-pr-issue-triage.md) | Triage of stale PRs and issues | Partly implemented |
+| [0055](0055-shard-hasher-q-over-borrowed-key-routing.md) | `ShardHasher<Q>` bounds replace `BorrowedKeyRouting` | Implemented |

@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `String: Borrow<&String>` is not satisfied
+  --> tests/ui/sharded_double_reference_key_inference.rs:20:27
+   |
+20 |         let _ = cache.get(&k);
+   |                       --- ^^ the trait `Borrow<&String>` is not implemented for `String`
+   |                       |
+   |                       required by a bound introduced by this call
+   |
+help: the trait `Borrow<&String>` is not implemented for `String`
+      but trait `Borrow<str>` is implemented for it
+  --> $RUST/alloc/src/str.rs
+   |
+   | impl Borrow<str> for String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `str`, found `&String`
+note: required by a bound in `ShardedLruCache::<K, V, H>::get`
+  --> src/stores/sharded/lru.rs
+   |
+   |     pub fn get<Q>(&self, k: &Q) -> Option<V>
+   |            --- required by a bound in this associated function
+   |     where
+   |         K: Borrow<Q>,
+   |            ^^^^^^^^^ required by this bound in `ShardedLruCache::<K, V, H>::get`

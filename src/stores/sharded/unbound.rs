@@ -12,8 +12,7 @@ use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
 use core::future::Future;
 
 use super::{
-    BorrowedKeyRouting, CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
-    routing_hash, shard_index,
+    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, shard_index,
 };
 use crate::stores::BuildError;
 
@@ -114,21 +113,23 @@ where
 
     /// Route a borrowed key to the shard that owns the equivalent owned key.
     ///
-    /// Only callable when `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`. For such
-    /// an `H` the `ShardHasher` impl is the blanket one, and coherence forbids a second,
-    /// hand-written impl. Both that blanket `shard_hash` and this function route through
+    /// Calls the same [`ShardHasher::shard_hash`](super::ShardHasher::shard_hash) the owned path
+    /// (`shard_of`) calls, only at `Q` instead of `K`, so the two cannot drift and a custom
+    /// router's own `shard_hash` is honored here rather than bypassed. When `H` reaches
+    /// `ShardHasher` through the blanket `BuildHasher` impl, both instantiations run
     /// [`routing_hash`](super::routing_hash), so the hash for `&Q` equals the hash for the owned
     /// `K` by the `Borrow` contract alone (equal keys hash equally), the same guarantee
-    /// `HashMap::get(&str)` on a `String` key already relies on. See `routing_hash` for why the
-    /// construction is written out rather than delegated to `BuildHasher::hash_one`.
+    /// `HashMap::get(&str)` on a `String` key already relies on. When `H` carries hand-written
+    /// impls, that agreement is the cross-impl contract documented on
+    /// [`ShardHasher`](super::ShardHasher).
     #[inline]
     fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>
     where
         K: Borrow<Q>,
         Q: Hash + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
-        let h = routing_hash(&self.inner.hasher, k);
+        let h = self.inner.hasher.shard_hash(k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
 }
@@ -299,28 +300,28 @@ where
     /// assert_eq!(cache.get("a"), Some(1));
     /// ```
     ///
-    /// This method requires `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`
-    /// (the alias exists so the compile error names the fix). Every hasher that reaches
-    /// [`ShardHasher`] through the blanket impl satisfies it, including the default
-    /// [`DefaultShardHasher`]. The bound is unconditional, not predicated on `Q != K`, so on a
-    /// store built with a hand-written `ShardHasher` (which coherence keeps from also being a
-    /// `BuildHasher`) this inherent method disappears entirely: the owned-key call
-    /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
-    /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
-    /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    /// This method is bounded on `H: ShardHasher<Q>`. Every hasher that reaches [`ShardHasher`]
+    /// through the blanket `BuildHasher` impl satisfies it for every `Q: Hash`, including the
+    /// default [`DefaultShardHasher`], so the owned-key call `cache.get(&k)` and the borrowed
+    /// `cache.get("k")` both work. A store built on a hand-written `ShardHasher` keeps this
+    /// method at the key types it implements: `ShardHasher<K>` alone gives the owned-key call,
+    /// and a borrowed form needs a second `impl ShardHasher<Q>` on the router, which must agree
+    /// with the first (see [`ShardHasher`]'s consistency contract).
     ///
     /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
     /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
-    /// entry that is present and counts the miss against it; see
-    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
-    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
-    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
+    /// entry that is present and counts the miss against it. Pass the borrowed key directly:
+    /// `cache.get(&k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&` and
+    /// write `cache.get(k)`. A `&Box<K>` or `&Arc<K>` has no extra `&` to drop and needs an
+    /// explicit deref instead (`cache.get(&**k)`). With a single-impl router the failure is an
+    /// argument type mismatch (E0308, `expected &UserId, found &u64`), not a missing bound.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.get_in(self.shard_of_borrowed(k), k)
     }
@@ -352,12 +353,12 @@ where
     /// Remove a cached value and return it if the entry was live.
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
-    /// the key; see [`get`](Self::get) for the `H: BorrowedKeyRouting` restriction that carries.
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
     pub fn remove<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.remove_entry_in(self.shard_of_borrowed(k), k)
             .map(|(_, v)| v)
@@ -366,12 +367,12 @@ where
     /// Remove a cached entry and return the stored key and value, if present.
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
-    /// the key; see [`get`](Self::get) for the `H: BorrowedKeyRouting` restriction that carries.
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
     pub fn remove_entry<Q>(&self, k: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.remove_entry_in(self.shard_of_borrowed(k), k)
     }
@@ -379,12 +380,12 @@ where
     /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
-    /// the key; see [`get`](Self::get) for the `H: BorrowedKeyRouting` restriction that carries.
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
     pub fn delete<Q>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.remove_entry_in(self.shard_of_borrowed(k), k).is_some()
     }
@@ -399,13 +400,13 @@ where
     /// Return true if a live value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
-    /// `H: BorrowedKeyRouting` restriction that carries.
+    /// `H: ShardHasher<Q>` bound that carries.
     #[must_use]
     pub fn contains<Q>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.contains_in(self.shard_of_borrowed(k), k)
     }
@@ -417,17 +418,13 @@ where
     /// per-shard lock.
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
-    /// `H: BorrowedKeyRouting` restriction that carries.
-    ///
-    /// On a store whose `H` is not a `BuildHasher` the replacement is
-    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get`
-    /// form named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
+    /// `H: ShardHasher<Q>` bound that carries.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.peek_in(self.shard_of_borrowed(k), k)
     }
@@ -1532,11 +1529,18 @@ mod borrowed_key_and_capability_tests {
     /// `DefaultShardHasher`, the same type shard selection uses, so a `hash_one` override added
     /// back to `DefaultShardHasher` would silently reintroduce the newtype-over-primitive miss in
     /// both places at once. `hash_one`'s provided default body is exactly `build_hasher` +
-    /// `Hash::hash` + `Hasher::finish`, so this holds on every toolchain today and only breaks if
-    /// `DefaultShardHasher` starts overriding `hash_one`.
+    /// `Hash::hash` + `Hasher::finish`, so with no override this assertion passes trivially, BY
+    /// CONSTRUCTION, on every toolchain: both calls run the identical provided body regardless of
+    /// whether ahash's `specialize` cfg is on. It cannot fail on stable even if the override
+    /// comes back, because that cfg (which is what makes a `hash_one` override observably
+    /// diverge from the provided body) is only ever enabled on nightly. This test is therefore a
+    /// documentation/regression marker for the coupling, not a guard against reintroducing the
+    /// override; the `nightly-routing` CI job (`.github/workflows/build.yml`) is what actually
+    /// exercises this hazard, by running the design-0055 routing suites under a toolchain where
+    /// `specialize` is on.
     // The `&UserId(7)` / `&7u64` borrows are the point: ahash's `CallHasher` specialization keys
     // on the reference type argument to `hash_one`, so hashing the owned values would not
-    // exercise the hazard this test pins.
+    // exercise the hazard this test pins on nightly.
     #[allow(clippy::needless_borrows_for_generic_args)]
     #[test]
     fn default_shard_hasher_hash_one_agrees_for_newtype_and_primitive() {

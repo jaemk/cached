@@ -157,7 +157,15 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `ConcurrentCacheSetMaxSize` | `&self` mirror of `CacheSetMaxSize`; implemented by `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache` |
 | `CacheClearWithOnEvict` | `cache_clear_with_on_evict()`, reaching the existing inherent method from generic code; no new capability. Implemented by all 7 single-owner in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`) |
 | `ConcurrentCacheClearWithOnEvict` | `&self` mirror of `CacheClearWithOnEvict`; implemented by all 6 sharded stores (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) |
-| `BorrowedKeyRouting` | Exactly equivalent to `BuildHasher`: a marker subtrait of it, blanket-implemented for every `BuildHasher`. Exported at the crate root but deliberately not in the prelude. Name it as the bound in a generic helper over a sharded store's hasher type parameter (`H: BorrowedKeyRouting`) to keep the six borrowed-key-capable inherent methods (`get`/`remove`/`remove_entry`/`delete`/`contains`/`peek`) available |
+
+**Capability-trait method naming.** A capability trait's method name always mirrors the inherent
+method it reaches, never adds its own prefix: `CacheSetMaxSize::set_max_size`/`try_set_max_size`
+match the unprefixed inherent names, and `CacheClearWithOnEvict::cache_clear_with_on_evict` matches
+the `cache_`-prefixed inherent name. When adding a new capability trait, name its method after the
+existing inherent method verbatim; do not invent a prefix. An unprefixed name is more likely to
+collide with a downstream extension trait of the same name once both are in scope via
+`cached::prelude` (E0034, fixable with UFCS): keeping the mirrored name is still correct, but be
+aware of that sharper collision surface for unprefixed methods.
 
 **Peek is an in-memory concept.** `CachedPeek` and `ConcurrentCachePeek` are implemented by the
 six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and
@@ -166,25 +174,31 @@ or TTL state to skip and the hit/miss-metrics distinction is meaningless, while 
 a full round trip. Generic code bounded on either peek trait therefore accepts only the sharded
 stores. See `specs/design/0040-peek-is-an-in-memory-concept.md`.
 
-**Sharded borrowed-key lookups require `H: BuildHasher`.** The six sharded stores' inherent
+**Sharded borrowed-key lookups require `H: ShardHasher<Q>`.** The six sharded stores' inherent
 `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` accept any borrowed form of the key
-(`K: Borrow<Q>`), bounded on `H: BuildHasher`, named `BorrowedKeyRouting` in the bound's
-diagnostic (`src/stores/sharded/mod.rs`). `DefaultShardHasher` and every `BuildHasher` satisfy it
-automatically. A hand-written `ShardHasher` that is not also a `BuildHasher` loses these six
-inherent methods (owned-key shard routing carries no proven agreement with borrowed-key routing
-for an arbitrary hasher); it keeps owned-key access through
-`ConcurrentCachedExt::get(&cache, &key).unwrap()` and friends (`remove`/`remove_entry`/`delete`/
-`contains`), and `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek` --
-`ConcurrentCachedExt` has no `peek` of its own. These trait forms return `Result<_, Infallible>`,
-so the `.unwrap()` is required to be drop-in for the inherent methods' bare `Option<V>`. `set` and
+(`K: Borrow<Q>`), bounded per method on `H: ShardHasher<Q>` rather than the store's own
+`H: ShardHasher<K>`. `ShardHasher<K>`'s key parameter is `K: ?Sized`, so `Q: ?Sized` (for example
+`Q = str`) can satisfy it. `DefaultShardHasher` and any `BuildHasher` that is
+`Clone + Send + Sync + 'static` reach `ShardHasher<Q>` for every `Q` through the blanket impl,
+where owned-key and borrowed-key routing provably agree; a `BuildHasher` missing one of those
+bounds gets nothing from it. A
+hand-written `ShardHasher` router keeps these six methods, owned-key calls included, at every key
+type for which it implements `ShardHasher<Q>`. How a missing impl at some `Q` is reported depends on
+how many impls the router carries: with exactly one `ShardHasher` impl, inference collapses `Q` onto
+it and the failure is a call-site `E0308` type mismatch (`expected &UserId, found &u64`), not a
+missing-bound error; a router with two or more impls gives `Q` nothing to collapse onto and fails as
+`E0277` with `ShardHasher`'s `#[diagnostic::on_unimplemented]` notes. A router
+implementing `ShardHasher` for more than one key type carries an unenforced consistency contract:
+`shard_hash(&k)` must equal `shard_hash(k.borrow())` for `K: Borrow<Q>`. `set` and
 `get_or_set_with` stay owned-key on every hasher. See
-`specs/design/0052-sharded-borrowed-key-lookups.md`.
+`specs/design/0055-shard-hasher-q-over-borrowed-key-routing.md`.
 
-**Generic-helper break class.** A downstream helper bounded only on `H: ShardHasher<K>`, e.g.
-`fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> { c.get(k) }`,
-now fails at its own definition regardless of which hasher the call sites use, because the six
-inherent methods above require `H: BorrowedKeyRouting` unconditionally. The remedy is to add
-`H: BorrowedKeyRouting` (or `H: BuildHasher`) to the helper's own bound.
+**Generic-helper bound.** A downstream helper doing only owned-key lookups needs no hasher bound
+beyond `H: ShardHasher<K>`: `fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V>
+where K: Hash + Eq + Clone, V: Clone, H: ShardHasher<K> { c.get(k) }`. The inherent owned-key call
+resolves `Q = K`, and `H: ShardHasher<K>` already covers that; `K: Hash + Eq + Clone` and `V: Clone`
+are required too, since the inherent `get` lives in an `impl` block bounded on them. Only a helper
+that adds its own borrowed-key lookup at some `Q` needs to add `H: ShardHasher<Q>` to its own bound.
 
 **`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
 expiry-aware stores the count folds predicate rejections together with expired entries swept
@@ -397,6 +411,7 @@ directions, indexed in `specs/design/README.md`.
 | `benches/cache_benches.rs` | Cache benchmarks (`make bench`) |
 | `bin/` | Release helper scripts (`check-versions.sh`, `publish.sh`, `tag-release.sh`) |
 | `src/lib.rs` | Main library entry point + doc comments (source of truth for README) |
+| `src/claim.rs` | `ClaimRegistry`/`Claim` single-flight guard (`cached::claim`, also in the prelude) |
 | `src/stores/` | Cache store implementations |
 | `src/macros.rs` | Proc macro re-export module (`cached::macros`) |
 | `src/stores/mod.rs` | Store re-exports, `CacheEvict` impls, `BuildError` type |

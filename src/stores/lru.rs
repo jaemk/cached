@@ -476,6 +476,24 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         drained
     }
 
+    /// Hash a key (owned or borrowed) for the internal table.
+    ///
+    /// Do not rewrite this into [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one), the
+    /// cleanup clippy's `manual_hash_one` lint asks for on this construction (`routing_hash` in
+    /// `src/stores/sharded/mod.rs` carries an `allow` for exactly that). `hash_one` is an
+    /// overridable provided method that may dispatch on its static type argument, and
+    /// `ahash::RandomState` (this cache's default hash builder) does so under nightly's
+    /// `specialize` cfg: it specializes some reference types and not others, so `hash_one::<&K>`
+    /// and `hash_one::<&Q>` are not required to agree even for values that hash identically.
+    /// Building the `Hasher` here depends only on the `Hash` impl, which `Borrow` already
+    /// requires to agree.
+    ///
+    /// This is load-bearing beyond this cache. `ShardedLruCache`, `ShardedLruTtlCache` and
+    /// `ShardedExpiringLruCache` hold an `LruCache` as their shard payload, so this function is
+    /// the intra-shard probe those three stores rely on to agree with shard routing (see
+    /// `routing_hash` in `src/stores/sharded/mod.rs`). Switching to `hash_one` would send a
+    /// newtype-over-primitive key's owned insert and borrowed lookup to different table slots on
+    /// a nightly compiler, with no panic and no error.
     pub(super) fn hash<Q>(&self, key: &Q) -> u64
     where
         K: Borrow<Q>,

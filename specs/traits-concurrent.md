@@ -35,11 +35,14 @@ counterpart, see CTRAIT-7. The six sharded concrete types also expose inherent
 `get<Q>(&self, &Q) -> Option<V>`, `remove<Q>(&self, &Q) -> Option<V>`,
 `remove_entry<Q>(&self, &Q) -> Option<(K, V)>`, `delete<Q>(&self, &Q) -> bool`,
 `contains<Q>(&self, &Q) -> bool`, and `peek<Q>(&self, &Q) -> Option<V>` (`contains` and `peek` are
-peek-based: no recency, TTL, or metrics effects; `peek` clones the live value), generic since
-design 0052 over any borrowed form of the key (`K: Borrow<Q>`, bounded on `H: BorrowedKeyRouting`,
-exactly equivalent to `H: BuildHasher` but exported at the crate root and deliberately not in the
-prelude so a failed bound names the real cause; see [store-sharded.md](store-sharded.md)
-SHARD-15), and taking call-site priority over the ext-trait aliases.
+peek-based: no recency, TTL, or metrics effects; `peek` clones the live value), generic over any
+borrowed form of the key (`K: Borrow<Q>`, `Q: Hash + Eq + ?Sized`, bounded on `H: ShardHasher<Q>`;
+see [store-sharded.md](store-sharded.md) SHARD-15), and taking call-site priority over the
+ext-trait aliases. Design 0052 introduced these borrowed-key lookups under an
+`H: BorrowedKeyRouting` bound; 0055 dropped that marker trait and re-bounded them on
+`H: ShardHasher<Q>`, so both records are needed for the current shape
+([design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md),
+[design/0055-shard-hasher-q-over-borrowed-key-routing.md](design/0055-shard-hasher-q-over-borrowed-key-routing.md)).
 They likewise expose inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` (see
 [store-sharded.md](store-sharded.md) SHARD-6). It is deliberately not a `ConcurrentCached*` trait
 method: it is generic over `F`, so a trait method would need `where Self: Sized` to stay object
@@ -208,6 +211,15 @@ past for an entry `Expires::is_expired` reports live, and `t` can be in the futu
 `is_expired` reports expired (a token with a fixed deadline that is also revocable). A future `t`
 is therefore not evidence that the entry is live on these stores.
 
+Both reads take `&K`, not a borrowed `&Q`. That matches the rest of the concurrent trait surface
+(CTRAIT-2, and `ConcurrentCached`'s `&K` rationale) but not the six sharded stores' inherent
+lookups, which are generic over `Q` ([store-sharded.md](store-sharded.md) SHARD-15): on a
+`ShardedTtlCache<String, V>`, `cache.get("a")` and `cache.peek("a")` compile while
+`cache.expires_at("a")` and `cache.peek_expires_at("a")` do not, and need an owned `&String`.
+TRAIT-6's single-owner `CacheExpiry` is generic over `Q`, so the same operation is borrowed-key on
+`TtlCache` and owned-key on `ShardedTtlCache`; the sharded key surface is deliberately half
+borrowed-key, and this trait is on the owned half.
+
 Deliberately a standalone trait rather than a new required method on `ConcurrentCloneCached`: that
 would break external store implementations.
 
@@ -218,10 +230,12 @@ would break external store implementations.
 Option<usize>` and `try_set_max_size(&self, max_size: usize) -> Result<Option<usize>,
 SetMaxSizeError>`. Both methods already existed as inherent-only methods on every implementor; the
 trait adds no new capability, only the generic-code route. The requested bound is ceiling-divided
-across shards with a floor of 16 per shard (`checked_per_shard_cap_from_total`,
+across shards, with a floor of 16 per shard applied only when the store has more than one shard
+(`checked_per_shard_cap_from_total` runs `per_shard.max(16)` under `n_shards > 1`,
 `src/stores/sharded/mod.rs:~127-139`), so `set_max_size(4)` on a 16-shard cache leaves an effective
-bound of 256. The returned previous bound is the previous EFFECTIVE TOTAL, not the previously
-requested value, and is always `Some` on all three sharded implementors. The resize is not atomic
+bound of 256 while a single-shard store resizes to exactly the requested total. The returned
+previous bound is the previous EFFECTIVE TOTAL, not the previously requested value, and is always
+`Some` on all three sharded implementors. The resize is not atomic
 across shards: shards are updated one at a time, so two concurrent resizes can blend into a mix of
 the two targets. Taking `&self` rather than `&mut self` matches every other concurrent-side trait
 in this file, since the sharded stores are internally synchronized. Implemented by

@@ -32,7 +32,7 @@ values and take call-site priority over the `ConcurrentCachedExt` aliases: `get`
 infallible, `&self`; `peek` returns a clone of the live value with no recency/TTL/metrics
 effects). `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek` (every inherent lookup
 except `set` and `get_or_set_with`, which insert the key) accept any borrowed form of the key
-(`K: Borrow<Q>`), bounded on `H: BuildHasher`; see [SHARD-15](#shard-15). The same `peek` contract
+(`K: Borrow<Q>`), bounded on `H: ShardHasher<Q>`; see [SHARD-15](#shard-15). The same `peek` contract
 is also reachable generically through the `ConcurrentCachePeek`
 trait (`cache_peek` plus a defaulted `peek` alias, `Result<Option<V>, Infallible>` on these six
 stores); the inherent shim keeps call-site priority on the concrete types.
@@ -209,31 +209,39 @@ are generic over `Q` and take any borrowed form of the key (`K: Borrow<Q>`, `Q: 
 on a `ShardedLruCache<String, _>` without allocating a `String`. `set` and `get_or_set_with` are
 unchanged and stay owned-key, since they insert the key rather than look it up.
 
-Each of the six methods is additionally bounded on `H: BuildHasher`, surfaced as `BorrowedKeyRouting`
-(`src/stores/sharded/mod.rs`, a `#[diagnostic::on_unimplemented]` alias exactly equivalent to
-`BuildHasher`) so a failed bound names the real cause instead of a bare `BuildHasher` error. The
-bound is required because owned-key and borrowed-key shard routing are only provably equal when
-the store's `ShardHasher` impl is the blanket one every `BuildHasher` receives, which builds a
-`Hasher` and feeds it the key explicitly rather than going through `BuildHasher::hash_one` (the
-routing then agrees for `K: Borrow<Q>` because `Hash::hash` on the owned and borrowed forms already
-must agree, the same guarantee `HashMap::get` already depends on); an arbitrary hand-written
-`ShardHasher` (see [SHARD-1](#shard-1)) carries no such guarantee, since two unrelated
-`ShardHasher` impls share no consistency contract at all.
+Each of the six methods is additionally bounded on `H: ShardHasher<Q>` rather than `H:
+ShardHasher<K>`. `ShardHasher<K>`'s key parameter is itself relaxed to `ShardHasher<K: ?Sized>` so
+`Q: ?Sized` (for example `Q = str`) can satisfy it. `DefaultShardHasher` and
+every ordinary `BuildHasher` reach `ShardHasher<Q>` for every `Q` through the blanket impl, where
+owned-key and borrowed-key routing provably agree because both go through the same explicit
+`build_hasher()` / `Hash::hash` / `finish` construction and `Hash::hash` on the owned and borrowed
+forms of a `K: Borrow<Q>` already must agree, the same guarantee `HashMap::get` already depends on.
+A hand-written `ShardHasher` router keeps these six methods at every key type for which it
+implements `ShardHasher<Q>`. A lookup at a `Q` it has not implemented fails to compile, in one of
+two shapes depending on how many impls the router carries:
 
-This is a BREAKING change for a store built on a hand-written, non-`BuildHasher` `ShardHasher`:
-`DefaultShardHasher` and every ordinary `BuildHasher` satisfy `BorrowedKeyRouting` automatically,
-but a store parameterized over a custom `ShardHasher` router loses these six inherent methods
-outright, with no method-resolution fallback (the inherent method is selected by name first, then
-fails its bound). The owned-key form remains available through the trait on every hasher:
-`ConcurrentCachedExt::get(&cache, &key)` (and the matching `remove`/`remove_entry`/`delete`/
-`contains`), and `ConcurrentCachePeek::peek(&cache, &key)` for `peek`, since its alias is not on
-`ConcurrentCachedExt`.
+- Exactly one `ShardHasher` impl: inference has a single candidate, so `Q` collapses onto that
+  impl's key type before any bound is checked and rustc reports `E0308` mismatched types at the
+  call site (`expected &UserId, found &u64`). Neither the missing bound nor `ShardHasher`'s
+  `#[diagnostic::on_unimplemented]` text appears. Golden:
+  `tests/ui/sharded_router_missing_borrowed_impl.stderr`.
+- Two or more impls, or a generic `H`: `Q` has nothing to collapse onto, the `H: ShardHasher<Q>`
+  bound is checked, and the failure is `E0277` carrying the `on_unimplemented` message
+  (``NameRouter cannot route keys of type str to a shard``) and its notes. Golden:
+  `tests/ui/sharded_router_multi_impl_missing_borrowed_impl.stderr`.
 
-It is also a BREAKING change for the case most likely to hit a user who never wrote a custom
-hasher at all: `for k in &keys { cache.get(&k) }` where `k: &K` (so `&k` is `&&K`; same for
-`&Box<K>` and `&Arc<K>`) previously compiled through deref coercion. It no longer does, since `Q`
-now unifies to `&K` first and the call fails with ``the trait bound `String: Borrow<&String>` is
-not satisfied``. The `BorrowedKeyRouting` diagnostic above does not fire for this case, since the
-`H` bound is satisfied and only the `Borrow` impl is missing, so the error is opaque. Migration:
-drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&*boxed)`). See
-[design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md).
+A router implementing `ShardHasher` for more than one key type carries an unenforced cross-impl
+consistency contract: for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`.
+The compiler cannot check this, the same way it cannot check that `Borrow`'s own "equal keys hash
+equally" requirement holds. Violating it routes an owned insert and an equivalent borrowed lookup
+to different shards, producing a silent miss on an entry that is present. A type reaching
+`ShardHasher` only through the blanket `BuildHasher` impl satisfies this automatically and never
+needs to reason about it.
+
+It is a BREAKING change for the case most likely to hit a user who never wrote a custom hasher at
+all: `for k in &keys { cache.get(&k) }` where `k: &K` (so `&k` is `&&K`; same for `&Box<K>` and
+`&Arc<K>`) previously compiled through deref coercion. It no longer does, since `Q` now unifies to
+`&K` first and the call fails with ``the trait bound `String: Borrow<&String>` is not satisfied``.
+Migration: drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&*boxed)`). See
+[design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md) and
+[design/0055-shard-hasher-q-over-borrowed-key-routing.md](design/0055-shard-hasher-q-over-borrowed-key-routing.md).

@@ -42,6 +42,16 @@ pub trait Expires {
     ///
     /// This is the authoritative liveness check: callers must use `is_expired` to
     /// decide whether a cached value may be returned, not `expires_at`.
+    ///
+    /// # Runs under the shard lock
+    ///
+    /// The sharded expiring stores ([`ShardedExpiringCache`](crate::ShardedExpiringCache),
+    /// [`ShardedExpiringLruCache`](crate::ShardedExpiringLruCache)) call `is_expired` from
+    /// `get`, `contains`, and `peek` while holding the lock on the shard the value lives in.
+    /// `is_expired` must not, directly or indirectly, call back into the same store: a
+    /// `parking_lot::RwLock` is not reentrant, and a recursive read on an already-locked shard
+    /// blocks behind any writer already queued for that lock, which deadlocks the shard
+    /// permanently and stalls every request that routes to it.
     fn is_expired(&self) -> bool;
 
     /// Returns the [`crate::time::Instant`] at which this value expires, or `None` if the

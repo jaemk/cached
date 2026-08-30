@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/sharded_router_missing_borrowed_impl.rs:40:26
+   |
+40 |     assert_eq!(cache.get(&7u64), Some(9));
+   |                      --- ^^^^^ expected `&UserId`, found `&u64`
+   |                      |
+   |                      arguments to this method are incorrect
+   |
+   = note: expected reference `&UserId`
+              found reference `&u64`
+note: method defined here
+  --> src/stores/sharded/unbound.rs
+   |
+   |     pub fn get<Q>(&self, k: &Q) -> Option<V>
+   |            ^^^

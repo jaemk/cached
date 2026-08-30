@@ -26,7 +26,8 @@
 //!
 //! The shape the refresh recipes use: claim, move the claim into the spawned refresh, and let
 //! the refresh's end drop it. Borrowing the key out of the guard with [`Claim::key`] keeps the
-//! guard alive for exactly the refresh, so the release cannot be forgotten.
+//! guard alive for the duration of the call the borrow is passed into, so the release cannot be
+//! forgotten while that call runs.
 //!
 //! ```rust
 //! use cached::claim::ClaimRegistry;
@@ -68,6 +69,52 @@
 //! caller that would have done the work. Claim after the decision to do the work, never before
 //! it. [`ClaimRegistry::len`] and [`ClaimRegistry::is_empty`] are there so tests can assert the
 //! registry drains.
+//!
+//! # Do not release a claim early
+//!
+//! The opposite mistake is the more likely one, and it is silent: the claim is dropped before
+//! the work it is meant to cover starts, so every caller wins its own claim and the
+//! deduplication is gone. No lint fires on any of these: `#[must_use]` catches only a value
+//! left unused, and each of these consumes the claim, then drops it too soon.
+//!
+//! ```rust
+//! use cached::claim::ClaimRegistry;
+//!
+//! # fn spawn_refresh(_key: String) {}
+//! # let registry: ClaimRegistry<String> = ClaimRegistry::new();
+//! # let key = "user:1";
+//! // Wrong: the temporary claim is dropped at the end of the condition, before the work runs.
+//! if registry.claim(key.to_string()).is_some() {
+//!     spawn_refresh(key.to_string());
+//! }
+//!
+//! // Wrong: `let _ =` drops the claim immediately. `let _claim = ...` would not.
+//! let _ = registry.claim(key.to_string());
+//!
+//! // Wrong: the work captures the key but not the claim, so the claim drops at the end of the
+//! // block. This is the natural shape for a caller that already has the key and so never
+//! // reaches for `Claim::key`.
+//! if let Some(claim) = registry.claim(key.to_string()) {
+//!     let owned = claim.key().clone();
+//!     spawn_refresh(owned);
+//! }
+//! ```
+//!
+//! The claim has to be bound and moved into the work, so that the work's end is what drops it:
+//!
+//! ```rust
+//! use cached::claim::ClaimRegistry;
+//!
+//! # fn prime_cache(_key: &str) {}
+//! let registry: ClaimRegistry<String> = ClaimRegistry::new();
+//!
+//! if let Some(claim) = registry.claim("user:1".to_string()) {
+//!     std::thread::spawn(move || {
+//!         prime_cache(claim.key());
+//!         // `claim` is dropped here, at the end of the work, releasing the key.
+//!     });
+//! }
+//! ```
 //!
 //! # A claim is not a lock
 //!
@@ -148,7 +195,16 @@ impl<K: Eq + Hash + Clone> ClaimRegistry<K> {
     /// Claims `key` for this caller, or returns `None` if a claim on `key` is already live.
     ///
     /// Claim after deciding to do the work, never before it: a claim taken on a path that does
-    /// not go on to do the work turns away the caller that would have.
+    /// not go on to do the work turns away the caller that would have. Bind the returned claim
+    /// and move it into the work; dropping it early defeats the deduplication silently, see the
+    /// [module docs](self).
+    ///
+    /// The key is taken by value, so the losing path (the common one, since most callers past a
+    /// refresh threshold get `None`) allocates an owned key and drops it. That is deliberate:
+    /// the insert has to be atomic with the decision, and the obvious way to avoid the
+    /// allocation, testing [`is_claimed`](ClaimRegistry::is_claimed) first and claiming only
+    /// when it says no, is a time-of-check-to-time-of-use race that hands two callers the work.
+    /// Pay the allocation.
     ///
     /// ```rust
     /// use cached::claim::ClaimRegistry;
@@ -192,6 +248,7 @@ impl<K: Eq + Hash + Clone> ClaimRegistry<K> {
     /// The answer is a snapshot: another thread can claim or release `key` before the caller
     /// acts on it. Use [`claim`](ClaimRegistry::claim) itself, whose insert is atomic, to decide
     /// whether to do the work.
+    #[must_use]
     pub fn is_claimed<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -201,20 +258,36 @@ impl<K: Eq + Hash + Clone> ClaimRegistry<K> {
     }
 
     /// Returns the number of live claims.
+    ///
+    /// The count is a snapshot: another thread can claim or release a key before the caller acts
+    /// on it. It is meant for tests asserting that the registry drains, and for diagnostics, not
+    /// for deciding whether to do work.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.keys.lock().len()
     }
 
     /// Returns `true` when no claim is live.
+    ///
+    /// Like [`len`](ClaimRegistry::len), the answer is a snapshot: another thread can claim a
+    /// key the instant after it is read.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.lock().is_empty()
     }
 }
 
-impl<K: fmt::Debug> fmt::Debug for ClaimRegistry<K> {
+impl<K: fmt::Debug + Clone> fmt::Debug for ClaimRegistry<K> {
+    /// Renders the claimed keys.
+    ///
+    /// The key set is cloned under the lock and formatted after the guard is dropped, so no
+    /// user code (`K::fmt`) and no writer (the `stdout` lock behind a `println!`, say) runs
+    /// while the registry mutex is held. Holding it across the whole format would make an
+    /// ordinary log line deadlock against a concurrent claim or release.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let claimed = self.keys.lock().clone();
         f.debug_struct("ClaimRegistry")
-            .field("claimed", &*self.keys.lock())
+            .field("claimed", &claimed)
             .finish()
     }
 }
@@ -227,6 +300,12 @@ impl<K: fmt::Debug> fmt::Debug for ClaimRegistry<K> {
 ///
 /// Deliberately not [`Clone`]: two live claims on one key is the thing the type prevents. Also
 /// do not leak it (see the [module docs](self)), which wedges the key permanently.
+///
+/// The `K: Eq + Hash` bounds sit on the struct, unlike [`ClaimRegistry`], which is bound-free
+/// with the bounds on its impl blocks. They cannot be moved: the release is `Drop::drop` calling
+/// `HashSet::remove`, and a `Drop` impl may not require bounds the struct itself does not declare
+/// (`E0367`).
+#[must_use = "a dropped claim releases the key immediately; bind it for the whole refresh"]
 pub struct Claim<K: Eq + Hash> {
     registry: ClaimRegistry<K>,
     key: K,
@@ -235,8 +314,10 @@ pub struct Claim<K: Eq + Hash> {
 impl<K: Eq + Hash> Claim<K> {
     /// Returns the claimed key.
     ///
-    /// Passing this borrow to the work keeps the claim alive for exactly the work: the guard
-    /// cannot be dropped early without a borrow error.
+    /// Passing this borrow to the work keeps the claim alive for the duration of the call the
+    /// borrow is passed into: the guard cannot be dropped while that borrow is live. It does not
+    /// pin the claim to the whole refresh; cloning the key out and dropping the claim releases
+    /// it early, which is one of the anti-patterns in the [module docs](self).
     pub fn key(&self) -> &K {
         &self.key
     }
@@ -258,6 +339,10 @@ impl<K: Eq + Hash + fmt::Debug> fmt::Debug for Claim<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::OnceLock;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn second_claim_of_a_live_key_is_none() {
@@ -336,6 +421,51 @@ mod tests {
         let claim = registry.claim("a".to_string()).unwrap();
         assert_send(&registry);
         assert_send(&claim);
+    }
+
+    /// The registry a [`ReentrantKey`] reads back from while it is being formatted.
+    static REENTRANT_REGISTRY: OnceLock<ClaimRegistry<ReentrantKey>> = OnceLock::new();
+
+    /// A key whose `Debug` reads the registry that holds it, which is what an ordinary
+    /// `println!` of a registry does from a second thread: run other code while the registry is
+    /// being formatted. `parking_lot::Mutex` is not reentrant and cannot time out, so this
+    /// wedges forever if `Debug for ClaimRegistry` holds the registry lock across the format.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct ReentrantKey(u32);
+
+    impl fmt::Debug for ReentrantKey {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let live = REENTRANT_REGISTRY
+                .get()
+                .expect("registry installed before formatting")
+                .len();
+            write!(f, "ReentrantKey({}, live={live})", self.0)
+        }
+    }
+
+    #[test]
+    fn formatting_the_registry_does_not_hold_the_registry_lock() {
+        // Every touch of the registry mutex, the claim included, happens on the spawned thread:
+        // a regression then fails this test on the timeout below rather than wedging the test
+        // binary, since the asserting thread never takes the lock (not even on its unwind).
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let registry = REENTRANT_REGISTRY.get_or_init(ClaimRegistry::new);
+            let claim = registry.claim(ReentrantKey(1)).expect("first claim wins");
+            let rendered = format!("{registry:?}");
+            drop(claim);
+            let _ = tx.send((rendered, registry.is_empty()));
+        });
+
+        let (rendered, drained) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("formatting the registry deadlocked on the registry mutex");
+        assert!(rendered.contains("ReentrantKey(1"), "{rendered}");
+        assert!(
+            rendered.contains("live=1"),
+            "the key set stays readable mid-format: {rendered}"
+        );
+        assert!(drained, "the claim released after the format");
     }
 
     #[test]

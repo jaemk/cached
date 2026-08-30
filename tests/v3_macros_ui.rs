@@ -84,15 +84,32 @@ fn compile_fail_v3_macros() {
     // implement `ConcurrentCacheTtl`, so `set_ttl` does not exist on them even under
     // the prelude glob.
     t.compile_fail("tests/ui/sharded_unbound_no_set_ttl.rs");
-    // Negative surface for borrowed-key lookups: a store built on a hand-written `ShardHasher`
-    // is not `BorrowedKeyRouting`, so `cache.get("a")` does not resolve. The golden pins the
-    // `#[diagnostic::on_unimplemented]` text, which nothing else would catch if it stopped
-    // rendering.
-    t.compile_fail("tests/ui/sharded_borrowed_key_requires_build_hasher.rs");
-    // Negative surface for owned-key lookups: the same bound is unconditional, so the plain
-    // owned-key call `cache.get(&k)` on a hand-written `ShardHasher` fails identically. This is
-    // the dominant real-world break (see the fixture's own comment), and is otherwise unpinned.
-    t.compile_fail("tests/ui/sharded_owned_key_requires_build_hasher.rs");
+    // Negative surface for a hand-written router carrying only ONE `ShardHasher<K>` impl: per
+    // 0055's Pitfalls, the missing borrowed-key impl collapses to an inference / type mismatch
+    // (E0308) at the call site, not an unsatisfied bound, so `ShardHasher`'s
+    // `#[diagnostic::on_unimplemented]` never fires here. Pinned so a future change that makes
+    // this fire (or stops firing entirely, silently) is visible.
+    t.compile_fail("tests/ui/sharded_router_missing_borrowed_impl.rs");
+    // Negative surface for a generic helper bounded only on `H: ShardHasher<K>` performing a
+    // borrowed lookup without also bounding `H: ShardHasher<Q>`: `H` is an unresolved type
+    // parameter here, not a concrete router with one impl to collapse onto, so this is a real
+    // unsatisfied bound and `ShardHasher`'s `#[diagnostic::on_unimplemented]` text does fire.
+    t.compile_fail("tests/ui/sharded_helper_missing_borrowed_bound.rs");
+    // The case in between the two above: a CONCRETE hand-written router that already carries two
+    // `ShardHasher` impls, asked for a third key type. With more than one impl in play there is
+    // nothing for `Q` to collapse onto, so the bound is genuinely unsatisfied and the
+    // `on_unimplemented` text fires for a concrete router, not only for a generic `H`.
+    t.compile_fail("tests/ui/sharded_router_multi_impl_missing_borrowed_impl.rs");
+    // The generic helper that names `H` but under-bounds `K`/`V`: the inherent `get` lives in an
+    // `impl` block requiring `K: Hash + Eq + Clone` and returns `V` by value, so a helper bounded
+    // only on `H: ShardHasher<K>` fails at its own definition with E0599 (no method named `get`)
+    // rather than with anything about the hasher. The crate docs quote that E0599 as the thing to
+    // read as a bounds list; this golden is what keeps that quote honest.
+    t.compile_fail("tests/ui/sharded_helper_missing_key_bounds.rs");
+    // Break class 2 (`cache.get(&k)` with `k: &K` inferring `Q = &K`), which 0055 deliberately
+    // does not fix. `CHANGELOG.md`, the crate docs and `README.md` all quote this diagnostic
+    // verbatim as the migration text; this golden is what keeps that quote honest.
+    t.compile_fail("tests/ui/sharded_double_reference_key_inference.rs");
     // Item 9: `#[cached]`-only attributes rejected on other macros
     t.compile_fail("tests/ui/once_sync_lock_unsupported.rs");
     t.compile_fail("tests/ui/once_unsync_reads_unsupported.rs");

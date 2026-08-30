@@ -52,5 +52,5 @@ callers would have no value to serve; `sync_writes = "by_key"` covers that case 
 
 `Claim`/`ClaimRegistry` are reachable through `cached::claim::` and through `cached::prelude`,
 not the crate root: both are generic English words that would otherwise be offered as rustc's
-nearest-match suggestion for unrelated mistyped imports, the same reasoning recorded for
-`KeyedCache` (`src/lib.rs:1143-1145`).
+nearest-match suggestion for unrelated mistyped imports, the same reasoning recorded for the
+`KeyedCache` struct doc in `src/lib.rs`'s `__private` module.

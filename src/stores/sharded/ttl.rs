@@ -17,8 +17,8 @@ use crate::{ConcurrentCachePeekAsync, ConcurrentCachedAsync};
 use core::future::Future;
 
 use super::{
-    BorrowedKeyRouting, CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count,
-    decode_ttl, encode_ttl, routing_hash, shard_index,
+    CachePadded, DefaultShardHasher, Shard, ShardHasher, checked_shard_count, decode_ttl,
+    encode_ttl, shard_index,
 };
 use crate::stores::{BuildError, TimedEntry};
 
@@ -172,13 +172,15 @@ where
 
     /// Route a borrowed key to the shard that owns the equivalent owned key.
     ///
-    /// Only callable when `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`. For such
-    /// an `H` the `ShardHasher` impl is the blanket one, and coherence forbids a second,
-    /// hand-written impl. Both that blanket `shard_hash` and this function route through
+    /// Calls the same [`ShardHasher::shard_hash`](super::ShardHasher::shard_hash) the owned path
+    /// (`shard_of`) calls, only at `Q` instead of `K`, so the two cannot drift and a custom
+    /// router's own `shard_hash` is honored here rather than bypassed. When `H` reaches
+    /// `ShardHasher` through the blanket `BuildHasher` impl, both instantiations run
     /// [`routing_hash`](super::routing_hash), so the hash for `&Q` equals the hash for the owned
     /// `K` by the `Borrow` contract alone (equal keys hash equally), the same guarantee
-    /// `HashMap::get(&str)` on a `String` key already relies on. See `routing_hash` for why the
-    /// construction is written out rather than delegated to `BuildHasher::hash_one`.
+    /// `HashMap::get(&str)` on a `String` key already relies on. When `H` carries hand-written
+    /// impls, that agreement is the cross-impl contract documented on
+    /// [`ShardHasher`](super::ShardHasher).
     #[inline]
     fn shard_of_borrowed<Q>(
         &self,
@@ -187,9 +189,9 @@ where
     where
         K: Borrow<Q>,
         Q: Hash + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
-        let h = routing_hash(&self.inner.hasher, k);
+        let h = self.inner.hasher.shard_hash(k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
     }
 
@@ -472,28 +474,28 @@ where
     /// assert_eq!(cache.get("a"), Some(1));
     /// ```
     ///
-    /// This method requires `H: BorrowedKeyRouting`, which is exactly `H: BuildHasher`
-    /// (the alias exists so the compile error names the fix). Every hasher that reaches
-    /// [`ShardHasher`] through the blanket impl satisfies it, including the default
-    /// [`DefaultShardHasher`]. The bound is unconditional, not predicated on `Q != K`, so on a
-    /// store built with a hand-written `ShardHasher` (which coherence keeps from also being a
-    /// `BuildHasher`) this inherent method disappears entirely: the owned-key call
-    /// `cache.get(&k)` fails to compile exactly like the borrowed one. Use
-    /// [`ConcurrentCachedExt::get`](crate::ConcurrentCachedExt::get) there instead, spelled
-    /// `ConcurrentCachedExt::get(&cache, &k).unwrap()`.
+    /// This method is bounded on `H: ShardHasher<Q>`. Every hasher that reaches [`ShardHasher`]
+    /// through the blanket `BuildHasher` impl satisfies it for every `Q: Hash`, including the
+    /// default [`DefaultShardHasher`], so the owned-key call `cache.get(&k)` and the borrowed
+    /// `cache.get("k")` both work. A store built on a hand-written `ShardHasher` keeps this
+    /// method at the key types it implements: `ShardHasher<K>` alone gives the owned-key call,
+    /// and a borrowed form needs a second `impl ShardHasher<Q>` on the router, which must agree
+    /// with the first (see [`ShardHasher`]'s consistency contract).
     ///
     /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
     /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
-    /// entry that is present and counts the miss against it; see
-    /// [`BorrowedKeyRouting`](crate::BorrowedKeyRouting). Pass the borrowed key directly:
-    /// `cache.get(k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
-    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&`.
+    /// entry that is present and counts the miss against it. Pass the borrowed key directly:
+    /// `cache.get(&k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&` and
+    /// write `cache.get(k)`. A `&Box<K>` or `&Arc<K>` has no extra `&` to drop and needs an
+    /// explicit deref instead (`cache.get(&**k)`). With a single-impl router the failure is an
+    /// argument type mismatch (E0308, `expected &UserId, found &u64`), not a missing bound.
     #[must_use]
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.get_in(self.shard_of_borrowed(k), k)
     }
@@ -525,12 +527,12 @@ where
     /// Remove a cached value and return it if the entry was live.
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
-    /// the key; see [`get`](Self::get) for the `H: BorrowedKeyRouting` restriction that carries.
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
     pub fn remove<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.remove_in(self.shard_of_borrowed(k), k)
     }
@@ -538,12 +540,12 @@ where
     /// Remove a cached entry and return the stored key and value, if present.
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
-    /// the key; see [`get`](Self::get) for the `H: BorrowedKeyRouting` restriction that carries.
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
     pub fn remove_entry<Q>(&self, k: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.remove_entry_in(self.shard_of_borrowed(k), k)
     }
@@ -551,12 +553,12 @@ where
     /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
-    /// the key; see [`get`](Self::get) for the `H: BorrowedKeyRouting` restriction that carries.
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
     pub fn delete<Q>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.remove_entry_in(self.shard_of_borrowed(k), k).is_some()
     }
@@ -571,13 +573,13 @@ where
     /// Return true if a live (not expired) value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
-    /// `H: BorrowedKeyRouting` restriction that carries.
+    /// `H: ShardHasher<Q>` bound that carries.
     #[must_use]
     pub fn contains<Q>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.contains_in(self.shard_of_borrowed(k), k)
     }
@@ -590,17 +592,13 @@ where
     /// per-shard lock.
     ///
     /// Takes any borrowed form of the key; see [`get`](Self::get) for the
-    /// `H: BorrowedKeyRouting` restriction that carries.
-    ///
-    /// On a store whose `H` is not a `BuildHasher` the replacement is
-    /// `ConcurrentCachePeek::peek(&cache, &k).unwrap()`, not the `ConcurrentCachedExt::get`
-    /// form named in [`get`](Self::get)'s doc: `ConcurrentCachedExt` has no `peek`.
+    /// `H: ShardHasher<Q>` bound that carries.
     #[must_use]
     pub fn peek<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        H: BorrowedKeyRouting,
+        H: ShardHasher<Q>,
     {
         self.peek_in(self.shard_of_borrowed(k), k)
     }
@@ -5027,6 +5025,116 @@ mod borrowed_key_and_capability_tests {
         );
         assert_eq!(c.len(), 1);
         assert_eq!(c.metrics().hits.unwrap() - hits_before, 1);
+    }
+
+    /// A borrowed `remove` on an expired entry physically removes it and fires `on_evict`
+    /// exactly like a live removal, but reports the removal as `None`: the entry had expired,
+    /// so there was nothing live to hand back. This diverges from `remove_entry` below --
+    /// `remove_in` filters the returned value on `is_expired`, but it still counts the
+    /// eviction and still fires the callback with the stored value.
+    #[test]
+    fn borrowed_remove_of_an_expired_entry_evicts_it_but_returns_none() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        let before = c.metrics();
+        assert_eq!(
+            c.remove("stale"),
+            None,
+            "a borrowed remove of an expired entry must report None, not the stale value"
+        );
+        let after = c.metrics();
+        assert!(
+            c.is_empty(),
+            "the expired entry must be physically removed by remove"
+        );
+        assert_eq!(
+            &*seen.lock(),
+            &[("stale".to_string(), 7)],
+            "on_evict must still fire with the stored owned key and value"
+        );
+        assert_eq!(
+            after.evictions.unwrap() - before.evictions.unwrap(),
+            1,
+            "the removal must still be counted as an eviction"
+        );
+    }
+
+    /// A borrowed `remove_entry` on an expired entry returns the stored key and value even
+    /// though the entry had expired: unlike `remove_in`, `remove_entry_in` does not filter on
+    /// `is_expired` at all, so callers get the last-known pair back along with the eviction.
+    #[test]
+    fn borrowed_remove_entry_of_an_expired_entry_returns_the_stale_pair() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        let before = c.metrics();
+        assert_eq!(
+            c.remove_entry("stale"),
+            Some(("stale".to_string(), 7)),
+            "remove_entry must hand back the stored pair even though it had expired"
+        );
+        let after = c.metrics();
+        assert!(
+            c.is_empty(),
+            "the expired entry must be physically removed by remove_entry"
+        );
+        assert_eq!(&*seen.lock(), &[("stale".to_string(), 7)]);
+        assert_eq!(after.evictions.unwrap() - before.evictions.unwrap(), 1);
+    }
+
+    /// A borrowed `delete` on an expired entry reports `true`: `delete` is defined as
+    /// `remove_entry_in(..).is_some()`, and (as pinned above) `remove_entry_in` does not
+    /// filter on expiry, so the stale-but-present entry counts as deleted.
+    #[test]
+    fn borrowed_delete_of_an_expired_entry_returns_true() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        let before = c.metrics();
+        assert!(
+            c.delete("stale"),
+            "delete must report true for an expired-but-present entry"
+        );
+        let after = c.metrics();
+        assert!(
+            c.is_empty(),
+            "the expired entry must be physically removed by delete"
+        );
+        assert_eq!(&*seen.lock(), &[("stale".to_string(), 7)]);
+        assert_eq!(after.evictions.unwrap() - before.evictions.unwrap(), 1);
+    }
+
+    /// A borrowed `contains` on an expired entry reports `false` without removing it: unlike
+    /// `remove` / `remove_entry` / `delete`, `contains_in` only reads under a shared lock and
+    /// filters on `is_expired`, leaving the stale entry in place for the next lazy-eviction
+    /// lookup.
+    #[test]
+    fn borrowed_contains_of_an_expired_entry_returns_false_and_leaves_it_in_place() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        assert!(
+            !c.contains("stale"),
+            "contains must report false for an expired entry"
+        );
+        assert_eq!(
+            c.len(),
+            1,
+            "contains must not physically remove the expired entry"
+        );
+        assert!(seen.lock().is_empty(), "contains must not fire on_evict");
+    }
+
+    /// A borrowed `peek` on an expired entry reports `None` without removing it, mirroring
+    /// `contains`: `peek_in` filters the returned clone on `is_expired` but never takes a
+    /// write lock on the map.
+    #[test]
+    fn borrowed_peek_of_an_expired_entry_returns_none_and_leaves_it_in_place() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        assert_eq!(
+            c.peek("stale"),
+            None,
+            "peek must report None for an expired entry"
+        );
+        assert_eq!(
+            c.len(),
+            1,
+            "peek must not physically remove the expired entry"
+        );
+        assert!(seen.lock().is_empty(), "peek must not fire on_evict");
     }
 
     // `set_max_size` / `try_set_max_size` / `cache_clear_with_on_evict` are also inherent
