@@ -8,9 +8,10 @@
 //! `tokio` runtime, plus the concurrency property (N racing claimers, exactly one winner) and the
 //! module's public reachability.
 //!
-//! Every test ends by asserting the registry drains back to `len() == 0` / `is_empty()`: that is
-//! the guard's whole contract, and a leaked claim is a silent, permanent failure (see the
-//! "Capacity" and "Do not leak a claim" sections of `src/claim.rs`'s module docs).
+//! Every test that takes a claim ends by asserting the registry drains back to `len() == 0` /
+//! `is_empty()`: that is the guard's whole contract, and a leaked claim is a silent, permanent
+//! failure (see the "Capacity" and "Do not leak a claim" sections of `src/claim.rs`'s module
+//! docs).
 //!
 //! The module is unconditional (no feature gate), so this whole file runs identically under
 //! `--all-features` and `--no-default-features`; nothing here is gated.

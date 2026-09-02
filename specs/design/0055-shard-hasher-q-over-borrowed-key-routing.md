@@ -240,8 +240,9 @@ rebounded on `H: ShardHasher<Q>`, and each `shard_of_borrowed` now calls
 owned and borrowed paths are the same call and a custom router's own `shard_hash` is honored on the
 borrowed path rather than bypassed. `BorrowedKeyRouting` is deleted from the trait definitions, the
 crate root, and the prelude, along with the rustdoc that existed only to explain it.
-`ShardHasher` picked up the `#[diagnostic::on_unimplemented]` with four notes described under
-"Delete `BorrowedKeyRouting`" (`src/stores/sharded/mod.rs`). `CHANGELOG.md`, `specs/store-sharded.md`
+`ShardHasher` picked up the `#[diagnostic::on_unimplemented]` with six notes described under
+"Delete `BorrowedKeyRouting`" (`src/stores/sharded/mod.rs`; the count tracks the `note = "..."`
+lines on that attribute directly -- recount there before trusting this number). `CHANGELOG.md`, `specs/store-sharded.md`
 (SHARD-15, plus a stale SHARD-3 reference), `specs/traits-concurrent.md` (CTRAIT-2), and `AGENTS.md`
 are resynced; `README.md` is regenerated via `cargo readme`, not hand-edited.
 
@@ -263,7 +264,7 @@ trybuild, doc tests), including the new and rewritten suites: `sharded_custom_ro
 `sharded_generic_helper_bounds`, `v3_macros_ui`, `sharded_router_agreement_per_store` (21 tests,
 agreeing and disagreeing routers on all six stores), `sharded_router_trait_and_async_surface` (16
 tests, `ConcurrentCached`/`ConcurrentCachedExt`/`ConcurrentCachePeek` on all six stores plus async
-on four), and `sharded_unsized_key_lookups` (7 tests, `Path`/`OsStr`/`[u32]`/`Arc<str>`). Feature
+on four), and `sharded_unsized_key_lookups` (8 tests, `Path`/`OsStr`/`[u32]`/`Arc<str>`). Feature
 slices `tests/no-default`, `tests/default`, `tests/proc-macro`, `tests/time-stores`, `tests/ahash`,
 `tests/async`, `tests/disk-store`: 0 failures. `make examples`: all 10 examples run. On nightly
 (`cargo +nightly test --all-features`), over the five routing files: 61 passed, 0 failed, including
@@ -296,7 +297,7 @@ are corrected here rather than silently fixed:
 - **The `on_unimplemented` attribute was worth keeping, contrary to this record's doubt, and the
   "single-impl" framing in the Pitfalls section was also too broad.** The Pitfalls section said the
   diagnostic could not fire for the case it cared about and implied limited value in adding it at
-  all; it does fire, with the full four-note message, in two of three concrete diagnostic shapes.
+  all; it does fire, with the full six-note message, in two of three concrete diagnostic shapes.
   The E0308 collapse it documented holds only for a concrete router with exactly one `ShardHasher`
   impl, where `Q` has nothing else to resolve to. A concrete router with two or more impls has
   nothing to collapse onto either: the bound is genuinely unsatisfied and the full E0277 message

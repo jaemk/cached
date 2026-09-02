@@ -12,7 +12,7 @@
   coercion. It no longer does: `Q` unifies to `&K` first, and the call fails with ``the trait
   bound `String: Borrow<&String>` is not satisfied``; same for `k: &Box<K>` and `k: &Arc<K>`, and
   the same shape applies to `remove`, `remove_entry`, `delete`, `contains`, and `peek`. Migration:
-  drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&*boxed)`). Single-owner
+  drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&**boxed)`). Single-owner
   `Cached` methods (e.g. `LruCache::cache_get`) are unchanged.
 - `ShardHasher<K>`'s key parameter is relaxed to `ShardHasher<K: ?Sized>`. Existing impls compile
   unchanged, since this only widens what the trait accepts. But `H: ShardHasher<K>` no longer
@@ -24,7 +24,11 @@
   the upper-32-bit distribution contract for a custom hasher applies to the `Hasher` returned by
   `build_hasher()`. This matters for a `BuildHasher` whose `hash_one` dispatches on the static
   type of its argument (`ahash::RandomState` does, on any nightly compiler): an owned newtype key
-  and its borrowed primitive form would otherwise route to different shards.
+  and its borrowed primitive form would otherwise route to different shards. Deliberate tradeoff:
+  `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache` back their shards with
+  `HashMap<_, _, DefaultShardHasher>` and std's `HashMap` probes via `BuildHasher::hash_one`, so
+  dropping the override means those three stores take ahash's unspecialized path on a nightly
+  build. Taken for correctness; the cost is nightly-only.
 
 ### Added
 
@@ -63,13 +67,21 @@
   stores: `sharded_cache.get("a")` now works on a `ShardedLruCache<String, _>` without allocating
   a `String` first. Bounded on `H: ShardHasher<Q>`, so a hand-written `ShardHasher` router keeps
   these six methods at every key type it implements, not just where it also implements
-  `BuildHasher`. `set` and `get_or_set_with` are unchanged: they take the key by value because
-  they insert it. See "Breaking Changes" above for the one case this is not additive for.
+  `BuildHasher`. This relies on an unenforced contract: every `ShardHasher` impl on the router
+  must agree, `shard_hash(&k) == shard_hash(k.borrow())`, for `K: Borrow<Q>`. A router with two or
+  more disagreeing `ShardHasher` impls routes an owned insert and its borrowed lookup to different
+  shards, so `get`/`peek`/`contains` miss a present entry and `remove`/`delete` silently no-op; see
+  the contract at `src/stores/sharded/mod.rs:386-410`. `set` and `get_or_set_with` are unchanged:
+  they take the key by value because they insert it. See "Breaking Changes" above for the one case
+  this is not additive for.
 - `cached::prelude` now also exports `CacheSetMaxSize`, `CacheClearWithOnEvict`,
-  `ConcurrentCacheSetMaxSize`, and `ConcurrentCacheClearWithOnEvict`. Note that a downstream
-  extension trait offering `set_max_size` or `cache_clear_with_on_evict` for the same stores,
-  combined with `use cached::prelude::*`, now yields E0034 (multiple applicable items in scope);
-  fixable with UFCS.
+  `ConcurrentCacheSetMaxSize`, and `ConcurrentCacheClearWithOnEvict`. This cannot cause E0034 for
+  any store in this crate: every store implementing these traits already has `set_max_size` /
+  `cache_clear_with_on_evict` as an inherent method, and inherent methods take call-site priority
+  over trait methods before a trait is even considered. It can bite a downstream store type that
+  implements `CacheSetMaxSize` (or one of the other three traits) with no inherent method of its
+  own, if a same-named extension trait is also in scope: combined with `use cached::prelude::*`,
+  that yields E0034 (multiple applicable items in scope), fixable with UFCS.
 
 ### Fixed
 
@@ -79,9 +91,12 @@
   static type of its argument (`ahash::RandomState`'s does, on a nightly compiler that enables
   ahash's `specialize` cfg), so an owned newtype key and its borrowed primitive form were not
   guaranteed to route to the same shard. Known limitation: the single-owner stores
-  (`UnboundCache`, `TtlCache`, `ExpiringCache`, `LruCache`) still back their maps with
+  (`UnboundCache`, `TtlCache`, `ExpiringCache`, `TtlSortedCache`) still back their maps with
   `DefaultHashBuilder = ahash::RandomState` by default and are not covered by this fix; on an
   affected nightly compiler, work around it by building with `.hasher(std::hash::RandomState::new())`.
+  The `LruCache`-backed family (`LruCache`, `LruTtlCache`, `ExpiringLruCache`) is not affected:
+  `LruCache` indexes its entries with a `HashTable<usize>` probed through `LruCache::hash`, which
+  hand-builds the `Hasher` precisely to avoid this.
 - `TtlSortedCache::cache_clear_with_on_evict` now counts an eviction per removed entry even when
   no `on_evict` callback is configured, matching the trait contract and the other implementors.
   Previously it took an early-return fast path that cleared the store without counting anything.

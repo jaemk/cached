@@ -288,7 +288,8 @@ where
     /// Deliberately does not consult [`Expires::is_expired`](crate::Expires::is_expired):
     /// `remove_entry` and `delete` report
     /// the stored pair whether or not it had expired, and `is_expired` is arbitrary user code
-    /// with no purity guarantee. Of `pop_in`'s three callers, only `remove_in` consults it.
+    /// with no purity guarantee. Of `pop_in`'s two callers, only `remove_in` consults it;
+    /// `delete` reaches `pop_in` indirectly, through `remove_entry_in`.
     fn pop_in<Q>(&self, shard: &CachePadded<Shard<LruCache<K, V>>>, k: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
@@ -4815,8 +4816,9 @@ mod borrowed_key_and_capability_tests {
         );
     }
 
-    /// The expired-on-access branch of `get_in`: the read lock finds no live value, `pop_raw`
-    /// removes the still-stored expired entry under the write lock, an eviction is counted,
+    /// The expired-on-access branch of `get_in`, which holds the shard write lock throughout: the
+    /// `get_if` probe finds no live value and `pop_raw` removes the still-stored expired entry
+    /// under that same lock, without ever dropping to a read lock. An eviction is counted,
     /// `on_evict` fires and the call still reports a miss. Only owned-key tests reached that
     /// branch; this is the borrowed one. `contains` and `peek` take the read-only path over the
     /// same entry: they must report it absent without removing it or notifying anyone.

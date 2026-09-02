@@ -310,3 +310,13 @@ Allocated `specs/traits-core.md` `TRAIT-7` (`CacheSetMaxSize`) and `TRAIT-8`
 `specs/traits-concurrent.md` `CTRAIT-10` / `CTRAIT-11` for their concurrent mirrors. Updated the
 crate-doc trait overview (`src/lib.rs`) and the `AGENTS.md` Key Traits table with four new rows.
 `README.md` regenerated via `make docs/readme` and verified with `make check/readme`.
+
+One deviation not mentioned above: implementing `CacheClearWithOnEvict`'s contract (count an
+eviction per removed entry, per TRAIT-8) forced a behavior fix on `TtlSortedCache`.
+`TtlSortedCache::cache_clear_with_on_evict` previously took an early-return fast path that cleared
+the store without counting anything when no `on_evict` callback was configured; it now counts an
+eviction per removed entry unconditionally, matching the trait contract and every other
+implementor (commit 2470c41; `CHANGELOG.md` "Fixed", "Observable to anyone metering evictions on
+that store"). This is the fix that lets `specs/traits-core.md` TRAIT-8 call `UnboundCache` the
+"sole exception" among the seven single-owner stores for eviction counters -- without it,
+`TtlSortedCache` would have been a second, undocumented exception.

@@ -1,6 +1,6 @@
 # 0052 - Borrowed-key lookups on the sharded inherent methods
 
-Status: Implemented, then superseded
+Status: Superseded by 0055
 
 Superseded by [0055](0055-shard-hasher-q-over-borrowed-key-routing.md), which replaces this
 record's route choice (`H: BorrowedKeyRouting`, a diagnostic alias for `BuildHasher`) with

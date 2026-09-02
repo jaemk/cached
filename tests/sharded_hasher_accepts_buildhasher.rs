@@ -34,7 +34,7 @@ const MAX_PER_SHARD: usize = 600;
 
 /// Accepts anything the sharded builders accept. Instantiating it is the compile-level
 /// assertion that the blanket impl exists.
-fn assert_is_shard_hasher<K, H: ShardHasher<K>>(_hasher: H) {}
+fn assert_is_shard_hasher<K: ?Sized, H: ShardHasher<K>>(_hasher: H) {}
 
 /// Build a 16-shard LRU over the given hasher, fill it, and report the per-shard occupancy.
 /// The capacity is deliberately four times the key count so that eviction cannot mask an
@@ -79,6 +79,8 @@ fn assert_well_spread(sizes: &[usize], label: &str) {
 fn std_random_state_satisfies_shard_hasher() {
     assert_is_shard_hasher::<u64, _>(RandomState::new());
     assert_is_shard_hasher::<String, _>(RandomState::new());
+    assert_is_shard_hasher::<str, _>(RandomState::new());
+    assert_is_shard_hasher::<[u8], _>(RandomState::new());
 }
 
 #[test]

@@ -6,11 +6,12 @@ error[E0277]: `H` cannot route keys of type `str` to a shard
    |           |
    |           required by a bound introduced by this call
    |
-   = note: a hand-written router implements `ShardHasher` once per key type it routes; on a concrete router type, add `impl ShardHasher<str> for H`
+   = note: if `H` implements `BuildHasher` it reaches `ShardHasher` through the blanket impl and must not be given an impl of its own: the missing piece is `str: Hash`, or one of `Clone + Send + Sync + 'static` on `H` (a non-`Clone` hasher wants `#[derive(Clone)]`, not an impl). Writing `impl ShardHasher<str> for H` overlaps the blanket impl and is rejected by coherence, and by the orphan rule too when `H` is foreign, as `ahash::RandomState` is
+   = note: a `BuildHasher` that is `Clone + Send + Sync + 'static` covers every key type at once through the blanket impl and needs no per-key impl; that is an alternative only for a type carrying no hand-written `ShardHasher` impls, since coherence rejects both on one type
+   = note: a hand-written router is a type that deliberately does not implement `BuildHasher`; it implements `ShardHasher` once per key type it routes, so on such a concrete router add `impl ShardHasher<str> for H`
    = note: if `H` is a type parameter of your own generic code it cannot carry an impl: add `H: ShardHasher<str>` to that function's where clause, in addition to (not instead of) the store's own `ShardHasher<K>` bound
    = note: borrowed-key lookups need their own impl: `cache.get(&q)` on a store keyed by `K` resolves through `ShardHasher<Q>`, not `ShardHasher<K>`
    = note: every impl on one router must agree on keys that compare equal -- for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`
-   = note: a `BuildHasher` that is `Clone + Send + Sync + 'static` covers every key type at once through the blanket impl and needs no per-key impl; that is an alternative only for a type carrying no hand-written `ShardHasher` impls, since coherence rejects both on one type
    = note: required for `H` to implement `ShardHasher<str>`
 note: required by a bound in `ShardedUnboundCache::<K, V, H>::get`
   --> src/stores/sharded/unbound.rs

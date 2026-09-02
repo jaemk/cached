@@ -528,6 +528,18 @@ where
     ///
     /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
     /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
+    ///
+    /// If the entry is present but already expired, `remove` still physically removes it,
+    /// counts the eviction, and fires `on_evict` with the stale value -- but it returns `None`,
+    /// since there was nothing live to hand back. This means `cache.remove(&k).is_some()` and
+    /// `cache.delete(&k)` ([`delete`](Self::delete)) can disagree for the same key: `remove`
+    /// filters the return value on expiry, `delete` (built on
+    /// [`remove_entry`](Self::remove_entry)) does not, so `remove("stale")` returns `None`
+    /// while `delete("stale")` returns `true` for the same expired entry. Likewise
+    /// `!cache.contains(&k)` does not imply a following `cache.delete(&k)` returns `false`: an
+    /// expired-but-still-present entry reports as absent under `contains`, yet `delete` still
+    /// finds and removes it, returning `true`. Any resources tied to `on_evict` are released
+    /// even though `remove` reported `None`.
     pub fn remove<Q>(&self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -1465,6 +1477,34 @@ mod tests {
     use crate::ConcurrentCached;
     use crate::ConcurrentCached as SyncConcurrentCached;
     use crate::ConcurrentCloneCached;
+
+    /// Structural, toolchain-independent guard on the per-shard map hasher (design-0055).
+    ///
+    /// The per-shard `HashMap` above is parameterized on `DefaultShardHasher`, the same type
+    /// shard selection uses. Reverting it back to `ahash::RandomState` would keep the whole
+    /// suite green on the pinned stable toolchain: ahash's `specialize` cfg, which is what
+    /// makes the two hashers observably diverge for a newtype-over-primitive key, is
+    /// nightly-only, and the only job that exercises it (`nightly-routing` in
+    /// `.github/workflows/build.yml`) runs `continue-on-error: true`. A runtime assertion
+    /// therefore cannot be trusted to catch the regression on stable.
+    ///
+    /// This is a compile-time check instead: `assert_shard_map_hasher` only type-checks
+    /// against `HashMap<_, _, DefaultShardHasher>`, so if the shard payload's hasher type ever
+    /// changes away from `DefaultShardHasher`, `check_shard_map_uses_default_shard_hasher`
+    /// fails to COMPILE, on any toolchain, stable included. See
+    /// `src/stores/sharded/unbound.rs:1528-1554` for the identical hazard's prose precedent
+    /// (that file documents the coupling but, unlike this one, has no structural guard).
+    #[allow(dead_code)]
+    fn assert_shard_map_hasher<K, V>(_: &HashMap<K, TimedEntry<V>, DefaultShardHasher>) {}
+    #[allow(dead_code)]
+    fn check_shard_map_uses_default_shard_hasher() {
+        let c = ShardedTtlCache::<u64, u64>::builder()
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let guard = c.inner.shards[0].lock.read();
+        assert_shard_map_hasher(&guard);
+    }
 
     #[test]
     fn new_returns_ready_cache_respecting_ttl() {
@@ -5013,7 +5053,7 @@ mod borrowed_key_and_capability_tests {
             let shard = c.shard_of(&"live".to_string());
             let mut guard = shard.lock.write();
             guard.get_mut("live").expect("key stored").expires_at =
-                Some(Instant::now() + Duration::from_secs(1));
+                Some(Instant::now() + Duration::from_secs(60));
         }
         let before = deadline(&c);
         let hits_before = c.metrics().hits.unwrap();

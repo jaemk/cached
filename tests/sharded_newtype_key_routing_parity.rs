@@ -20,22 +20,30 @@
 //! cfg is on (any nightly rustc).
 //!
 //! The tests here that build a store with the default `DefaultShardHasher` (everything above
-//! `borrowed_remove_entry_and_delete_reach_the_owned_newtype_entry`) cannot detect a regression
-//! that swaps `routing_hash` for `H::hash_one` inside `shard_of`/`shard_of_borrowed`.
-//! `DefaultShardHasher` does not override `hash_one` -- composing over `ahash::RandomState` does
-//! not inherit its trait method impls -- so `DefaultShardHasher::hash_one` is always the plain
-//! provided default, the exact computation `routing_hash` performs by hand, on every toolchain
-//! including nightly. Those tests instead guard a different regression: the per-shard `HashMap`s
-//! reverting from `DefaultShardHasher` back to `ahash::RandomState` directly, which only bites on
-//! nightly and is otherwise unrelated to shard *selection*.
+//! `type_dispatching_hasher_catches_a_hash_one_regression_on_any_toolchain`, i.e. every test
+//! except the last) cannot detect a regression that swaps `routing_hash` for `H::hash_one` inside
+//! `shard_of`/`shard_of_borrowed`. `DefaultShardHasher` does not override `hash_one` -- composing
+//! over `ahash::RandomState` does not inherit its trait method impls -- so
+//! `DefaultShardHasher::hash_one` is always the plain provided default, the exact computation
+//! `routing_hash` performs by hand, on every toolchain including nightly. Those tests instead
+//! guard a different regression: the per-shard payload reverting from `DefaultShardHasher` back
+//! to `ahash::RandomState` directly, which only bites on nightly and is otherwise unrelated to
+//! shard *selection*. That payload takes two shapes, per `src/stores/sharded/mod.rs:186-206`: a
+//! plain `HashMap<K, V, DefaultShardHasher>` for the non-LRU stores, and an `LruCache<K, V,
+//! DefaultHashBuilder>` for `sharded_lru_routes_*`, `sharded_expiring_lru_routes_*`, and
+//! `sharded_lru_ttl_routes_*`, whose regression is `LruCache::hash` being rewritten into
+//! `hash_one` rather than the `HashMap`'s own lookup reverting.
 //!
 //! `type_dispatching_hasher_catches_a_hash_one_regression_on_any_toolchain` is the one case that
 //! can catch the `routing_hash` -> `hash_one` regression itself. It supplies a hand-written
 //! `BuildHasher` whose `hash_one` override salts with `std::any::type_name::<T>()` while
 //! `build_hasher` stays type-agnostic -- a legal override that disagrees for `&UserId` and `&u64`
-//! unconditionally, on stable exactly as much as on nightly. If `shard_of`/`shard_of_borrowed`
-//! ever call `H::hash_one` instead of `routing_hash`, that case fails deterministically on any
-//! toolchain, with no dependence on `ahash`'s `specialize` cfg at all.
+//! unconditionally, on stable exactly as much as on nightly. If the blanket impl body at
+//! `src/stores/sharded/mod.rs:612-614` -- the only site where `H` is bounded on `BuildHasher` and
+//! `hash_one` is in scope, since `shard_of`/`shard_of_borrowed` themselves are bounded only on
+//! `ShardHasher<K>`/`ShardHasher<Q>` -- ever calls `H::hash_one` instead of `routing_hash`, that
+//! case fails deterministically on any toolchain, with no dependence on `ahash`'s `specialize`
+//! cfg at all. One store suffices to cover that site; it does not need replicating per store.
 
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};

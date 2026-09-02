@@ -26,9 +26,20 @@
 //! `path_keys_are_reachable_through_borrowed_path_lookups_on_an_lru_backed_store` below repeats
 //! the `PathBuf`/`Path` case against `ShardedLruCache` so that probe path is covered by an
 //! exotic `Q` too, rather than resting entirely on the in-module `&str`/`&[u8]` tests each store
-//! module carries. The other four stores (`ShardedTtlCache`, `ShardedExpiringCache`,
-//! `ShardedLruTtlCache`, `ShardedExpiringLruCache`) are not separately covered here; their
-//! exotic-`Q` coverage rests on their own in-module tests.
+//! module carries.
+//!
+//! The other four stores (`ShardedTtlCache`, `ShardedExpiringCache`, `ShardedLruTtlCache`,
+//! `ShardedExpiringLruCache`) have **no exotic-`Q` coverage anywhere in the tree**: their
+//! in-module suites and the sibling routing suites only ever look up through `k.as_str()` and
+//! `k.as_slice()`, so `str` and `[u8]` are the only unsized `Q`s they see. That is accepted
+//! deliberately rather than overlooked. Exotic-`Q` risk lives in the intra-shard probe -- the one
+//! step after routing that consults `Q`'s own `Hash` -- and each store's private `*_in` helpers
+//! are one of exactly two probe shapes, both already driven at an exotic `Q` above:
+//! `ShardedTtlCache` and `ShardedExpiringCache` probe a `HashMap` like `ShardedUnboundCache`,
+//! while `ShardedLruTtlCache` and `ShardedExpiringLruCache` probe an `LruCache` like
+//! `ShardedLruCache`. What those four add over their covered twin is expiry filtering, which is
+//! indifferent to the key type. Adding an exotic `Q` for a fifth or sixth store would re-run a
+//! probe shape already pinned here, not reach new code.
 
 use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};

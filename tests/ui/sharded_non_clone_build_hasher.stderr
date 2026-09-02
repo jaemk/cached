@@ -1,0 +1,26 @@
+error[E0277]: `SlowHasher` cannot route keys of type `u64` to a shard
+  --> tests/ui/sharded_non_clone_build_hasher.rs:35:59
+   |
+35 |         ShardedUnboundCache::<u64, u32>::builder().hasher(SlowHasher(RandomState::new()));
+   |                                                    ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SlowHasher` has no `ShardHasher<u64>` impl
+   |                                                    |
+   |                                                    required by a bound introduced by this call
+   |
+   = help: the trait `Clone` is not implemented for `SlowHasher`
+   = note: if `SlowHasher` implements `BuildHasher` it reaches `ShardHasher` through the blanket impl and must not be given an impl of its own: the missing piece is `u64: Hash`, or one of `Clone + Send + Sync + 'static` on `SlowHasher` (a non-`Clone` hasher wants `#[derive(Clone)]`, not an impl). Writing `impl ShardHasher<u64> for SlowHasher` overlaps the blanket impl and is rejected by coherence, and by the orphan rule too when `SlowHasher` is foreign, as `ahash::RandomState` is
+   = note: a `BuildHasher` that is `Clone + Send + Sync + 'static` covers every key type at once through the blanket impl and needs no per-key impl; that is an alternative only for a type carrying no hand-written `ShardHasher` impls, since coherence rejects both on one type
+   = note: a hand-written router is a type that deliberately does not implement `BuildHasher`; it implements `ShardHasher` once per key type it routes, so on such a concrete router add `impl ShardHasher<u64> for SlowHasher`
+   = note: if `SlowHasher` is a type parameter of your own generic code it cannot carry an impl: add `SlowHasher: ShardHasher<u64>` to that function's where clause, in addition to (not instead of) the store's own `ShardHasher<K>` bound
+   = note: borrowed-key lookups need their own impl: `cache.get(&q)` on a store keyed by `K` resolves through `ShardHasher<Q>`, not `ShardHasher<K>`
+   = note: every impl on one router must agree on keys that compare equal -- for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`
+   = note: required for `SlowHasher` to implement `ShardHasher<u64>`
+note: required by a bound in `ShardedUnboundCacheBuilder::<K, V, H>::hasher`
+  --> src/stores/sharded/unbound.rs
+   |
+   |     pub fn hasher<H2: ShardHasher<K>>(self, hasher: H2) -> ShardedUnboundCacheBuilder<K, V, H2> {
+   |                       ^^^^^^^^^^^^^^ required by this bound in `ShardedUnboundCacheBuilder::<K, V, H>::hasher`
+help: consider annotating `SlowHasher` with `#[derive(Clone)]`
+   |
+21 + #[derive(Clone)]
+22 | struct SlowHasher(RandomState);
+   |

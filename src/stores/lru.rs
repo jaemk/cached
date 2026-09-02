@@ -3274,4 +3274,125 @@ mod tests {
         assert_eq!(evicted.load(AOrdering::Relaxed), 3);
         assert_eq!(c.cache_evictions(), Some(3));
     }
+
+    /// A newtype over a primitive whose `Hash` impl is the inner `u64`'s, so an owned
+    /// `UserId(id)` and a borrowed `&id` hash identically through the ordinary
+    /// `build_hasher` + `Hash::hash` + `finish` route, exactly as `Borrow` requires.
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    struct UserId(u64);
+
+    impl Borrow<u64> for UserId {
+        fn borrow(&self) -> &u64 {
+            &self.0
+        }
+    }
+
+    /// A `BuildHasher` whose `hash_one` override dispatches on the *static* type of what it
+    /// hashes, while `build_hasher` stays type-agnostic. This is a legal override -- `hash_one`
+    /// is a provided method that implementations may specialize on `T` -- and here it disagrees
+    /// for `&UserId` and `&u64` unconditionally, with no dependence on a `specialize` cfg or a
+    /// nightly toolchain, unlike `ahash::RandomState`.
+    #[derive(Clone, Default)]
+    struct TypeDispatchingHasher;
+
+    impl BuildHasher for TypeDispatchingHasher {
+        type Hasher = std::collections::hash_map::DefaultHasher;
+
+        fn build_hasher(&self) -> Self::Hasher {
+            Self::Hasher::default()
+        }
+
+        fn hash_one<T: Hash>(&self, x: T) -> u64 {
+            let mut hasher = self.build_hasher();
+            // Salt with the static type name so `hash_one::<&UserId>` and `hash_one::<&u64>`
+            // disagree even though `x.hash(..)` alone agrees through `Borrow`.
+            std::any::type_name::<T>().hash(&mut hasher);
+            x.hash(&mut hasher);
+            hasher.finish()
+        }
+    }
+
+    /// Guards the "do not rewrite this into `hash_one`" invariant documented on
+    /// [`LruCache::hash`] on *any* toolchain.
+    ///
+    /// That invariant is load-bearing past this cache: `LruCache::hash` is the intra-shard probe
+    /// for `ShardedLruCache`, `ShardedLruTtlCache` and `ShardedExpiringLruCache`, which is why
+    /// `src/stores/sharded/lru.rs` cites this test by name. With the default `ahash::RandomState`
+    /// the owned/borrowed divergence only appears under nightly's `specialize` cfg, so the
+    /// `clippy::manual_hash_one` cleanup would sail through CI's pinned stable toolchain. Routing
+    /// the probe through a `BuildHasher` whose *own* `hash_one` dispatches on the static type
+    /// makes the regression observable everywhere: an owned `UserId` insert and a borrowed `u64`
+    /// lookup land in different table slots the moment `hash` stops building the `Hasher` itself.
+    #[test]
+    fn type_dispatching_hasher_catches_a_lru_hash_regression_on_any_toolchain() {
+        // Self-check the instrument: the two hashing routes must agree on the `Hash` path (what
+        // `LruCache::hash` uses) and disagree on the `hash_one` path (what the clippy cleanup
+        // would use), or this test proves nothing.
+        fn build_hasher_route<T: Hash + ?Sized>(hasher: &TypeDispatchingHasher, value: &T) -> u64 {
+            let h = &mut hasher.build_hasher();
+            value.hash(h);
+            h.finish()
+        }
+
+        let hasher = TypeDispatchingHasher;
+        let owned = UserId(7);
+        let owned_ref = &owned;
+        let borrowed: &u64 = owned.borrow();
+        assert_eq!(
+            build_hasher_route(&hasher, owned_ref),
+            build_hasher_route(&hasher, borrowed),
+            "`Borrow` requires the owned and borrowed `Hash` impls to agree"
+        );
+        assert_ne!(
+            hasher.hash_one(owned_ref),
+            hasher.hash_one(borrowed),
+            "the instrument is degenerate: `hash_one` must dispatch on the static type"
+        );
+
+        let mut c = LruCache::<UserId, u64, _>::builder()
+            .max_size(8)
+            .hasher(TypeDispatchingHasher)
+            .build()
+            .unwrap();
+
+        for id in [1u64, 2, 3, 4] {
+            assert_eq!(c.cache_set(UserId(id), id * 10), None);
+        }
+        assert_eq!(c.cache_size(), 4);
+
+        for id in [1u64, 2, 3, 4] {
+            // Every one of these routes through `LruCache::hash` with `Q = u64` against entries
+            // inserted with `Q = UserId`. Under a `hash_one`-based `hash` they all miss.
+            assert_eq!(
+                c.cache_peek(&id),
+                Some(&(id * 10)),
+                "borrowed `cache_peek` missed `UserId({id})`"
+            );
+            assert_eq!(
+                c.cache_get(&id),
+                Some(&(id * 10)),
+                "borrowed `cache_get` missed `UserId({id})`"
+            );
+            assert_eq!(
+                c.cache_get_mut(&id).map(|v| *v),
+                Some(id * 10),
+                "borrowed `cache_get_mut` missed `UserId({id})`"
+            );
+        }
+
+        // An owned re-set must also find the entry the owned insert created, rather than
+        // inserting a duplicate at a second slot.
+        assert_eq!(c.cache_set(UserId(1), 11), Some(10));
+        assert_eq!(c.cache_size(), 4);
+        assert_eq!(c.cache_get(&1u64), Some(&11));
+
+        for id in [1u64, 2, 3, 4] {
+            assert_eq!(
+                c.cache_remove(&id),
+                Some(if id == 1 { 11 } else { id * 10 }),
+                "borrowed `cache_remove` missed `UserId({id})`"
+            );
+        }
+        assert_eq!(c.cache_size(), 0);
+    }
 }

@@ -4906,6 +4906,119 @@ mod borrowed_key_and_capability_tests {
         assert_eq!(c.metrics().hits.unwrap() - hits_before, 1);
     }
 
+    /// A borrowed `remove` on an expired entry physically removes it (via `pop_raw`) and fires
+    /// `on_evict` exactly like a live removal, but reports the removal as `None`: `remove_in`
+    /// filters the returned value on `expires_at`, even though it still counts the eviction and
+    /// still fires the callback with the stored value. This diverges from `remove_entry` below,
+    /// which does not filter its return value on expiry.
+    #[test]
+    fn borrowed_remove_of_an_expired_entry_evicts_it_but_returns_none() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        let before = c.metrics();
+        assert_eq!(
+            c.remove("stale"),
+            None,
+            "a borrowed remove of an expired entry must report None, not the stale value"
+        );
+        let after = c.metrics();
+        assert!(
+            c.is_empty(),
+            "the expired entry must be physically removed by remove"
+        );
+        assert_eq!(
+            &*seen.lock(),
+            &[("stale".to_string(), 7)],
+            "on_evict must still fire with the stored owned key and value"
+        );
+        assert_eq!(
+            after.evictions.unwrap() - before.evictions.unwrap(),
+            1,
+            "the removal must still be counted as an eviction"
+        );
+    }
+
+    /// A borrowed `remove_entry` on an expired entry returns the stored key and value even
+    /// though the entry had expired: unlike `remove_in`, `remove_entry_in` does not filter on
+    /// `expires_at` at all, so callers get the last-known pair back along with the eviction.
+    #[test]
+    fn borrowed_remove_entry_of_an_expired_entry_returns_the_stale_pair() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        let before = c.metrics();
+        assert_eq!(
+            c.remove_entry("stale"),
+            Some(("stale".to_string(), 7)),
+            "remove_entry must hand back the stored pair even though it had expired"
+        );
+        let after = c.metrics();
+        assert!(
+            c.is_empty(),
+            "the expired entry must be physically removed by remove_entry"
+        );
+        assert_eq!(&*seen.lock(), &[("stale".to_string(), 7)]);
+        assert_eq!(after.evictions.unwrap() - before.evictions.unwrap(), 1);
+    }
+
+    /// A borrowed `delete` on an expired entry reports `true`: `delete` is defined as
+    /// `remove_entry_in(..).is_some()`, and (as pinned above) `remove_entry_in` does not
+    /// filter on expiry, so the stale-but-present entry counts as deleted. This is the same
+    /// asymmetry as `remove` above: `cache.remove("stale")` is `None` while
+    /// `cache.delete("stale")` is `true` for the identical expired entry.
+    #[test]
+    fn borrowed_delete_of_an_expired_entry_returns_true() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        let before = c.metrics();
+        assert!(
+            c.delete("stale"),
+            "delete must report true for an expired-but-present entry"
+        );
+        let after = c.metrics();
+        assert!(
+            c.is_empty(),
+            "the expired entry must be physically removed by delete"
+        );
+        assert_eq!(&*seen.lock(), &[("stale".to_string(), 7)]);
+        assert_eq!(after.evictions.unwrap() - before.evictions.unwrap(), 1);
+    }
+
+    /// A borrowed `contains` on an expired entry reports `false` without removing it. Unlike
+    /// `remove` / `remove_entry` / `delete` (which all take the shard's write lock via
+    /// `pop_raw`), `contains_in` only reads under a shared lock, going through
+    /// `LruCache::cache_peek` plus a local `expires_at` filter, leaving the stale entry in
+    /// place for the next lazy-eviction lookup.
+    #[test]
+    fn borrowed_contains_of_an_expired_entry_returns_false_and_leaves_it_in_place() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        assert!(
+            !c.contains("stale"),
+            "contains must report false for an expired entry"
+        );
+        assert_eq!(
+            c.len(),
+            1,
+            "contains must not physically remove the expired entry"
+        );
+        assert!(seen.lock().is_empty(), "contains must not fire on_evict");
+    }
+
+    /// A borrowed `peek` on an expired entry reports `None` without removing it, mirroring
+    /// `contains`: `peek_in` also goes through `LruCache::cache_peek` and filters the returned
+    /// clone on `expires_at`, never taking a write lock on the shard.
+    #[test]
+    fn borrowed_peek_of_an_expired_entry_returns_none_and_leaves_it_in_place() {
+        let (c, seen) = store_with_one_expired_entry(false);
+        assert_eq!(
+            c.peek("stale"),
+            None,
+            "peek must report None for an expired entry"
+        );
+        assert_eq!(
+            c.len(),
+            1,
+            "peek must not physically remove the expired entry"
+        );
+        assert!(seen.lock().is_empty(), "peek must not fire on_evict");
+    }
+
     #[test]
     fn borrowed_peek_leaves_lru_recency_alone_but_borrowed_get_promotes() {
         // One shard with an exact cap of 2, so the eviction victim pins recency exactly.

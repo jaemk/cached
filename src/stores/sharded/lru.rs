@@ -2071,12 +2071,20 @@ mod borrowed_key_and_capability_tests {
     ///
     /// Compares what this store's own `shard_of` and `shard_of_borrowed` return, by address, the
     /// same way `owned_and_borrowed_keys_route_to_the_same_shard` above does. This store builds
-    /// with the default hasher, and routing goes through `routing_hash` (`build_hasher` +
+    /// with the default hasher, and shard routing goes through `routing_hash` (`build_hasher` +
     /// `Hash::hash` + `Hasher::finish`), which never calls `BuildHasher::hash_one`, so the
     /// `hash_one` specialization hazard -- `ahash::RandomState` dispatching a different
     /// `CallHasher` impl for `&UserId` than for `&u64` under nightly's `specialize` cfg -- is not
-    /// reachable from here. That hazard is covered by a dedicated hasher-override case in
-    /// `tests/sharded_newtype_key_routing_parity.rs`.
+    /// reachable from shard selection alone.
+    ///
+    /// It is, however, still reachable one layer down: each shard's payload is an `LruCache`,
+    /// and `LruCache::hash` (`src/stores/lru.rs`) is the intra-shard probe that has to agree
+    /// with shard routing for a borrowed lookup to find an owned insert. This store's own
+    /// `shard_of`/`shard_of_borrowed` pair (exercised above) cannot reach that hazard, because
+    /// the shard payload's hash builder is not this store's `H`. That hazard is covered by a
+    /// dedicated hasher-override case at the `LruCache` level:
+    /// `type_dispatching_hasher_catches_a_lru_hash_regression_on_any_toolchain` in
+    /// `src/stores/lru.rs`.
     #[test]
     fn newtype_over_primitive_routes_the_same_owned_and_borrowed() {
         #[derive(Clone, Debug, PartialEq, Eq)]

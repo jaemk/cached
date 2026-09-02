@@ -2463,5 +2463,6 @@ mod tests {
         c.set(3, ExpiredU8(1));
         c.cache_clear();
         assert_eq!(count.load(AOrdering::Relaxed), 2);
+        assert_eq!(c.cache_evictions(), Some(2));
     }
 }

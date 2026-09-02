@@ -1,0 +1,35 @@
+error[E0277]: the trait bound `ExpiringCache<String, Token>: CacheSetMaxSize` is not satisfied
+  --> tests/ui/expiring_cache_no_set_max_size.rs:33:20
+   |
+33 |     let _ = shrink(&mut cache, 10);
+   |             ------ ^^^^^^^^^^ the trait `CacheSetMaxSize` is not implemented for `ExpiringCache<String, Token>`
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the following other types implement trait `CacheSetMaxSize`
+  --> src/stores/expiring_lru.rs
+   |
+   | / impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> crate::CacheSetMaxSize
+   | |     for ExpiringLruCache<K, V, S>
+   | |_________________________________^ `ExpiringLruCache<K, V, S>`
+   |
+  ::: src/stores/lru.rs
+   |
+   |   impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheSetMaxSize for LruCache<K, V, S> {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `LruCache<K, V, S>`
+   |
+  ::: src/stores/lru_ttl.rs
+   |
+   |   impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheSetMaxSize for LruTtlCache<K, V, S> {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `LruTtlCache<K, V, S>`
+   |
+  ::: src/stores/ttl_sorted.rs
+   |
+   | / impl<K: Hash + Eq + Ord + Clone, V, S: BuildHasher> crate::CacheSetMaxSize
+   | |     for TtlSortedCache<K, V, S>
+   | |_______________________________^ `TtlSortedCache<K, V, S>`
+note: required by a bound in `shrink`
+  --> tests/ui/expiring_cache_no_set_max_size.rs:27:14
+   |
+27 | fn shrink<T: CacheSetMaxSize>(cache: &mut T, max_size: usize) -> Option<usize> {
+   |              ^^^^^^^^^^^^^^^ required by this bound in `shrink`

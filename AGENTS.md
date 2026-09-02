@@ -184,10 +184,14 @@ where owned-key and borrowed-key routing provably agree; a `BuildHasher` missing
 bounds gets nothing from it. A
 hand-written `ShardHasher` router keeps these six methods, owned-key calls included, at every key
 type for which it implements `ShardHasher<Q>`. How a missing impl at some `Q` is reported depends on
-how many impls the router carries: with exactly one `ShardHasher` impl, inference collapses `Q` onto
-it and the failure is a call-site `E0308` type mismatch (`expected &UserId, found &u64`), not a
-missing-bound error; a router with two or more impls gives `Q` nothing to collapse onto and fails as
-`E0277` with `ShardHasher`'s `#[diagnostic::on_unimplemented]` notes. A router
+how many candidate impls or in-scope bounds `Q` can collapse onto: with exactly one `ShardHasher`
+impl in scope for the router's concrete type -- or a generic helper bounded on a single concrete
+`ShardHasher<SomeType>` -- inference collapses `Q` onto that one candidate before any bound is
+checked, and the failure is a call-site `E0308` type mismatch (`expected &UserId, found &u64`, or
+`expected &String, found &str` for the generic-helper case), not a missing-bound error; with two or
+more candidates, or a generic `H` with no in-scope bound `Q` could collapse onto, `Q` has nothing to
+collapse onto and the call fails as `E0277` with `ShardHasher`'s `#[diagnostic::on_unimplemented]`
+notes. A router
 implementing `ShardHasher` for more than one key type carries an unenforced consistency contract:
 `shard_hash(&k)` must equal `shard_hash(k.borrow())` for `K: Borrow<Q>`. `set` and
 `get_or_set_with` stay owned-key on every hasher. See

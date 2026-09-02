@@ -149,9 +149,19 @@ pub(crate) fn checked_per_shard_cap_from_total(
 ///
 /// Panics if `n_shards * per_shard_cap` overflows `usize`. Callers that must not panic go
 /// through [`checked_per_shard_cap_from_total`] instead.
+///
+/// Every caller of this function is a sharded store's `set_max_size`, so the panic message names
+/// that public operation, the `max_size` it was handed and the shard count it could not be split
+/// across -- not this `pub(crate)` helper, which a caller reading the panic has no way to look up.
+/// It reads alongside the zero-`max_size` assertion those same methods carry
+/// (`max_size must be greater than zero`).
 pub(crate) fn per_shard_cap_from_total(total: usize, n_shards: usize) -> (usize, usize) {
-    checked_per_shard_cap_from_total(total, n_shards)
-        .expect("per_shard_cap_from_total: n_shards * per_shard overflows usize")
+    checked_per_shard_cap_from_total(total, n_shards).unwrap_or_else(|_| {
+        panic!(
+            "set_max_size: max_size {total} cannot be split across {n_shards} shards; \
+             rounding the per-shard share up and multiplying it back overflows usize"
+        )
+    })
 }
 
 pub(crate) fn checked_shard_count(shards: Option<usize>) -> Result<usize, BuildError> {
@@ -314,11 +324,25 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 /// store can be looked up by, and coherence permits the whole set because a hand-written router
 /// is deliberately not a `BuildHasher`.
 ///
-/// Read the error for that missing second impl carefully. When the router implements exactly one
-/// `ShardHasher<K>`, inference resolves `Q` to that single impl and rustc reports a type mismatch
-/// rather than an unsatisfied bound -- `expected &UserId, found &u64` at the `cache.get(&7u64)`
-/// argument, not "`TenantRouter: ShardHasher<u64>` is not satisfied". The fix is still to add
-/// `impl ShardHasher<u64> for TenantRouter`.
+/// Read the error for that missing second impl carefully. What decides the diagnostic is how many
+/// `ShardHasher` bounds are in scope for `Q` to resolve to, not whether the hasher is a concrete
+/// router or a type parameter: when there is exactly one, inference resolves `Q` to it and rustc
+/// reports a type mismatch rather than an unsatisfied bound. Two shapes hit this.
+///
+/// * A concrete router carrying exactly one `ShardHasher<K>` impl: `cache.get(&7u64)` reports
+///   `expected &UserId, found &u64` at the argument, not "`TenantRouter: ShardHasher<u64>` is not
+///   satisfied". The fix is to add `impl ShardHasher<u64> for TenantRouter`.
+/// * A generic helper bounded only on the store's own hasher bound, which is the likelier way to
+///   meet this: `fn lookup<H: ShardHasher<String>>(c: &ShardedUnboundCache<String, u32, H>) ->
+///   Option<u32> { c.get("a") }` has one `ShardHasher` bound in scope, so `Q` collapses to
+///   `String` before any bound is checked and the call reports `expected &String, found &str` --
+///   again a type mismatch, saying nothing about a missing `ShardHasher<str>`. The fix is to add
+///   the borrowed form to the helper's bounds, `H: ShardHasher<String> + ShardHasher<str>`, in
+///   addition to (not instead of) the store's own bound.
+///
+/// Give `Q` more than one candidate and the collapse stops: a router with two or more impls, or a
+/// helper with two or more `ShardHasher` bounds, fails on the third key type as a genuine
+/// unsatisfied bound with the `ShardHasher` diagnostic notes attached.
 ///
 /// ```rust
 /// use cached::{ShardHasher, ShardedUnboundCache};
@@ -570,11 +594,12 @@ pub(crate) fn decode_ttl(nanos: u64) -> Option<crate::time::Duration> {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot route keys of type `{K}` to a shard",
     label = "`{Self}` has no `ShardHasher<{K}>` impl",
-    note = "a hand-written router implements `ShardHasher` once per key type it routes; on a concrete router type, add `impl ShardHasher<{K}> for {Self}`",
+    note = "if `{Self}` implements `BuildHasher` it reaches `ShardHasher` through the blanket impl and must not be given an impl of its own: the missing piece is `{K}: Hash`, or one of `Clone + Send + Sync + 'static` on `{Self}` (a non-`Clone` hasher wants `#[derive(Clone)]`, not an impl). Writing `impl ShardHasher<{K}> for {Self}` overlaps the blanket impl and is rejected by coherence, and by the orphan rule too when `{Self}` is foreign, as `ahash::RandomState` is",
+    note = "a `BuildHasher` that is `Clone + Send + Sync + 'static` covers every key type at once through the blanket impl and needs no per-key impl; that is an alternative only for a type carrying no hand-written `ShardHasher` impls, since coherence rejects both on one type",
+    note = "a hand-written router is a type that deliberately does not implement `BuildHasher`; it implements `ShardHasher` once per key type it routes, so on such a concrete router add `impl ShardHasher<{K}> for {Self}`",
     note = "if `{Self}` is a type parameter of your own generic code it cannot carry an impl: add `{Self}: ShardHasher<{K}>` to that function's where clause, in addition to (not instead of) the store's own `ShardHasher<K>` bound",
     note = "borrowed-key lookups need their own impl: `cache.get(&q)` on a store keyed by `K` resolves through `ShardHasher<Q>`, not `ShardHasher<K>`",
-    note = "every impl on one router must agree on keys that compare equal -- for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`",
-    note = "a `BuildHasher` that is `Clone + Send + Sync + 'static` covers every key type at once through the blanket impl and needs no per-key impl; that is an alternative only for a type carrying no hand-written `ShardHasher` impls, since coherence rejects both on one type"
+    note = "every impl on one router must agree on keys that compare equal -- for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`"
 )]
 pub trait ShardHasher<K: ?Sized>: Clone + Send + Sync + 'static {
     fn shard_hash(&self, key: &K) -> u64;
@@ -647,17 +672,27 @@ impl DefaultShardHasher {
     }
 }
 
-/// Do not override [`hash_one`](std::hash::BuildHasher::hash_one) here, however tempting it is to
-/// forward it to the inner `ahash::RandomState` for its specialized path. `hash_one` may dispatch
-/// on its static type argument, and ahash's does under nightly's `specialize` cfg: it specializes
-/// some reference types (`&u8`..`&i64`, `&u128`/`&i128`/`&usize`/`&isize`) and not others
-/// (`&str`, `&String`, `&[u8]`), so `hash_one::<&K>` and `hash_one::<&Q>` are not required to
-/// agree even when the two values hash identically. With an override in place, a newtype key such
-/// as `struct UserId(u64)` with `Borrow<u64>` routes its owned inserts and its borrowed lookups to
-/// different shards on any nightly compiler, with no panic and no error. Leaving `hash_one`
-/// un-overridden keeps it equal to the provided body, which is the same construction as
-/// `routing_hash` above. `default_shard_hasher_routes_through_build_hasher` in this module's tests
-/// pins the equality.
+/// `DefaultShardHasher` deliberately does not override
+/// [`hash_one`](std::hash::BuildHasher::hash_one), so `hash_one` here is the provided body:
+/// build a [`Hasher`](std::hash::Hasher), feed the key to it, finish it -- the same construction
+/// shard routing uses.
+///
+/// That matters because `hash_one` may dispatch on its static type argument, and
+/// `ahash::RandomState`'s does under nightly's `specialize` cfg: it specializes some reference
+/// types (`&u8`..`&i64`, `&u128`/`&i128`/`&usize`/`&isize`) and not others (`&str`, `&String`,
+/// `&[u8]`), so `hash_one::<&K>` and `hash_one::<&Q>` are not required to agree even when the two
+/// values hash identically. Forwarding this type's `hash_one` to its inner hasher for that
+/// specialized path would route a newtype key such as `struct UserId(u64)` with `Borrow<u64>` to
+/// one shard on its owned inserts and to another on its borrowed lookups, on any nightly
+/// compiler, with no panic and no error.
+// Do not override `hash_one` here, however tempting the inner `ahash::RandomState`'s specialized
+// path is. `default_shard_hasher_routes_through_build_hasher` in this module's tests asserts
+// `shard_hash == hash_one`, but it does NOT pin this on stable: ahash gates its own `hash_one`
+// override on `#[cfg(specialize)]`, which is only ever on under nightly, so on stable 1.96 a
+// re-added override here would forward to a body identical to the provided one and that assertion
+// would still pass. The `nightly-routing` CI job (`.github/workflows/build.yml`) is where the
+// hazard actually fires: it runs `cargo test --lib` plus the design-0055 routing suites under a
+// toolchain where `specialize` is on.
 impl std::hash::BuildHasher for DefaultShardHasher {
     type Hasher = <crate::stores::DefaultHashBuilder as std::hash::BuildHasher>::Hasher;
 
@@ -718,6 +753,13 @@ mod tests {
     /// exclusive after the relaxation to `K: ?Sized`: a second, explicit
     /// `ShardHasher for DefaultShardHasher` impl alongside the blanket one would be a
     /// duplicate-impl error, so this compiling is itself the single-path check.
+    ///
+    /// The `shard_hash == hash_one` equality is a marker for that coupling, not a stable-toolchain
+    /// guard against re-adding a `hash_one` override to `DefaultShardHasher`: ahash gates its own
+    /// `hash_one` override on `#[cfg(specialize)]`, which is only ever on under nightly, so on
+    /// stable a re-added override would forward to a body identical to the provided one and this
+    /// would still pass. The `nightly-routing` CI job (`.github/workflows/build.yml`) runs it under
+    /// a toolchain where `specialize` is on, which is where such a regression fails.
     #[test]
     fn default_shard_hasher_routes_through_build_hasher() {
         use std::hash::BuildHasher;
@@ -838,6 +880,54 @@ mod tests {
             checked_per_shard_cap_from_total(usize::MAX - 1, 1024),
             Err(SetMaxSizeError::CapacityOverflow)
         );
+    }
+
+    /// The panicking wrapper's message is written for the caller who reaches it, and the only way
+    /// to reach it is a sharded store's `set_max_size`. It therefore names that public operation,
+    /// the `max_size` it was handed and the shard count it could not be split across, and does
+    /// **not** name `per_shard_cap_from_total`, a `pub(crate)` helper the caller cannot look up.
+    /// The zero case those same methods carry (`max_size must be greater than zero`) sets the bar.
+    #[test]
+    fn per_shard_cap_overflow_panic_names_set_max_size_and_the_offending_value() {
+        // Suppressed only so the deliberate panic does not print a backtrace mid-suite; the hook
+        // is restored before any assertion can fail.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let payload = std::panic::catch_unwind(|| per_shard_cap_from_total(usize::MAX, 16))
+            .expect_err("splitting usize::MAX across 16 shards must panic");
+        std::panic::set_hook(prev);
+
+        let msg = payload
+            .downcast_ref::<String>()
+            .expect("the panic payload is a formatted String")
+            .clone();
+        assert!(
+            msg.contains("set_max_size"),
+            "panic must name the public operation that reached it, got: {msg}"
+        );
+        assert!(
+            msg.contains(&usize::MAX.to_string()),
+            "panic must name the offending max_size, got: {msg}"
+        );
+        assert!(
+            msg.contains("16 shards"),
+            "panic must name the shard count it could not split across, got: {msg}"
+        );
+        assert!(
+            !msg.contains("per_shard_cap_from_total"),
+            "panic must not name a pub(crate) helper the caller cannot look up, got: {msg}"
+        );
+    }
+
+    /// The same message through the public entry point the panic names, so the wording is pinned
+    /// where a consumer actually meets it rather than only on the private helper.
+    #[test]
+    #[should_panic(expected = "set_max_size: max_size")]
+    fn sharded_lru_set_max_size_overflow_panic_names_set_max_size() {
+        // 100/16 == 6 -> 8 shards, so this store is multi-shard and `usize::MAX` overflows when
+        // the rounded per-shard share is multiplied back. The panic fires before any shard lock.
+        let cache: crate::ShardedLruCache<u64, u64> = crate::ShardedLruCache::new(100);
+        let _ = cache.set_max_size(usize::MAX);
     }
 
     /// A single shard divides by one, so no rounding and no product: every total is

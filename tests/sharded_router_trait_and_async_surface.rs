@@ -11,10 +11,16 @@
 //! `H: ShardHasher<K>` bounds at all, let alone that it routes to the same shard the inherent
 //! methods do.
 //!
-//! Every call below goes through a *generic* helper bounded on the trait, never on the concrete
-//! store type. That is deliberate: an inherent method wins at a concrete call site, so
+//! Every trait call in `exercise_trait_surface` and `exercise_async_surface` -- the two scripts
+//! that make the claim above -- goes through a *generic* helper bounded on the trait, never on the
+//! concrete store type. That is deliberate: an inherent method wins at a concrete call site, so
 //! `cache.get(&k)` would silently exercise the inherent lookup instead of the trait one. Routing
 //! through a generic function is the only way to be sure the trait impl is what ran.
+//!
+//! The one deliberate exception is `the_inherent_and_trait_forms_reach_the_same_entry`, which
+//! names the concrete store on purpose: comparing the two routes requires calling both, so it
+//! calls `c.get(..)`, `c.set(..)` and `c.peek(..)` directly alongside the generic helpers. Every
+//! inherent call in this file is inside that test.
 //!
 //! The traits take owned keys only (`&K`, not `&Q`), so a single `impl ShardHasher<K>` is the
 //! whole requirement -- `OwnedOnlyRouter` here carries exactly one impl. The borrowed-key surface
@@ -269,6 +275,19 @@ macro_rules! per_store_trait_surface_tests {
                         concat!(
                             $label,
                             ": the trait `get` must find what the inherent `set` stored for `UserId({})`"
+                        ),
+                        id
+                    );
+                    // Pin the trait `peek` to the stored value BEFORE comparing the two routes.
+                    // A bare `peek_via_trait(..) == c.peek(..)` also holds when both sides
+                    // return `None`, so a routing regression that broke both peek routes
+                    // identically would slip through the comparison alone.
+                    assert_eq!(
+                        peek_via_trait(&c, &UserId(id)),
+                        Some(val(id)),
+                        concat!(
+                            $label,
+                            ": trait `peek` must find what the inherent `set` stored for `UserId({})`"
                         ),
                         id
                     );

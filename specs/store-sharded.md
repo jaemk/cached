@@ -24,7 +24,11 @@ which collapsed the original base-type-plus-alias pair into a single generic typ
 Sharded stores implement the concurrent trait family: `ConcurrentCacheBase`,
 `ConcurrentCached`, and `ConcurrentCachedAsync` on all six variants; `ConcurrentCacheTtl` on the
 TTL variants; `ConcurrentCacheEvict` and `ConcurrentCloneCached` on the four expiry-capable
-variants (TTL and expiring). The runtime TTL controls (`ttl`/`set_ttl`/`unset_ttl`/
+variants (TTL and expiring); `ConcurrentCacheClearWithOnEvict` on all six variants; and
+`ConcurrentCacheSetMaxSize` on the three LRU-bounded variants (`ShardedLruCache`,
+`ShardedLruTtlCache`, `ShardedExpiringLruCache`). See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md)
+and [traits-concurrent.md](traits-concurrent.md) CTRAIT-10/CTRAIT-11. The runtime TTL controls (`ttl`/`set_ttl`/`unset_ttl`/
 `refresh_on_hit`/`set_refresh_on_hit`) exist only on `ConcurrentCacheTtl`, not as inherent
 methods. Each of the six concrete sharded types also exposes inherent shims that return unwrapped
 values and take call-site priority over the `ConcurrentCachedExt` aliases: `get`, `set`, `remove`,
@@ -53,7 +57,12 @@ Collapsing the `*Base` type and its alias into one generic type shipped; see
 
 The LRU-bounded variants (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`)
 support runtime capacity resizing via `set_max_size(&self)` / `try_set_max_size(&self)`, using
-the builders' ceiling-division-plus-16-per-shard-floor policy. Shrinks evict per shard strictly
+the builders' ceiling-division-plus-16-per-shard-floor policy. These are also reachable generically
+through `ConcurrentCacheSetMaxSize`; see [SHARD-3](#shard-3) and
+[traits-concurrent.md](traits-concurrent.md) CTRAIT-10. Both methods return the *previous* bound
+wrapped in `Some`, and that returned value is the ROUNDED effective total (shard count times
+per-shard cap after the ceiling-division-plus-floor policy), not the raw `max_size` a caller
+last passed in; see [SHARD-7](#shard-7) for how the two can diverge. Shrinks evict per shard strictly
 by LRU recency (TTL/expiry state is ignored); resize is not atomic across shards. The unbounded
 variants' builders (`ShardedUnboundCacheBuilder`, `ShardedTtlCacheBuilder`,
 `ShardedExpiringCacheBuilder`) take a `per_shard_initial_capacity` preallocation hint, the
@@ -242,6 +251,10 @@ It is a BREAKING change for the case most likely to hit a user who never wrote a
 all: `for k in &keys { cache.get(&k) }` where `k: &K` (so `&k` is `&&K`; same for `&Box<K>` and
 `&Arc<K>`) previously compiled through deref coercion. It no longer does, since `Q` now unifies to
 `&K` first and the call fails with ``the trait bound `String: Borrow<&String>` is not satisfied``.
-Migration: drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&*boxed)`). See
+Migration: drop the extra `&` (`cache.get(k)`); for a `k: &Box<K>` or `k: &Arc<K>` there is no
+extra `&` to drop, so deref explicitly instead -- `&*k` is still `&Box<K>` (a reborrow, not a
+deref through `Box`'s own `Deref`) and fails the same way, so it takes two derefs:
+`cache.get(&**boxed)`. This matches the existing `get` rustdoc
+(`src/stores/sharded/unbound.rs:316-318` and its five siblings). See
 [design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md) and
 [design/0055-shard-hasher-q-over-borrowed-key-routing.md](design/0055-shard-hasher-q-over-borrowed-key-routing.md).

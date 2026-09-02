@@ -18,9 +18,13 @@ the item stays here for history.
   from outside this repository.
 - **Not implemented** - agreed direction, not yet built (or a conscious decision not to build).
 - **Needs research** - direction is plausible but unresolved; do not build until scoped.
+- **Partly implemented** - some but not all of the record's scope has landed; the record's own
+  Outcome section (or an equivalent early section) states what remains.
 - **Superseded by NNNN** - the code landed but a later record (NNNN) replaced its route choice.
   The original record stays as history and is not edited beyond a correction pointing at the
-  superseding record; treat the superseding record's row as current.
+  superseding record; treat the superseding record's row as current. A record's own header uses
+  this exact wording (`Status: Superseded by NNNN`), not a variant phrasing like "Implemented,
+  then superseded".
 
 ## Index
 

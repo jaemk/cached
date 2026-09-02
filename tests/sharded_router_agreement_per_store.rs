@@ -1,17 +1,23 @@
 //! The cross-impl consistency contract on [`cached::ShardHasher`], exercised on **all six**
 //! sharded stores rather than on one of them.
 //!
-//! `tests/sharded_custom_router_lookups.rs` covers break class 1 (a hand-written router keeps its
-//! inherent owned lookups) per store, and the borrowed half of the contract on
+//! Break class 1 (a hand-written router keeps its inherent owned lookups) is already covered per
+//! store, but across **two** locations rather than one: `tests/sharded_custom_router_lookups.rs`
+//! sweeps five of the six stores, and `mod custom_shard_hasher_doc_contract` at the end of
+//! `src/lib.rs` covers the sixth, `ShardedLruCache`, which that sweep deliberately leaves out (its
+//! own header records why). The *borrowed* half of the contract, though, is covered on
 //! `ShardedUnboundCache` only. The borrowed half is the half that depends on each store's own
 //! private `shard_of_borrowed<Q>` helper, and there are six separately written copies of that
-//! helper. This file holds every one of them to the same two properties:
+//! helper. This file holds every one of them to the same three properties:
 //!
 //! 1. an *agreeing* two-impl router makes every owned insert reachable through all six borrowed
 //!    lookups -- which also proves the borrowed path routes through the store's `H` rather than
 //!    through some other hasher, since the owned inserts were placed by `H`'s own `shard_hash`;
 //! 2. a *disagreeing* two-impl router loses every present entry through all six borrowed forms,
-//!    while the owned form keeps finding them and `len()` never moves.
+//!    while the owned form keeps finding them and `len()` never moves;
+//! 3. that same disagreeing router costs *nothing* on a `shards(1)` store, where the mask is `0`
+//!    and shard selection cannot diverge -- pinning that a custom router influences shard
+//!    selection only, never the intra-shard probe.
 //!
 //! Property 2 is the documented footgun, pinned as a hazard rather than endorsed: a real router
 //! must satisfy `shard_hash(&k) == shard_hash(k.borrow())`, as `AgreeingRouter` below does.
@@ -48,7 +54,8 @@ const SHARDS: usize = 8;
 const KEYS: u64 = 64;
 /// Per-shard capacity works out to `MAX_SIZE / SHARDS` = 64 >= `KEYS`, so no bounded store can
 /// evict during these tests even if every key routed to one shard. A capacity eviction would
-/// otherwise be indistinguishable from a routing miss.
+/// otherwise be indistinguishable from a routing miss. The `shards(1)` builds reuse the same
+/// constant, where the one shard holds all 512.
 const MAX_SIZE: usize = 512;
 /// Key pairs `(id, id ^ 1)` used by the shard-divergence check. Kept small because it rebuilds a
 /// store per observation.
@@ -177,48 +184,19 @@ fn the_agreeing_router_satisfies_the_cross_impl_consistency_contract() {
     }
 }
 
-/// The shard-count boundary the footgun depends on. With `shards(1)` the mask is `0`, so
-/// `shard_index` returns shard 0 for every hash and the two disagreeing impls cannot send a key
-/// anywhere different: the same contract-violating router that loses every entry above loses
-/// nothing here.
-///
-/// That is worth pinning in its own right, because it separates the two things a lookup does. The
-/// router picks the shard; the per-shard `HashMap` then probes with the key's own `Hash`, which
-/// `Borrow` already forces to agree. A regression that made a custom router influence the
-/// intra-shard probe -- rather than only shard selection -- would show up here as a miss on a
-/// single-shard store, and nowhere else in this file.
-#[test]
-fn a_disagreeing_router_costs_nothing_on_a_single_shard_store() {
-    let c = ShardedUnboundCache::<UserId, u64>::builder()
-        .shards(1)
-        .hasher(DisagreeingRouter)
-        .build()
-        .unwrap();
-    assert_eq!(c.shards(), 1);
-    for id in 0..KEYS {
-        c.set(UserId(id), id * 10);
-    }
-
-    for id in 0..KEYS {
-        assert_eq!(
-            c.get(&id),
-            Some(id * 10),
-            "with one shard there is nowhere else for the borrowed form of `UserId({id})` to land"
-        );
-        assert_eq!(c.peek(&id), Some(id * 10));
-        assert!(c.contains(&id));
-    }
-    for id in 0..KEYS {
-        assert_eq!(c.remove_entry(&id), Some((UserId(id), id * 10)));
-    }
-    assert!(c.is_empty());
-}
-
-/// Generates the three per-store tests. Each store's builder expression is written out twice (once
-/// per router) rather than passed through a closure, because the two expressions have different
-/// concrete types and the point is that each store resolves its own inherent methods.
+/// Generates the four per-store tests. Each store's builder expression is written out once per
+/// (router, shard count) combination rather than passed through a closure, because the expressions
+/// have different concrete types and the point is that each store resolves its own inherent
+/// methods.
 macro_rules! per_store_router_tests {
-    ($name:ident, $label:literal, $agreeing:expr, $disagreeing:expr, $val:expr) => {
+    (
+        $name:ident,
+        $label:literal,
+        $agreeing:expr,
+        $disagreeing:expr,
+        $single_shard_disagreeing:expr,
+        $val:expr
+    ) => {
         mod $name {
             use super::*;
 
@@ -398,6 +376,96 @@ macro_rules! per_store_router_tests {
                     );
                 }
             }
+
+            /// The shard-count boundary the footgun depends on. With `shards(1)` the mask is `0`,
+            /// so `shard_index` returns shard 0 for every hash and the two disagreeing impls
+            /// cannot send a key anywhere different: the same contract-violating router that
+            /// loses every entry above loses nothing here.
+            ///
+            /// That is worth pinning in its own right, because it separates the two things a
+            /// lookup does. The router picks the shard; the shard's own container then probes
+            /// with the key's `Hash`, which `Borrow` already forces to agree. A regression that
+            /// made a custom router influence the intra-shard probe -- rather than only shard
+            /// selection -- would show up as a miss on a single-shard store and nowhere else in
+            /// this file.
+            ///
+            /// That intra-shard probe is not one code path, which is why this runs per store
+            /// rather than once. `ShardedUnboundCache`, `ShardedTtlCache` and
+            /// `ShardedExpiringCache` probe a `HashMap`; `ShardedLruCache`, `ShardedLruTtlCache`
+            /// and `ShardedExpiringLruCache` probe through `LruCache::hash`
+            /// (`src/stores/lru.rs`), a separately written function whose agreement with the
+            /// owned insert is a separate guarantee.
+            #[test]
+            fn a_disagreeing_router_costs_nothing_on_a_single_shard_store() {
+                let val = $val;
+                let c = $single_shard_disagreeing;
+                assert_eq!(c.shards(), 1, concat!($label, ": shard count"));
+                for id in 0..KEYS {
+                    c.set(UserId(id), val(id));
+                }
+                assert_eq!(
+                    c.len(),
+                    KEYS as usize,
+                    concat!($label, ": every owned insert must be stored")
+                );
+
+                for id in 0..KEYS {
+                    assert_eq!(
+                        c.get(&id),
+                        Some(val(id)),
+                        concat!(
+                            $label,
+                            ": with one shard there is nowhere else for the borrowed form of `UserId({})` to land"
+                        ),
+                        id
+                    );
+                    assert_eq!(
+                        c.peek(&id),
+                        Some(val(id)),
+                        concat!($label, ": borrowed `peek` must hit on a single-shard store for `UserId({})`"),
+                        id
+                    );
+                    assert!(
+                        c.contains(&id),
+                        concat!($label, ": borrowed `contains` must hit on a single-shard store for `UserId({})`"),
+                        id
+                    );
+                }
+
+                // Each removing method gets its own third of the key space, matching the
+                // agreeing-router test above, so all three are observed on this path too.
+                for id in 0..KEYS {
+                    match id % 3 {
+                        0 => assert_eq!(
+                            c.remove(&id),
+                            Some(val(id)),
+                            concat!($label, ": borrowed `remove` must hit on a single-shard store for `UserId({})`"),
+                            id
+                        ),
+                        1 => assert_eq!(
+                            c.remove_entry(&id),
+                            Some((UserId(id), val(id))),
+                            concat!(
+                                $label,
+                                ": borrowed `remove_entry` must hand back the stored owned key for `UserId({})`"
+                            ),
+                            id
+                        ),
+                        _ => assert!(
+                            c.delete(&id),
+                            concat!($label, ": borrowed `delete` must hit on a single-shard store for `UserId({})`"),
+                            id
+                        ),
+                    }
+                }
+                assert!(
+                    c.is_empty(),
+                    concat!(
+                        $label,
+                        ": every entry must have been removed through the borrowed form"
+                    )
+                );
+            }
         }
     };
 }
@@ -412,6 +480,11 @@ per_store_router_tests!(
         .unwrap(),
     ShardedUnboundCache::<UserId, u64>::builder()
         .shards(SHARDS)
+        .hasher(DisagreeingRouter)
+        .build()
+        .unwrap(),
+    ShardedUnboundCache::<UserId, u64>::builder()
+        .shards(1)
         .hasher(DisagreeingRouter)
         .build()
         .unwrap(),
@@ -433,6 +506,12 @@ per_store_router_tests!(
         .hasher(DisagreeingRouter)
         .build()
         .unwrap(),
+    ShardedLruCache::<UserId, u64>::builder()
+        .shards(1)
+        .max_size(MAX_SIZE)
+        .hasher(DisagreeingRouter)
+        .build()
+        .unwrap(),
     |id: u64| id * 10
 );
 
@@ -446,6 +525,11 @@ per_store_router_tests!(
         .unwrap(),
     ShardedExpiringCache::<UserId, Live>::builder()
         .shards(SHARDS)
+        .hasher(DisagreeingRouter)
+        .build()
+        .unwrap(),
+    ShardedExpiringCache::<UserId, Live>::builder()
+        .shards(1)
         .hasher(DisagreeingRouter)
         .build()
         .unwrap(),
@@ -463,6 +547,12 @@ per_store_router_tests!(
         .unwrap(),
     ShardedExpiringLruCache::<UserId, Live>::builder()
         .shards(SHARDS)
+        .max_size(MAX_SIZE)
+        .hasher(DisagreeingRouter)
+        .build()
+        .unwrap(),
+    ShardedExpiringLruCache::<UserId, Live>::builder()
+        .shards(1)
         .max_size(MAX_SIZE)
         .hasher(DisagreeingRouter)
         .build()
@@ -492,6 +582,12 @@ mod time_stores {
             .hasher(DisagreeingRouter)
             .build()
             .unwrap(),
+        ShardedTtlCache::<UserId, u64>::builder()
+            .shards(1)
+            .ttl(TTL)
+            .hasher(DisagreeingRouter)
+            .build()
+            .unwrap(),
         |id: u64| id * 10
     );
 
@@ -507,6 +603,13 @@ mod time_stores {
             .unwrap(),
         ShardedLruTtlCache::<UserId, u64>::builder()
             .shards(SHARDS)
+            .max_size(MAX_SIZE)
+            .ttl(TTL)
+            .hasher(DisagreeingRouter)
+            .build()
+            .unwrap(),
+        ShardedLruTtlCache::<UserId, u64>::builder()
+            .shards(1)
             .max_size(MAX_SIZE)
             .ttl(TTL)
             .hasher(DisagreeingRouter)

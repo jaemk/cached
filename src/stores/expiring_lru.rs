@@ -46,12 +46,14 @@ pub trait Expires {
     /// # Runs under the shard lock
     ///
     /// The sharded expiring stores ([`ShardedExpiringCache`](crate::ShardedExpiringCache),
-    /// [`ShardedExpiringLruCache`](crate::ShardedExpiringLruCache)) call `is_expired` from
-    /// `get`, `contains`, and `peek` while holding the lock on the shard the value lives in.
+    /// [`ShardedExpiringLruCache`](crate::ShardedExpiringLruCache)) call `is_expired` from every
+    /// operation that inspects an entry while holding the lock on the shard the value lives in.
     /// `is_expired` must not, directly or indirectly, call back into the same store: a
-    /// `parking_lot::RwLock` is not reentrant, and a recursive read on an already-locked shard
-    /// blocks behind any writer already queued for that lock, which deadlocks the shard
-    /// permanently and stalls every request that routes to it.
+    /// `parking_lot::RwLock` is not reentrant. Under the write lock (held by, for example,
+    /// `set`, `retain`, and `sweep_expired`), a recursive call deadlocks unconditionally; under
+    /// the read lock, a recursive read blocks behind any writer already queued for that lock.
+    /// Either way the shard is deadlocked permanently and every request that routes to it
+    /// stalls.
     fn is_expired(&self) -> bool;
 
     /// Returns the [`crate::time::Instant`] at which this value expires, or `None` if the
@@ -64,6 +66,10 @@ pub trait Expires {
     ///
     /// `is_expired()` remains the authoritative liveness check; `expires_at` is advisory
     /// and must not be used as a substitute for `is_expired`.
+    ///
+    /// `expires_at` is subject to the same "runs under the shard lock" hazard documented on
+    /// [`Expires::is_expired`]: it must not, directly or indirectly, call back into the same
+    /// store.
     fn expires_at(&self) -> Option<crate::time::Instant> {
         None
     }
