@@ -23,8 +23,10 @@ These cover the new attribute validations:
 
 Most of the compile-fail cases fire during macro expansion before any
 feature-gated store type is emitted, so `proc_macro` alone is sufficient for them
-(no `time_stores` needed). The one compile-pass case expands fully and is gated
-on `time_stores`.
+(no `time_stores` needed). Two cases are gated on `time_stores`: the one
+compile-pass case, which expands fully, and `expiring_cache_no_set_max_size`,
+whose golden quotes rustc's list of the other `CacheSetMaxSize` implementors and
+so changes with the feature slice.
 
 Not all of them, though, and the file name undersells what it now covers. Ten
 of the registered fixtures are not macro diagnostics at all:
@@ -124,6 +126,11 @@ fn compile_fail_v3_macros() {
     // (it has no live bound to resize, and a stub returning `None` would be indistinguishable to a
     // generic caller from a store that really resized), so a `T: CacheSetMaxSize` helper must
     // reject it at compile time. A future stub impl would make this compile and break the golden.
+    // Gated on `time_stores`: the E0277 carries rustc's "the following other types implement
+    // trait `CacheSetMaxSize`" list, and `LruTtlCache` / `TtlSortedCache` are in that list only
+    // when `time_stores` is on, so the golden is not feature-invariant. Covered by the
+    // time_stores/default/async CI targets.
+    #[cfg(feature = "time_stores")]
     t.compile_fail("tests/ui/expiring_cache_no_set_max_size.rs");
     // Negative surface for a hand-written router carrying only ONE `ShardHasher<K>` impl: per
     // 0055's Pitfalls, the missing borrowed-key impl collapses to an inference / type mismatch
