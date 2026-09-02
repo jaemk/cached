@@ -5,9 +5,16 @@ Status: Implemented
 ## Outcome
 
 Shipped as `src/claim.rs`: `ClaimRegistry<K>` (`K: Eq + Hash + Clone`), `Claim<K>`, matching the
-proposed surface in "Desired work" exactly, including the `Clone`-over-`Arc<K>` tradeoff and
-`parking_lot::Mutex`. `claim` returns a `#[must_use]` guard; the read-only accessors
-(`is_claimed`, `len`, `is_empty`) are also `#[must_use]`.
+proposed surface in "Desired work" for `new`/`claim`/`is_claimed`/`len`/`is_empty`, including the
+`Clone`-over-`Arc<K>` tradeoff and `parking_lot::Mutex`. `claim` returns a `#[must_use]` guard; the
+read-only accessors (`is_claimed`, `len`, `is_empty`) are also `#[must_use]`. The shipped type
+carries three impls the proposed surface did not list: `impl Default for ClaimRegistry`
+(`K: Eq + Hash + Clone`, `src/claim.rs:171-175`, equivalent to `new()`), `impl Debug for
+ClaimRegistry` (`K: Debug + Clone`, `:280-293`), and `impl Debug for Claim` (`K: Eq + Hash +
+Debug`, `:333`). The `Debug` impl on `ClaimRegistry` carries its own lock-discipline choice: the
+key set is cloned under the registry mutex and formatted only after the guard drops, so `K::fmt`
+and whatever writer it targets never run while the mutex is held. See CLAIM-8 in
+[claim-registry.md](../claim-registry.md).
 
 Two points the record left open:
 
@@ -158,8 +165,12 @@ Points that are decisions, not details:
   is exactly why both examples declare `Mutex<Option<HashSet<String>>>` and lazily
   `get_or_insert_with` (`stale_while_revalidate.rs:181`, `204-207`).
 - **`key()` is load-bearing, not a convenience.** Because the refresh borrows its key out of the
-  guard, the guard cannot be dropped before the refresh finishes without a borrow error. The
-  correct usage is the one the compiler already enforces.
+  guard, the guard cannot be dropped before the borrow's own call finishes without a borrow error.
+  **Correction (shipped behavior, see CLAIM-3 in [claim-registry.md](../claim-registry.md)):** this
+  only pins the guard for the duration of the call the borrow is passed into, not for the whole
+  refresh -- cloning the key out of the borrow and dropping the claim early compiles fine and
+  silently defeats the deduplication, which is exactly the anti-pattern documented in
+  `src/claim.rs:94-100`. The compiler enforces the borrow, not the intended usage.
 - **No async variant, one type for both.** The guard is a `Drop` impl, and `Drop` runs the same
   way for a thread that returns, a thread that unwinds, a task that completes, and a task whose
   future is dropped mid-poll (cancellation). The only async-specific requirement is that

@@ -10,7 +10,8 @@ own. Introduced per
 `ClaimRegistry<K>` (`K: Eq + Hash + Clone`) holds the set of keys with work in flight. It is a
 standalone type independent of any store: it works with `#[cached]`, `#[concurrent_cached]`, and
 hand-rolled caches alike. `ClaimRegistry::new()` creates an empty registry; it is not `const`, so
-a `static` registry needs `std::sync::LazyLock`.
+a `static` registry needs `std::sync::LazyLock`. `ClaimRegistry` also implements `Default`
+(`K: Eq + Hash + Clone`), equivalent to `new()`.
 
 ## CLAIM-2
 
@@ -23,8 +24,12 @@ binding the claim is what keeps it alive for the refresh.
 `Claim<K>` releases its key from `Drop`, which runs on normal completion, on an unwind (a panic
 in the refresh body), and on cancellation (an async task whose future is dropped mid-poll, e.g.
 `JoinHandle::abort`). A hand-written release call at the end of the refresh body covers only the
-first path; `Claim` covers all three. `Claim::key()` borrows the claimed key, so the guard cannot
-be dropped before the refresh that uses it finishes without a borrow error.
+first path; `Claim` covers all three. `Claim::key()` borrows the claimed key, which keeps the
+guard alive only for the duration of the call the borrow is passed into, not for the whole
+refresh: cloning the key out of the borrow and dropping the claim releases it early. That early
+release is the anti-pattern the module docs warn against (`src/claim.rs:94-100`), since it defeats
+the deduplication silently. The correct shape binds the claim itself and moves it into the
+refresh, so the refresh's own end (not an intermediate borrow) is what drops it.
 
 ## CLAIM-4
 
@@ -54,3 +59,18 @@ callers would have no value to serve; `sync_writes = "by_key"` covers that case 
 not the crate root: both are generic English words that would otherwise be offered as rustc's
 nearest-match suggestion for unrelated mistyped imports, the same reasoning recorded for the
 `KeyedCache` struct doc in `src/lib.rs`'s `__private` module.
+
+## CLAIM-8
+
+`ClaimRegistry<K>` implements `Debug` (`K: fmt::Debug + Clone`, `src/claim.rs:280-293`) -- note
+these bounds are `Debug + Clone`, not the `Eq + Hash + Clone` every other `ClaimRegistry` impl
+block carries. `Claim<K>` implements `Debug` too (`K: Eq + Hash + Debug`, `:333`). The narrow
+claim: `K::fmt` and the writer it formats into (a `stdout` lock behind a `println!`, say) do not
+run under the registry mutex, because the key set is cloned under the lock and formatted only
+after the guard is dropped. This is what keeps an ordinary `println!("{registry:?}")` from
+deadlocking against a concurrent claim or release on another thread. `K::clone` DOES run under the
+mutex, via the `HashSet::clone` that produces the snapshot, as do `K::hash` and `K::eq` in `claim`
+(`:223`, the `insert`) and in `Claim`'s `Drop` (`:329`, the `remove`). Pinned by the regression
+test `formatting_the_registry_does_not_hold_the_registry_lock` (`:446-469`), which formats a key
+whose own `Debug` reads the registry back from a second thread and fails on a 10-second timeout if
+the lock is ever held across the format.

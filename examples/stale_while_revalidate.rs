@@ -193,6 +193,16 @@ async fn sharded_lookup_swr(id: &str) -> String {
 
 static REFRESHING: LazyLock<ClaimRegistry<String>> = LazyLock::new(ClaimRegistry::new);
 
+/// Upper bound on a single background refresh. `Claim` has no expiry of its own, and the
+/// peek deliberately never removes an expired entry, so a refresh body that hangs (a
+/// stuck origin call, say) would otherwise hold its claim forever: every later caller
+/// would keep being served the same stale value with nobody able to recompute it. Wrap
+/// every spawned refresh in `tokio::time::timeout(REFRESH_TIMEOUT, ..)` so that instead
+/// the claim drops - and the key releases - on elapse, the same as it does on a normal
+/// completion, a panic, or a cancellation. Named so copy-paste call sites share one
+/// tunable instead of each hardcoding their own.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn async_lookup_swr_deduped(id: &str) -> String {
     let (value, expired) = {
         let cache = ASYNC_LOOKUP.read().await;
@@ -208,11 +218,17 @@ async fn async_lookup_swr_deduped(id: &str) -> String {
                     // mid-refresh sees the claim rather than starting a second one.
                     // Borrowing the key out of the guard is what keeps it alive for
                     // the duration of the call the borrow is passed into: the guard
-                    // cannot be dropped while that borrow is live. It is dropped,
-                    // and the key released, on
-                    // completion, on an unwind out of the refresh, and on
-                    // cancellation alike.
-                    async_lookup_prime_cache(claim.key()).await;
+                    // cannot be dropped while that borrow is live. It is dropped, and
+                    // the key released, on completion, on an unwind out of the
+                    // refresh, and on cancellation alike - including here, where the
+                    // timeout elapsing drops the future (and with it the claim)
+                    // instead of ever finishing the call.
+                    if tokio::time::timeout(REFRESH_TIMEOUT, async_lookup_prime_cache(claim.key()))
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("refresh for {:?} timed out; claim released", claim.key());
+                    }
                 });
             }
             stale

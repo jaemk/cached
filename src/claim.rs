@@ -4,7 +4,8 @@
 //! [`ClaimRegistry::claim`] hands the first caller a [`Claim`] and every later caller `None`,
 //! until that claim is dropped. It exists for the background-refresh recipes, where every reader
 //! that observes one stale entry would otherwise start its own recompute; see
-//! `examples/stale_while_revalidate.rs` and `examples/refresh_before_expiry.rs`.
+//! [`examples/stale_while_revalidate.rs`](https://github.com/jaemk/cached/blob/master/examples/stale_while_revalidate.rs)
+//! and `examples/refresh_before_expiry.rs`.
 //!
 //! The registry is independent of any store, so it works with `#[cached]`,
 //! `#[concurrent_cached]`, and hand-rolled caches alike. It spawns nothing and awaits nothing:
@@ -58,6 +59,14 @@
 //!
 //! The mutex is [`parking_lot::Mutex`], which does not poison, so the release path cannot panic
 //! a second time while a panic is already unwinding.
+//!
+//! None of that covers the work simply never finishing. A claim is held for as long as the work
+//! runs, with no upper bound: if the refresh hangs (a stuck network call, a deadlock in the work
+//! itself), the key stays claimed for the life of the process. Every later caller sees `None` and
+//! keeps serving the stale value forever, and no caller ever gets to recompute that key again.
+//! Bound the work with a timeout so a hang still reaches the claim's drop; see the
+//! `tokio::time::timeout` in
+//! [`examples/stale_while_revalidate.rs`](https://github.com/jaemk/cached/blob/master/examples/stale_while_revalidate.rs).
 //!
 //! # Do not leak a claim
 //!
@@ -116,6 +125,27 @@
 //! }
 //! ```
 //!
+//! The distinguishing detail is that the claim was never captured, not that cloning the key is
+//! itself wrong. A refresh function that takes `K` by value (rather than `&K`, as `prime_cache`
+//! above does) still has to move the *claim* into the closure; it clones the key out of the claim
+//! from inside the work, after the move, so the clone happens while the claim is still live:
+//!
+//! ```rust
+//! use cached::claim::ClaimRegistry;
+//!
+//! # fn prime_cache_owned(_key: String) {}
+//! let registry: ClaimRegistry<String> = ClaimRegistry::new();
+//!
+//! if let Some(claim) = registry.claim("user:1".to_string()) {
+//!     std::thread::spawn(move || {
+//!         // The claim moved into the closure; the clone happens after that move, so the claim
+//!         // is still held while `prime_cache_owned` runs.
+//!         prime_cache_owned(claim.key().clone());
+//!         // `claim` is dropped here, at the end of the work, releasing the key.
+//!     });
+//! }
+//! ```
+//!
 //! # A claim is not a lock
 //!
 //! The registry mutex is held only across the set insert or remove, never across the work
@@ -138,6 +168,12 @@
 //! empty. The keys themselves are dropped on release, and the peak is bounded by the number of
 //! claims in flight at once (concurrency), not by the size of the key space. Use a registry per
 //! key space rather than one global registry if that bound matters.
+//!
+//! There is no `shrink_to_fit` or `clear` on [`ClaimRegistry`], and none is planned: reclaiming
+//! the table for a key space that saw one burst and will not again means dropping every handle to
+//! the registry (every clone, every `Claim` still outstanding) so the backing allocation is freed
+//! with it. A registry parked in a `LazyLock` static cannot be replaced this way; a static is for
+//! a registry whose peak allocation is acceptable to hold for the life of the process.
 
 use std::borrow::Borrow;
 use std::collections::HashSet;
@@ -280,10 +316,19 @@ impl<K: Eq + Hash + Clone> ClaimRegistry<K> {
 impl<K: fmt::Debug + Clone> fmt::Debug for ClaimRegistry<K> {
     /// Renders the claimed keys.
     ///
-    /// The key set is cloned under the lock and formatted after the guard is dropped, so no
-    /// user code (`K::fmt`) and no writer (the `stdout` lock behind a `println!`, say) runs
-    /// while the registry mutex is held. Holding it across the whole format would make an
-    /// ordinary log line deadlock against a concurrent claim or release.
+    /// The set is cloned under the lock (`HashSet::clone`, which does run `K::clone` while the
+    /// lock is held) and formatted after the guard is dropped. What that buys is narrower than
+    /// "no user code runs under the lock": `K::fmt` and the writer (the `stdout` lock behind a
+    /// `println!`, say) are guaranteed not to run while the registry mutex is held. Holding the
+    /// lock across the format itself, rather than just the clone, would make an ordinary log line
+    /// deadlock against a concurrent claim or release, since [`claim`](ClaimRegistry::claim) and
+    /// [`Claim`]'s `Drop` also take this same lock (running `K::hash`/`K::eq` while they hold it).
+    ///
+    /// This does not save a `K` whose own `Clone` impl re-enters the registry (calls
+    /// [`claim`](ClaimRegistry::claim), [`is_claimed`](ClaimRegistry::is_claimed), or drops a
+    /// [`Claim`] on it): `parking_lot::Mutex` is not reentrant, so that still deadlocks here, just
+    /// as it would in `claim` or `Drop`. The `ReentrantKey` test below only re-enters through
+    /// `K::fmt`, which runs after the lock is released; the `Clone`-reentrancy case is untested.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let claimed = self.keys.lock().clone();
         f.debug_struct("ClaimRegistry")
@@ -457,9 +502,18 @@ mod tests {
             let _ = tx.send((rendered, registry.is_empty()));
         });
 
-        let (rendered, drained) = rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("formatting the registry deadlocked on the registry mutex");
+        let (rendered, drained) = match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(sent) => sent,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("formatting the registry deadlocked on the registry mutex")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!(
+                    "the spawned thread panicked before sending, for a reason unrelated to the \
+                     registry mutex (see the panic message printed above)"
+                )
+            }
+        };
         assert!(rendered.contains("ReentrantKey(1"), "{rendered}");
         assert!(
             rendered.contains("live=1"),
@@ -473,5 +527,54 @@ mod tests {
         let registry: ClaimRegistry<u32> = ClaimRegistry::default();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
+    }
+
+    /// A regression test for the `recv_timeout` handling in
+    /// `formatting_the_registry_does_not_hold_the_registry_lock`: an unrelated panic on the
+    /// spawned thread (never touching the registry mutex at all) must be reported as a panic, not
+    /// misattributed to a mutex deadlock. Before this was fixed, both `RecvTimeoutError` variants
+    /// were collapsed by a single `.expect(...)`, so a panicked sender and an actual deadlock
+    /// produced the identical "deadlocked on the registry mutex" message.
+    #[test]
+    fn recv_timeout_disconnected_is_reported_as_a_panic_not_a_deadlock() {
+        // Deliberately does not touch the global panic hook: this test runs alongside every
+        // other test in the binary, and `std::panic::set_hook` is process-global, so swapping it
+        // here would race with unrelated tests' panics on other threads. The spawned thread's
+        // panic message printing to stderr is expected output, not a failure.
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _tx = tx; // held so the channel disconnects only once this thread ends
+            panic!("simulated unrelated failure, e.g. `expect(\"first claim wins\")`");
+        });
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(()) => unreachable!("the spawned thread never sends"),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("formatting the registry deadlocked on the registry mutex")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!(
+                        "the spawned thread panicked before sending, for a reason unrelated to \
+                         the registry mutex (see the panic message printed above)"
+                    )
+                }
+            }
+        }));
+
+        let panic_payload = outcome.expect_err("recv_timeout on a disconnected channel panics");
+        let message = panic_payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+            .expect("panic payload is a string");
+        assert!(
+            message.contains("panicked before sending"),
+            "a disconnected channel must be reported as a panic, not a deadlock: {message}"
+        );
+        assert!(
+            !message.contains("deadlocked"),
+            "a disconnected channel must not be misreported as a mutex deadlock: {message}"
+        );
     }
 }
