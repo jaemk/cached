@@ -488,6 +488,26 @@ mod tests {
         }
     }
 
+    /// Receives the spawned thread's result, distinguishing the two `RecvTimeoutError` variants:
+    /// a timeout means the registry mutex is genuinely wedged, while a disconnect means the
+    /// sender died first, for a reason that has nothing to do with the mutex. Collapsing both
+    /// into one `.expect(...)` reports an unrelated panic as a deadlock and sends the reader
+    /// after the wrong bug. Shared with the test below, which is what pins this handling.
+    fn recv_or_panic<T>(rx: &mpsc::Receiver<T>) -> T {
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(sent) => sent,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("formatting the registry deadlocked on the registry mutex")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!(
+                    "the spawned thread panicked before sending, for a reason unrelated to the \
+                     registry mutex (see the panic message printed above)"
+                )
+            }
+        }
+    }
+
     #[test]
     fn formatting_the_registry_does_not_hold_the_registry_lock() {
         // Every touch of the registry mutex, the claim included, happens on the spawned thread:
@@ -502,18 +522,7 @@ mod tests {
             let _ = tx.send((rendered, registry.is_empty()));
         });
 
-        let (rendered, drained) = match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(sent) => sent,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!("formatting the registry deadlocked on the registry mutex")
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!(
-                    "the spawned thread panicked before sending, for a reason unrelated to the \
-                     registry mutex (see the panic message printed above)"
-                )
-            }
-        };
+        let (rendered, drained) = recv_or_panic(&rx);
         assert!(rendered.contains("ReentrantKey(1"), "{rendered}");
         assert!(
             rendered.contains("live=1"),
@@ -529,12 +538,13 @@ mod tests {
         assert_eq!(registry.len(), 0);
     }
 
-    /// A regression test for the `recv_timeout` handling in
-    /// `formatting_the_registry_does_not_hold_the_registry_lock`: an unrelated panic on the
-    /// spawned thread (never touching the registry mutex at all) must be reported as a panic, not
-    /// misattributed to a mutex deadlock. Before this was fixed, both `RecvTimeoutError` variants
-    /// were collapsed by a single `.expect(...)`, so a panicked sender and an actual deadlock
-    /// produced the identical "deadlocked on the registry mutex" message.
+    /// A regression test for `recv_or_panic`, the `recv_timeout` handling
+    /// `formatting_the_registry_does_not_hold_the_registry_lock` receives through: an unrelated
+    /// panic on the spawned thread (never touching the registry mutex at all) must be reported as
+    /// a panic, not misattributed to a mutex deadlock. Before this was fixed, both
+    /// `RecvTimeoutError` variants were collapsed by a single `.expect(...)`, so a panicked
+    /// sender and an actual deadlock produced the identical "deadlocked on the registry mutex"
+    /// message.
     #[test]
     fn recv_timeout_disconnected_is_reported_as_a_panic_not_a_deadlock() {
         // Deliberately does not touch the global panic hook: this test runs alongside every
@@ -547,20 +557,9 @@ mod tests {
             panic!("simulated unrelated failure, e.g. `expect(\"first claim wins\")`");
         });
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match rx.recv_timeout(Duration::from_secs(10)) {
-                Ok(()) => unreachable!("the spawned thread never sends"),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    panic!("formatting the registry deadlocked on the registry mutex")
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!(
-                        "the spawned thread panicked before sending, for a reason unrelated to \
-                         the registry mutex (see the panic message printed above)"
-                    )
-                }
-            }
-        }));
+        // Calls the same `recv_or_panic` the test above does, so reverting it to a single
+        // `.expect(...)` fails here rather than passing against a private copy of the logic.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recv_or_panic(&rx)));
 
         let panic_payload = outcome.expect_err("recv_timeout on a disconnected channel panics");
         let message = panic_payload

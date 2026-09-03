@@ -71,7 +71,8 @@
   must agree, `shard_hash(&k) == shard_hash(k.borrow())`, for `K: Borrow<Q>`. A router with two or
   more disagreeing `ShardHasher` impls routes an owned insert and its borrowed lookup to different
   shards, so `get`/`peek`/`contains` miss a present entry and `remove`/`delete` silently no-op; see
-  the contract at `src/stores/sharded/mod.rs:386-410`. `set` and `get_or_set_with` are unchanged:
+  the "Contract: a router's impls must agree with each other" section of the `ShardHasher` docs.
+  `set` and `get_or_set_with` are unchanged:
   they take the key by value because they insert it. See "Breaking Changes" above for the one case
   this is not additive for.
 - `cached::prelude` now also exports `CacheSetMaxSize`, `CacheClearWithOnEvict`,
