@@ -640,7 +640,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     //
     // The generated cache internals clone the value on every cache-set
     // (`set_cache_block` below) and on a cache hit (`return_cache_block`). Both go
-    // through `<#cache_value_ty as Clone>::clone(...)`, spanned at the user's
+    // through `<#cache_value_ty as Clone>::clone(...)`, located at the user's
     // return type, rather than through a `.clone()` method call: that is the
     // `Clone` assertion AND the clone, so a non-`Clone` value type produces
     // exactly one precisely-spanned error instead of that error plus an

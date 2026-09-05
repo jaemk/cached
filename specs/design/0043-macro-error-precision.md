@@ -36,11 +36,20 @@ and rustc's diagnostic deduplication then fails on the differing note paths
 
 What ships instead: `clone_return_assertion` is replaced by `clone_cached_value`
 (`cached_proc_macro/src/helpers.rs`), which emits every clone of the cached value as a qualified
-call, `<Ret as ::std::clone::Clone>::clone(expr)`, `quote_spanned!` at the return type. That
+call, `<Ret as ::std::clone::Clone>::clone(expr)`, `quote_spanned!` at the return type's
+location. That
 single construct is both the bound assertion and the clone, so there is no method left to resolve
 (no E0599) and no `&T` / `T` mismatch (no E0308). Every clone site in every generated body renders
-an identical diagnostic, which rustc then deduplicates to one. All `.clone()` / `.to_owned()`
-sites in `cached.rs` and `once.rs` route through it.
+an identical diagnostic, which rustc then deduplicates to one rendered error (the JSON output
+still carries one entry per site). All `.clone()` / `.to_owned()` sites in `cached.rs` and
+`once.rs` route through it.
+
+Only the return type's location is reused, not its syntax context: the span is built as
+`Span::call_site().located_at(return_ty_span)` (#325). The context is load-bearing. With a
+verbatim return-type span the call reads as hand-written user code, and clippy's `clone_on_copy`,
+which covers `<T as Clone>::clone(&x)` calls as of 1.100, fires on every function whose cached
+value type is `Copy`, pointing at the user's own signature with a `try dereferencing it:
+*#[cached]` suggestion. Tightening this span back for a nicer caret reintroduces that.
 
 ## (b) Span attribute errors at the offending attribute
 
@@ -74,6 +83,12 @@ Compile diagnostics only. No change to accepted attributes, generated code, or r
 - The `tests/ui/` golden files record both, so the error count and the caret position are pinned
   and a regression shows up as a `.stderr` diff. Regenerate with
   `TRYBUILD=overwrite cargo test --features "proc_macro,time_stores"`.
+- The generated clone is attributed to the macro expansion, so a lint that fires on it is
+  suppressed as external-macro code instead of being reported against the user's function. The
+  goldens cannot pin this: trybuild runs `cargo check`, which does not run clippy, and the
+  goldens capture errors, not warnings. The `nightly-lint` job in `.github/workflows/build.yml`
+  runs `cargo clippy --tests -- -D clippy::clone_on_copy` over the crate's own test targets,
+  which already contain `Copy`-valued `#[cached]` functions (`tests/cached.rs`).
 
 ## Notes
 

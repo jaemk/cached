@@ -461,10 +461,13 @@ pub(super) fn find_value_type(
 /// wrote. Naming the bound explicitly in a qualified path removes those: there
 /// is no method to resolve and no `&T`-vs-`T` mismatch to report, only the
 /// `#value_ty: Clone` obligation. Every clone site renders the identical
-/// diagnostic (same message, same span), and rustc deduplicates identical
-/// diagnostics, so exactly one error remains no matter how many clone sites the
-/// expansion contains or how many generated bodies (the cached fn and its
-/// `_prime_cache` companion) contain them.
+/// diagnostic (same message, same span), and rustc's human emitter deduplicates
+/// identical diagnostics, so exactly one rendered error remains no matter how
+/// many clone sites the expansion contains or how many generated bodies (the
+/// cached fn and its `_prime_cache` companion) contain them. The deduplication is
+/// in the rendering only: `--message-format=json` still carries one entry per
+/// site, so a JSON consumer (rust-analyzer, IDE inline diagnostics) shows the
+/// error once per clone site.
 ///
 /// Naming `value_ty` as the self type of a qualified path works even when it is
 /// a generic parameter of the enclosing function (or, for `in_impl` methods, of
@@ -479,13 +482,15 @@ pub(super) fn find_value_type(
 /// `value_ty`'s tokens carry their original source spans (they are threaded
 /// through unmodified from the parsed return type), so they alone underline the
 /// user's return type in the resulting error; `span` (the return type's span)
-/// additionally locates the surrounding generated syntax so the whole expression
-/// is attributed to the return type rather than to macro-internal call-site
-/// code.
+/// additionally locates the surrounding generated syntax, so a diagnostic
+/// arising anywhere in the generated expression points at the return type
+/// rather than at macro-internal call-site code.
 ///
-/// Only the location of `span` is reused; the syntax context stays the macro's.
-/// A verbatim user span would make the call look hand-written, and clippy's
-/// `clone_on_copy` would then fire on every `Copy` return type.
+/// Only the location of `span` is reused; the syntax context stays the macro's,
+/// so for hygiene and lint purposes the call is macro-expanded code and only its
+/// rendered location is the user's. A verbatim user span would make the call look
+/// hand-written, and clippy's `clone_on_copy` would then fire on every `Copy`
+/// value type.
 pub(super) fn clone_cached_value(
     value_ty: &TokenStream2,
     span: Span,
