@@ -163,3 +163,54 @@ jobs:
         --test sharded_unsized_key_lookups
         --test sharded_generic_helper_bounds
       name: 'Owned/borrowed key routing parity on nightly'
+
+  nightly-lint:
+
+    runs-on: ubuntu-latest
+    # Advisory only, for the same reason as `nightly-routing` above: nightly is unpinned and
+    # can go red on toolchain churn unrelated to this crate. Not a required check.
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v6
+
+    # Pinned to a commit rather than the mutable `nightly` branch ref, as in `nightly-routing`.
+    - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+      with:
+        components: clippy
+
+    - name: Cache cargo dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-cargo-dir
+      with:
+        path: ~/.cargo
+        key: ${{ runner.os }}-nightly-lint-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nightly-lint-${{ env.cache-name }}-
+          ${{ runner.os }}-nightly-lint-
+
+    - name: Cache target dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-target-dir
+      with:
+        path: ./target
+        key: ${{ runner.os }}-nightly-lint-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nightly-lint-${{ env.cache-name }}-
+          ${{ runner.os }}-nightly-lint-
+
+    # Guards the syntax context of the generated clone (design/0043): if it goes back to a
+    # verbatim user span, `clone_on_copy` fires on every `Copy`-valued `#[cached]` / `#[once]`
+    # function, spanned at the user's signature. The `build` job cannot catch it - the lint
+    # only covers `<T as Clone>::clone(&x)` calls as of 1.100, and trybuild goldens capture
+    # errors, not warnings. The crate's own test targets supply the fixtures.
+    #
+    # One lint, not `-D warnings`: nightly clippy has unrelated warnings on this tree that
+    # would make a blanket deny red on arrival. Default features only, so no redis service.
+    - run: cargo clippy --tests -- -D clippy::clone_on_copy
+      name: 'Generated clones stay inside the macro expansion'

@@ -114,13 +114,23 @@
 
 ### Fixed
 
-- `#[cached]` and `#[once]` on a function returning a `Copy` type (`bool`, `u32`,
-  `Result<u32, E>`, ...) no longer trip clippy's `clone_on_copy` on nightly (1.100+), where the
-  lint also covers `<T as Clone>::clone(&x)` calls. The generated clone was spanned verbatim at
-  the user's return type, so clippy took it for hand-written code and reported it against the
-  signature with a suggestion naming the attribute text. The clone now resolves inside the
-  macro expansion while keeping the return type's location, so the `Clone` bound diagnostic
-  for non-`Clone` return types is unchanged.
+- `#[cached]` and `#[once]` no longer trip clippy's `clone_on_copy` on rust 1.100+ (nightly at
+  the time of writing), where the lint also covers `<T as Clone>::clone(&x)` calls. It fired
+  whenever the cached value type is `Copy` (the unwrapped `T` of a `Result`/`Option` return, or
+  the whole return type otherwise), and was reported against the user's own signature:
+  ```text
+  warning: using `clone` on type `u32` which implements the `Copy` trait
+   --> src/lib.rs:4:28
+    |
+  4 | pub fn copy_ret(x: u32) -> u32 {
+    |                            ^^^ help: try dereferencing it: `*#[cached]`
+  ```
+  The generated clone was spanned verbatim at the user's return type, so clippy took it for
+  hand-written code. The clone now resolves inside the macro expansion while keeping the return
+  type's location, so the `Clone` bound diagnostic for non-`Clone` return types is unchanged
+  ([design/0043](specs/design/0043-macro-error-precision.md)). Note that if you suppressed this
+  with `#[expect(clippy::clone_on_copy)]`, remove it: the expectation is now unfulfilled, which
+  is itself an error under `-D warnings`. A plain `#[allow]` is harmless.
 
 ## [3.1.1] - 2026-08-25
 
