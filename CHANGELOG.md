@@ -15,6 +15,16 @@
   the crate root, to keep `Claim` and `ClaimRegistry` out of rustc's nearest-match suggestions
   for mistyped imports ([design/0053](specs/design/0053-refresh-claim-guard.md)).
 
+### Fixed
+
+- `#[cached]` and `#[once]` on a function returning a `Copy` type (`bool`, `u32`,
+  `Result<u32, E>`, ...) no longer trip clippy's `clone_on_copy` on nightly (1.100+), where the
+  lint also covers `<T as Clone>::clone(&x)` calls. The generated clone was spanned verbatim at
+  the user's return type, so clippy took it for hand-written code and reported it against the
+  signature with a suggestion naming the attribute text. The clone now resolves inside the
+  macro expansion while keeping the return type's location, so the `Clone` bound diagnostic
+  for non-`Clone` return types is unchanged.
+
 ## [3.1.1] - 2026-08-25
 
 Documentation and tests only. There is no API or behavior change.

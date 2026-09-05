@@ -479,14 +479,19 @@ pub(super) fn find_value_type(
 /// `value_ty`'s tokens carry their original source spans (they are threaded
 /// through unmodified from the parsed return type), so they alone underline the
 /// user's return type in the resulting error; `span` (the return type's span)
-/// additionally covers the surrounding generated syntax so the whole expression
+/// additionally locates the surrounding generated syntax so the whole expression
 /// is attributed to the return type rather than to macro-internal call-site
 /// code.
+///
+/// Only the location of `span` is reused; the syntax context stays the macro's.
+/// A verbatim user span would make the call look hand-written, and clippy's
+/// `clone_on_copy` would then fire on every `Copy` return type.
 pub(super) fn clone_cached_value(
     value_ty: &TokenStream2,
     span: Span,
     value: TokenStream2,
 ) -> TokenStream2 {
+    let span = Span::call_site().located_at(span);
     quote_spanned! {span=>
         <#value_ty as ::std::clone::Clone>::clone(#value)
     }
