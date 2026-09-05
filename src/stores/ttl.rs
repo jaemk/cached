@@ -1039,6 +1039,12 @@ impl<K: std::hash::Hash + Eq, V, S: BuildHasher> CacheEvict for TtlCache<K, V, S
     }
 }
 
+impl<K: Hash + Eq, V, S: BuildHasher> crate::CacheClearWithOnEvict for TtlCache<K, V, S> {
+    fn cache_clear_with_on_evict(&mut self) {
+        TtlCache::cache_clear_with_on_evict(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3465,5 +3471,37 @@ mod tests {
         c.cache_set(2, 200);
         assert_eq!(c.cache_remove(&2u32), Some(200));
         assert_eq!(c.cache_expires_at(&2u32), (false, None));
+    }
+
+    // A generic bound, so this can only reach the trait method: the inherent
+    // `cache_clear_with_on_evict` wins at a concrete call site.
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c = TtlCache::builder()
+            .ttl(crate::time::Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                count2.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        c.cache_set(3, 30);
+
+        clear_with_on_evict_through_trait(&mut c);
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
+        // The plain clear stays silent, so the trait method is not just an alias for it.
+        c.cache_set(4, 40);
+        c.cache_clear();
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
     }
 }

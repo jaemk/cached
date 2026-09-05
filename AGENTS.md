@@ -153,6 +153,19 @@ Write any scratch files, research dumps, or intermediate agent outputs to `local
 | `CacheRefreshOnHit` | `refresh_on_hit()` / `set_refresh_on_hit()` on single-owner timed stores; implemented by `TtlCache` and `LruTtlCache`, deliberately not by `TtlSortedCache` (its deadline-ordered index cannot refresh an entry's expiry on read) |
 | `CacheExpiry` | `cache_peek_expires_at()` / `peek_expires_at()`: side-effect-free per-key expiry read returning `(Option<V>, Option<Instant>)`; `cache_expires_at()` / `expires_at()`: value-free deadline read returning `(bool, Option<Instant>)` (presence, deadline), no `V: Clone` bound; implemented by `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache` |
 | `ConcurrentCacheExpiry` | `&self` mirror of `CacheExpiry`, including `cache_expires_at()` / `expires_at()`; implemented by `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache` |
+| `CacheSetMaxSize` | `set_max_size()` / `try_set_max_size()` capacity resize, reaching the existing inherent methods from generic code; no new capability. Implemented by `LruCache`, `LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache` |
+| `ConcurrentCacheSetMaxSize` | `&self` mirror of `CacheSetMaxSize`; implemented by `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache` |
+| `CacheClearWithOnEvict` | `cache_clear_with_on_evict()`, reaching the existing inherent method from generic code; no new capability. Implemented by all 7 single-owner in-memory stores (`UnboundCache`, `LruCache`, `TtlCache`, `LruTtlCache`, `TtlSortedCache`, `ExpiringCache`, `ExpiringLruCache`) |
+| `ConcurrentCacheClearWithOnEvict` | `&self` mirror of `CacheClearWithOnEvict`; implemented by all 6 sharded stores (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`) |
+
+**Capability-trait method naming.** A capability trait's method name always mirrors the inherent
+method it reaches, never adds its own prefix: `CacheSetMaxSize::set_max_size`/`try_set_max_size`
+match the unprefixed inherent names, and `CacheClearWithOnEvict::cache_clear_with_on_evict` matches
+the `cache_`-prefixed inherent name. When adding a new capability trait, name its method after the
+existing inherent method verbatim; do not invent a prefix. An unprefixed name is more likely to
+collide with a downstream extension trait of the same name once both are in scope via
+`cached::prelude` (E0034, fixable with UFCS): keeping the mirrored name is still correct, but be
+aware of that sharper collision surface for unprefixed methods.
 
 **Peek is an in-memory concept.** `CachedPeek` and `ConcurrentCachePeek` are implemented by the
 six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`, and
@@ -160,6 +173,36 @@ six sharded stores only (`Self::Error = Infallible`). `RedisCache`, `RedbCache`,
 or TTL state to skip and the hit/miss-metrics distinction is meaningless, while the read remains
 a full round trip. Generic code bounded on either peek trait therefore accepts only the sharded
 stores. See `specs/design/0040-peek-is-an-in-memory-concept.md`.
+
+**Sharded borrowed-key lookups require `H: ShardHasher<Q>`.** The six sharded stores' inherent
+`get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` accept any borrowed form of the key
+(`K: Borrow<Q>`), bounded per method on `H: ShardHasher<Q>` rather than the store's own
+`H: ShardHasher<K>`. `ShardHasher<K>`'s key parameter is `K: ?Sized`, so `Q: ?Sized` (for example
+`Q = str`) can satisfy it. `DefaultShardHasher` and any `BuildHasher` that is
+`Clone + Send + Sync + 'static` reach `ShardHasher<Q>` for every `Q` through the blanket impl,
+where owned-key and borrowed-key routing provably agree; a `BuildHasher` missing one of those
+bounds gets nothing from it. A
+hand-written `ShardHasher` router keeps these six methods, owned-key calls included, at every key
+type for which it implements `ShardHasher<Q>`. How a missing impl at some `Q` is reported depends on
+how many candidate impls or in-scope bounds `Q` can collapse onto: with exactly one `ShardHasher`
+impl in scope for the router's concrete type -- or a generic helper bounded on a single concrete
+`ShardHasher<SomeType>` -- inference collapses `Q` onto that one candidate before any bound is
+checked, and the failure is a call-site `E0308` type mismatch (`expected &UserId, found &u64`, or
+`expected &String, found &str` for the generic-helper case), not a missing-bound error; with two or
+more candidates, or a generic `H` with no in-scope bound `Q` could collapse onto, `Q` has nothing to
+collapse onto and the call fails as `E0277` with `ShardHasher`'s `#[diagnostic::on_unimplemented]`
+notes. A router
+implementing `ShardHasher` for more than one key type carries an unenforced consistency contract:
+`shard_hash(&k)` must equal `shard_hash(k.borrow())` for `K: Borrow<Q>`. `set` and
+`get_or_set_with` stay owned-key on every hasher. See
+`specs/design/0055-shard-hasher-q-over-borrowed-key-routing.md`.
+
+**Generic-helper bound.** A downstream helper doing only owned-key lookups needs no hasher bound
+beyond `H: ShardHasher<K>`: `fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V>
+where K: Hash + Eq + Clone, V: Clone, H: ShardHasher<K> { c.get(k) }`. The inherent owned-key call
+resolves `Q = K`, and `H: ShardHasher<K>` already covers that; `K: Hash + Eq + Clone` and `V: Clone`
+are required too, since the inherent `get` lives in an `impl` block bounded on them. Only a helper
+that adds its own borrowed-key lookup at some `Q` needs to add `H: ShardHasher<Q>` to its own bound.
 
 **`retain`**: returns `usize` (entries removed) on all thirteen stores that have it. On the
 expiry-aware stores the count folds predicate rejections together with expired entries swept
@@ -372,6 +415,7 @@ directions, indexed in `specs/design/README.md`.
 | `benches/cache_benches.rs` | Cache benchmarks (`make bench`) |
 | `bin/` | Release helper scripts (`check-versions.sh`, `publish.sh`, `tag-release.sh`) |
 | `src/lib.rs` | Main library entry point + doc comments (source of truth for README) |
+| `src/claim.rs` | `ClaimRegistry`/`Claim` single-flight guard (`cached::claim`, also in the prelude) |
 | `src/stores/` | Cache store implementations |
 | `src/macros.rs` | Proc macro re-export module (`cached::macros`) |
 | `src/stores/mod.rs` | Store re-exports, `CacheEvict` impls, `BuildError` type |

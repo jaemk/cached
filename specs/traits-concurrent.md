@@ -31,10 +31,18 @@ required with no `V: Clone + Send` bound (its get-based implementors are `AsyncR
 `try_get_or_set_with`, `len`, `is_empty`, `hits`, `misses`, `capacity`, `evictions`); it does not
 forward `cache_reset_metrics` directly. `try_get_or_set_with` delegates to
 `ConcurrentCached::cache_try_get_or_set_with`. `ConcurrentCachedAsyncExt` is its async
-counterpart, see CTRAIT-7. The six sharded concrete types also expose
-inherent `contains(&self, &K) -> bool` and `peek(&self, &K) -> Option<V>` (both peek-based: no
-recency, TTL, or metrics effects; `peek` clones the live value) that take call-site priority over
-the ext-trait aliases, consistent with the other inherent shims (`get`, `set`, `reset`).
+counterpart, see CTRAIT-7. The six sharded concrete types also expose inherent
+`get<Q>(&self, &Q) -> Option<V>`, `remove<Q>(&self, &Q) -> Option<V>`,
+`remove_entry<Q>(&self, &Q) -> Option<(K, V)>`, `delete<Q>(&self, &Q) -> bool`,
+`contains<Q>(&self, &Q) -> bool`, and `peek<Q>(&self, &Q) -> Option<V>` (`contains` and `peek` are
+peek-based: no recency, TTL, or metrics effects; `peek` clones the live value), generic over any
+borrowed form of the key (`K: Borrow<Q>`, `Q: Hash + Eq + ?Sized`, bounded on `H: ShardHasher<Q>`;
+see [store-sharded.md](store-sharded.md) SHARD-15), and taking call-site priority over the
+ext-trait aliases. Design 0052 introduced these borrowed-key lookups under an
+`H: BorrowedKeyRouting` bound; 0055 dropped that marker trait and re-bounded them on
+`H: ShardHasher<Q>`, so both records are needed for the current shape
+([design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md),
+[design/0055-shard-hasher-q-over-borrowed-key-routing.md](design/0055-shard-hasher-q-over-borrowed-key-routing.md)).
 They likewise expose inherent `retain<F: FnMut(&K, &V) -> bool>(&self, keep: F)` (see
 [store-sharded.md](store-sharded.md) SHARD-6). It is deliberately not a `ConcurrentCached*` trait
 method: it is generic over `F`, so a trait method would need `where Self: Sized` to stay object
@@ -203,5 +211,59 @@ past for an entry `Expires::is_expired` reports live, and `t` can be in the futu
 `is_expired` reports expired (a token with a fixed deadline that is also revocable). A future `t`
 is therefore not evidence that the entry is live on these stores.
 
+Both reads take `&K`, not a borrowed `&Q`. That matches the rest of the concurrent trait surface
+(CTRAIT-2, and `ConcurrentCached`'s `&K` rationale) but not the six sharded stores' inherent
+lookups, which are generic over `Q` ([store-sharded.md](store-sharded.md) SHARD-15): on a
+`ShardedTtlCache<String, V>`, `cache.get("a")` and `cache.peek("a")` compile while
+`cache.expires_at("a")` and `cache.peek_expires_at("a")` do not, and need an owned `&String`.
+TRAIT-6's single-owner `CacheExpiry` is generic over `Q`, so the same operation is borrowed-key on
+`TtlCache` and owned-key on `ShardedTtlCache`; the sharded key surface is deliberately half
+borrowed-key, and this trait is on the owned half.
+
 Deliberately a standalone trait rather than a new required method on `ConcurrentCloneCached`: that
 would break external store implementations.
+
+## CTRAIT-10
+
+`ConcurrentCacheSetMaxSize` is the `&self` mirror of `CacheSetMaxSize`
+([traits-core.md](traits-core.md) TRAIT-7): `set_max_size(&self, max_size: usize) ->
+Option<usize>` and `try_set_max_size(&self, max_size: usize) -> Result<Option<usize>,
+SetMaxSizeError>`. Both methods already existed as inherent-only methods on every implementor; the
+trait adds no new capability, only the generic-code route. The requested bound is ceiling-divided
+across shards, with a floor of 16 per shard applied only when the store has more than one shard
+(`checked_per_shard_cap_from_total` runs `per_shard.max(16)` under `n_shards > 1`,
+`src/stores/sharded/mod.rs:~127-139`), so `set_max_size(4)` on a 16-shard cache leaves an effective
+bound of 256 while a single-shard store resizes to exactly the requested total. The returned
+previous bound is the previous EFFECTIVE TOTAL, not the previously requested value, and is always
+`Some` on all three sharded implementors. The resize is not atomic
+across shards: shards are updated one at a time, so two concurrent resizes can blend into a mix of
+the two targets. Taking `&self` rather than `&mut self` matches every other concurrent-side trait
+in this file, since the sharded stores are internally synchronized. Implemented by
+`ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache`, the three sharded stores
+with a live, resizable capacity. `try_set_max_size` on these three can
+additionally return `SetMaxSizeError::CapacityOverflow`, when `max_size` is close enough to
+`usize::MAX` that dividing it across shards and multiplying back overflows; TRAIT-7's single-owner
+implementors never construct that variant. Not implemented by the unbounded sharded stores
+(`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) or the IO stores, matching
+TRAIT-7's exclusions. It is in `cached::prelude` and the trait is ungated (only the built-in impls
+are gated on their store's feature). See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).
+
+## CTRAIT-11
+
+`ConcurrentCacheClearWithOnEvict` is the `&self` mirror of `CacheClearWithOnEvict`
+([traits-core.md](traits-core.md) TRAIT-8): `cache_clear_with_on_evict(&self)`, clearing the store
+while firing `on_evict` for every removed entry, and counting an eviction per removed entry on the
+stores that track evictions at all. `ShardedUnboundCache` has no evictions counter at all
+(`metrics().evictions` is always `None`) and is the sole exception: `on_evict` still fires for
+every entry, but no counter moves. The method already existed as inherent-only on every
+implementor; the trait adds no new capability. Coverage is total, matching TRAIT-8: all six
+sharded stores implement it (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`,
+`ShardedLruTtlCache`, `ShardedExpiringCache`, `ShardedExpiringLruCache`), since every one of them
+has an `on_evict` callback. The split from
+`CacheClearWithOnEvict` is for receiver-family symmetry, not because coverage differs, following
+CTRAIT-6's rationale for splitting `ConcurrentCacheRefreshOnHit` out even with an identical
+implementor set. `RedisCache`, `AsyncRedisCache`, and `RedbCache` have no `on_evict` mechanism and
+implement neither trait. It is in `cached::prelude` and the trait is ungated (only the built-in
+impls are gated on their store's feature). See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md).

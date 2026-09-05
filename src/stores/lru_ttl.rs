@@ -1081,6 +1081,27 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheRefreshOnHit for LruTt
     }
 }
 
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheSetMaxSize for LruTtlCache<K, V, S> {
+    fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
+        LruTtlCache::set_max_size(self, max_size)
+    }
+
+    fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
+        LruTtlCache::try_set_max_size(self, max_size)
+    }
+}
+
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheClearWithOnEvict
+    for LruTtlCache<K, V, S>
+{
+    fn cache_clear_with_on_evict(&mut self) {
+        LruTtlCache::cache_clear_with_on_evict(self);
+    }
+}
+
 impl<K: Hash + Eq + Clone, V: Clone, S: BuildHasher + Clone> CloneCached<K, V>
     for LruTtlCache<K, V, S>
 {
@@ -4216,5 +4237,99 @@ mod tests {
         c.cache_set(2, 200);
         assert_eq!(c.cache_remove(&2u32), Some(200));
         assert_eq!(c.cache_expires_at(&2u32), (false, None));
+    }
+
+    // Generic bounds, so these can only reach the trait methods: the inherent methods of the
+    // same name win at a concrete call site.
+    fn resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Option<usize> {
+        cache.set_max_size(max_size)
+    }
+
+    fn try_resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError> {
+        cache.try_set_max_size(max_size)
+    }
+
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn set_max_size_through_trait_shrinks_eagerly_and_fires_on_evict() {
+        use std::sync::Mutex;
+        let evicted_keys: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_keys2 = evicted_keys.clone();
+        let mut cache = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |k: &u32, _v: &u32| {
+                evicted_keys2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+        cache.cache_set(4, 40);
+        assert_eq!(cache.cache_get(&1), Some(&10));
+        assert_eq!(cache.cache_get(&2), Some(&20));
+
+        assert_eq!(resize_through_trait(&mut cache, 2), Some(4));
+        assert_eq!(cache.capacity(), 2);
+        // Eviction happens before the call returns, not on the next insert.
+        assert_eq!(cache.cache_size(), 2);
+        assert_eq!(cache.cache_evictions(), Some(2));
+        assert_eq!(*evicted_keys.lock().unwrap(), vec![3, 4]);
+        assert_eq!(cache.cache_get(&1), Some(&10));
+        assert_eq!(cache.cache_get(&2), Some(&20));
+        assert_eq!(cache.cache_get(&3), None);
+
+        // Growing back reports the shrunk bound and keeps the survivors.
+        assert_eq!(resize_through_trait(&mut cache, 8), Some(2));
+        assert_eq!(cache.capacity(), 8);
+        assert_eq!(cache.cache_size(), 2);
+    }
+
+    #[test]
+    fn try_set_max_size_through_trait_rejects_zero() {
+        let mut cache: LruTtlCache<u32, u32> = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        assert_eq!(
+            try_resize_through_trait(&mut cache, 0),
+            Err(crate::SetMaxSizeError::ZeroMaxSize)
+        );
+        assert_eq!(cache.capacity(), 4);
+        assert_eq!(try_resize_through_trait(&mut cache, 2), Ok(Some(4)));
+        assert_eq!(cache.capacity(), 2);
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let evicted2 = evicted.clone();
+        let mut cache = LruTtlCache::builder()
+            .max_size(4)
+            .ttl(Duration::from_secs(60))
+            .on_evict(move |_k: &u32, _v: &u32| {
+                evicted2.fetch_add(1, AtomicOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        cache.cache_set(1, 10);
+        cache.cache_set(2, 20);
+        cache.cache_set(3, 30);
+
+        clear_with_on_evict_through_trait(&mut cache);
+        assert_eq!(cache.cache_size(), 0);
+        assert_eq!(evicted.load(AtomicOrdering::Relaxed), 3);
+        assert_eq!(cache.cache_evictions(), Some(3));
     }
 }

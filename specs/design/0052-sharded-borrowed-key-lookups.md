@@ -1,6 +1,11 @@
 # 0052 - Borrowed-key lookups on the sharded inherent methods
 
-Status: Not implemented
+Status: Superseded by 0055
+
+Superseded by [0055](0055-shard-hasher-q-over-borrowed-key-routing.md), which replaces this
+record's route choice (`H: BorrowedKeyRouting`, a diagnostic alias for `BuildHasher`) with
+`H: ShardHasher<Q>`. This record stays as history and is not rewritten; only the "Outcome" section
+below carries a correction pointing at 0055.
 
 ## Current state
 
@@ -104,6 +109,12 @@ specialization (`ahash-0.8.12/build.rs:7-9`), not by a cargo feature, so it can 
 nightly toolchain without any change here. It does not change the answer, but it does mean the
 routing-parity test below has to exist rather than being argued from the feature set.
 
+**This conclusion is wrong.** It holds for `str`/`String`/`[u8]`/`Vec<u8>`, but not in general; see
+the correction in "Outcome" below for the specific line it missed (`ahash-0.8.12/src/specialize.rs`
+also registers `CallHasher` on the *reference* forms of the integer primitives, not just the bare
+ones) and for why the fix was to stop routing through `hash_one` entirely rather than to patch this
+argument.
+
 ### Verdict: feasible, additive, and no trait change
 
 Recommended shape, per method, on the existing inherent impl blocks:
@@ -121,6 +132,10 @@ with one private routing helper per store, `shard_of_borrowed<Q>(&self, k: &Q)`,
 exactly this kind of borrowed-key routing for `sync_writes = "by_key"`:
 `KeyedCache::bucket_for<Q: Hash + ?Sized>` hashes a `&Q` to pick a bucket
 (`src/lib.rs:1171-1175`).
+
+(The `hash_one` call in the sketch above is not what shipped, nor what the `hash_one::<&K>` /
+`hash_one::<&Q>` correctness argument above actually supports; see "Outcome" for both
+corrections.)
 
 The `H: BuildHasher` method bound is the whole trick. It restricts the borrowed path to precisely
 the hashers whose `ShardHasher` impl is the blanket one, where owned-versus-borrowed agreement is
@@ -208,7 +223,10 @@ sharded expiry stores expose them only as trait methods (there is no inherent `p
   `shard_index(hash_one(borrowed))` agreeing is the entire correctness argument, it depends on a
   third-party hasher's dispatch, and when it breaks the failure is silent: the entry is present,
   the lookup lands on the wrong shard, and the store reports a miss and a `misses` increment. Pin
-  it with a test over many keys, not one.
+  it with a test over many keys, not one. This pitfall was right to worry: see "Outcome" for the
+  case (a key that borrows to a primitive integer) where `hash_one::<&K>` and `hash_one::<&Q>` do
+  not agree, missed by this record's own analysis above. The fix was to stop depending on
+  `hash_one`'s dispatch at all rather than to widen the test.
 - **`peek` routes but does not go through the trait** (`src/stores/sharded/lru.rs:260-263`), so it
   is the one method whose borrowed form is a one-line change and the one most likely to be
   "done" while the other five are half-converted. Convert all six per store or none.
@@ -248,7 +266,10 @@ sharded expiry stores expose them only as trait methods (there is no inherent `p
   `tests/v3_custom_hasher_threaded.rs`, `tests/v3_sharded_lru_read_path.rs`,
   `tests/v3_cert_sharded_lru_semantics.rs`.
 - If the ahash `specialize` path is a live worry for a consumer on nightly, the routing-parity
-  test is what covers it; there is nothing to configure.
+  test is what covers it; there is nothing to configure. (Superseded: the routing no longer goes
+  through `hash_one`/`specialize` at all, for the reason given in "Outcome"; a routing-parity test
+  is still worth keeping as a regression check, but it is no longer the thing standing between a
+  consumer and a silent misroute.)
 
 ## Notes
 
@@ -262,3 +283,88 @@ sharded expiry stores expose them only as trait methods (there is no inherent `p
 - If this lands, `specs/store-sharded.md` needs a new statement for the borrowed-key methods and
   `specs/traits-concurrent.md:35` ("inherent `contains(&self, &K)` and `peek(&self, &K)`") needs
   correcting.
+
+## Outcome
+
+Superseded by [0055](0055-shard-hasher-q-over-borrowed-key-routing.md): the route choice recorded
+below was reversed. `H: ShardHasher<Q>` is the bound that ships today, not `H: BorrowedKeyRouting`,
+and `BorrowedKeyRouting` no longer exists in the tree. The rest of this section is kept as history.
+
+Implemented as recommended: `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek`
+became generic over `Borrow<Q>` on all six sharded stores, bounded on `H: BorrowedKeyRouting`
+(the diagnostic alias for `BuildHasher` proposed above) at the time this record shipped. 0055
+later relaxed that bound to `H: ShardHasher<Q>` and deleted `BorrowedKeyRouting`; see the
+supersession note above the "Outcome" heading. There was one `&Q`-generic core per store that
+both the inherent method and the trait method (at `Q = K`) call. `set` and `get_or_set_with` stay
+owned-key, as scoped. `specs/store-sharded.md` (SHARD-15) and `specs/traits-concurrent.md`
+(CTRAIT-2) were corrected as flagged above, and the crate-doc family comparison
+(`src/lib.rs`, near the old `253-258`) was rewritten to state the inherent/trait split precisely.
+
+Three claims in this record's own reasoning did not hold up and are corrected here rather than
+silently fixed:
+
+- **"Coherence makes the blanket impl exclusive" overstated what that exclusivity means.**
+  Coherence does forbid one type from implementing both `BuildHasher` and a hand-written
+  `ShardHasher<K>` (0044), but the record's use of "exclusive" reads as though hand-written
+  `ShardHasher` impls were consequently a marginal or unsupported path. They are not: `ShardHasher`
+  is a normal, actively documented trait, and its own rustdoc examples (`FibHasher`, the
+  `IdentityHasher` anti-pattern warning, `src/stores/sharded/mod.rs`) are written entirely around
+  hand-rolled, non-`BuildHasher` implementations as the trait's primary illustrated use. Coherence
+  restricts one type from doing both at once; it does not restrict custom shard routing in
+  general, and this record should not have implied otherwise.
+- **"A custom hasher keeps working for owned lookups" was false for the shape actually shipped.**
+  The record proposed one `&Q`-generic method per name (`get<Q>`, etc.) bounded on `H: BuildHasher`
+  regardless of `Q`, which is what shipped. Because there is only one method named `get` and its
+  bound covers every caller including `Q = K`, a hand-written `ShardHasher` that is not a
+  `BuildHasher` loses `get` entirely, not just its borrowed form; there is no separate owned-key
+  `get` left to fall back to on the inherent surface. Owned-key access survives only through the
+  trait (`ConcurrentCachedExt::get(&cache, &key)`, `ConcurrentCachePeek::peek(&cache, &key)` for
+  `peek`), which was already true before this change and is unaffected by it. The CHANGELOG and
+  crate doc were written to state this plainly rather than repeat the record's original claim.
+- **The ahash `specialize.rs` reading in "Checked against the crate's actual hasher" above is
+  wrong, and stayed wrong until a later routing change caught it.** That section correctly shows
+  that `str`, `String`, `[u8]`, and `Vec<u8>` are registered as `CallHasher` impls only on their
+  bare, unreferenced forms (`ahash-0.8.12/src/specialize.rs:99-128` in the vendored source), so a
+  reference to any of them takes the unspecialized `build_hasher(); hash(); finish()` path and
+  `hash_one::<&String>` agrees with `hash_one::<&str>`. It missed that the same file *also*
+  registers `CallHasher` on the reference forms of every integer primitive: `&u8` through `&i64`
+  (`ahash-0.8.12/src/specialize.rs:68-75`) and `&u128`/`&i128`/`&usize`/`&isize` (`:93-96`), each
+  dispatching to `RandomState::hash_as_u64` or `hash_as_fixed_length` instead of the default path.
+  For a key type that borrows to a primitive integer, e.g. `struct UserId(u64)` with `impl
+  Borrow<u64> for UserId`, `hash_one::<&UserId>` has no `CallHasher` impl of its own and takes the
+  unspecialized path, while `hash_one::<&u64>` (what a borrowed lookup with `Q = u64` calls) takes
+  the specialized `&u64` path. The two need not agree, so an owned insert and an equivalent
+  borrowed lookup could route to different shards: the exact silent-miss failure mode the
+  "routing must be proven equal, not assumed" pitfall above warned about, missed by this record's
+  own verification of that same warning. The fix, made once this was caught, was to stop routing
+  through `hash_one` at all: `shard_hash` (0044's blanket impl) and every store's
+  `shard_of_borrowed` now build a `Hasher` and feed it the key explicitly (`build_hasher()` ->
+  `key.hash(&mut hasher)` -> `hasher.finish()`), which depends only on `Hash::hash` agreeing
+  between the owned and borrowed forms, something the `Borrow` contract already requires, and not
+  on any hasher's internal dispatch. See `src/stores/sharded/mod.rs` and 0044's own "Update" note.
+
+All three corrections point the same direction: the `H: BuildHasher` route was chosen anyway, deliberate
+tradeoffs and all, because the alternative (relaxing `ShardHasher<K>` to `K: ?Sized` and bounding
+on `H: ShardHasher<Q>`) trades a compile-time-enforced restriction for a runtime-silent one - a
+cross-impl consistency contract the type system cannot check, whose failure is a phantom miss on
+an entry that is actually present. A documented, discoverable compile error for the (assumed
+near-zero, one-week-old) custom-router population was judged the better failure mode than a
+correctness landmine for everyone else.
+
+**Release blocker for 3.2, corrected by 0055:** this section originally listed three
+breaking-change classes for anyone moving from the published 3.1.1 to the unreleased 3.2 cycle.
+0055 reversed the route this record shipped (`H: BorrowedKeyRouting` -> `H: ShardHasher<Q>`),
+which closes two of the three: a hand-written, non-`BuildHasher` router now keeps its inherent
+owned-key `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` (the class-1 loss above no
+longer happens), and a downstream helper bounded only on `H: ShardHasher<K>` compiles unchanged
+for owned lookups without adding any extra bound (the class-3 breakage above no longer happens).
+One class survives unchanged under 0055: argument-inference breakage, where a call like
+`cache.get(&k)` with `k: &K` (or `&Box<K>`/`&Arc<K>`) that previously compiled via deref coercion
+now fails on a missing `Borrow` impl, with no diagnostic hint. `CHANGELOG.md` documents this
+surviving class under `### Breaking Changes` for the 3.2 entry. That is not sufficient on its own:
+`specs/` is excluded from the published crate (`Cargo.toml:15`), and the repo's convention is a
+dedicated migration guide per release, `docs/migrations/PREV-to-X.Y.Z.md` plus its `-human.md`
+companion (`AGENTS.md:411`). Per that same convention, migration guides are authored in the
+release PR, not ahead of it, so no guide is added by this record. Before 3.2 ships,
+`docs/migrations/3.1.1-to-3.2.md` (and `-human.md`) must be written in the 3.2 release PR, covering
+the one surviving break class above.

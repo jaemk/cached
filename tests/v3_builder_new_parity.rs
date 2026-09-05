@@ -633,7 +633,7 @@ impl cached::ShardHasher<u32> for KeyIsShardHasher {
 
 #[test]
 fn sharded_unbound_cache_new_hasher_matches_builder() {
-    use cached::{ShardedUnboundCache, ShardedUnboundCacheBuilder};
+    use cached::{ConcurrentCachedExt, ShardedUnboundCache, ShardedUnboundCacheBuilder};
 
     let a: ShardedUnboundCache<u32, u32, KeyIsShardHasher> = ShardedUnboundCacheBuilder::new()
         .shards(4)
@@ -657,7 +657,14 @@ fn sharded_unbound_cache_new_hasher_matches_builder() {
     assert_eq!(a.shard_sizes(), b.shard_sizes());
     assert_eq!(a.shard_sizes(), vec![4, 4, 4, 4]);
 
+    // `KeyIsShardHasher` implements `ShardHasher<u32>` only (see design 0055), so both the
+    // inherent owned-key `get(&K)` and the `ConcurrentCachedExt::get` trait path resolve on
+    // these stores; assert through both to prove `new()` and `builder()` agree on each.
     for k in 0..16u32 {
         assert_eq!(a.get(&k), b.get(&k));
+        assert_eq!(
+            ConcurrentCachedExt::get(&a, &k).unwrap(),
+            ConcurrentCachedExt::get(&b, &k).unwrap()
+        );
     }
 }

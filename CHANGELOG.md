@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Argument-inference breakage on the six sharded stores' inherent lookup methods
+  (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`,
+  `ShardedExpiringCache`, `ShardedExpiringLruCache`): `get`, `remove`, `remove_entry`, `delete`,
+  `contains`, and `peek` are all generic over the looked-up key form `Q`. `cache.get(&k)` where
+  `k: &K` (for example, `for k in &keys { cache.get(&k) }`) previously compiled through deref
+  coercion. It no longer does: `Q` unifies to `&K` first, and the call fails with ``the trait
+  bound `String: Borrow<&String>` is not satisfied``; same for `k: &Box<K>` and `k: &Arc<K>`, and
+  the same shape applies to `remove`, `remove_entry`, `delete`, `contains`, and `peek`. Migration:
+  drop the extra `&` (`cache.get(k)`), or deref explicitly (`cache.get(&**boxed)`). Single-owner
+  `Cached` methods (e.g. `LruCache::cache_get`) are unchanged.
+- `ShardHasher<K>`'s key parameter is relaxed to `ShardHasher<K: ?Sized>`. Existing impls compile
+  unchanged, since this only widens what the trait accepts. But `H: ShardHasher<K>` no longer
+  implies `K: Sized` at a use site, which can shift inference in rare downstream generic code.
+- Shard routing no longer consults `BuildHasher::hash_one`. The blanket `ShardHasher` impl for a
+  `BuildHasher` and every store's borrowed-key routing build a `Hasher` with `build_hasher()`,
+  hash the key and finish it, and `DefaultShardHasher`'s `hash_one` override was removed so it
+  uses the provided default too. An overridden `hash_one` is no longer consulted for routing, and
+  the upper-32-bit distribution contract for a custom hasher applies to the `Hasher` returned by
+  `build_hasher()`. This matters for a `BuildHasher` whose `hash_one` dispatches on the static
+  type of its argument (`ahash::RandomState` does, on any nightly compiler): an owned newtype key
+  and its borrowed primitive form would otherwise route to different shards. Deliberate tradeoff:
+  `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache` back their shards with
+  `HashMap<_, _, DefaultShardHasher>` and std's `HashMap` probes via `BuildHasher::hash_one`, so
+  dropping the override means those three stores take ahash's unspecialized path on a nightly
+  build. Taken for correctness; the cost is nightly-only.
+
 ### Added
 
 - `cached::claim::{ClaimRegistry, Claim}`: a single-flight claim on a key, for collapsing
@@ -14,6 +42,75 @@
   dependency, no feature flag), and reachable via `cached::claim::` or `cached::prelude`, not
   the crate root, to keep `Claim` and `ClaimRegistry` out of rustc's nearest-match suggestions
   for mistyped imports ([design/0053](specs/design/0053-refresh-claim-guard.md)).
+  `Debug for ClaimRegistry<K>` requires `K: Debug + Clone`: it copies the key set out from
+  under the registry mutex and formats after releasing it, so no user `Debug` code and no
+  writer lock is held while the registry is locked. `ClaimRegistry::new` already requires
+  `K: Clone`, so this only constrains generic code that names the type without building one.
+- `CacheSetMaxSize` and `ConcurrentCacheSetMaxSize` traits, reaching `set_max_size` /
+  `try_set_max_size` from generic code holding a `T: CacheSetMaxSize` (or
+  `ConcurrentCacheSetMaxSize`) bound instead of a concrete store type. No new capability: both
+  methods already existed as inherent-only methods and already evicted eagerly on shrink, firing
+  `on_evict` per removed entry; this only adds a route through a generic bound. Implemented by
+  `LruCache`, `LruTtlCache`, `ExpiringLruCache`, `TtlSortedCache` (single-owner) and
+  `ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache` (sharded). Not implemented by
+  the unbounded stores (`UnboundCache`, `TtlCache`, `ExpiringCache` and their sharded forms), which
+  have no live capacity to resize, or by `RedisCache` / `AsyncRedisCache` / `RedbCache`, which have
+  no client-side capacity.
+- `CacheClearWithOnEvict` and `ConcurrentCacheClearWithOnEvict` traits, reaching
+  `cache_clear_with_on_evict` from generic code the same way. Implemented by all 7 single-owner
+  in-memory stores and all 6 sharded stores (every in-memory store that has an `on_evict`
+  callback); not implemented by the three IO stores, which have no `on_evict` mechanism. The crate
+  doc previously described this method as inherent-only and unreachable from generic code; that
+  gap is now closed.
+- The six sharded stores' inherent `get`, `remove`, `remove_entry`, `delete`, `contains`, and
+  `peek` now accept any borrowed form of the key (`K: Borrow<Q>`), matching the single-owner
+  stores: `sharded_cache.get("a")` now works on a `ShardedLruCache<String, _>` without allocating
+  a `String` first. Bounded on `H: ShardHasher<Q>`, so a hand-written `ShardHasher` router keeps
+  these six methods at every key type it implements, not just where it also implements
+  `BuildHasher`. This relies on an unenforced contract: every `ShardHasher` impl on the router
+  must agree, `shard_hash(&k) == shard_hash(k.borrow())`, for `K: Borrow<Q>`. A router with two or
+  more disagreeing `ShardHasher` impls routes an owned insert and its borrowed lookup to different
+  shards, so `get`/`peek`/`contains` miss a present entry and `remove`/`delete` silently no-op; see
+  the "Contract: a router's impls must agree with each other" section of the `ShardHasher` docs.
+  `set` and `get_or_set_with` are unchanged:
+  they take the key by value because they insert it. See "Breaking Changes" above for the one case
+  this is not additive for.
+- `cached::prelude` now also exports `CacheSetMaxSize`, `CacheClearWithOnEvict`,
+  `ConcurrentCacheSetMaxSize`, and `ConcurrentCacheClearWithOnEvict`. This cannot cause E0034 for
+  any store in this crate: every store implementing these traits already has `set_max_size` /
+  `cache_clear_with_on_evict` as an inherent method, and inherent methods take call-site priority
+  over trait methods before a trait is even considered. It can bite a downstream store type that
+  implements `CacheSetMaxSize` (or one of the other three traits) with no inherent method of its
+  own, if a same-named extension trait is also in scope: combined with `use cached::prelude::*`,
+  that yields E0034 (multiple applicable items in scope), fixable with UFCS.
+
+### Fixed
+
+- The sharded map stores (`ShardedUnboundCache`, `ShardedTtlCache`, `ShardedExpiringCache`) now
+  route their intra-shard probe through `DefaultShardHasher` instead of a shard `HashMap`'s own
+  `BuildHasher::hash_one`. `hash_one` is an overridable provided method that can dispatch on the
+  static type of its argument (`ahash::RandomState`'s does, on a nightly compiler that enables
+  ahash's `specialize` cfg), so an owned newtype key and its borrowed primitive form were not
+  guaranteed to route to the same shard. Known limitation: the single-owner stores
+  (`UnboundCache`, `TtlCache`, `ExpiringCache`, `TtlSortedCache`) still back their maps with
+  `DefaultHashBuilder = ahash::RandomState` by default and are not covered by this fix; on an
+  affected nightly compiler, work around it by building with `.hasher(std::hash::RandomState::new())`.
+  The `LruCache`-backed family (`LruCache`, `LruTtlCache`, `ExpiringLruCache`) is not affected:
+  `LruCache` indexes its entries with a `HashTable<usize>` probed through `LruCache::hash`, which
+  hand-builds the `Hasher` precisely to avoid this.
+- `TtlSortedCache::cache_clear_with_on_evict` now counts an eviction per removed entry even when
+  no `on_evict` callback is configured, matching the trait contract and the other implementors.
+  Previously it took an early-return fast path that cleared the store without counting anything.
+  Observable to anyone metering evictions on that store.
+
+### Documentation
+
+- Gate the per-entry-expiry macro example in the crate doc on the `proc_macro` feature. The fence
+  used `cached::macros`, which does not exist without that feature, so
+  `cargo test --no-default-features --doc` failed to compile it; CI's no-default-features row
+  runs `--tests` only, so this went uncaught there. Gated rather than marked `ignore` (like its
+  two neighboring macro fences), so it still compiles when the feature is on; the rendered
+  README is unchanged, since cargo-readme strips the hidden lines.
 
 ## [3.1.1] - 2026-08-25
 

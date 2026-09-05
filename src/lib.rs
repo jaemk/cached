@@ -227,7 +227,40 @@ Shard structs are padded to 128-byte alignment (covering Intel adjacent-line pre
 For sharded LRU variants, eviction is enforced independently per shard. `max_size = N` is divided across shards with ceiling division. Use the builder's `per_shard_max_size` method for an exact per-shard cap (builder-only; `#[concurrent_cached]` does not expose a `per_shard_max_size` attribute — use `shards` to control parallelism and `max_size` for total capacity). **Capacity Fragmentation Warning**: To protect against premature evictions due to hash collisions in extremely small caches (where a shard capacity could drop to 1-2 entries), when sharding is active (`shards > 1`) we enforce a minimum capacity of `16` entries **per shard** (e.g., minimum total capacity of `128` on a single-core machine with 8 shards, or `256` on a 4-core machine with 16 shards). If you require smaller, strict limits under low capacities, configure `shards = 1` or specify `per_shard_max_size` directly (builder-only; not available via `#[concurrent_cached]`).
 Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedLruTtlCache`, and `ShardedExpiringLruCache` must acquire an exclusive **write lock** on accessed shards during read hits, which can lead to contention under highly concurrent read-heavy workloads. Unbounded `ShardedUnboundCache`, time-only `ShardedTtlCache` (when `refresh_on_hit` is disabled -- enabling it promotes read hits to exclusive write locks), and expiring `ShardedExpiringCache` require only a **shared read lock** on read hits, avoiding this contention. To mitigate contention on LRU variants, consider increasing the number of `shards` to distribute writes. Note: this write-lock-on-read behavior is a known limitation of the strict-LRU sharded stores. A future read-optimized variant that relaxes strict recency ordering will ship as a separate store type; the existing stores will not change semantics.
 
+On the default hasher, the six sharded stores' inherent lookups accept any borrowed form of the
+key with no allocation, so a `String`-keyed store reads with a plain `&str`:
+
+```rust
+use cached::ShardedLruCache;
+
+let sharded: ShardedLruCache<String, u32> = ShardedLruCache::new(10);
+sharded.set("a".to_string(), 1);
+assert_eq!(sharded.get("a"), Some(1));
+```
+
 > **Custom shard hashers:** Every sharded store carries a third, defaulted type parameter for its [`ShardHasher`] — `ShardedUnboundCache<K, V, H = DefaultShardHasher>`, `ShardedLruCache<K, V, H = DefaultShardHasher>`, and so on — mirroring `std::collections::HashMap<K, V, S = RandomState>`. Writing `ShardedLruCache<K, V>` therefore gets the default hasher, which is what most users want; name the third parameter only when routing keys through a custom `ShardHasher`. Construct such a cache through the builder's `hasher` method: `ShardedLruCache::builder().hasher(my_hasher)` switches the builder's hasher type and `build` yields a `ShardedLruCache<K, V, H>` over `my_hasher`. `new`/`builder` are defined only on the default-hasher instantiation, so a custom hasher is always introduced through `hasher`, never a `ShardedLruCache::<_, _, H>` turbofish (which would otherwise silently drop the hasher).
+>
+> A hand-written `ShardHasher` that does not also implement `BuildHasher` keeps the six inherent `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek` lookups at every key type it implements: each one is bounded on `H: ShardHasher<Q>` for the `Q` being looked up, so a single `impl ShardHasher<K> for MyRouter` covers the owned-key calls (`cache.get(&key)`). Borrowed forms are opt-in — writing a second `impl ShardHasher<str>` alongside `ShardHasher<String>` is what enables `cache.get("a")` on a `ShardedLruCache<String, V, MyRouter>`. Multiple impls on one router must agree on keys that compare equal (for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`); the compiler cannot check that, and disagreement routes an owned insert and its equivalent borrowed lookup to different shards, producing a miss on an entry that is present. A `BuildHasher` that is also `Clone + Send + Sync + 'static` reaches every key type through the blanket `ShardHasher` impl, where `Borrow`'s own hash-agreement contract makes this automatic. How a missing impl is reported depends on how many candidates `Q` can collapse onto, counting both the router's own impls and any `ShardHasher` bounds in scope: with exactly one, inference collapses `Q` onto it and the failure is a call-site `E0308` type mismatch (`expected &UserId, found &u64`) rather than a missing-bound error. That covers a single-impl concrete router and, just as often, a generic helper bounded only on `H: ShardHasher<String>` calling `c.get("a")`. With two or more, `Q` has nothing to collapse onto and the failure is `E0277` with `ShardHasher`'s diagnostic notes (`NameRouter cannot route keys of type str to a shard`). The [`ShardHasher`] docs spell both out. The trait forms remain available for owned keys on any hasher: `ConcurrentCachedExt::get(&cache, &key).unwrap()` (and the matching `remove`/`remove_entry`/`delete`/`contains`), plus `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek` (`ConcurrentCachedExt` has no `peek` of its own). Both trait forms return `Result<_, Infallible>`, hence the `.unwrap()`.
+>
+> Naming that third type parameter in your own generic helpers has a sharp edge, but it is not the hasher bound: a helper written as `fn lookup<K, V, H: ShardHasher<K>>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> { c.get(k) }` still fails to compile **at its own definition**, regardless of which hasher any call site uses, because the inherent `get` lives in an `impl` block that also requires `K: Hash + Eq + Clone` and `V: Clone`. rustc surfaces that as E0599 first, reported as "the method `get` exists for reference `&ShardedLruCache<K, V, H>`, but its trait bounds were not satisfied" and followed by the four bounds it is missing (`K: Hash`, `K: Eq`, `K: Clone`, `V: Clone`), so read the error as a bounds list rather than a missing method; `tests/ui/sharded_helper_missing_key_bounds.stderr` pins the exact text. The working signature is `fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V> where K: Hash + Eq + Clone, V: Clone, H: ShardHasher<K> { c.get(k) }`: `H: ShardHasher<K>` is exactly the bound the owned-key `get` carries, and no additional marker trait is involved. A helper that looks keys up in a *borrowed* form names that form **in addition to** the store's key type, not instead of it: `fn lookup_borrowed<V, H>(c: &ShardedLruCache<String, V, H>, k: &str) -> Option<V> where V: Clone, H: ShardHasher<String> + ShardHasher<str> { c.get(k) }`, or `H: ShardHasher<K> + ShardHasher<Q>` with the borrowed form left generic (`K: Hash + Eq + Clone + Borrow<Q>`, `Q: Hash + Eq + ?Sized`). That `impl` block is itself bounded on `H: ShardHasher<K>`, so a borrowed call adds `ShardHasher<Q>` on top of the store's own hasher bound rather than replacing it. Leaving the borrowed half out is the confusing failure: with only `H: ShardHasher<String>`, `c.get("a")` fails as an E0308 argument mismatch (`expected &String, found &str`) rather than a missing-impl error, because `Q` collapses to the key type before any bound is checked.
+
+**Breaking: a double-reference lookup no longer compiles.** The same inherent-method resolution
+breaks argument inference for callers that used to pass a double-reference, and this is the shape
+most likely to hit a user who never wrote a custom `ShardHasher` at all. Before this crate's
+borrowed-key routing existed, `get` took `&K`, so `for k in &keys { cache.get(&k) }` on a
+`ShardedLruCache<String, _>` compiled with `k: &String` through plain deref coercion of `&&String`
+to `&String`. `get` is now generic over the looked-up form (`&Q` with `K: Borrow<Q>`), and
+inference fills `Q` in from the argument type before any coercion can apply, so the same call
+infers `Q = &String` and fails with "the trait bound `String: Borrow<&String>` is not satisfied":
+a plain `E0277` that gives no "remove the extra `&`" hint, because the fix is not a missing bound
+but an extra reference at the call site. Dropping that `&` fixes this shape (`cache.get(k)`
+instead of `cache.get(&k)`). Any other indirection the old code let deref coercion paper over
+fails the same way, but with no extra `&` to remove, so the deref has to be written out: with
+`k: &Box<String>` (or `&Arc<String>`), `cache.get(k)` infers `Q = Box<String>` and fails on
+`String: Borrow<Box<String>>`, and the call becomes `cache.get(&**k)` (or `cache.get(k.as_str())`).
+In every case the goal is the same, that `Q` infers as a form the stored key actually borrows to
+rather than a wrapper around it. The same shape applies to `remove`, `remove_entry`, `delete`,
+`contains`, and `peek`.
 
 **Behavioral guarantees**
 
@@ -251,11 +284,32 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   The concurrent family returns owned values because its implementors include IO stores that
   serialize entries and cannot hand out a borrow into the store, and it is fallible because those
   stores can fail; the single-owner family stays infallible and borrow-returning. Lookup keys
-  differ the same way: single-owner `cache_get` accepts any borrowed form of the key
-  (`&Q where K: Borrow<Q>`, so `cache.get("a")` works on an `LruCache<String, _>`), while the
-  concurrent family takes `&K` exactly (`store.get(&"a".to_string())` on a sharded store) because
-  its IO-store implementors serialize the full key. A prelude glob
-  can bring both families into scope without collision.
+  differ the same way on the trait: single-owner `Cached::cache_get` accepts any borrowed form of
+  the key (`&Q where K: Borrow<Q>`, so `cache.get("a")` works on an `LruCache<String, _>`), while
+  `ConcurrentCached::cache_get` takes `&K` exactly, because its IO-store implementors
+  (`RedisCache`, `RedbCache`) serialize the full key and a generic `&Q` carries no serialization
+  guarantee. The six sharded stores' own **inherent** `get`/`remove`/`remove_entry`/`delete`/
+  `contains`/`peek` are the exception: they accept any borrowed form of the key too
+  (`sharded.get("a")` works on a `ShardedLruCache<String, _>` with no allocation), bounded on
+  [`H: ShardHasher<Q>`](https://docs.rs/cached/latest/cached/trait.ShardHasher.html) — the bound
+  names the looked-up form, not the stored key. `ShardHasher` carries
+  `Clone + Send + Sync + 'static` as supertraits, and every `BuildHasher` meeting those gets a
+  blanket `ShardHasher<Q>` impl for every `Q: Hash`, so the default hasher and any such
+  `BuildHasher`-based one reach all borrowed forms, with owned- and borrowed-key routing
+  agreement guaranteed by the `Borrow` contract. A `BuildHasher` missing any of those
+  supertraits (a non-`Clone` one, say) falls outside the blanket impl and is reported as a
+  missing `ShardHasher` impl. A hand-written, non-`BuildHasher` `ShardHasher` keeps these six inherent
+  methods at each key type it implements (`impl ShardHasher<K>` alone covers the owned-key
+  calls) and opts into borrowed forms with a further `impl ShardHasher<Q>` that must agree with
+  the first on keys that compare equal. Where a lookup form is unsupported there is **no
+  method-resolution fallback**: the inherent method is selected by name first and then fails, so
+  importing a trait does not rescue the call at the same call site. The replacement is the trait
+  form, e.g. `ConcurrentCachedExt::get(&cache, &key).unwrap()` (and the matching
+  `remove`/`remove_entry`/`delete`/`contains`), and
+  `ConcurrentCachePeek::peek(&cache, &key).unwrap()` for `peek`, since `ConcurrentCachedExt` has
+  no `peek`. `set` and `get_or_set_with` stay owned-key on every hasher, since they insert the
+  key rather than look it up. A prelude glob can bring both families into scope without
+  collision.
 - **The inherent-method asymmetry between the two families is deliberate.** On a sharded store the
   short `set`/`get`/`len` calls resolve to *inherent* methods (infallible, `&self`), so
   `ShardedLruCache::new(100)` is usable bare. A single-owner `LruCache::new(100)` has no such
@@ -291,8 +345,15 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   callback to fire for every removed entry (e.g., to release resources tracked via `on_evict`).
   Note: `cache_clear` is a required method on `ConcurrentCached` (and `async_cache_clear` on
   the async counterpart), with the short `clear()` alias on `ConcurrentCachedExt`, so generic
-  code over `ConcurrentCached` can clear. `cache_clear_with_on_evict()` is the exception: it is
-  inherent-only on each concrete sharded store type and is not callable through the trait.
+  code over `ConcurrentCached` can clear. `cache_clear_with_on_evict()` has its own trait per
+  receiver family,
+  [`CacheClearWithOnEvict`](https://docs.rs/cached/latest/cached/trait.CacheClearWithOnEvict.html)
+  (`&mut self`) and
+  [`ConcurrentCacheClearWithOnEvict`](https://docs.rs/cached/latest/cached/trait.ConcurrentCacheClearWithOnEvict.html)
+  (`&self`), implemented by every in-memory store that has an
+  `on_evict` callback: all seven single-owner stores and all six sharded ones. The concrete types
+  keep the inherent method, which takes call-site priority; the traits only add the route through
+  a generic bound. The Redis and redb stores have no `on_evict` mechanism and implement neither.
 - Bounded caches enforce capacity on insertion. Time-bounded caches enforce freshness on lookup.
 - Redis and disk stores serialize values and return owned values. Non-sharded in-memory stores
   return references from direct store APIs; sharded stores return owned `Option<V>` values
@@ -324,6 +385,30 @@ Because LRU caches require updating access recency, `ShardedLruCache`, `ShardedL
   compile with an `E0599` that names the guard type rather than the missing trait. See the
   [`refresh_before_expiry`](https://github.com/jaemk/cached/blob/master/examples/refresh_before_expiry.rs)
   example for a runnable threshold-refresh recipe over both traits.
+- [`CacheSetMaxSize`](https://docs.rs/cached/latest/cached/trait.CacheSetMaxSize.html) is the
+  capacity resize for the bounded single-owner stores
+  ([`LruCache`], [`LruTtlCache`], [`ExpiringLruCache`], [`TtlSortedCache`]): `set_max_size`
+  returns the previous bound, `try_set_max_size` returns
+  [`SetMaxSizeError::ZeroMaxSize`](https://docs.rs/cached/latest/cached/enum.SetMaxSizeError.html#variant.ZeroMaxSize)
+  instead of panicking on a zero bound, and shrinking evicts eagerly, firing `on_evict` and
+  counting an eviction per removed entry.
+  [`ConcurrentCacheSetMaxSize`](https://docs.rs/cached/latest/cached/trait.ConcurrentCacheSetMaxSize.html)
+  is the `&self` mirror on [`ShardedLruCache`], [`ShardedLruTtlCache`], and
+  [`ShardedExpiringLruCache`], which add
+  [`SetMaxSizeError::CapacityOverflow`](https://docs.rs/cached/latest/cached/enum.SetMaxSizeError.html#variant.CapacityOverflow)
+  for a bound that overflows when split across shards, and which round the requested total up to a
+  multiple of the shard count (further up to the 16-per-shard floor on a multi-shard store): the
+  bound `set_max_size`/`try_set_max_size` installs, and the previous-bound value they return, are
+  both rounded totals rather than the requested number. Nothing in the return value reports the
+  rounding, so `try_set_max_size(4)` on a 16-shard cache returns `Ok(Some(previous))` having
+  installed a 256-entry bound; read `cache_capacity` afterwards to see the bound actually in force.
+  The unbounded and time-only stores ([`UnboundCache`], [`TtlCache`], [`ExpiringCache`], and
+  their sharded forms) have no live bound and implement neither trait, so the bound is a compile
+  error rather than a silent no-op. Reading the bound needs no extra trait on a concrete store;
+  generic code that also reads the bound needs `T: Cached<K, V>` or `T: ConcurrentCacheBase`
+  alongside `CacheSetMaxSize`/`ConcurrentCacheSetMaxSize`, since `CacheSetMaxSize` itself is
+  un-parameterized and does not carry `cache_capacity`. `cache_capacity` is already a method on
+  [`Cached`] and [`ConcurrentCacheBase`] (defaulted to `None`, overridden by every bounded store).
 - Sharded stores implement `ConcurrentCached`/`ConcurrentCachedAsync` instead of
   `Cached`/`CachedGetOrSetAsync`. Generic code parameterized over `Cached<K, V>` cannot accept sharded
   stores; use a `ConcurrentCached<K, V>` bound or a concrete type instead.
@@ -474,9 +559,10 @@ assert_eq!(c.len(), 2);
 `Claim` is dropped, which happens on normal completion, on a panic, and on cancellation (a
 dropped async task) alike, so a claim can never wedge a key the way a hand-released guard can. It
 is independent of any store and is not background refresh: the registry spawns nothing and awaits
-nothing, so it composes with the stale-while-revalidate recipe (`examples/stale_while_revalidate.rs`,
+nothing, so it composes with the stale-while-revalidate recipe
+([`stale_while_revalidate`](https://github.com/jaemk/cached/blob/master/examples/stale_while_revalidate.rs),
 `examples/refresh_before_expiry.rs`) without taking over where the refresh runs. See the
-[`claim` module docs](claim) for the full contract, including why it is reachable through
+[`claim` module docs](https://docs.rs/cached/latest/cached/claim/index.html) for the full contract, including why it is reachable through
 `cached::claim::` and the prelude rather than the crate root.
 
 ```rust
@@ -531,6 +617,9 @@ these stores either way.
 The macro form below derives each entry's TTL from a function argument — `key`/`convert` keep the TTL out of the cache key so it influences only the entry's lifetime, not which slot it occupies (the [`expires_per_key`](https://github.com/jaemk/cached/blob/master/examples/expires_per_key.rs) example uses the same pattern):
 
 ```rust,no_run
+# #[cfg(feature = "proc_macro")]
+# #[allow(dead_code)]
+# mod example {
 use cached::macros::cached;
 use cached::Expires;
 use cached::time::{Duration, Instant};
@@ -550,6 +639,7 @@ fn fetch_token(user_id: u64, ttl_secs: u64) -> Token {
         expires_at: Instant::now() + Duration::from_secs(ttl_secs),
     }
 }
+# }
 # fn main() {}
 ```
 
@@ -1217,17 +1307,51 @@ pub mod __private {
 /// are intentionally omitted to avoid name clashes. Import those directly
 /// (e.g. `use cached::ShardedUnboundCache;`).
 ///
+/// This glob also brings in the four capacity/clear capability traits ([`CacheSetMaxSize`],
+/// [`CacheClearWithOnEvict`], [`ConcurrentCacheSetMaxSize`], [`ConcurrentCacheClearWithOnEvict`]).
+/// On a custom store type that defines its own same-named extension trait but has no inherent
+/// method of that name, importing both can produce `E0034` ("multiple applicable items in
+/// scope") at the call site. This never happens for this crate's own stores: every one of them
+/// has the matching inherent method, and inherent methods win resolution before any trait is
+/// even considered.
+///
 /// [`claim::ClaimRegistry`] and [`claim::Claim`] are re-exported here as well. They are not at the crate root, where their generic names would
 /// be offered as nearest-match suggestions for unrelated mistyped imports (the reason
 /// `KeyedCache` moved off the root); a glob of this module is opt-in, and a `Claim` the user
 /// defines or imports directly shadows the glob rather than colliding with it.
+///
+/// Both names therefore resolve here (and at `cached::claim::`):
+///
+/// ```rust
+/// use cached::prelude::ClaimRegistry;
+/// let registry: ClaimRegistry<u32> = ClaimRegistry::new();
+/// assert!(registry.is_empty());
+/// ```
+///
+/// and **not** at the crate root:
+///
+/// ```compile_fail
+/// use cached::ClaimRegistry;
+/// let registry: ClaimRegistry<u32> = ClaimRegistry::new();
+/// assert!(registry.is_empty());
+/// ```
+///
+/// nor through a glob of the crate root:
+///
+/// ```compile_fail
+/// use cached::*;
+/// let registry: ClaimRegistry<u32> = ClaimRegistry::new();
+/// assert!(registry.is_empty());
+/// ```
 pub mod prelude {
     pub use crate::claim::{Claim, ClaimRegistry};
     pub use crate::{
-        CacheEvict, CacheExpiry, CacheMetrics, Cached, CachedExt, CachedIter, CachedPeek,
-        CachedRead, CloneCached, ConcurrentCacheBase, ConcurrentCacheEvict, ConcurrentCacheExpiry,
-        ConcurrentCachePeek, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached,
-        ConcurrentCachedExt, ConcurrentCloneCached, Expires, IntoValues, SerializeCached,
+        CacheClearWithOnEvict, CacheEvict, CacheExpiry, CacheMetrics, CacheSetMaxSize, Cached,
+        CachedExt, CachedIter, CachedPeek, CachedRead, CloneCached, ConcurrentCacheBase,
+        ConcurrentCacheClearWithOnEvict, ConcurrentCacheEvict, ConcurrentCacheExpiry,
+        ConcurrentCachePeek, ConcurrentCacheRefreshOnHit, ConcurrentCacheSetMaxSize,
+        ConcurrentCacheTtl, ConcurrentCached, ConcurrentCachedExt, ConcurrentCloneCached, Expires,
+        IntoValues, SerializeCached,
     };
 
     // Unconditional, like `ConcurrentCacheTtl` above: the traits themselves are
@@ -2432,6 +2556,14 @@ pub trait ConcurrentCloneCached<K, V> {
 /// the authority there, so
 /// [`cache_peek_with_expiry_status`](ConcurrentCloneCached::cache_peek_with_expiry_status)
 /// remains the authoritative liveness read.
+///
+/// **Both reads take `&K`, not a borrowed form.** The sharded stores' inherent
+/// `get`/`peek`/`contains` accept any `&Q` where `K: Borrow<Q>` (bounded on
+/// [`ShardHasher<Q>`](ShardHasher)), and the single-owner [`CacheExpiry`] mirror is generic over
+/// `Q` as well, but these methods stay on the `&K` concurrent trait surface for the reason given
+/// on [`ConcurrentCached`]. So on a `ShardedTtlCache<String, V>`, `cache.peek("a")` compiles while
+/// `cache.expires_at("a")` does not: pass `&key` (allocating a `String` if all you hold is a
+/// `&str`).
 pub trait ConcurrentCacheExpiry<K, V> {
     /// Peek at the value and the instant it expires at, with no read side effects.
     ///
@@ -2568,6 +2700,136 @@ pub trait CacheRefreshOnHit {
     /// Every implementor honors this: the returned flag is the state the store was actually in
     /// before the call, and the new state takes effect for subsequent hits.
     fn set_refresh_on_hit(&mut self, refresh: bool) -> bool;
+}
+
+/// Capacity resize for single-owner stores that carry a size bound.
+///
+/// Implemented by the four bounded single-owner stores: [`LruCache`], [`LruTtlCache`],
+/// [`ExpiringLruCache`], and [`TtlSortedCache`]. Each of them already exposes
+/// `set_max_size`/`try_set_max_size` inherently; this trait is what makes the pair reachable from
+/// generic code holding a `T: CacheSetMaxSize` rather than a concrete store type.
+///
+/// [`UnboundCache`], [`TtlCache`], and [`ExpiringCache`] deliberately do **not** implement it.
+/// None of them has a bound to change: the unbounded store has none by definition, and the two
+/// time-only stores are sized by what has not yet expired (their builders take an
+/// `initial_capacity` allocation hint consumed once at build time, which is not a live bound). A
+/// stub returning `None` would be indistinguishable to a generic caller from a store that really
+/// resized, so the capability lives in its own trait and those stores are simply left off it,
+/// exactly as [`TtlSortedCache`] is left off [`CacheRefreshOnHit`]. The Redis and redb stores have
+/// no client-side capacity at all; capacity there is a server or database property.
+///
+/// Reading the bound needs no trait beyond [`Cached`]: `cache_capacity` is already a method on
+/// [`Cached`] (defaulted to `None`, overridden by every bounded store), so only the setters were
+/// inherent-only.
+///
+/// Inherent methods take call-site priority over trait methods, so this changes nothing for code
+/// that names a concrete store. It only adds the generic route:
+///
+/// ```rust
+/// use cached::{CacheSetMaxSize, CachedExt, LruCache};
+///
+/// fn shrink<T: CacheSetMaxSize>(cache: &mut T, max_size: usize) -> Option<usize> {
+///     cache.set_max_size(max_size)
+/// }
+///
+/// let mut cache: LruCache<u32, u32> = LruCache::new(10);
+/// cache.set(1, 1);
+/// cache.set(2, 2);
+/// assert_eq!(shrink(&mut cache, 1), Some(10)); // the previous bound
+/// assert_eq!(cache.len(), 1);                  // the shrink evicted eagerly
+/// ```
+///
+/// The `&self` mirror for the internally-synchronized stores is
+/// [`ConcurrentCacheSetMaxSize`]. The trait itself is not feature-gated (mirroring [`CacheTtl`]),
+/// so external stores can implement it in any feature configuration; the built-in impls on
+/// [`LruTtlCache`] and [`TtlSortedCache`] require `time_stores`.
+pub trait CacheSetMaxSize {
+    /// Change the maximum number of entries, returning the previous bound.
+    ///
+    /// Shrinking below the current entry count evicts eagerly, before this returns: entries are
+    /// removed until the cache fits the new bound, firing `on_evict` and counting an eviction for
+    /// each removed entry. Growing does not pre-allocate; the backing stores grow on demand.
+    ///
+    /// **Which entries are dropped inverts across implementors**, so generic code holding only a
+    /// `T: CacheSetMaxSize` bound cannot assume either policy: [`LruCache`], [`LruTtlCache`], and
+    /// [`ExpiringLruCache`] drop the least-recently-used entries, while [`TtlSortedCache`] drops
+    /// the entries closest to expiring (it shrinks through `retain_latest`, keeping the
+    /// longest-lived entries).
+    ///
+    /// The return is the previous bound. It is `Some` on every store that was already bounded,
+    /// which is all of them except [`TtlSortedCache`], the one built-in store that can be
+    /// constructed with no bound and so can report `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0. Use [`try_set_max_size`](Self::try_set_max_size) to validate
+    /// first and avoid the panic.
+    fn set_max_size(&mut self, max_size: usize) -> Option<usize>;
+
+    /// Validated variant of [`set_max_size`](Self::set_max_size): rejects an invalid `max_size`
+    /// instead of panicking. On success it is [`set_max_size`](Self::set_max_size), same return
+    /// and same eager eviction on shrink.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetMaxSizeError::ZeroMaxSize`] if `max_size` is 0. The
+    /// [`CapacityOverflow`](SetMaxSizeError::CapacityOverflow) variant is never returned by a
+    /// single-owner store; it belongs to the sharded implementors of
+    /// [`ConcurrentCacheSetMaxSize`], which divide the bound across shards.
+    fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError>;
+}
+
+/// Clearing a single-owner store with `on_evict` notification.
+///
+/// [`Cached::cache_clear`] removes every entry silently: it does not fire `on_evict` and does not
+/// count evictions. `cache_clear_with_on_evict` is the notifying form, for stores whose `on_evict`
+/// callback releases something tracked outside the cache.
+///
+/// Implemented by all seven single-owner in-memory stores: [`UnboundCache`], [`LruCache`],
+/// [`TtlCache`], [`LruTtlCache`], [`TtlSortedCache`], [`ExpiringCache`], and
+/// [`ExpiringLruCache`]. Unlike [`CacheSetMaxSize`], there is no partial coverage to reason about
+/// here: every store with an `on_evict` callback has the method. The trait exists to make it
+/// reachable through a bound, and the split from [`ConcurrentCacheClearWithOnEvict`] is receiver
+/// symmetry (`&mut self` versus `&self`), not a difference in capability. The Redis and redb
+/// stores implement neither, having no `on_evict` mechanism to notify.
+///
+/// ```rust
+/// use cached::{CacheClearWithOnEvict, CachedExt, UnboundCache};
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicUsize, Ordering};
+///
+/// fn drain<T: CacheClearWithOnEvict>(cache: &mut T) {
+///     cache.cache_clear_with_on_evict();
+/// }
+///
+/// let evicted = Arc::new(AtomicUsize::new(0));
+/// let counter = evicted.clone();
+/// let mut cache = UnboundCache::builder()
+///     .on_evict(move |_k: &u32, _v: &u32| {
+///         counter.fetch_add(1, Ordering::Relaxed);
+///     })
+///     .build()
+///     .unwrap();
+/// cache.set(1, 10);
+/// cache.set(2, 20);
+///
+/// drain(&mut cache);
+/// assert_eq!(cache.len(), 0);
+/// assert_eq!(evicted.load(Ordering::Relaxed), 2);
+/// ```
+///
+/// The trait is not feature-gated; only the built-in impls on the `time_stores` stores are.
+pub trait CacheClearWithOnEvict {
+    /// Remove every entry, firing `on_evict` for each removed entry and counting it as an
+    /// eviction.
+    ///
+    /// The eviction count does not depend on whether an `on_evict` callback is configured, on the
+    /// stores that track evictions at all ([`UnboundCache`] has no evictions counter). Contrast
+    /// [`Cached::cache_clear`], which removes the same entries with neither side effect.
+    fn cache_clear_with_on_evict(&mut self);
 }
 
 /// Memoize an async closure over a synchronous in-memory [`Cached`] store.
@@ -2893,6 +3155,107 @@ pub trait ConcurrentCacheRefreshOnHit {
     fn set_refresh_on_hit(&self, refresh: bool) -> bool;
 }
 
+/// Capacity resize for concurrent stores that carry a size bound.
+///
+/// The `&self` mirror of [`CacheSetMaxSize`], taking a shared reference because concurrent stores
+/// are internally synchronized and are held behind an `Arc` or a `static`. Implemented by the
+/// three bounded sharded stores: `ShardedLruCache`, `ShardedLruTtlCache`, and
+/// `ShardedExpiringLruCache`.
+///
+/// `ShardedUnboundCache`, `ShardedTtlCache`, and `ShardedExpiringCache` do **not** implement it,
+/// for the same reason their single-owner counterparts do not: there is no live bound to change.
+/// `RedisCache`, `AsyncRedisCache`, and `RedbCache` have no client-side capacity at all.
+///
+/// The requested bound is ceiling-divided across shards, with a floor of 16 entries per shard
+/// when the store has more than one shard, so the effective total can exceed what was asked for:
+/// `set_max_size(4)` on a 16-shard cache leaves an effective bound of 256, not 4. A single-shard
+/// store has no such floor and resizes to exactly the requested total. The returned
+/// "previous bound" is the previous **effective total** (the value `capacity()` would have
+/// reported), not the value previously passed to `set_max_size` or `try_set_max_size`, and it is
+/// always `Some` on all three sharded implementors — none of them can be built unbounded.
+///
+/// The resize is **not atomic across shards**: shards are updated one at a time, so two
+/// concurrent resizes can interleave their per-shard writes and leave a blend of both requested
+/// totals rather than either one cleanly.
+///
+/// This is an asymmetry with [`CacheSetMaxSize`], which is exact on `LruCache`. Generic code that
+/// moves a bound between the single-owner and concurrent traits can silently retain far more than
+/// requested: the `set_max_size(4)`-on-16-shards example above resolves to 256 entries, 64x the
+/// requested bound.
+///
+/// The sharded stores divide the bound across shards, so unlike the single-owner side they have a
+/// second failure mode: a `max_size` close enough to `usize::MAX` that dividing and multiplying
+/// back overflows. [`set_max_size`](Self::set_max_size) panics on it and
+/// [`try_set_max_size`](Self::try_set_max_size) reports
+/// [`SetMaxSizeError::CapacityOverflow`].
+///
+/// The trait is not feature-gated; only the built-in impls whose store requires a feature are.
+pub trait ConcurrentCacheSetMaxSize {
+    /// Change the maximum number of entries, returning the previous bound.
+    ///
+    /// Takes `&self`: concurrent stores are internally synchronized, so this is callable through a
+    /// shared reference. Shrinking below the current entry count evicts eagerly, before this
+    /// returns, firing `on_evict` and counting an eviction for each removed entry.
+    ///
+    /// Both the effective bound this sets and the previous-bound value it returns are the
+    /// per-shard-rounded totals described on the trait, not the raw number passed in or
+    /// previously requested — see the trait docs for the rounding rule.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0, and panics if splitting `max_size` across the shard count
+    /// overflows (a value close enough to `usize::MAX` that dividing by the shard count and
+    /// multiplying back does not fit). Generic code that forwards a configuration value or an
+    /// admin-API argument straight into this method therefore panics on input it did not
+    /// validate, with no concrete store type to consult: use
+    /// [`try_set_max_size`](Self::try_set_max_size), which reports the same two conditions as
+    /// [`SetMaxSizeError::ZeroMaxSize`] and [`SetMaxSizeError::CapacityOverflow`]. Both panics
+    /// fire before any shard lock is taken, so no shard is left resized and no capacity state is
+    /// torn.
+    fn set_max_size(&self, max_size: usize) -> Option<usize>;
+
+    /// Validated variant of [`set_max_size`](Self::set_max_size): rejects an invalid `max_size`
+    /// instead of panicking. On success it is [`set_max_size`](Self::set_max_size), same return,
+    /// same rounding of both the effective bound and the returned previous value, and same eager
+    /// eviction on shrink.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetMaxSizeError::ZeroMaxSize`] if `max_size` is 0, and
+    /// [`SetMaxSizeError::CapacityOverflow`] if splitting `max_size` across the shard count
+    /// overflows.
+    fn try_set_max_size(&self, max_size: usize) -> Result<Option<usize>, crate::SetMaxSizeError>;
+}
+
+/// Clearing a concurrent store with `on_evict` notification.
+///
+/// The `&self` mirror of [`CacheClearWithOnEvict`]. [`ConcurrentCached::cache_clear`] removes
+/// every entry silently; this fires `on_evict` for each removed entry and, on the stores that
+/// track evictions at all, counts it as an eviction. Implemented by all six sharded stores
+/// (`ShardedUnboundCache`, `ShardedLruCache`, `ShardedTtlCache`, `ShardedLruTtlCache`,
+/// `ShardedExpiringCache`, `ShardedExpiringLruCache`); the Redis and redb stores have no
+/// `on_evict` mechanism and implement neither trait in the pair. `ShardedUnboundCache` is the one
+/// exception to the eviction count: it has no evictions counter at all, so `metrics().evictions`
+/// stays `None` even though `on_evict` still fires for every removed entry.
+///
+/// The sharded stores also expose the method inherently, and inherent methods take call-site
+/// priority, so this trait changes nothing for code naming a concrete sharded type. It adds the
+/// route through a `T: ConcurrentCacheClearWithOnEvict` bound.
+///
+/// The trait is not feature-gated; only the built-in impls whose store requires a feature are.
+pub trait ConcurrentCacheClearWithOnEvict {
+    /// Remove every entry, firing `on_evict` for each removed entry and counting it as an
+    /// eviction.
+    ///
+    /// The eviction count does not depend on whether an `on_evict` callback is configured, on the
+    /// stores that track evictions at all (`ShardedUnboundCache` has no evictions counter).
+    ///
+    /// Takes `&self`: concurrent stores are internally synchronized, so this is callable through a
+    /// shared reference. Clearing is per shard and is not atomic across shards. Contrast
+    /// [`ConcurrentCached::cache_clear`], which removes the same entries with neither side effect.
+    fn cache_clear_with_on_evict(&self);
+}
+
 /// Side-effect-free cache lookup for concurrent stores that can expose a value cheaply.
 ///
 /// This is the concurrent analogue of the single-owner [`CachedPeek`] trait: a genuinely
@@ -3145,14 +3508,20 @@ pub trait ConcurrentCachePeekAsync<K, V>: ConcurrentCacheBase {
 /// **Why key-lookup methods take `&K` instead of `&Q` (`Borrow<Q>`)**:
 ///
 /// [`Cached`] uses `Borrow<Q>` for all key-lookup methods (e.g. look up a `String` key with a
-/// `&str`). `ConcurrentCached` cannot follow the same pattern for two reasons. The sharded
-/// in-memory stores must hash the key with the shard hasher to select the correct shard; a
-/// borrowed `&Q` may hash differently from the stored `K`, routing the lookup to the wrong shard.
-/// The IO stores (`RedbCache`, `RedisCache`) must serialize the key to perform a lookup; a generic
-/// `&Q` where only `K: Borrow<Q>` carries no serialization guarantee, and adding a `Q: Serialize`
-/// bound would bleed a serde dependency into every `ConcurrentCached` implementation. Both cases
-/// require the lookup key to produce the same result as the stored `K`; the concrete `&K` is
-/// the only type that guarantees this. All key-lookup methods therefore take `&K` directly.
+/// `&str`). `ConcurrentCached` cannot follow the same pattern, for two reasons that no longer
+/// weigh the same on the sharded stores as they do on the trait. For an *arbitrary* shard hasher,
+/// a borrowed `&Q` may hash differently from the stored `K`, routing the lookup to the wrong
+/// shard; that risk is why the trait keeps `&K`. The six sharded stores answer it on their own
+/// terms instead: their **inherent** `get`/`remove`/`remove_entry`/`delete`/`contains`/`peek`
+/// take `&Q` where `K: Borrow<Q>`, bounded on [`ShardHasher<Q>`](ShardHasher) so the looked-up
+/// form must itself be routable. For a `BuildHasher` that bound is met by the blanket
+/// `ShardHasher` impl and agreement with the owned key follows from the `Borrow` contract; a
+/// hand-written router that adds a borrowed impl takes on `ShardHasher`'s documented cross-impl
+/// consistency requirement, which the compiler cannot check. The trait itself still cannot follow, because its implementor set is wider than
+/// the sharded stores: the IO stores (`RedbCache`, `RedisCache`) must serialize the key to perform
+/// a lookup, and a generic `&Q` where only `K: Borrow<Q>` carries no serialization guarantee;
+/// adding a `Q: Serialize` bound would bleed a serde dependency into every `ConcurrentCached`
+/// implementation. All key-lookup methods therefore take `&K` directly at the trait level.
 pub trait ConcurrentCached<K, V>: ConcurrentCacheBase {
     /// Attempt to retrieve a cached value
     ///
@@ -4414,5 +4783,138 @@ mod expiry_read_doc_contract {
         assert!(!live(now), "t == now is already past");
         assert!(!live(now - Duration::from_nanos(1)));
         assert!(live(now + Duration::from_nanos(1)));
+    }
+}
+
+#[cfg(test)]
+mod custom_shard_hasher_doc_contract {
+    //! Pins the claims the crate-root "Custom shard hashers" blockquote makes about hand-written
+    //! [`ShardHasher`] routers: a router that is not a `BuildHasher` keeps the six inherent
+    //! lookups at every key type it implements, borrowed forms are an opt-in second impl, and
+    //! the documented generic-helper signature is the working one. Prose cannot be compiled;
+    //! this module is that prose expressed as code, so a claim that stops being true fails the
+    //! build here rather than misleading a reader.
+
+    use crate::{ShardHasher, ShardedLruCache};
+    use std::hash::Hash;
+
+    /// A hand-written router that is deliberately not a `BuildHasher`, implementing
+    /// `ShardHasher` for the owned key type only.
+    #[derive(Clone)]
+    struct OwnedOnlyRouter;
+
+    impl ShardHasher<u64> for OwnedOnlyRouter {
+        fn shard_hash(&self, key: &u64) -> u64 {
+            key.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        }
+    }
+
+    /// A router that opts into borrowed lookups with a second impl. The two impls agree on keys
+    /// that compare equal (both hash the same bytes), which is the contract the docs place on a
+    /// multi-impl router and which the compiler cannot check.
+    #[derive(Clone)]
+    struct BorrowedOptInRouter;
+
+    fn bytes_hash(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    impl ShardHasher<String> for BorrowedOptInRouter {
+        fn shard_hash(&self, key: &String) -> u64 {
+            bytes_hash(key.as_bytes())
+        }
+    }
+
+    impl ShardHasher<str> for BorrowedOptInRouter {
+        fn shard_hash(&self, key: &str) -> u64 {
+            bytes_hash(key.as_bytes())
+        }
+    }
+
+    /// The generic-helper signature the crate docs give as the working one, copied from the
+    /// blockquote. `H: ShardHasher<K>` is the entire hasher bound: if the inherent `get` ever
+    /// needs more, this definition stops compiling on its own, exactly as the docs describe.
+    fn lookup<K, V, H>(c: &ShardedLruCache<K, V, H>, k: &K) -> Option<V>
+    where
+        K: Hash + Eq + Clone,
+        V: Clone,
+        H: ShardHasher<K>,
+    {
+        c.get(k)
+    }
+
+    /// The borrowed-form helper signature the docs give: the looked-up form is named **in
+    /// addition to** the store's key type, because the inherent `get`'s `impl` block is bounded
+    /// on `H: ShardHasher<K>` and the borrowed call adds `ShardHasher<Q>` on top.
+    /// `tests/sharded_generic_helper_bounds.rs` pins the same shape over the default hasher; this
+    /// one pins it over a hand-written, non-`BuildHasher` router carrying both impls.
+    fn lookup_borrowed<V, H>(c: &ShardedLruCache<String, V, H>, k: &str) -> Option<V>
+    where
+        V: Clone,
+        H: ShardHasher<String> + ShardHasher<str>,
+    {
+        c.get(k)
+    }
+
+    fn owned_only_cache() -> ShardedLruCache<u64, u64, OwnedOnlyRouter> {
+        ShardedLruCache::builder()
+            .shards(4)
+            .max_size(64)
+            .hasher(OwnedOnlyRouter)
+            .build()
+            .expect("build must succeed")
+    }
+
+    /// A single `impl ShardHasher<K>` is enough for every owned-key inherent lookup.
+    #[test]
+    fn hand_written_router_keeps_the_six_inherent_owned_key_lookups() {
+        let cache = owned_only_cache();
+        cache.set(1, 10);
+        cache.set(2, 20);
+        cache.set(3, 30);
+        cache.set(4, 40);
+
+        assert_eq!(cache.get(&1), Some(10));
+        assert_eq!(cache.peek(&1), Some(10));
+        assert!(cache.contains(&1));
+        assert_eq!(cache.remove(&2), Some(20));
+        assert_eq!(cache.remove_entry(&3), Some((3, 30)));
+        assert!(cache.delete(&4));
+        assert!(!cache.contains(&4));
+    }
+
+    /// The documented helper bound set compiles and works over a non-`BuildHasher` router.
+    #[test]
+    fn documented_generic_helper_bound_set_works_over_a_hand_written_router() {
+        let cache = owned_only_cache();
+        cache.set(7, 70);
+
+        assert_eq!(lookup(&cache, &7), Some(70));
+        assert_eq!(lookup(&cache, &8), None);
+    }
+
+    /// The opt-in half: a second `impl ShardHasher<Q>` enables the borrowed lookups, and an
+    /// owned insert is found through the borrowed form because the two impls agree.
+    #[test]
+    fn a_second_shard_hasher_impl_opts_the_router_into_borrowed_lookups() {
+        let cache: ShardedLruCache<String, u32, BorrowedOptInRouter> = ShardedLruCache::builder()
+            .shards(4)
+            .max_size(64)
+            .hasher(BorrowedOptInRouter)
+            .build()
+            .expect("build must succeed");
+
+        cache.set("a".to_string(), 1);
+
+        assert_eq!(cache.get("a"), Some(1));
+        assert!(cache.contains("a"));
+        // The documented borrowed-helper bound set (`ShardHasher<String> + ShardHasher<str>`)
+        // reaches the same entry through a generic helper.
+        assert_eq!(lookup_borrowed(&cache, "a"), Some(1));
+        assert_eq!(lookup_borrowed(&cache, "b"), None);
+        assert_eq!(cache.remove("a"), Some(1));
+        assert_eq!(cache.get("a"), None);
     }
 }

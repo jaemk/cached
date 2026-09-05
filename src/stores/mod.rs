@@ -37,6 +37,17 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// cache.cache_set(1, 100);
 /// assert_eq!(cache.cache_get(&1), Some(&100));
 /// ```
+///
+/// ## Nightly caveat
+///
+/// On nightly Rust, `ahash::RandomState` specializes `BuildHasher::hash_one` under the
+/// `specialize` cfg and dispatches on the static type of the argument, so an owned newtype key
+/// and its borrowed primitive form can hash differently and a borrowed lookup can silently miss
+/// a present entry. This affects the `HashMap`-backed stores that probe the hasher directly --
+/// [`UnboundCache`], [`TtlCache`], [`ExpiringCache`], and [`TtlSortedCache`] -- but not
+/// [`LruCache`], [`LruTtlCache`], or [`ExpiringLruCache`], which hand-build the `Hasher` to
+/// avoid this. Work around it with `.hasher(std::collections::hash_map::RandomState::new())` in
+/// place of the default.
 #[cfg(feature = "ahash")]
 pub type DefaultHashBuilder = ahash::RandomState;
 
@@ -46,6 +57,18 @@ pub type DefaultHashBuilder = ahash::RandomState;
 /// and to `std::collections::hash_map::RandomState` otherwise. This
 /// matches the behavior prior to the introduction of the `S` type parameter,
 /// so existing code that does not name the hasher is unaffected.
+///
+/// ## Nightly caveat
+///
+/// On nightly Rust with the `ahash` feature enabled, `ahash::RandomState` specializes
+/// `BuildHasher::hash_one` under the `specialize` cfg and dispatches on the static type of the
+/// argument, so an owned newtype key and its borrowed primitive form can hash differently and a
+/// borrowed lookup can silently miss a present entry. This affects the `HashMap`-backed stores
+/// that probe the hasher directly -- [`UnboundCache`], [`TtlCache`], [`ExpiringCache`], and
+/// [`TtlSortedCache`] -- but not [`LruCache`], [`LruTtlCache`], or [`ExpiringLruCache`], which
+/// hand-build the `Hasher` to avoid this. Work around it with
+/// `.hasher(std::collections::hash_map::RandomState::new())` in place of the default (or by
+/// disabling the `ahash` feature, as this fallback already does).
 #[cfg(not(feature = "ahash"))]
 pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 
@@ -201,7 +224,9 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// Error returned by `try_set_max_size` methods.
+/// Error returned by [`CacheSetMaxSize::try_set_max_size`](crate::CacheSetMaxSize::try_set_max_size)
+/// and [`ConcurrentCacheSetMaxSize::try_set_max_size`](crate::ConcurrentCacheSetMaxSize::try_set_max_size),
+/// and by the inherent `try_set_max_size` on the bounded stores.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetMaxSizeError {

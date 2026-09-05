@@ -8,9 +8,10 @@
 //! `tokio` runtime, plus the concurrency property (N racing claimers, exactly one winner) and the
 //! module's public reachability.
 //!
-//! Every test ends by asserting the registry drains back to `len() == 0` / `is_empty()`: that is
-//! the guard's whole contract, and a leaked claim is a silent, permanent failure (see the
-//! "Capacity" and "Do not leak a claim" sections of `src/claim.rs`'s module docs).
+//! Every test that takes a claim ends by asserting the registry drains back to `len() == 0` /
+//! `is_empty()`: that is the guard's whole contract, and a leaked claim is a silent, permanent
+//! failure (see the "Capacity" and "Do not leak a claim" sections of `src/claim.rs`'s module
+//! docs).
 //!
 //! The module is unconditional (no feature gate), so this whole file runs identically under
 //! `--all-features` and `--no-default-features`; nothing here is gated.
@@ -40,24 +41,26 @@ fn prelude_glob_brings_both_names_into_scope() {
 /// The negative half -- `use cached::Claim;` and `use cached::ClaimRegistry;` must fail to
 /// resolve at the crate root -- cannot be expressed as a `#[test]` in this file: a failing `use`
 /// at the top of an integration test crate fails the whole crate's build, not one test function
-/// (the same limitation documented in `tests/v3_keyed_cache_private.rs` for `KeyedCache`, and
-/// `src/lib.rs:1121-1131` covers exactly this with `compile_fail` doctests on the `__private`
-/// module). Adding a `tests/ui/*.rs` trybuild case is out of scope for this file per the task
-/// (owned by a sibling shard's `src/lib.rs`/`specs/` work); it belongs next to the `__private`
-/// `compile_fail` doctests if this record wants a dedicated regression for it.
+/// (the same limitation documented in `tests/v3_keyed_cache_private.rs` for `KeyedCache`).
 ///
-/// What an integration test CAN still show without any negative compile: a crate-root glob and a
-/// local item of the same name are distinct namespaces, so a glob import cannot itself be the
-/// thing that resolves `Claim`/`ClaimRegistry` if they were ever (re)exported at the root.
+/// That guard lives in `src/lib.rs`, on the `cached::prelude` module docs: a `rust` doctest
+/// resolving `ClaimRegistry` through the prelude, plus two `compile_fail` doctests for
+/// `use cached::ClaimRegistry;` and for a bare `ClaimRegistry` after `use cached::*;`. It follows
+/// the `__private::KeyedCache` precedent in the same file. Run it with
+/// `cargo test --all-features --doc`.
+///
+/// The test below is NOT that guard and cannot be: a local item shadows a glob import
+/// unconditionally in Rust, so it would pass whether or not the crate root exported these names.
+/// It covers the positive half only -- that a crate-root glob coexists with a same-named local
+/// type without a resolution error, and that the real type is reachable at `cached::claim::`.
 #[test]
-fn root_glob_does_not_shadow_a_local_same_named_type() {
+fn root_glob_coexists_with_a_local_same_named_type() {
     #[allow(unused_imports)]
     use cached::*;
 
-    // A local type sharing the generic name; if `cached::*` also exported a root-level
-    // `ClaimRegistry`, this local definition -- not the crate's -- is what a bare `ClaimRegistry`
-    // resolves to here, which is the same "nearest match masks the real name" hazard the design
-    // record calls out for `Claim`/`ClaimRegistry` staying off the root.
+    // A local type sharing the generic name. Rust resolves a bare `ClaimRegistry` to this local
+    // item regardless of what the glob brings in, so no assertion here can distinguish a root
+    // export from its absence; see the `compile_fail` doctests named above for that.
     struct ClaimRegistry(u8);
     let local = ClaimRegistry(9);
     assert_eq!(local.0, 9);

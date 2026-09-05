@@ -19,8 +19,8 @@
 use std::time::Duration;
 
 use cached::{
-    DefaultShardHasher, ShardHasher, ShardedExpiringCache, ShardedExpiringLruCache,
-    ShardedLruCache, ShardedUnboundCache,
+    ConcurrentCachedExt, DefaultShardHasher, ShardHasher, ShardedExpiringCache,
+    ShardedExpiringLruCache, ShardedLruCache, ShardedUnboundCache,
 };
 #[cfg(feature = "time_stores")]
 use cached::{ShardedLruTtlCache, ShardedTtlCache};
@@ -170,8 +170,12 @@ fn sharded_unbound_copy_from_rehashes_through_target_hasher() {
         "copy_from must re-hash every entry through the TARGET's hasher, not preserve the \
          source's (all-shard-0) layout"
     );
+    // `EvenSpreadHasher` / `AllShardZeroHasher` implement `ShardHasher<u32>` only, so the
+    // inherent owned-key lookup (`&K`) works on stores built with them (design 0055); exercise
+    // it alongside `ConcurrentCachedExt::get`'s trait path.
     for k in 0..16u32 {
         assert_eq!(target.get(&k), Some(k * 10));
+        assert_eq!(ConcurrentCachedExt::get(&target, &k).unwrap(), Some(k * 10));
     }
 }
 
@@ -195,8 +199,11 @@ fn sharded_lru_copy_from_rehashes_through_target_hasher() {
         .expect("copy_from across distinct concrete hashers must succeed");
 
     assert_eq!(target.shard_sizes(), EVEN_SPREAD);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_copy_from_rehashes_through_target_hasher`.
     for k in 0..16u32 {
         assert_eq!(target.get(&k), Some(k * 10));
+        assert_eq!(ConcurrentCachedExt::get(&target, &k).unwrap(), Some(k * 10));
     }
 }
 
@@ -221,8 +228,11 @@ fn sharded_ttl_copy_from_rehashes_through_target_hasher() {
         .expect("copy_from across distinct concrete hashers must succeed");
 
     assert_eq!(target.shard_sizes(), EVEN_SPREAD);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_copy_from_rehashes_through_target_hasher`.
     for k in 0..16u32 {
         assert_eq!(target.get(&k), Some(k * 10));
+        assert_eq!(ConcurrentCachedExt::get(&target, &k).unwrap(), Some(k * 10));
     }
 }
 
@@ -249,8 +259,11 @@ fn sharded_lru_ttl_copy_from_rehashes_through_target_hasher() {
         .expect("copy_from across distinct concrete hashers must succeed");
 
     assert_eq!(target.shard_sizes(), EVEN_SPREAD);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_copy_from_rehashes_through_target_hasher`.
     for k in 0..16u32 {
         assert_eq!(target.get(&k), Some(k * 10));
+        assert_eq!(ConcurrentCachedExt::get(&target, &k).unwrap(), Some(k * 10));
     }
 }
 
@@ -273,8 +286,14 @@ fn sharded_expiring_copy_from_rehashes_through_target_hasher() {
         .expect("copy_from across distinct concrete hashers must succeed");
 
     assert_eq!(target.shard_sizes(), EVEN_SPREAD);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_copy_from_rehashes_through_target_hasher`.
     for k in 0..16u32 {
         assert_eq!(target.get(&k), Some(Val(k * 10)));
+        assert_eq!(
+            ConcurrentCachedExt::get(&target, &k).unwrap(),
+            Some(Val(k * 10))
+        );
     }
 }
 
@@ -300,8 +319,14 @@ fn sharded_expiring_lru_copy_from_rehashes_through_target_hasher() {
             .expect("copy_from across distinct concrete hashers must succeed");
 
     assert_eq!(target.shard_sizes(), EVEN_SPREAD);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_copy_from_rehashes_through_target_hasher`.
     for k in 0..16u32 {
         assert_eq!(target.get(&k), Some(Val(k * 10)));
+        assert_eq!(
+            ConcurrentCachedExt::get(&target, &k).unwrap(),
+            Some(Val(k * 10))
+        );
     }
 }
 
@@ -355,8 +380,16 @@ fn sharded_unbound_cache_deep_clone_metrics_shard_sizes_on_custom_hasher() {
 
     let clone = cache.deep_clone();
     cache.set(0, 999);
+    // `EvenSpreadHasher` implements `ShardHasher<u32>` only, so the inherent owned-key lookup
+    // (`&K`) works on stores built with it (design 0055); exercise it alongside
+    // `ConcurrentCachedExt::get`'s trait path.
     assert_eq!(
         clone.get(&0),
+        Some(0),
+        "deep_clone must be an independent snapshot on a custom-hasher instantiation"
+    );
+    assert_eq!(
+        ConcurrentCachedExt::get(&clone, &0).unwrap(),
         Some(0),
         "deep_clone must be an independent snapshot on a custom-hasher instantiation"
     );
@@ -380,7 +413,10 @@ fn sharded_lru_deep_clone_metrics_shard_sizes_on_custom_hasher() {
 
     let clone = cache.deep_clone();
     cache.set(0, 999);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_cache_deep_clone_metrics_shard_sizes_on_custom_hasher`.
     assert_eq!(clone.get(&0), Some(0));
+    assert_eq!(ConcurrentCachedExt::get(&clone, &0).unwrap(), Some(0));
     assert_eq!(clone.shard_sizes(), EVEN_SPREAD);
 }
 
@@ -401,7 +437,10 @@ fn sharded_ttl_deep_clone_metrics_shard_sizes_on_custom_hasher() {
 
     let clone = cache.deep_clone();
     cache.set(0, 999);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_cache_deep_clone_metrics_shard_sizes_on_custom_hasher`.
     assert_eq!(clone.get(&0), Some(0));
+    assert_eq!(ConcurrentCachedExt::get(&clone, &0).unwrap(), Some(0));
     assert_eq!(clone.shard_sizes(), EVEN_SPREAD);
 }
 
@@ -424,7 +463,10 @@ fn sharded_lru_ttl_deep_clone_metrics_shard_sizes_on_custom_hasher() {
 
     let clone = cache.deep_clone();
     cache.set(0, 999);
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_cache_deep_clone_metrics_shard_sizes_on_custom_hasher`.
     assert_eq!(clone.get(&0), Some(0));
+    assert_eq!(ConcurrentCachedExt::get(&clone, &0).unwrap(), Some(0));
     assert_eq!(clone.shard_sizes(), EVEN_SPREAD);
 }
 
@@ -443,7 +485,10 @@ fn sharded_expiring_cache_deep_clone_metrics_shard_sizes_on_custom_hasher() {
 
     let clone = cache.deep_clone();
     cache.set(0, Val(999));
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_cache_deep_clone_metrics_shard_sizes_on_custom_hasher`.
     assert_eq!(clone.get(&0), Some(Val(0)));
+    assert_eq!(ConcurrentCachedExt::get(&clone, &0).unwrap(), Some(Val(0)));
     assert_eq!(clone.shard_sizes(), EVEN_SPREAD);
 }
 
@@ -465,6 +510,9 @@ fn sharded_expiring_lru_cache_deep_clone_metrics_shard_sizes_on_custom_hasher() 
 
     let clone = cache.deep_clone();
     cache.set(0, Val(999));
+    // Inherent owned-key lookup alongside the trait path, for the reason spelled out in
+    // `sharded_unbound_cache_deep_clone_metrics_shard_sizes_on_custom_hasher`.
     assert_eq!(clone.get(&0), Some(Val(0)));
+    assert_eq!(ConcurrentCachedExt::get(&clone, &0).unwrap(), Some(Val(0)));
     assert_eq!(clone.shard_sizes(), EVEN_SPREAD);
 }

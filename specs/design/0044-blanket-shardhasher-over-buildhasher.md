@@ -27,12 +27,24 @@ Blanket-implement `ShardHasher<K>` for every thread-safe `BuildHasher`:
 ```rust
 impl<K, S> ShardHasher<K> for S
 where
-    K: std::hash::Hash,
+    K: std::hash::Hash + ?Sized,
     S: std::hash::BuildHasher + Clone + Send + Sync + 'static,
 {
     fn shard_hash(&self, key: &K) -> u64 { self.hash_one(key) }
 }
 ```
+
+**Superseded, first by [0052](0052-sharded-borrowed-key-lookups.md) and then by
+[0055](0055-shard-hasher-q-over-borrowed-key-routing.md), which is the current record:** the body
+shown above no longer matches the code. `shard_hash` now builds a `Hasher` and feeds it the key
+explicitly (`build_hasher()` -> `key.hash(&mut hasher)` -> `hasher.finish()`) instead of calling
+`hash_one`. The reason is that `hash_one` is an overridable provided method allowed to dispatch on
+its static type argument, and `ahash::RandomState` does exactly that; a key type that borrows to a
+different type (for example a newtype over an integer) could then have its owned insert and its
+borrowed lookup routed to different shards. 0052's own status is now "Superseded by 0055" (see
+[design/README.md](README.md)); see 0052's "Outcome" for the ahash specialization case that was
+originally analyzed and gotten wrong, and see 0055's "Outcome" for the trait's current shape,
+including the `?Sized` relaxation added above.
 
 `Clone + Send + Sync + 'static` are the existing `ShardHasher` supertrait bounds, required
 because the hasher lives inside the store's `Arc<Inner>`.
@@ -59,6 +71,14 @@ The cost is that `DefaultShardHasher::Hasher` is public API and resolves to `aha
 the `ahash` feature. `ahash` is already public API through the `DefaultHashBuilder` alias
 (`pub type DefaultHashBuilder = ahash::RandomState`), so this adds no new exposure.
 
+**Update, per [0052](0052-sharded-borrowed-key-lookups.md), whose route was in turn superseded by
+[0055](0055-shard-hasher-q-over-borrowed-key-routing.md):** the `hash_one` override this section
+describes was itself deleted later, along with routing through `hash_one` generally. `shard_hash`
+no longer delegates to `hash_one` on anything, `DefaultShardHasher`'s own included, so the
+"single-value path is not lost" reasoning above and the "behavior is identical either way" bullet
+both describe a mechanism the crate no longer uses. See the note after the code block above for
+why, and see 0055 for the current blanket-impl shape.
+
 ## Consequences
 
 Breaking, which is why it lands in 3.0 rather than a later 3.x. The blanket impl overlaps any
@@ -69,10 +89,10 @@ range, string prefix, tenant id) belongs on a type that does not implement `Buil
 what the existing `ShardHasher` doc example already shows.
 
 The upper-32-bit distribution contract is unchanged and is not implied by `BuildHasher`. Shard
-selection is `(hash >> 32) & shard_mask`. `hash_one` on `std::hash::RandomState` (SipHash-1-3) and
-on `ahash::RandomState` diffuse key entropy across all 64 bits and satisfy it; a hand-written
-`BuildHasher` whose `finish` leaves the high bits constant still routes every key to shard 0, and
-the "zero upper bits" warning on `ShardHasher` stays for that reason.
+selection is `(hash >> 32) & shard_mask`. The `Hasher` finished by `std::hash::RandomState`
+(SipHash-1-3) and by `ahash::RandomState` (ahash's own) diffuse key entropy across all 64 bits and
+satisfy it; a hand-written `BuildHasher` whose `finish` leaves the high bits constant still routes
+every key to shard 0, and the "zero upper bits" warning on `ShardHasher` stays for that reason.
 
 ## Coverage
 
@@ -81,7 +101,14 @@ the "zero upper bits" warning on `ShardHasher` stays for that reason.
   `DefaultShardHasher` works as a `HashMap` and `UnboundCache` hash builder; `shard_sizes()` over
   4096 keys and 16 shards shows the spread, and the upper 32 bits of `shard_hash` are checked
   directly.
-- `src/stores/sharded/mod.rs`: `shard_hash` on `DefaultShardHasher` equals `hash_one`.
+- `src/stores/sharded/mod.rs`: `shard_hash` on `DefaultShardHasher` equals `hash_one`. This
+  invariant still holds after the later changes recorded in
+  [0052](0052-sharded-borrowed-key-lookups.md) and carried forward unchanged by
+  [0055](0055-shard-hasher-q-over-borrowed-key-routing.md), but for the opposite reason:
+  `shard_hash` no longer forwards to `hash_one`, and `DefaultShardHasher` no longer overrides
+  `hash_one` either, so both sides now happen to run the same default provided `BuildHasher`
+  construction (`build_hasher()` -> hash -> `finish()`) independently, rather than one calling the
+  other.
 
 Single-path enforcement needs no test of its own: two impls for one type is a compile error, so
 the crate building is the check.

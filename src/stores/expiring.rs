@@ -811,6 +811,14 @@ impl<K: std::hash::Hash + Eq, V: Expires, S: BuildHasher> CacheEvict for Expirin
     }
 }
 
+impl<K: Hash + Eq, V: Expires, S: BuildHasher> crate::CacheClearWithOnEvict
+    for ExpiringCache<K, V, S>
+{
+    fn cache_clear_with_on_evict(&mut self) {
+        ExpiringCache::cache_clear_with_on_evict(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2418,5 +2426,43 @@ mod tests {
         assert!(c.expires_at(&1u8).0);
         // The value was never cloned or moved out: it is still in the store.
         assert_eq!(c.cache_peek(&1u8), Some(&NotClone(100)));
+    }
+
+    // A generic bound, so this can only reach the trait method: the inherent
+    // `cache_clear_with_on_evict` wins at a concrete call site.
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering as AOrdering},
+        };
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let mut c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder()
+            .on_evict(move |_k: &u8, _v: &ExpiredU8| {
+                count2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.set(1, ExpiredU8(5)); // live
+        c.set(2, ExpiredU8(15)); // expired (value > 10)
+
+        clear_with_on_evict_through_trait(&mut c);
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(
+            count.load(AOrdering::Relaxed),
+            2,
+            "on_evict fires for all entries including expired"
+        );
+        assert_eq!(c.cache_evictions(), Some(2));
+        // The plain clear stays silent, so the trait method is not just an alias for it.
+        c.set(3, ExpiredU8(1));
+        c.cache_clear();
+        assert_eq!(count.load(AOrdering::Relaxed), 2);
+        assert_eq!(c.cache_evictions(), Some(2));
     }
 }

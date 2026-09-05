@@ -24,13 +24,20 @@ which collapsed the original base-type-plus-alias pair into a single generic typ
 Sharded stores implement the concurrent trait family: `ConcurrentCacheBase`,
 `ConcurrentCached`, and `ConcurrentCachedAsync` on all six variants; `ConcurrentCacheTtl` on the
 TTL variants; `ConcurrentCacheEvict` and `ConcurrentCloneCached` on the four expiry-capable
-variants (TTL and expiring). The runtime TTL controls (`ttl`/`set_ttl`/`unset_ttl`/
+variants (TTL and expiring); `ConcurrentCacheClearWithOnEvict` on all six variants; and
+`ConcurrentCacheSetMaxSize` on the three LRU-bounded variants (`ShardedLruCache`,
+`ShardedLruTtlCache`, `ShardedExpiringLruCache`). See
+[design/0050-capability-traits-for-inherent-only-ops.md](design/0050-capability-traits-for-inherent-only-ops.md)
+and [traits-concurrent.md](traits-concurrent.md) CTRAIT-10/CTRAIT-11. The runtime TTL controls (`ttl`/`set_ttl`/`unset_ttl`/
 `refresh_on_hit`/`set_refresh_on_hit`) exist only on `ConcurrentCacheTtl`, not as inherent
 methods. Each of the six concrete sharded types also exposes inherent shims that return unwrapped
 values and take call-site priority over the `ConcurrentCachedExt` aliases: `get`, `set`, `remove`,
 `remove_entry`, `delete`, `reset`, `contains`, and `peek` (`contains` and `peek` are peek-based,
 infallible, `&self`; `peek` returns a clone of the live value with no recency/TTL/metrics
-effects). The same `peek` contract is also reachable generically through the `ConcurrentCachePeek`
+effects). `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek` (every inherent lookup
+except `set` and `get_or_set_with`, which insert the key) accept any borrowed form of the key
+(`K: Borrow<Q>`), bounded on `H: ShardHasher<Q>`; see [SHARD-15](#shard-15). The same `peek` contract
+is also reachable generically through the `ConcurrentCachePeek`
 trait (`cache_peek` plus a defaulted `peek` alias, `Result<Option<V>, Infallible>` on these six
 stores); the inherent shim keeps call-site priority on the concrete types.
 Metrics are exposed through the trait per
@@ -50,7 +57,12 @@ Collapsing the `*Base` type and its alias into one generic type shipped; see
 
 The LRU-bounded variants (`ShardedLruCache`, `ShardedLruTtlCache`, `ShardedExpiringLruCache`)
 support runtime capacity resizing via `set_max_size(&self)` / `try_set_max_size(&self)`, using
-the builders' ceiling-division-plus-16-per-shard-floor policy. Shrinks evict per shard strictly
+the builders' ceiling-division-plus-16-per-shard-floor policy. These are also reachable generically
+through `ConcurrentCacheSetMaxSize`; see [SHARD-3](#shard-3) and
+[traits-concurrent.md](traits-concurrent.md) CTRAIT-10. Both methods return the *previous* bound
+wrapped in `Some`, and that returned value is the ROUNDED effective total (shard count times
+per-shard cap after the ceiling-division-plus-floor policy), not the raw `max_size` a caller
+last passed in; see [SHARD-7](#shard-7) for how the two can diverge. Shrinks evict per shard strictly
 by LRU recency (TTL/expiry state is ignored); resize is not atomic across shards. The unbounded
 variants' builders (`ShardedUnboundCacheBuilder`, `ShardedTtlCacheBuilder`,
 `ShardedExpiringCacheBuilder`) take a `per_shard_initial_capacity` preallocation hint, the
@@ -177,7 +189,8 @@ silently discard `H` still fails to compile; a custom hasher is introduced only 
 ## SHARD-14
 
 `ShardHasher<K>` is blanket-implemented for every `std::hash::BuildHasher` that is
-`Clone + Send + Sync + 'static`, for every `K: Hash`, forwarding to `BuildHasher::hash_one`. The
+`Clone + Send + Sync + 'static`, for every `K: Hash`, hashing the key explicitly: build a
+`Hasher` with `build_hasher()`, feed the key to it with `Hash::hash`, then `finish()` it. The
 same hasher value therefore works on both cache families: `std::hash::RandomState`,
 `ahash::RandomState`, and any other thread-safe `BuildHasher` accepted by the single-owner
 builders' `hasher` method (see [store-lru.md](store-lru.md),
@@ -187,11 +200,61 @@ that blanket impl and no longer carries its own; it implements `BuildHasher` ins
 symmetrically usable as the hash builder of a non-sharded store or a plain `HashMap`.
 
 The upper-32-bit distribution contract of [SHARD-1](#shard-1) is unchanged and is not implied by
-`BuildHasher`: `hash_one` on `std::hash::RandomState` (SipHash-1-3) and on `ahash::RandomState`
-diffuse key entropy across all 64 bits and satisfy it, but a hand-written `BuildHasher` whose
-`finish` leaves the high bits constant still routes every key to shard 0.
+`BuildHasher`: the `Hasher` finished by `std::hash::RandomState` (SipHash-1-3) and by
+`ahash::RandomState` (ahash's own) diffuse key entropy across all 64 bits and satisfy it, but a
+hand-written `BuildHasher` whose `finish` leaves the high bits constant still routes every key to
+shard 0.
 
 Coherence makes the blanket impl exclusive: a type that implements `BuildHasher` can no longer
 also carry a hand-written `ShardHasher` impl. Custom shard routing belongs on a type that does
 not implement `BuildHasher`. This is a BREAKING change. See
 [design/0044-blanket-shardhasher-over-buildhasher.md](design/0044-blanket-shardhasher-over-buildhasher.md).
+
+## SHARD-15
+
+The six sharded stores' inherent `get`, `remove`, `remove_entry`, `delete`, `contains`, and `peek`
+are generic over `Q` and take any borrowed form of the key (`K: Borrow<Q>`, `Q: Hash + Eq +
+?Sized`), matching the single-owner stores' `Cached` methods: `sharded_cache.get("a")` now works
+on a `ShardedLruCache<String, _>` without allocating a `String`. `set` and `get_or_set_with` are
+unchanged and stay owned-key, since they insert the key rather than look it up.
+
+Each of the six methods is additionally bounded on `H: ShardHasher<Q>` rather than `H:
+ShardHasher<K>`. `ShardHasher<K>`'s key parameter is itself relaxed to `ShardHasher<K: ?Sized>` so
+`Q: ?Sized` (for example `Q = str`) can satisfy it. `DefaultShardHasher` and
+every ordinary `BuildHasher` reach `ShardHasher<Q>` for every `Q` through the blanket impl, where
+owned-key and borrowed-key routing provably agree because both go through the same explicit
+`build_hasher()` / `Hash::hash` / `finish` construction and `Hash::hash` on the owned and borrowed
+forms of a `K: Borrow<Q>` already must agree, the same guarantee `HashMap::get` already depends on.
+A hand-written `ShardHasher` router keeps these six methods at every key type for which it
+implements `ShardHasher<Q>`. A lookup at a `Q` it has not implemented fails to compile, in one of
+two shapes depending on how many impls the router carries:
+
+- Exactly one `ShardHasher` impl: inference has a single candidate, so `Q` collapses onto that
+  impl's key type before any bound is checked and rustc reports `E0308` mismatched types at the
+  call site (`expected &UserId, found &u64`). Neither the missing bound nor `ShardHasher`'s
+  `#[diagnostic::on_unimplemented]` text appears. Golden:
+  `tests/ui/sharded_router_missing_borrowed_impl.stderr`.
+- Two or more impls, or a generic `H`: `Q` has nothing to collapse onto, the `H: ShardHasher<Q>`
+  bound is checked, and the failure is `E0277` carrying the `on_unimplemented` message
+  (``NameRouter cannot route keys of type str to a shard``) and its notes. Golden:
+  `tests/ui/sharded_router_multi_impl_missing_borrowed_impl.stderr`.
+
+A router implementing `ShardHasher` for more than one key type carries an unenforced cross-impl
+consistency contract: for `K: Borrow<Q>`, `shard_hash(&k)` must equal `shard_hash(k.borrow())`.
+The compiler cannot check this, the same way it cannot check that `Borrow`'s own "equal keys hash
+equally" requirement holds. Violating it routes an owned insert and an equivalent borrowed lookup
+to different shards, producing a silent miss on an entry that is present. A type reaching
+`ShardHasher` only through the blanket `BuildHasher` impl satisfies this automatically and never
+needs to reason about it.
+
+It is a BREAKING change for the case most likely to hit a user who never wrote a custom hasher at
+all: `for k in &keys { cache.get(&k) }` where `k: &K` (so `&k` is `&&K`; same for `&Box<K>` and
+`&Arc<K>`) previously compiled through deref coercion. It no longer does, since `Q` now unifies to
+`&K` first and the call fails with ``the trait bound `String: Borrow<&String>` is not satisfied``.
+Migration: drop the extra `&` (`cache.get(k)`); for a `k: &Box<K>` or `k: &Arc<K>` there is no
+extra `&` to drop, so deref explicitly instead -- `&*k` is still `&Box<K>` (a reborrow, not a
+deref through `Box`'s own `Deref`) and fails the same way, so it takes two derefs:
+`cache.get(&**boxed)`. This matches the existing `get` rustdoc
+(`src/stores/sharded/unbound.rs:316-318` and its five siblings). See
+[design/0052-sharded-borrowed-key-lookups.md](design/0052-sharded-borrowed-key-lookups.md) and
+[design/0055-shard-hasher-q-over-borrowed-key-routing.md](design/0055-shard-hasher-q-over-borrowed-key-routing.md).

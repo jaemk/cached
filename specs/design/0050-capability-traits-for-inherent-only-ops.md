@@ -1,6 +1,6 @@
 # 0050 - Capability traits for `set_max_size` and `cache_clear_with_on_evict`
 
-Status: Not implemented
+Status: Implemented
 
 ## Current state
 
@@ -285,3 +285,38 @@ inherent path agree. Run the crate's existing `cargo test --all-features` (prefi
   entries) and `specs/traits-concurrent.md` `CTRAIT-10` (and `CTRAIT-11` if split) - confirm
   against the files directly before allocating, since sibling 3.2 work may have already claimed
   the next ID by the time this is picked up.
+
+## Outcome
+
+Implemented over exactly the implementor sets in "Desired work", with the implementor sets,
+`try_set_max_size` error handling, and the additive/non-breaking shape all landing as designed.
+One deviation from the "Recommended shape" above: the four traits (`CacheSetMaxSize`,
+`ConcurrentCacheSetMaxSize`, `CacheClearWithOnEvict`, `ConcurrentCacheClearWithOnEvict`) are
+defined directly in `src/lib.rs`, not in `src/stores/mod.rs` next to `CacheEvict` as recommended,
+and so are not re-exported from `stores` at all - they are plain `pub trait` items in
+`src/lib.rs`, added to `cached::prelude` as planned. This matches where the crate's other single-owner/concurrent
+capability trait pairs already live (`CacheExpiry`/`ConcurrentCacheExpiry`, `CacheTtl`,
+`CacheRefreshOnHit`/`ConcurrentCacheRefreshOnHit` are all `pub trait` items in `src/lib.rs`, not
+`src/stores/mod.rs`), rather than the `CacheEvict`/`ConcurrentCacheEvict` precedent this record
+cited for the recommendation. This record's own "Recommended shape" (place the four traits in
+`src/stores/mod.rs`, re-exported) was itself inconsistent with `specs/traits-core.md:3-4`'s "most
+are defined in `src/lib.rs`; `CacheEvict` and `Expires` are defined under `src/stores/` and
+re-exported" framing: that framing already correctly described where these four traits would land
+if implemented as `src/lib.rs` items, so the shipped placement matches the existing framing and it
+was the recommendation, not the outcome, that would have broken it.
+
+Allocated `specs/traits-core.md` `TRAIT-7` (`CacheSetMaxSize`) and `TRAIT-8`
+(`CacheClearWithOnEvict`), split per the two-trait-pairs-not-one rule in "Pitfalls", and
+`specs/traits-concurrent.md` `CTRAIT-10` / `CTRAIT-11` for their concurrent mirrors. Updated the
+crate-doc trait overview (`src/lib.rs`) and the `AGENTS.md` Key Traits table with four new rows.
+`README.md` regenerated via `make docs/readme` and verified with `make check/readme`.
+
+One deviation not mentioned above: implementing `CacheClearWithOnEvict`'s contract (count an
+eviction per removed entry, per TRAIT-8) forced a behavior fix on `TtlSortedCache`.
+`TtlSortedCache::cache_clear_with_on_evict` previously took an early-return fast path that cleared
+the store without counting anything when no `on_evict` callback was configured; it now counts an
+eviction per removed entry unconditionally, matching the trait contract and every other
+implementor (commit 2470c41; `CHANGELOG.md` "Fixed", "Observable to anyone metering evictions on
+that store"). This is the fix that lets `specs/traits-core.md` TRAIT-8 call `UnboundCache` the
+"sole exception" among the seven single-owner stores for eviction counters -- without it,
+`TtlSortedCache` would have been a second, undocumented exception.

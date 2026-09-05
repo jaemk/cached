@@ -21,10 +21,43 @@ These cover the new attribute validations:
 - a `create` block combined with `ttl_millis` (the create-conflict rejection,
   #149) on both `#[cached]` and `#[concurrent_cached]`.
 
-All of the compile-fail cases fire during macro expansion before any
-feature-gated store type is emitted, so `proc_macro` alone is sufficient (no
-`time_stores` needed). The one compile-pass case expands fully and is gated on
-`time_stores`.
+Most of the compile-fail cases fire during macro expansion before any
+feature-gated store type is emitted, so `proc_macro` alone is sufficient for them
+(no `time_stores` needed). Two cases are gated on `time_stores`: the one
+compile-pass case, which expands fully, and `expiring_cache_no_set_max_size`,
+whose golden quotes rustc's list of the other `CacheSetMaxSize` implementors and
+so changes with the feature slice.
+
+Not all of them, though, and the file name undersells what it now covers. Ten
+of the registered fixtures are not macro diagnostics at all:
+
+- `sharded_router_missing_borrowed_impl`,
+  `sharded_helper_missing_borrowed_bound`,
+  `sharded_helper_missing_borrowed_bound_no_turbofish`,
+  `sharded_router_multi_impl_missing_borrowed_impl`,
+  `sharded_helper_missing_key_bounds` and
+  `sharded_double_reference_key_inference` are borrowed-key / `ShardHasher`
+  type-check failures in fully expanded programs that instantiate
+  `ShardedUnboundCache` / `ShardedLruCache`. They invoke no macro from this
+  crate, and they fail during type checking, not expansion.
+- `expiring_cache_no_set_max_size` and `sharded_unbound_no_set_ttl` are
+  capability-trait negative surface (a store deliberately left off a trait), also
+  in expanded programs.
+- `sharded_non_clone_shard_hasher` and `sharded_non_clone_build_hasher` pin the
+  two halves of the `ShardHasher: Clone + Send + Sync + 'static` supertrait
+  surface: the first at a hand-written `impl` block in the fixture, the second at
+  a builder call site where a non-`Clone` `BuildHasher` falls out of the blanket
+  impl.
+- `sharded_double_reference_key_inference` additionally needs the `rust-src`
+  component installed, because its golden quotes a `core` span.
+
+Known wart: every one of them is reachable only under the `#![cfg(feature =
+"proc_macro")]` gate below despite having nothing to do with proc macros, so a
+feature slice that leaves `proc_macro` off silently skips them. They live here
+because this is where the trybuild runner is, and moving them to their own test
+file was considered and deliberately declined -- a second `trybuild::TestCases`
+would recompile the shared fixtures' dependencies for no added coverage. Read the
+file name as "the trybuild goldens", not "the macro goldens".
 */
 
 #![cfg(feature = "proc_macro")]
@@ -80,10 +113,58 @@ fn compile_fail_v3_macros() {
     t.compile_fail("tests/ui/cached_name_keyword.rs");
     // Item 11: `ShardHasher: Clone` supertrait - a non-Clone custom hasher is rejected.
     t.compile_fail("tests/ui/sharded_non_clone_shard_hasher.rs");
+    // The other half of the supertrait surface: a plain `BuildHasher` that is not `Clone` falls
+    // out of the blanket `ShardHasher` impl and is reported at the call site as a missing
+    // `ShardHasher` impl, where the `on_unimplemented` notes fire. Its first note is written for
+    // precisely this reader, so this golden is what keeps that note aimed at a real diagnostic.
+    t.compile_fail("tests/ui/sharded_non_clone_build_hasher.rs");
     // Negative surface for the concurrent trait split: non-TTL sharded stores do not
     // implement `ConcurrentCacheTtl`, so `set_ttl` does not exist on them even under
     // the prelude glob.
     t.compile_fail("tests/ui/sharded_unbound_no_set_ttl.rs");
+    // The single-owner counterpart: `ExpiringCache` is deliberately left off `CacheSetMaxSize`
+    // (it has no live bound to resize, and a stub returning `None` would be indistinguishable to a
+    // generic caller from a store that really resized), so a `T: CacheSetMaxSize` helper must
+    // reject it at compile time. A future stub impl would make this compile and break the golden.
+    // Gated on `time_stores`: the E0277 carries rustc's "the following other types implement
+    // trait `CacheSetMaxSize`" list, and `LruTtlCache` / `TtlSortedCache` are in that list only
+    // when `time_stores` is on, so the golden is not feature-invariant. Covered by the
+    // time_stores/default/async CI targets.
+    #[cfg(feature = "time_stores")]
+    t.compile_fail("tests/ui/expiring_cache_no_set_max_size.rs");
+    // Negative surface for a hand-written router carrying only ONE `ShardHasher<K>` impl: per
+    // 0055's Pitfalls, the missing borrowed-key impl collapses to an inference / type mismatch
+    // (E0308) at the call site, not an unsatisfied bound, so `ShardHasher`'s
+    // `#[diagnostic::on_unimplemented]` never fires here. Pinned so a future change that makes
+    // this fire (or stops firing entirely, silently) is visible.
+    t.compile_fail("tests/ui/sharded_router_missing_borrowed_impl.rs");
+    // Negative surface for a generic helper bounded only on `H: ShardHasher<K>` performing a
+    // borrowed lookup without also bounding `H: ShardHasher<Q>`: `H` is an unresolved type
+    // parameter here, not a concrete router with one impl to collapse onto, so this is a real
+    // unsatisfied bound and `ShardHasher`'s `#[diagnostic::on_unimplemented]` text does fire.
+    t.compile_fail("tests/ui/sharded_helper_missing_borrowed_bound.rs");
+    // The same helper written the way a caller actually writes it, without the turbofish: with one
+    // `ShardHasher` bound in scope, `Q` collapses to `String` before any bound is checked and the
+    // plain `c.get("a")` fails as an E0308 argument mismatch (`expected &String, found &str`), NOT
+    // as a missing bound. The crate docs and `README.md` quote that exact wording as the migration
+    // text for an under-bounded helper; this golden is what keeps that quote honest, and the
+    // turbofished sibling above is only a fixture device for pinning the `on_unimplemented` text.
+    t.compile_fail("tests/ui/sharded_helper_missing_borrowed_bound_no_turbofish.rs");
+    // The case in between the two above: a CONCRETE hand-written router that already carries two
+    // `ShardHasher` impls, asked for a third key type. With more than one impl in play there is
+    // nothing for `Q` to collapse onto, so the bound is genuinely unsatisfied and the
+    // `on_unimplemented` text fires for a concrete router, not only for a generic `H`.
+    t.compile_fail("tests/ui/sharded_router_multi_impl_missing_borrowed_impl.rs");
+    // The generic helper that names `H` but under-bounds `K`/`V`: the inherent `get` lives in an
+    // `impl` block requiring `K: Hash + Eq + Clone` and returns `V` by value, so a helper bounded
+    // only on `H: ShardHasher<K>` fails at its own definition with E0599 (no method named `get`)
+    // rather than with anything about the hasher. The crate docs quote that E0599 as the thing to
+    // read as a bounds list; this golden is what keeps that quote honest.
+    t.compile_fail("tests/ui/sharded_helper_missing_key_bounds.rs");
+    // Break class 2 (`cache.get(&k)` with `k: &K` inferring `Q = &K`), which 0055 deliberately
+    // does not fix. `CHANGELOG.md`, the crate docs and `README.md` all quote this diagnostic
+    // verbatim as the migration text; this golden is what keeps that quote honest.
+    t.compile_fail("tests/ui/sharded_double_reference_key_inference.rs");
     // Item 9: `#[cached]`-only attributes rejected on other macros
     t.compile_fail("tests/ui/once_sync_lock_unsupported.rs");
     t.compile_fail("tests/ui/once_unsync_reads_unsupported.rs");

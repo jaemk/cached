@@ -4,25 +4,48 @@ Status: Implemented
 
 ## Outcome
 
-Shipped as `src/claim.rs`: `ClaimRegistry<K>` (`K: Eq + Hash + Clone`), `Claim<K>`, and the
-`#[must_use]` `claim`/`is_claimed`/`len`/`is_empty` surface, matching the proposed surface in
-"Desired work" exactly, including the `Clone`-over-`Arc<K>` tradeoff and `parking_lot::Mutex`.
+Shipped as `src/claim.rs`: `ClaimRegistry<K>` (`K: Eq + Hash + Clone`), `Claim<K>`, matching the
+proposed surface in "Desired work" for `new`/`claim`/`is_claimed`/`len`/`is_empty`, including the
+`Clone`-over-`Arc<K>` tradeoff and `parking_lot::Mutex`. `claim` returns a `#[must_use]` guard; the
+read-only accessors (`is_claimed`, `len`, `is_empty`) are also `#[must_use]`. The shipped type
+carries three impls the proposed surface did not list: `impl Default for ClaimRegistry`
+(`K: Eq + Hash + Clone`, `src/claim.rs:171-175`, equivalent to `new()`), `impl Debug for
+ClaimRegistry` (`K: Debug + Clone`, `:280-293`), and `impl Debug for Claim` (`K: Eq + Hash +
+Debug`, `:333`). The `Debug` impl on `ClaimRegistry` carries its own lock-discipline choice: the
+key set is cloned under the registry mutex and formatted only after the guard drops, so `K::fmt`
+and whatever writer it targets never run while the mutex is held. See CLAIM-8 in
+[claim-registry.md](../claim-registry.md).
 
 Two points the record left open:
 
 - **Crate-root naming.** The record said "consider exporting only through `cached::claim::` plus
-  the prelude" (Pitfalls). That is what shipped: `pub mod claim;` at `src/lib.rs:915`, with
-  `Claim`/`ClaimRegistry` re-exported through `cached::prelude` (`src/lib.rs:1203`) and nowhere at
-  the crate root, for the same `KeyedCache` nearest-match-suggestion reason recorded at
-  `src/lib.rs:1143-1145`.
+  the prelude" (Pitfalls). That is what shipped: the `pub mod claim;` declaration in `src/lib.rs`,
+  with `Claim`/`ClaimRegistry` re-exported through the `pub use crate::claim::{Claim,
+  ClaimRegistry};` line inside `cached::prelude` in `src/lib.rs`, and nowhere at the crate root,
+  for the same `KeyedCache` nearest-match-suggestion reason: the doc comment on the `KeyedCache`
+  struct in `src/lib.rs`'s `__private` module records that `KeyedCache` "was previously exported
+  at the crate root, where rustc offered it as the nearest-match suggestion for unrelated
+  mistyped imports"; the `cached::prelude` module doc in `src/lib.rs` makes the same point about
+  `Claim`/`ClaimRegistry` directly, citing that as "the reason `KeyedCache` moved off the root".
 - **Capacity: shrink on empty vs. document the high-water mark.** The record posed this as a
   decision to make (Pitfalls, "Capacity is a high-water mark"). It shipped documented and left
-  alone, not shrunk: the module doc's "Capacity" section (`src/claim.rs:87-93`) states the set
-  keeps its peak allocation for the life of the registry and recommends a registry per key space
-  where that bound matters, rather than calling `shrink_to_fit` on drain to empty.
+  alone, not shrunk: the module doc's "Capacity" section in `src/claim.rs` states the set keeps
+  its peak allocation for the life of the registry and recommends a registry per key space where
+  that bound matters, rather than calling `shrink_to_fit` on drain to empty.
 
-`examples/stale_while_revalidate.rs` and `examples/refresh_before_expiry.rs` are being rewritten
-onto the shipped type in a separate change; not evaluated here.
+Both example rewrites landed in this same change, not a separate one. The hand-rolled
+`RefreshClaim` guard, `claim_refresh`, and `release_refresh` block is deleted from both
+`examples/stale_while_revalidate.rs` and `examples/refresh_before_expiry.rs`; both now `use
+cached::claim::ClaimRegistry` and hold a `static REFRESHING: LazyLock<ClaimRegistry<String>>` in
+its place, exactly the shape "Desired work" and "Verification" called for. One consequence of the
+`parking_lot::Mutex` choice (over `std::sync::Mutex`): the poisoned-mutex section this record's
+own Verification bullet listed ("a claim dropped over a poisoned mutex releases instead of
+panicking a second time") is gone from both examples along with the
+`.lock().unwrap_or_else(PoisonError::into_inner)` recovery it existed to prove, because
+`parking_lot::Mutex` does not poison, so there is nothing left to recover from and nothing left
+to test. The panic and cancellation (abort) sections both examples' Verification bullet also
+called for are still present, now driven against the shipped `ClaimRegistry`/`Claim` rather than
+the hand-rolled pair.
 
 ## Current state
 
@@ -142,8 +165,12 @@ Points that are decisions, not details:
   is exactly why both examples declare `Mutex<Option<HashSet<String>>>` and lazily
   `get_or_insert_with` (`stale_while_revalidate.rs:181`, `204-207`).
 - **`key()` is load-bearing, not a convenience.** Because the refresh borrows its key out of the
-  guard, the guard cannot be dropped before the refresh finishes without a borrow error. The
-  correct usage is the one the compiler already enforces.
+  guard, the guard cannot be dropped before the borrow's own call finishes without a borrow error.
+  **Correction (shipped behavior, see CLAIM-3 in [claim-registry.md](../claim-registry.md)):** this
+  only pins the guard for the duration of the call the borrow is passed into, not for the whole
+  refresh -- cloning the key out of the borrow and dropping the claim early compiles fine and
+  silently defeats the deduplication, which is exactly the anti-pattern documented in
+  `src/claim.rs:94-100`. The compiler enforces the borrow, not the intended usage.
 - **No async variant, one type for both.** The guard is a `Drop` impl, and `Drop` runs the same
   way for a thread that returns, a thread that unwinds, a task that completes, and a task whose
   future is dropped mid-poll (cancellation). The only async-specific requirement is that

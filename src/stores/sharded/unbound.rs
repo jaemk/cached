@@ -1,11 +1,7 @@
+use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(feature = "ahash")]
-use ahash::RandomState;
-#[cfg(not(feature = "ahash"))]
-use std::collections::hash_map::RandomState;
 
 use std::collections::HashMap;
 
@@ -24,7 +20,7 @@ type OnEvict<K, V> = Arc<dyn Fn(&K, &V) + Send + Sync>;
 
 #[allow(clippy::type_complexity)]
 struct UnboundInner<K, V, H> {
-    shards: Box<[CachePadded<Shard<HashMap<K, V, RandomState>>>]>,
+    shards: Box<[CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>]>,
     shard_mask: usize,
     hasher: H,
     on_evict: Option<OnEvict<K, V>>,
@@ -110,9 +106,110 @@ where
     H: ShardHasher<K>,
 {
     #[inline]
-    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, RandomState>>> {
+    fn shard_of(&self, k: &K) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>> {
         let h = self.inner.hasher.shard_hash(k);
         &self.inner.shards[shard_index(h, self.inner.shard_mask)]
+    }
+
+    /// Route a borrowed key to the shard that owns the equivalent owned key.
+    ///
+    /// Calls the same [`ShardHasher::shard_hash`](super::ShardHasher::shard_hash) the owned path
+    /// (`shard_of`) calls, only at `Q` instead of `K`, so the two cannot drift and a custom
+    /// router's own `shard_hash` is honored here rather than bypassed. When `H` reaches
+    /// `ShardHasher` through the blanket `BuildHasher` impl, both instantiations run
+    /// [`routing_hash`](super::routing_hash), so the hash for `&Q` equals the hash for the owned
+    /// `K` by the `Borrow` contract alone (equal keys hash equally), the same guarantee
+    /// `HashMap::get(&str)` on a `String` key already relies on. When `H` carries hand-written
+    /// impls, that agreement is the cross-impl contract documented on
+    /// [`ShardHasher`](super::ShardHasher).
+    #[inline]
+    fn shard_of_borrowed<Q>(&self, k: &Q) -> &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        let h = self.inner.hasher.shard_hash(k);
+        &self.inner.shards[shard_index(h, self.inner.shard_mask)]
+    }
+}
+
+/// Shared lookup bodies. Routing is the caller's job (`shard_of` for an owned key,
+/// `shard_of_borrowed` for a borrowed one), so the owned and borrowed entry points run one
+/// implementation and cannot drift on metrics or `on_evict`.
+///
+/// `get_in`, `contains_in` and `peek_in` take a `&self` they never use; only `remove_entry_in`
+/// needs it, for `on_evict`. Kept for call-site symmetry (every `*_in` method is called as
+/// `self.*_in(shard, k)`) rather than dropped per-method.
+impl<K, V, H: ShardHasher<K>> ShardedUnboundCache<K, V, H>
+where
+    K: Hash + Eq,
+    V: Clone,
+{
+    fn get_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let guard = shard.lock.read();
+        let found = guard.get(k).cloned();
+        drop(guard);
+        match found {
+            Some(v) => {
+                shard.hits.fetch_add(1, Ordering::Relaxed);
+                Some(v)
+            }
+            None => {
+                shard.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    fn remove_entry_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let removed = shard.lock.write().remove_entry(k);
+        if let Some((ref stored_k, ref v)) = removed
+            && let Some(on_evict) = &self.inner.on_evict
+        {
+            on_evict(stored_k, v);
+        }
+        removed
+    }
+
+    fn contains_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        shard.lock.read().contains_key(k)
+    }
+
+    fn peek_in<Q>(
+        &self,
+        shard: &CachePadded<Shard<HashMap<K, V, DefaultShardHasher>>>,
+        k: &Q,
+    ) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        shard.lock.read().get(k).cloned()
     }
 }
 
@@ -192,9 +289,41 @@ where
     /// [`ConcurrentCached`] should use the `Result`-returning trait methods (`cache_get` or the
     /// `get` alias from [`ConcurrentCachedExt`](crate::ConcurrentCachedExt)), callable as
     /// `ConcurrentCachedExt::get(&store, k)` when this inherent method is in scope.
+    ///
+    /// Takes any borrowed form of the key, so a `String`-keyed cache reads with a `&str`:
+    ///
+    /// ```rust
+    /// use cached::ShardedUnboundCache;
+    ///
+    /// let cache: ShardedUnboundCache<String, u32> = ShardedUnboundCache::new();
+    /// cache.set("a".to_string(), 1);
+    /// assert_eq!(cache.get("a"), Some(1));
+    /// ```
+    ///
+    /// This method is bounded on `H: ShardHasher<Q>`. Every hasher that reaches [`ShardHasher`]
+    /// through the blanket `BuildHasher` impl satisfies it for every `Q: Hash`, including the
+    /// default [`DefaultShardHasher`], so the owned-key call `cache.get(&k)` and the borrowed
+    /// `cache.get("k")` both work. A store built on a hand-written `ShardHasher` keeps this
+    /// method at the key types it implements: `ShardHasher<K>` alone gives the owned-key call,
+    /// and a borrowed form needs a second `impl ShardHasher<Q>` on the router, which must agree
+    /// with the first (see [`ShardHasher`]'s consistency contract).
+    ///
+    /// `K` and `Q` must hash identically, which is what the `Borrow` contract already requires. A
+    /// borrowed form that hashes differently routes to a different shard, so the lookup misses an
+    /// entry that is present and counts the miss against it. Pass the borrowed key directly:
+    /// `cache.get(&k)` where `k: &String` (the loop variable of `for k in &keys`, for instance)
+    /// infers `Q = &String` and fails on `String: Borrow<&String>`, so drop the extra `&` and
+    /// write `cache.get(k)`. A `&Box<K>` or `&Arc<K>` has no extra `&` to drop and needs an
+    /// explicit deref instead (`cache.get(&**k)`). With a single-impl router the failure is an
+    /// argument type mismatch (E0308, `expected &UserId, found &u64`), not a missing bound.
     #[must_use]
-    pub fn get(&self, k: &K) -> Option<V> {
-        ConcurrentCached::cache_get(self, k).unwrap()
+    pub fn get<Q>(&self, k: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        self.get_in(self.shard_of_borrowed(k), k)
     }
 
     /// Insert a key-value pair and return the previous value, if any.
@@ -223,23 +352,42 @@ where
 
     /// Remove a cached value and return it if the entry was live.
     ///
-    /// This is the infallible ergonomic API for the concrete type.
-    pub fn remove(&self, k: &K) -> Option<V> {
-        ConcurrentCached::cache_remove(self, k).unwrap()
+    /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
+    pub fn remove<Q>(&self, k: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        self.remove_entry_in(self.shard_of_borrowed(k), k)
+            .map(|(_, v)| v)
     }
 
     /// Remove a cached entry and return the stored key and value, if present.
     ///
-    /// This is the infallible ergonomic API for the concrete type.
-    pub fn remove_entry(&self, k: &K) -> Option<(K, V)> {
-        ConcurrentCached::cache_remove_entry(self, k).unwrap()
+    /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
+    pub fn remove_entry<Q>(&self, k: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        self.remove_entry_in(self.shard_of_borrowed(k), k)
     }
 
     /// Delete a cached entry without returning the value. Returns `true` if an entry was removed.
     ///
-    /// This is the infallible ergonomic API for the concrete type.
-    pub fn delete(&self, k: &K) -> bool {
-        ConcurrentCached::cache_delete(self, k).unwrap()
+    /// This is the infallible ergonomic API for the concrete type. Takes any borrowed form of
+    /// the key; see [`get`](Self::get) for the `H: ShardHasher<Q>` bound that carries.
+    pub fn delete<Q>(&self, k: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        self.remove_entry_in(self.shard_of_borrowed(k), k).is_some()
     }
 
     /// Remove all entries from every shard and reset metrics.
@@ -250,9 +398,17 @@ where
     }
 
     /// Return true if a live value is stored for `k`. Peek-based: no recency update, no hit/miss metrics.
+    ///
+    /// Takes any borrowed form of the key; see [`get`](Self::get) for the
+    /// `H: ShardHasher<Q>` bound that carries.
     #[must_use]
-    pub fn contains(&self, k: &K) -> bool {
-        ConcurrentCached::cache_contains(self, k).unwrap()
+    pub fn contains<Q>(&self, k: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        self.contains_in(self.shard_of_borrowed(k), k)
     }
 
     /// Return a clone of the value stored for `k` without observable side effects:
@@ -260,9 +416,17 @@ where
     /// [`CachedPeek::cache_peek`](crate::CachedPeek::cache_peek); the sharded stores
     /// return a clone rather than a reference because the value lives behind a
     /// per-shard lock.
+    ///
+    /// Takes any borrowed form of the key; see [`get`](Self::get) for the
+    /// `H: ShardHasher<Q>` bound that carries.
     #[must_use]
-    pub fn peek(&self, k: &K) -> Option<V> {
-        self.shard_of(k).lock.read().get(k).cloned()
+    pub fn peek<Q>(&self, k: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        H: ShardHasher<Q>,
+    {
+        self.peek_in(self.shard_of_borrowed(k), k)
     }
 }
 
@@ -412,6 +576,16 @@ where
     }
 }
 
+impl<K, V, H: ShardHasher<K>> crate::ConcurrentCacheClearWithOnEvict
+    for ShardedUnboundCache<K, V, H>
+where
+    K: Hash + Eq,
+{
+    fn cache_clear_with_on_evict(&self) {
+        ShardedUnboundCache::cache_clear_with_on_evict(self);
+    }
+}
+
 impl<K, V, H> ConcurrentCacheBase for ShardedUnboundCache<K, V, H>
 where
     K: Hash + Eq,
@@ -452,20 +626,7 @@ where
     H: ShardHasher<K>,
 {
     fn cache_get(&self, k: &K) -> Result<Option<V>, Self::Error> {
-        let shard = self.shard_of(k);
-        let guard = shard.lock.read();
-        let found = guard.get(k).cloned();
-        drop(guard);
-        match found {
-            Some(v) => {
-                shard.hits.fetch_add(1, Ordering::Relaxed);
-                Ok(Some(v))
-            }
-            None => {
-                shard.misses.fetch_add(1, Ordering::Relaxed);
-                Ok(None)
-            }
-        }
+        Ok(self.get_in(self.shard_of(k), k))
     }
 
     fn cache_set(&self, k: K, v: V) -> Result<Option<V>, Self::Error> {
@@ -480,14 +641,7 @@ where
     }
 
     fn cache_remove_entry(&self, k: &K) -> Result<Option<(K, V)>, Self::Error> {
-        let shard = self.shard_of(k);
-        let removed = shard.lock.write().remove_entry(k);
-        if let Some((ref stored_k, ref v)) = removed
-            && let Some(on_evict) = &self.inner.on_evict
-        {
-            on_evict(stored_k, v);
-        }
-        Ok(removed)
+        Ok(self.remove_entry_in(self.shard_of(k), k))
     }
 
     fn cache_clear(&self) -> Result<(), Self::Error> {
@@ -511,8 +665,7 @@ where
     /// Efficient peek-based contains: acquires a read lock, does not clone the value,
     /// and does not record hit/miss metrics.
     fn cache_contains(&self, k: &K) -> Result<bool, Self::Error> {
-        let shard = self.shard_of(k);
-        Ok(shard.lock.read().contains_key(k))
+        Ok(self.contains_in(self.shard_of(k), k))
     }
 }
 
@@ -523,7 +676,7 @@ where
     H: ShardHasher<K>,
 {
     fn cache_peek(&self, k: &K) -> Result<Option<V>, Self::Error> {
-        Ok(self.peek(k))
+        Ok(self.peek_in(self.shard_of(k), k))
     }
 }
 
@@ -706,7 +859,7 @@ impl<K, V, H> ShardedUnboundCacheBuilder<K, V, H> {
             .map(|_| {
                 CachePadded(Shard::new(HashMap::with_capacity_and_hasher(
                     per_shard_capacity,
-                    RandomState::new(),
+                    DefaultShardHasher::new(),
                 )))
             })
             .collect::<Vec<_>>()
@@ -1241,5 +1394,428 @@ mod tests {
         }
         let c = ShardedUnboundCache::<u32, u32>::new();
         use_trait(&c, 1, 100);
+    }
+}
+
+/// Borrowed-key (`Borrow<Q>`) inherent lookups and the concurrent capability traits.
+#[cfg(test)]
+mod borrowed_key_and_capability_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+
+    fn keys() -> Vec<String> {
+        (0..200).map(|i| format!("key-{i}")).collect()
+    }
+
+    fn val(i: usize) -> u32 {
+        i as u32
+    }
+
+    /// A multi-shard, `String`-keyed store with every key inserted by value.
+    fn filled() -> (ShardedUnboundCache<String, u32>, Vec<String>) {
+        let c = ShardedUnboundCache::<String, u32>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        let ks = keys();
+        for (i, k) in ks.iter().enumerate() {
+            c.set(k.clone(), val(i));
+        }
+        assert!(
+            c.shard_sizes().iter().filter(|n| **n > 0).count() > 1,
+            "the borrowed-key tests are only meaningful across several shards: {:?}",
+            c.shard_sizes()
+        );
+        (c, ks)
+    }
+
+    /// Position of `shard` within the store's shard array, found by address.
+    ///
+    /// Used only so the parity assertions below can report that they spanned several shards. The
+    /// assertions themselves compare what the store's own `shard_of` and `shard_of_borrowed`
+    /// return, by address. Recomputing the routing formula in the test instead would assert a
+    /// property of `DefaultShardHasher` rather than of this store, and would keep passing if
+    /// `shard_of_borrowed`'s body were replaced with `&self.inner.shards[0]`.
+    fn shard_position<S>(shards: &[CachePadded<Shard<S>>], shard: &CachePadded<Shard<S>>) -> usize {
+        shards
+            .iter()
+            .position(|s| std::ptr::eq(s, shard))
+            .expect("a shard returned by the store's own router must be one of its shards")
+    }
+
+    /// An owned key and the equivalent borrowed key must select the same shard. A silent
+    /// mismatch here is exactly the failure mode this feature risks: the entry is present, the
+    /// lookup lands on the wrong shard, and the store reports a miss.
+    #[test]
+    fn owned_and_borrowed_keys_route_to_the_same_shard() {
+        let (c, ks) = filled();
+        let mut seen = HashSet::new();
+        for k in &ks {
+            let owned = c.shard_of(k);
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(k.as_str())),
+                "`{k}` routes to a different shard as `&str` than as `String`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+        }
+        assert!(
+            seen.len() > 1,
+            "routing parity must be checked across shards, saw {seen:?}"
+        );
+    }
+
+    /// Routing parity for a newtype over a primitive: `UserId(u64)` with `Borrow<u64>`.
+    ///
+    /// This is the key shape that `BuildHasher::hash_one` cannot be trusted with. `hash_one` is
+    /// an overridable provided method allowed to dispatch on its static type argument, and
+    /// `ahash::RandomState` does: with its `specialize` cfg on (its build.rs enables it on any
+    /// nightly rustc) it has a specialized `CallHasher` impl for `&u64` and none for `&UserId`,
+    /// so `hash_one::<&UserId>` and `hash_one::<&u64>` can return different hashes for two values
+    /// that `Hash` identically. Shard selection routes both sides through `build_hasher` +
+    /// `Hash::hash` + `Hasher::finish` (`routing_hash`), which removes that possibility from
+    /// `shard_of`/`shard_of_borrowed` on every toolchain, so the pointer-equality assertion below
+    /// is a structural guard. The `c.get(&id)` assertion is not purely structural: it also
+    /// exercises the per-shard `HashMap`'s own intra-shard probe. That probe hashes through the
+    /// map's `H`, which is [`DefaultShardHasher`] and does not override `hash_one`; before the
+    /// per-shard maps were switched from `ahash::RandomState` to `DefaultShardHasher`, this same
+    /// assertion could fail on nightly for exactly this key shape. The end-to-end version lives
+    /// in `tests/sharded_newtype_key_routing_parity.rs`.
+    #[test]
+    fn newtype_over_primitive_routes_the_same_owned_and_borrowed() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct UserId(u64);
+        impl std::hash::Hash for UserId {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+        impl std::borrow::Borrow<u64> for UserId {
+            fn borrow(&self) -> &u64 {
+                &self.0
+            }
+        }
+
+        let c = ShardedUnboundCache::<UserId, u32>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        for id in 0..200u64 {
+            c.set(UserId(id), id as u32);
+        }
+
+        let mut seen = HashSet::new();
+        for id in 0..200u64 {
+            let owned = c.shard_of(&UserId(id));
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(&id)),
+                "`UserId({id})` routes to a different shard than its borrowed `u64`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+            assert_eq!(
+                c.get(&id),
+                Some(id as u32),
+                "borrowed `get` with a `&u64` missed `UserId({id})`"
+            );
+        }
+        assert!(
+            seen.len() > 1,
+            "newtype routing parity must be checked across shards, saw {seen:?}"
+        );
+    }
+
+    /// Pins the coupling this fix set up: the per-shard `HashMap`s are now parameterized on
+    /// `DefaultShardHasher`, the same type shard selection uses, so a `hash_one` override added
+    /// back to `DefaultShardHasher` would silently reintroduce the newtype-over-primitive miss in
+    /// both places at once. `hash_one`'s provided default body is exactly `build_hasher` +
+    /// `Hash::hash` + `Hasher::finish`, so with no override this assertion passes trivially, BY
+    /// CONSTRUCTION, on every toolchain: both calls run the identical provided body regardless of
+    /// whether ahash's `specialize` cfg is on. It cannot fail on stable even if the override
+    /// comes back, because that cfg (which is what makes a `hash_one` override observably
+    /// diverge from the provided body) is only ever enabled on nightly. This test is therefore a
+    /// documentation/regression marker for the coupling, not a guard against reintroducing the
+    /// override; the `nightly-routing` CI job (`.github/workflows/build.yml`) is what actually
+    /// exercises this hazard, by running the design-0055 routing suites under a toolchain where
+    /// `specialize` is on.
+    // The `&UserId(7)` / `&7u64` borrows are the point: ahash's `CallHasher` specialization keys
+    // on the reference type argument to `hash_one`, so hashing the owned values would not
+    // exercise the hazard this test pins on nightly.
+    #[allow(clippy::needless_borrows_for_generic_args)]
+    #[test]
+    fn default_shard_hasher_hash_one_agrees_for_newtype_and_primitive() {
+        use std::hash::BuildHasher;
+
+        #[derive(Hash)]
+        struct UserId(u64);
+
+        let h = DefaultShardHasher::new();
+        assert_eq!(h.hash_one(&UserId(7)), h.hash_one(&7u64));
+    }
+
+    /// The other half of the same guard: a bare `HashMap<UserId, u32, DefaultShardHasher>`,
+    /// with no shard routing involved at all, must find an owned-key insert through a borrowed
+    /// `&u64` lookup. This is exactly the intra-shard probe `H1` found broken when the per-shard
+    /// maps were parameterized on `ahash::RandomState` directly.
+    #[test]
+    fn bare_hashmap_with_default_shard_hasher_finds_owned_insert_via_borrowed_get() {
+        #[derive(Hash, PartialEq, Eq)]
+        struct UserId(u64);
+        impl std::borrow::Borrow<u64> for UserId {
+            fn borrow(&self) -> &u64 {
+                &self.0
+            }
+        }
+
+        let mut map: HashMap<UserId, u32, DefaultShardHasher> =
+            HashMap::with_hasher(DefaultShardHasher::new());
+        map.insert(UserId(7), 70);
+        assert_eq!(map.get(&7u64), Some(&70));
+    }
+
+    /// Routing parity for a plain `BuildHasher` that is not `DefaultShardHasher`.
+    ///
+    /// The cases above only ever exercise `DefaultShardHasher`, which is in-tree. This one pins
+    /// the same agreement for `std::hash::RandomState`, which reaches `ShardHasher` through the
+    /// blanket impl and nothing else, and follows it with a borrowed `get` / `remove` round trip
+    /// so the parity is observed through the public surface as well as by address.
+    #[test]
+    fn owned_and_borrowed_keys_route_together_for_a_plain_build_hasher() {
+        let c = ShardedUnboundCache::<String, u32>::builder()
+            .shards(8)
+            .hasher(std::hash::RandomState::new())
+            .build()
+            .unwrap();
+        let ks = keys();
+        for (i, k) in ks.iter().enumerate() {
+            c.set(k.clone(), val(i));
+        }
+        assert!(
+            c.shard_sizes().iter().filter(|n| **n > 0).count() > 1,
+            "the parity check is only meaningful across several shards: {:?}",
+            c.shard_sizes()
+        );
+
+        let mut seen = HashSet::new();
+        for (i, k) in ks.iter().enumerate() {
+            let owned = c.shard_of(k);
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(k.as_str())),
+                "`{k}` routes to a different shard as `&str` than as `String` under `RandomState`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+            assert_eq!(
+                c.get(k.as_str()),
+                Some(val(i)),
+                "borrowed `get` missed `{k}` under a plain `BuildHasher`"
+            );
+        }
+        assert!(
+            seen.len() > 1,
+            "routing parity must be checked across shards, saw {seen:?}"
+        );
+
+        for (i, k) in ks.iter().enumerate() {
+            assert_eq!(
+                c.remove(k.as_str()),
+                Some(val(i)),
+                "borrowed `remove` missed `{k}` under a plain `BuildHasher`"
+            );
+        }
+        assert!(
+            c.is_empty(),
+            "every entry must have been removed through the borrowed key"
+        );
+    }
+
+    /// `Vec<u8>` / `&[u8]` key parity, alongside the `String` / `&str` shape above. A byte-slice
+    /// key forwards `Hash` differently from a `str` key, so the owned/borrowed routing agreement
+    /// is pinned in its own right rather than inferred from the `String` case.
+    #[test]
+    fn owned_and_borrowed_byte_slice_keys_route_to_the_same_shard() {
+        let c = ShardedUnboundCache::<Vec<u8>, u32>::builder()
+            .shards(8)
+            .build()
+            .unwrap();
+        let ks: Vec<Vec<u8>> = (0..200).map(|i| format!("key-{i}").into_bytes()).collect();
+        for (i, k) in ks.iter().enumerate() {
+            c.set(k.clone(), val(i));
+        }
+        assert!(
+            c.shard_sizes().iter().filter(|n| **n > 0).count() > 1,
+            "byte-key routing parity is only meaningful across several shards: {:?}",
+            c.shard_sizes()
+        );
+
+        let mut seen = HashSet::new();
+        for (i, k) in ks.iter().enumerate() {
+            let owned = c.shard_of(k);
+            assert!(
+                std::ptr::eq(owned, c.shard_of_borrowed(k.as_slice())),
+                "`{k:?}` routes to a different shard as `&[u8]` than as `Vec<u8>`"
+            );
+            seen.insert(shard_position(&c.inner.shards, owned));
+            assert_eq!(
+                c.get(k.as_slice()),
+                Some(val(i)),
+                "borrowed `get` with a `&[u8]` missed `{k:?}`"
+            );
+        }
+        assert!(
+            seen.len() > 1,
+            "byte-key routing parity must be checked across shards, saw {seen:?}"
+        );
+    }
+
+    #[test]
+    fn borrowed_get_finds_every_owned_entry_across_shards() {
+        let (c, ks) = filled();
+        let before = c.metrics();
+        for (i, k) in ks.iter().enumerate() {
+            assert_eq!(
+                c.get(k.as_str()),
+                Some(val(i)),
+                "borrowed `get` missed `{k}`"
+            );
+        }
+        let after = c.metrics();
+        assert_eq!(
+            after.hits.unwrap() - before.hits.unwrap(),
+            ks.len() as u64,
+            "every borrowed hit must be counted as a hit"
+        );
+        assert_eq!(
+            after.misses.unwrap(),
+            before.misses.unwrap(),
+            "no borrowed lookup may be recorded as a miss"
+        );
+    }
+
+    #[test]
+    fn borrowed_get_misses_an_absent_key_and_counts_a_miss() {
+        let (c, _) = filled();
+        let before = c.metrics();
+        assert_eq!(c.get("absent"), None);
+        let after = c.metrics();
+        assert_eq!(after.misses.unwrap() - before.misses.unwrap(), 1);
+        assert_eq!(after.hits.unwrap(), before.hits.unwrap());
+    }
+
+    #[test]
+    fn borrowed_contains_and_peek_agree_with_borrowed_get() {
+        let (c, ks) = filled();
+        for (i, k) in ks.iter().enumerate() {
+            assert!(c.contains(k.as_str()), "borrowed `contains` missed `{k}`");
+            assert_eq!(
+                c.peek(k.as_str()),
+                Some(val(i)),
+                "borrowed `peek` missed `{k}`"
+            );
+            assert_eq!(c.peek(k.as_str()), c.get(k.as_str()));
+        }
+        assert!(!c.contains("absent"));
+        assert_eq!(c.peek("absent"), None);
+    }
+
+    #[test]
+    fn borrowed_contains_and_peek_record_no_hit_or_miss() {
+        let (c, ks) = filled();
+        let before = c.metrics();
+        assert!(c.contains(ks[0].as_str()));
+        assert!(c.peek(ks[0].as_str()).is_some());
+        assert!(!c.contains("absent"));
+        assert_eq!(c.peek("absent"), None);
+        let after = c.metrics();
+        assert_eq!(after.hits, before.hits);
+        assert_eq!(after.misses, before.misses);
+    }
+
+    #[test]
+    fn borrowed_remove_returns_the_value_and_removes_the_entry() {
+        let (c, ks) = filled();
+        let before = c.len();
+        for (i, k) in ks.iter().enumerate() {
+            assert_eq!(
+                c.remove(k.as_str()),
+                Some(val(i)),
+                "borrowed `remove` missed `{k}`"
+            );
+        }
+        assert_eq!(c.len(), before - ks.len());
+        assert_eq!(
+            c.remove(ks[0].as_str()),
+            None,
+            "a second remove must find nothing"
+        );
+    }
+
+    #[test]
+    fn borrowed_remove_entry_returns_the_stored_owned_key() {
+        let (c, ks) = filled();
+        for (i, k) in ks.iter().enumerate() {
+            assert_eq!(
+                c.remove_entry(k.as_str()),
+                Some((k.clone(), val(i))),
+                "borrowed `remove_entry` missed `{k}`"
+            );
+        }
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn borrowed_delete_reports_and_removes() {
+        let (c, ks) = filled();
+        for k in &ks {
+            assert!(c.delete(k.as_str()), "borrowed `delete` missed `{k}`");
+            assert!(!c.contains(k.as_str()));
+        }
+        assert!(c.is_empty());
+        assert!(!c.delete(ks[0].as_str()));
+    }
+
+    #[test]
+    fn borrowed_remove_fires_on_evict_with_the_stored_key() {
+        let seen: Arc<parking_lot::Mutex<Vec<String>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let c = ShardedUnboundCache::<String, u32>::builder()
+            .shards(8)
+            .on_evict(move |k: &String, _v: &u32| seen2.lock().push(k.clone()))
+            .build()
+            .unwrap();
+        c.set("a".to_string(), val(1));
+        assert!(c.remove("a").is_some());
+        assert_eq!(&*seen.lock(), &["a".to_string()]);
+    }
+
+    // `set_max_size` / `try_set_max_size` / `cache_clear_with_on_evict` are also inherent
+    // methods, and inherent methods win at a concrete call site. These helpers take a generic
+    // bound, so they can only reach the trait method: they are the reachability the traits add.
+    fn clear_with_on_evict_through_trait<T: crate::ConcurrentCacheClearWithOnEvict>(cache: &T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired2 = fired.clone();
+        let c = ShardedUnboundCache::<String, u32>::builder()
+            .shards(4)
+            .on_evict(move |_k: &String, _v: &u32| {
+                fired2.fetch_add(1, AOrd::Relaxed);
+            })
+            .build()
+            .unwrap();
+        for (i, k) in keys().iter().take(12).enumerate() {
+            c.set(k.clone(), val(i));
+        }
+        assert_eq!(c.len(), 12);
+
+        clear_with_on_evict_through_trait(&c);
+        assert_eq!(c.len(), 0);
+        assert_eq!(fired.load(AOrd::Relaxed), 12);
+        // `ShardedUnboundCache` tracks no eviction counter, so the trait route reports what the
+        // inherent method reports: nothing.
+        assert_eq!(c.metrics().evictions, None);
     }
 }

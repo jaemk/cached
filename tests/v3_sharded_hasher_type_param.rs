@@ -18,8 +18,8 @@
 use std::time::Duration;
 
 use cached::{
-    DefaultShardHasher, ShardHasher, ShardedExpiringCache, ShardedExpiringLruCache,
-    ShardedLruCache, ShardedUnboundCache,
+    ConcurrentCachedExt, DefaultShardHasher, ShardHasher, ShardedExpiringCache,
+    ShardedExpiringLruCache, ShardedLruCache, ShardedUnboundCache,
 };
 #[cfg(feature = "time_stores")]
 use cached::{ShardedLruTtlCache, ShardedTtlCache};
@@ -65,7 +65,11 @@ fn sharded_unbound_cache_names_its_hasher_as_a_type_argument() {
         EVEN_SPREAD,
         "the hasher passed to `.hasher()` must drive shard routing"
     );
+    // `KeyIsShardHasher` implements `ShardHasher<u32>` only (design 0055), so both the inherent
+    // owned-key `get(&K)` and the `ConcurrentCachedExt::get` trait path resolve on this store;
+    // assert through both to exercise `shard_of_borrowed` at `Q = K` as well as the trait path.
     assert_eq!(cache.get(&7), Some(70));
+    assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
 #[test]
@@ -82,6 +86,7 @@ fn sharded_lru_cache_names_its_hasher_as_a_type_argument() {
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
     assert_eq!(cache.get(&7), Some(70));
+    assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
 #[cfg(feature = "time_stores")]
@@ -99,6 +104,7 @@ fn sharded_ttl_cache_names_its_hasher_as_a_type_argument() {
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
     assert_eq!(cache.get(&7), Some(70));
+    assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
 #[cfg(feature = "time_stores")]
@@ -117,6 +123,7 @@ fn sharded_lru_ttl_cache_names_its_hasher_as_a_type_argument() {
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
     assert_eq!(cache.get(&7), Some(70));
+    assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(70));
 }
 
 #[test]
@@ -132,6 +139,7 @@ fn sharded_expiring_cache_names_its_hasher_as_a_type_argument() {
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
     assert_eq!(cache.get(&7), Some(Val(70)));
+    assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(Val(70)));
 }
 
 #[test]
@@ -149,6 +157,7 @@ fn sharded_expiring_lru_cache_names_its_hasher_as_a_type_argument() {
     }
     assert_eq!(cache.shard_sizes(), EVEN_SPREAD);
     assert_eq!(cache.get(&7), Some(Val(70)));
+    assert_eq!(ConcurrentCachedExt::get(&cache, &7).unwrap(), Some(Val(70)));
 }
 
 /// The hasher parameter defaults, so the two-argument spelling still names the default-hasher

@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ master ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -53,9 +56,14 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
+    # `rust-src` is not needed to build. It is needed so rustc can render the
+    # standard-library source snippet inside the "but trait `Borrow<str>` is
+    # implemented for it" help, which `tests/ui/sharded_double_reference_key_inference.stderr`
+    # pins. Without the component rustc prints the help without the snippet and
+    # that golden mismatches, so dropping this changes trybuild output.
     - uses: dtolnay/rust-toolchain@1.96.0
       with:
-        components: rustfmt, clippy
+        components: rustfmt, clippy, rust-src
         targets: wasm32-unknown-unknown
 
     - name: Cache cargo dir
@@ -93,3 +101,65 @@ jobs:
 
     - run: make clean/docker
       name: Cleaning Docker services
+
+  nightly-routing:
+
+    runs-on: ubuntu-latest
+    # Advisory only: nightly is unpinned upstream (see the toolchain step below) and can go
+    # red on its own toolchain regressions or flakiness that have nothing to do with this
+    # crate. `continue-on-error` keeps that noise from blocking merges to master; this job is
+    # informational and its result must not be treated as a required check.
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v6
+
+    # Pinned to a commit, not the mutable `nightly` branch ref: a compromised `nightly` ref
+    # could swap in a malicious toolchain-installer action. This job scopes its own
+    # GITHUB_TOKEN down to `contents: read` above, so a compromise here is contained; the
+    # rationale about running with elevated repository-default GITHUB_TOKEN privileges on
+    # the `push: branches: [master]` trigger that drives the release pipeline applies to
+    # the unpinned `msrv` and `build` jobs, which declare no `permissions:` block, not to
+    # this one.
+    - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+
+    - name: Cache cargo dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-cargo-dir
+      with:
+        path: ~/.cargo
+        key: ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-
+          ${{ runner.os }}-nightly-routing-
+
+    - name: Cache target dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-target-dir
+      with:
+        path: ./target
+        key: ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-nightly-routing-${{ env.cache-name }}-
+          ${{ runner.os }}-nightly-routing-
+
+    # ahash enables its `specialize` cfg on any nightly, which is the only
+    # configuration where owned/borrowed key routing and the per-shard map
+    # probe can disagree. Default features only, so no redis service is needed.
+    # Design-0055 lands six routing suites; this job runs the five that exercise
+    # borrowed-key routing. `sharded_router_trait_and_async_surface` is excluded: it is
+    # owned-key only, against a hand-written router, so it is immune to the specialization
+    # hazard this job guards against. `sharded_generic_helper_bounds` is the helper-bound
+    # compile-time surface, the rest exercise runtime routing agreement.
+    - run: cargo test --lib
+        --test sharded_newtype_key_routing_parity
+        --test sharded_custom_router_lookups
+        --test sharded_router_agreement_per_store
+        --test sharded_unsized_key_lookups
+        --test sharded_generic_helper_bounds
+      name: 'Owned/borrowed key routing parity on nightly'

@@ -476,6 +476,24 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
         drained
     }
 
+    /// Hash a key (owned or borrowed) for the internal table.
+    ///
+    /// Do not rewrite this into [`BuildHasher::hash_one`](std::hash::BuildHasher::hash_one), the
+    /// cleanup clippy's `manual_hash_one` lint asks for on this construction (`routing_hash` in
+    /// `src/stores/sharded/mod.rs` carries an `allow` for exactly that). `hash_one` is an
+    /// overridable provided method that may dispatch on its static type argument, and
+    /// `ahash::RandomState` (this cache's default hash builder) does so under nightly's
+    /// `specialize` cfg: it specializes some reference types and not others, so `hash_one::<&K>`
+    /// and `hash_one::<&Q>` are not required to agree even for values that hash identically.
+    /// Building the `Hasher` here depends only on the `Hash` impl, which `Borrow` already
+    /// requires to agree.
+    ///
+    /// This is load-bearing beyond this cache. `ShardedLruCache`, `ShardedLruTtlCache` and
+    /// `ShardedExpiringLruCache` hold an `LruCache` as their shard payload, so this function is
+    /// the intra-shard probe those three stores rely on to agree with shard routing (see
+    /// `routing_hash` in `src/stores/sharded/mod.rs`). Switching to `hash_one` would send a
+    /// newtype-over-primitive key's owned insert and borrowed lookup to different table slots on
+    /// a nightly compiler, with no panic and no error.
     pub(super) fn hash<Q>(&self, key: &Q) -> u64
     where
         K: Borrow<Q>,
@@ -1030,6 +1048,25 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> CachedPeek<K, V> for LruCache<K, V
             return Some(&self.order.get(index).1);
         }
         None
+    }
+}
+
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheSetMaxSize for LruCache<K, V, S> {
+    fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
+        LruCache::set_max_size(self, max_size)
+    }
+
+    fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
+        LruCache::try_set_max_size(self, max_size)
+    }
+}
+
+impl<K: Hash + Eq + Clone, V, S: BuildHasher> crate::CacheClearWithOnEvict for LruCache<K, V, S> {
+    fn cache_clear_with_on_evict(&mut self) {
+        LruCache::cache_clear_with_on_evict(self);
     }
 }
 
@@ -2072,6 +2109,7 @@ mod tests {
         assert_eq!(c.cache_get(&2), Some(&20));
         assert_eq!(c.cache_get(&3), None);
         assert_eq!(c.cache_get(&4), None);
+        assert_store_and_order_agree(&c);
     }
 
     #[test]
@@ -3135,5 +3173,226 @@ mod tests {
             );
             assert_store_and_order_agree(&c);
         }
+    }
+
+    // `set_max_size` / `try_set_max_size` / `cache_clear_with_on_evict` are also inherent
+    // methods, and inherent methods win at a concrete call site. These helpers take a generic
+    // bound, so they can only reach the trait method: they are the reachability the traits add.
+    fn resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Option<usize> {
+        cache.set_max_size(max_size)
+    }
+
+    fn try_resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError> {
+        cache.try_set_max_size(max_size)
+    }
+
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn set_max_size_through_trait_grows_like_the_inherent_method() {
+        let mut c: LruCache<u32, u32> = LruCache::new(2);
+        c.cache_set(1, 10);
+        c.cache_set(2, 20);
+        assert_eq!(resize_through_trait(&mut c, 4), Some(2));
+        assert_eq!(c.capacity(), 4);
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.cache_get(&1), Some(&10));
+    }
+
+    #[test]
+    fn set_max_size_through_trait_shrinks_eagerly_and_fires_on_evict() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let evicted2 = evicted.clone();
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                evicted2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_set(2u32, 20u32);
+        c.cache_set(3u32, 30u32);
+        c.cache_set(4u32, 40u32);
+        assert_eq!(c.cache_get(&3), Some(&30));
+        assert_eq!(c.cache_get(&4), Some(&40));
+
+        assert_eq!(resize_through_trait(&mut c, 2), Some(4));
+        assert_eq!(c.capacity(), 2);
+        // Eviction happens before the call returns, not on the next insert.
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(evicted.load(AOrdering::Relaxed), 2);
+        assert_eq!(c.cache_evictions(), Some(2));
+        assert_eq!(c.cache_get(&3), Some(&30));
+        assert_eq!(c.cache_get(&4), Some(&40));
+        assert_eq!(c.cache_get(&1), None);
+        assert_eq!(c.cache_get(&2), None);
+        assert_store_and_order_agree(&c);
+    }
+
+    #[test]
+    fn try_set_max_size_through_trait_rejects_zero() {
+        let mut c: LruCache<u32, u32> = LruCache::new(2);
+        assert_eq!(
+            try_resize_through_trait(&mut c, 0),
+            Err(crate::SetMaxSizeError::ZeroMaxSize)
+        );
+        assert_eq!(c.capacity(), 2);
+        assert_eq!(try_resize_through_trait(&mut c, 3), Ok(Some(2)));
+        assert_eq!(c.capacity(), 3);
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let evicted2 = evicted.clone();
+        let mut c = LruCache::builder()
+            .max_size(4)
+            .on_evict(move |_k: &u32, _v: &u32| {
+                evicted2.fetch_add(1, AOrdering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1u32, 10u32);
+        c.cache_set(2u32, 20u32);
+        c.cache_set(3u32, 30u32);
+
+        clear_with_on_evict_through_trait(&mut c);
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(evicted.load(AOrdering::Relaxed), 3);
+        assert_eq!(c.cache_evictions(), Some(3));
+    }
+
+    /// A newtype over a primitive whose `Hash` impl is the inner `u64`'s, so an owned
+    /// `UserId(id)` and a borrowed `&id` hash identically through the ordinary
+    /// `build_hasher` + `Hash::hash` + `finish` route, exactly as `Borrow` requires.
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    struct UserId(u64);
+
+    impl Borrow<u64> for UserId {
+        fn borrow(&self) -> &u64 {
+            &self.0
+        }
+    }
+
+    /// A `BuildHasher` whose `hash_one` override dispatches on the *static* type of what it
+    /// hashes, while `build_hasher` stays type-agnostic. This is a legal override -- `hash_one`
+    /// is a provided method that implementations may specialize on `T` -- and here it disagrees
+    /// for `&UserId` and `&u64` unconditionally, with no dependence on a `specialize` cfg or a
+    /// nightly toolchain, unlike `ahash::RandomState`.
+    #[derive(Clone, Default)]
+    struct TypeDispatchingHasher;
+
+    impl BuildHasher for TypeDispatchingHasher {
+        type Hasher = std::collections::hash_map::DefaultHasher;
+
+        fn build_hasher(&self) -> Self::Hasher {
+            Self::Hasher::default()
+        }
+
+        fn hash_one<T: Hash>(&self, x: T) -> u64 {
+            let mut hasher = self.build_hasher();
+            // Salt with the static type name so `hash_one::<&UserId>` and `hash_one::<&u64>`
+            // disagree even though `x.hash(..)` alone agrees through `Borrow`.
+            std::any::type_name::<T>().hash(&mut hasher);
+            x.hash(&mut hasher);
+            hasher.finish()
+        }
+    }
+
+    /// Guards the "do not rewrite this into `hash_one`" invariant documented on
+    /// [`LruCache::hash`] on *any* toolchain.
+    ///
+    /// That invariant is load-bearing past this cache: `LruCache::hash` is the intra-shard probe
+    /// for `ShardedLruCache`, `ShardedLruTtlCache` and `ShardedExpiringLruCache`, which is why
+    /// `src/stores/sharded/lru.rs` cites this test by name. With the default `ahash::RandomState`
+    /// the owned/borrowed divergence only appears under nightly's `specialize` cfg, so the
+    /// `clippy::manual_hash_one` cleanup would sail through CI's pinned stable toolchain. Routing
+    /// the probe through a `BuildHasher` whose *own* `hash_one` dispatches on the static type
+    /// makes the regression observable everywhere: an owned `UserId` insert and a borrowed `u64`
+    /// lookup land in different table slots the moment `hash` stops building the `Hasher` itself.
+    #[test]
+    fn type_dispatching_hasher_catches_a_lru_hash_regression_on_any_toolchain() {
+        // Self-check the instrument: the two hashing routes must agree on the `Hash` path (what
+        // `LruCache::hash` uses) and disagree on the `hash_one` path (what the clippy cleanup
+        // would use), or this test proves nothing.
+        fn build_hasher_route<T: Hash + ?Sized>(hasher: &TypeDispatchingHasher, value: &T) -> u64 {
+            let h = &mut hasher.build_hasher();
+            value.hash(h);
+            h.finish()
+        }
+
+        let hasher = TypeDispatchingHasher;
+        let owned = UserId(7);
+        let owned_ref = &owned;
+        let borrowed: &u64 = owned.borrow();
+        assert_eq!(
+            build_hasher_route(&hasher, owned_ref),
+            build_hasher_route(&hasher, borrowed),
+            "`Borrow` requires the owned and borrowed `Hash` impls to agree"
+        );
+        assert_ne!(
+            hasher.hash_one(owned_ref),
+            hasher.hash_one(borrowed),
+            "the instrument is degenerate: `hash_one` must dispatch on the static type"
+        );
+
+        let mut c = LruCache::<UserId, u64, _>::builder()
+            .max_size(8)
+            .hasher(TypeDispatchingHasher)
+            .build()
+            .unwrap();
+
+        for id in [1u64, 2, 3, 4] {
+            assert_eq!(c.cache_set(UserId(id), id * 10), None);
+        }
+        assert_eq!(c.cache_size(), 4);
+
+        for id in [1u64, 2, 3, 4] {
+            // Every one of these routes through `LruCache::hash` with `Q = u64` against entries
+            // inserted with `Q = UserId`. Under a `hash_one`-based `hash` they all miss.
+            assert_eq!(
+                c.cache_peek(&id),
+                Some(&(id * 10)),
+                "borrowed `cache_peek` missed `UserId({id})`"
+            );
+            assert_eq!(
+                c.cache_get(&id),
+                Some(&(id * 10)),
+                "borrowed `cache_get` missed `UserId({id})`"
+            );
+            assert_eq!(
+                c.cache_get_mut(&id).map(|v| *v),
+                Some(id * 10),
+                "borrowed `cache_get_mut` missed `UserId({id})`"
+            );
+        }
+
+        // An owned re-set must also find the entry the owned insert created, rather than
+        // inserting a duplicate at a second slot.
+        assert_eq!(c.cache_set(UserId(1), 11), Some(10));
+        assert_eq!(c.cache_size(), 4);
+        assert_eq!(c.cache_get(&1u64), Some(&11));
+
+        for id in [1u64, 2, 3, 4] {
+            assert_eq!(
+                c.cache_remove(&id),
+                Some(if id == 1 { 11 } else { id * 10 }),
+                "borrowed `cache_remove` missed `UserId({id})`"
+            );
+        }
+        assert_eq!(c.cache_size(), 0);
     }
 }

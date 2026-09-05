@@ -42,6 +42,18 @@ pub trait Expires {
     ///
     /// This is the authoritative liveness check: callers must use `is_expired` to
     /// decide whether a cached value may be returned, not `expires_at`.
+    ///
+    /// # Runs under the shard lock
+    ///
+    /// The sharded expiring stores ([`ShardedExpiringCache`](crate::ShardedExpiringCache),
+    /// [`ShardedExpiringLruCache`](crate::ShardedExpiringLruCache)) call `is_expired` from every
+    /// operation that inspects an entry while holding the lock on the shard the value lives in.
+    /// `is_expired` must not, directly or indirectly, call back into the same store: a
+    /// `parking_lot::RwLock` is not reentrant. Under the write lock (held by, for example,
+    /// `set`, `retain`, and `sweep_expired`), a recursive call deadlocks unconditionally; under
+    /// the read lock, a recursive read blocks behind any writer already queued for that lock.
+    /// Either way the shard is deadlocked permanently and every request that routes to it
+    /// stalls.
     fn is_expired(&self) -> bool;
 
     /// Returns the [`crate::time::Instant`] at which this value expires, or `None` if the
@@ -54,6 +66,10 @@ pub trait Expires {
     ///
     /// `is_expired()` remains the authoritative liveness check; `expires_at` is advisory
     /// and must not be used as a substitute for `is_expired`.
+    ///
+    /// `expires_at` is subject to the same "runs under the shard lock" hazard documented on
+    /// [`Expires::is_expired`]: it must not, directly or indirectly, call back into the same
+    /// store.
     fn expires_at(&self) -> Option<crate::time::Instant> {
         None
     }
@@ -986,6 +1002,29 @@ impl<K: std::hash::Hash + Eq + Clone, V: Expires, S: BuildHasher> CacheEvict
 {
     fn evict(&mut self) -> usize {
         ExpiringLruCache::evict(self)
+    }
+}
+
+impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> crate::CacheSetMaxSize
+    for ExpiringLruCache<K, V, S>
+{
+    fn set_max_size(&mut self, max_size: usize) -> Option<usize> {
+        ExpiringLruCache::set_max_size(self, max_size)
+    }
+
+    fn try_set_max_size(
+        &mut self,
+        max_size: usize,
+    ) -> Result<Option<usize>, super::SetMaxSizeError> {
+        ExpiringLruCache::try_set_max_size(self, max_size)
+    }
+}
+
+impl<K: Clone + Hash + Eq, V: Expires, S: BuildHasher> crate::CacheClearWithOnEvict
+    for ExpiringLruCache<K, V, S>
+{
+    fn cache_clear_with_on_evict(&mut self) {
+        ExpiringLruCache::cache_clear_with_on_evict(self);
     }
 }
 
@@ -2966,5 +3005,98 @@ mod tests {
         assert!(c.expires_at(&1u8).0);
         // The value was never cloned or moved out: it is still in the store.
         assert_eq!(c.cache_peek(&1u8), Some(&NotClone(100)));
+    }
+
+    // Generic bounds, so these can only reach the trait methods: the inherent methods of the
+    // same name win at a concrete call site.
+    fn resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Option<usize> {
+        cache.set_max_size(max_size)
+    }
+
+    fn try_resize_through_trait<T: crate::CacheSetMaxSize>(
+        cache: &mut T,
+        max_size: usize,
+    ) -> Result<Option<usize>, crate::SetMaxSizeError> {
+        cache.try_set_max_size(max_size)
+    }
+
+    fn clear_with_on_evict_through_trait<T: crate::CacheClearWithOnEvict>(cache: &mut T) {
+        cache.cache_clear_with_on_evict();
+    }
+
+    #[test]
+    fn set_max_size_through_trait_shrinks_eagerly_and_fires_on_evict() {
+        use std::sync::{Arc, Mutex};
+        let evicted_keys: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_keys2 = evicted_keys.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &u8, _v: &ExpiredU8| {
+                evicted_keys2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+
+        // Values 1..=4 are all <= 10, so none are expired.
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        c.cache_set(3, 3);
+        c.cache_set(4, 4);
+        // Touch 1 and 2 so 3 and 4 become least-recently-used.
+        assert_eq!(c.cache_get(&1), Some(&1));
+        assert_eq!(c.cache_get(&2), Some(&2));
+
+        assert_eq!(resize_through_trait(&mut c, 2), Some(4));
+        assert_eq!(c.capacity(), 2);
+        // Eviction happens before the call returns, not on the next insert.
+        assert_eq!(c.cache_size(), 2);
+        assert_eq!(c.cache_evictions(), Some(2));
+
+        let mut fired: Vec<u8> = evicted_keys.lock().unwrap().clone();
+        fired.sort_unstable();
+        assert_eq!(fired, vec![3, 4]);
+        assert_eq!(c.cache_get(&1), Some(&1));
+        assert_eq!(c.cache_get(&2), Some(&2));
+        assert_eq!(c.cache_get(&3), None);
+    }
+
+    #[test]
+    fn try_set_max_size_through_trait_rejects_zero() {
+        let mut c: ExpiringLruCache<u8, ExpiredU8> =
+            ExpiringLruCache::builder().max_size(4).build().unwrap();
+        assert_eq!(
+            try_resize_through_trait(&mut c, 0),
+            Err(crate::SetMaxSizeError::ZeroMaxSize)
+        );
+        assert_eq!(c.capacity(), 4);
+        assert_eq!(try_resize_through_trait(&mut c, 2), Ok(Some(4)));
+        assert_eq!(c.capacity(), 2);
+    }
+
+    #[test]
+    fn cache_clear_with_on_evict_through_trait_fires_for_all_entries() {
+        use std::sync::{Arc, Mutex};
+        let evicted_keys: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let evicted_keys2 = evicted_keys.clone();
+        let mut c: ExpiringLruCache<u8, ExpiredU8> = ExpiringLruCache::builder()
+            .max_size(4)
+            .on_evict(move |k: &u8, _v: &ExpiredU8| {
+                evicted_keys2.lock().unwrap().push(*k);
+            })
+            .build()
+            .unwrap();
+        c.cache_set(1, 1);
+        c.cache_set(2, 2);
+        c.cache_set(3, 3);
+
+        clear_with_on_evict_through_trait(&mut c);
+        assert_eq!(c.cache_size(), 0);
+        assert_eq!(c.cache_evictions(), Some(3));
+        let mut fired: Vec<u8> = evicted_keys.lock().unwrap().clone();
+        fired.sort_unstable();
+        assert_eq!(fired, vec![1, 2, 3]);
     }
 }
