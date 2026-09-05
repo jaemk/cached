@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.0 / cached_proc_macro 3.0.1] - 2026-09-05
+
 ### Breaking Changes
 
 - Argument-inference breakage on the six sharded stores' inherent lookup methods
@@ -103,17 +105,6 @@
   Previously it took an early-return fast path that cleared the store without counting anything.
   Observable to anyone metering evictions on that store.
 
-### Documentation
-
-- Gate the per-entry-expiry macro example in the crate doc on the `proc_macro` feature. The fence
-  used `cached::macros`, which does not exist without that feature, so
-  `cargo test --no-default-features --doc` failed to compile it; CI's no-default-features row
-  runs `--tests` only, so this went uncaught there. Gated rather than marked `ignore` (like its
-  two neighboring macro fences), so it still compiles when the feature is on; the rendered
-  README is unchanged, since cargo-readme strips the hidden lines.
-
-### Fixed
-
 - `#[cached]` and `#[once]` no longer trip clippy's `clone_on_copy` on rust 1.100+ (nightly at
   the time of writing), where the lint also covers `<T as Clone>::clone(&x)` calls. It fired
   whenever the cached value type is `Copy` (the unwrapped `T` of a `Result`/`Option` return, or
@@ -131,6 +122,15 @@
   ([design/0043](specs/design/0043-macro-error-precision.md)). Note that if you suppressed this
   with `#[expect(clippy::clone_on_copy)]`, remove it: the expectation is now unfulfilled, which
   is itself an error under `-D warnings`. A plain `#[allow]` is harmless.
+
+### Documentation
+
+- Gate the per-entry-expiry macro example in the crate doc on the `proc_macro` feature. The fence
+  used `cached::macros`, which does not exist without that feature, so
+  `cargo test --no-default-features --doc` failed to compile it; CI's no-default-features row
+  runs `--tests` only, so this went uncaught there. Gated rather than marked `ignore` (like its
+  two neighboring macro fences), so it still compiles when the feature is on; the rendered
+  README is unchanged, since cargo-readme strips the hidden lines.
 
 ## [3.1.1] - 2026-08-25
 
