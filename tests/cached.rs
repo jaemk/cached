@@ -557,49 +557,45 @@ fn test_once_cache_none_true_caches_none() {
 
 #[cfg(feature = "proc_macro")]
 #[cached(max_size = 2)]
-fn cached_smartstring(s: smartstring::alias::String) -> smartstring::alias::String {
+fn cached_std_string(s: String) -> String {
     if s == "very stringy" {
-        smartstring::alias::String::from("equal")
+        String::from("equal")
     } else {
-        smartstring::alias::String::from("not equal")
+        String::from("not equal")
     }
 }
 
 #[cfg(feature = "proc_macro")]
 #[test]
-fn test_cached_smartstring() {
-    let mut string = smartstring::alias::String::new();
+fn test_cached_std_string() {
+    let mut string = String::new();
     string.push_str("very stringy");
-    assert_eq!("equal", cached_smartstring(string.clone()));
+    assert_eq!("equal", cached_std_string(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.read();
+        let cache = CACHED_STD_STRING.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    assert_eq!("equal", cached_smartstring(string.clone()));
+    assert_eq!("equal", cached_std_string(string.clone()));
     {
-        let cache = CACHED_SMARTSTRING.read();
+        let cache = CACHED_STD_STRING.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    let string = smartstring::alias::String::from("also stringy");
-    assert_eq!("not equal", cached_smartstring(string));
+    let string = String::from("also stringy");
+    assert_eq!("not equal", cached_std_string(string));
     {
-        let cache = CACHED_SMARTSTRING.read();
+        let cache = CACHED_STD_STRING.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(
-    max_size = 2,
-    key = "smartstring::alias::String",
-    convert = r#"{ smartstring::alias::String::from(s) }"#
-)]
-fn cached_smartstring_from_str(s: &str) -> bool {
+#[cached(max_size = 2, key = "String", convert = r#"{ String::from(s) }"#)]
+fn cached_std_string_from_str(s: &str) -> bool {
     s == "true"
 }
 
@@ -642,24 +638,24 @@ fn sync_cached_remove_entry_and_delete_aliases() {
 
 #[cfg(feature = "proc_macro")]
 #[test]
-fn test_cached_smartstring_from_str() {
-    assert!(cached_smartstring_from_str("true"));
+fn test_cached_std_string_from_str() {
+    assert!(cached_std_string_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.read();
+        let cache = CACHED_STD_STRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    assert!(cached_smartstring_from_str("true"));
+    assert!(cached_std_string_from_str("true"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.read();
+        let cache = CACHED_STD_STRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    assert!(!cached_smartstring_from_str("false"));
+    assert!(!cached_std_string_from_str("false"));
     {
-        let cache = CACHED_SMARTSTRING_FROM_STR.read();
+        let cache = CACHED_STD_STRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }

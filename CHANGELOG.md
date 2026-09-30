@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Remove the unmaintained `smartstring` dev dependency, using `String` for the equivalent cache
+  macro test coverage.
+
 ## [4.0.0 / cached_proc_macro 3.0.1] - 2026-09-05
 
 ### Breaking Changes
