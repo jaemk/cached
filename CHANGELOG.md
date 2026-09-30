@@ -2,8 +2,8 @@
 
 ## [Unreleased]
 
-- Remove the unmaintained `smartstring` dev dependency, using `String` for the equivalent cache
-  macro test coverage.
+- Use `compact_str::CompactString` instead of `String` in cache macro tests, retaining coverage
+  for a third-party small-string type without the unmaintained `smartstring` dependency.
 
 ## [4.0.0 / cached_proc_macro 3.0.1] - 2026-09-05
 

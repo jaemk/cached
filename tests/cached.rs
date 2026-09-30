@@ -557,45 +557,49 @@ fn test_once_cache_none_true_caches_none() {
 
 #[cfg(feature = "proc_macro")]
 #[cached(max_size = 2)]
-fn cached_std_string(s: String) -> String {
+fn cached_compact_string(s: compact_str::CompactString) -> compact_str::CompactString {
     if s == "very stringy" {
-        String::from("equal")
+        compact_str::CompactString::from("equal")
     } else {
-        String::from("not equal")
+        compact_str::CompactString::from("not equal")
     }
 }
 
 #[cfg(feature = "proc_macro")]
 #[test]
-fn test_cached_std_string() {
-    let mut string = String::new();
+fn test_cached_compact_string() {
+    let mut string = compact_str::CompactString::new("");
     string.push_str("very stringy");
-    assert_eq!("equal", cached_std_string(string.clone()));
+    assert_eq!("equal", cached_compact_string(string.clone()));
     {
-        let cache = CACHED_STD_STRING.read();
+        let cache = CACHED_COMPACT_STRING.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    assert_eq!("equal", cached_std_string(string.clone()));
+    assert_eq!("equal", cached_compact_string(string.clone()));
     {
-        let cache = CACHED_STD_STRING.read();
+        let cache = CACHED_COMPACT_STRING.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    let string = String::from("also stringy");
-    assert_eq!("not equal", cached_std_string(string));
+    let string = compact_str::CompactString::from("also stringy");
+    assert_eq!("not equal", cached_compact_string(string));
     {
-        let cache = CACHED_STD_STRING.read();
+        let cache = CACHED_COMPACT_STRING.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
 }
 
 #[cfg(feature = "proc_macro")]
-#[cached(max_size = 2, key = "String", convert = r#"{ String::from(s) }"#)]
-fn cached_std_string_from_str(s: &str) -> bool {
+#[cached(
+    max_size = 2,
+    key = "compact_str::CompactString",
+    convert = r#"{ compact_str::CompactString::from(s) }"#
+)]
+fn cached_compact_string_from_str(s: &str) -> bool {
     s == "true"
 }
 
@@ -638,24 +642,24 @@ fn sync_cached_remove_entry_and_delete_aliases() {
 
 #[cfg(feature = "proc_macro")]
 #[test]
-fn test_cached_std_string_from_str() {
-    assert!(cached_std_string_from_str("true"));
+fn test_cached_compact_string_from_str() {
+    assert!(cached_compact_string_from_str("true"));
     {
-        let cache = CACHED_STD_STRING_FROM_STR.read();
+        let cache = CACHED_COMPACT_STRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(0));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    assert!(cached_std_string_from_str("true"));
+    assert!(cached_compact_string_from_str("true"));
     {
-        let cache = CACHED_STD_STRING_FROM_STR.read();
+        let cache = CACHED_COMPACT_STRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(1));
     }
 
-    assert!(!cached_std_string_from_str("false"));
+    assert!(!cached_compact_string_from_str("false"));
     {
-        let cache = CACHED_STD_STRING_FROM_STR.read();
+        let cache = CACHED_COMPACT_STRING_FROM_STR.read();
         assert_eq!(cache.cache_hits(), Some(1));
         assert_eq!(cache.cache_misses(), Some(2));
     }
