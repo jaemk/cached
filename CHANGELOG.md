@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-10-01
+
+### Changed
+
+- Replace the unmaintained `smartstring` dev-dependency with `compact_str`. The macro tests still
+  cover a third-party small-string key and value type. No change to the published crates.
+
 ## [4.0.0 / cached_proc_macro 3.0.1] - 2026-09-05
 
 ### Breaking Changes
