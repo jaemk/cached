@@ -214,7 +214,7 @@ sharded expiry stores expose them only as trait methods (there is no inherent `p
   `&String`) infers `Q` as the outer type and then fails on the missing `K: Borrow<Q>`. `&k` where
   `k: K` and literal `&"a".to_string()` are unaffected. This is the same hazard std accepts for
   `HashMap::get`, but it must be called out in the changelog rather than announced as
-  "purely additive". `smartstring` is already a dev-dependency (`Cargo.toml:174-175`), so check
+  "purely additive". `compact_str` is already a dev-dependency (`Cargo.toml:165`), so check
   the existing tests for such call sites before assuming there are none.
 - **Do not reimplement the lookups.** Two bodies per method (one owned, one borrowed) is how the
   hit/miss counters, the eviction counter, and `on_evict` drift apart. One `&Q` core, two thin
