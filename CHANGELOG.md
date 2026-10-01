@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-10-01
+
 ### Changed
 
 - Replace the unmaintained `smartstring` dev-dependency with `compact_str`. The macro tests still
