@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-10-12
+
 ### Fixed
 
 - Fix two unit tests that failed on 32-bit targets (#330). The `ExpiringCache` layout test checks
