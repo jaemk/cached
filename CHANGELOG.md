@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix two unit tests that failed on 32-bit targets (#330). The `ExpiringCache` layout test checks
+  field types instead of comparing `size_of` against `UnboundCache`, and the
+  `LruCache::pop_raw_with_hash` wrong-hash test asserts only that the cache stays consistent. No
+  change to the published crates' behavior.
+
+### Added
+
+- `make tests/32bit` runs the test suite on `i686-unknown-linux-gnu`, and CI runs it.
+  `make tests/32bit/docker` runs the same target in a container, with no local 32-bit toolchain
+  needed.
+
 ## [4.0.1] - 2026-10-01
 
 ### Changed

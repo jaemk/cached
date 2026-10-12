@@ -66,7 +66,9 @@ TEST_TARGETS = tests \
                tests/redis-runtime-axes \
                tests/redis-capability-requires-runtime \
                tests/redis-tokio \
-               tests/all-features
+               tests/all-features \
+               tests/32bit \
+               tests/32bit/docker
 
 DOCKER_TARGETS = docker/status docker/redis
 DOC_TARGETS = docs docs/readme
@@ -96,6 +98,10 @@ FMT_CCFLAGS           =
 DOCKER_COMMAND                        = docker
 DOCKER_REDIS_CONTAINER_NAME           = cached-tests
 DOCKER_REDIS_CONTAINER_LOCAL_PORT     = 6399
+DOCKER_32BIT_IMAGE                    = cached-tests-i686
+
+# Target for the 32-bit test run (`tests/32bit`)
+TESTS_32BIT_TARGET                    = i686-unknown-linux-gnu
 
 ################################################################################
 # Exported variables
@@ -149,6 +155,8 @@ help: ## List all supported Make targets
 			tests/redis-capability-requires-runtime) desc="Assert capability-only redis features fail without a runtime" ;; \
 			tests/redis-tokio) desc="Run async Redis Tokio tests" ;; \
 			tests/all-features) desc="Run tests with all features enabled" ;; \
+			tests/32bit) desc="Run tests on i686 (needs the rustup target and gcc-multilib)" ;; \
+			tests/32bit/docker) desc="Run tests/32bit in a Docker container" ;; \
 			docker/status) desc="Check whether the Docker engine is available" ;; \
 			docker/redis) desc="Start the Redis test container" ;; \
 			docs) desc="Sync generated documentation artifacts" ;; \
@@ -325,6 +333,37 @@ tests/redis-tokio: | docker/redis
 tests/all-features: | docker/redis
 	@echo "[$@]: Running tests (all features)..."
 	$(CARGO_COMMAND) test --all-features -- --nocapture
+
+# 32-bit run of the unit and integration tests. Store internals (struct layout, which
+# hash bits hashbrown reads) depend on pointer width, see #330. Needs the
+# `TESTS_32BIT_TARGET` rustup target and 32-bit libc headers (`gcc-multilib` on
+# Debian/Ubuntu), which `criterion`'s `alloca` dev-dependency compiles against.
+# `tests/32bit/docker` runs this target in a container that has both.
+tests/32bit:
+	@rustup target list --installed | grep -qx $(TESTS_32BIT_TARGET) \
+		|| (>&2 echo 'Missing rustup target, run `rustup target add $(TESTS_32BIT_TARGET)` or `make tests/32bit/docker`'; exit 1)
+	@printf '#include <stdint.h>\n' | cc -m32 -E - > /dev/null 2>&1 \
+		|| (>&2 echo 'Missing 32-bit libc headers, install gcc-multilib or run `make tests/32bit/docker`'; exit 1)
+	@echo "[$@]: Running tests on $(TESTS_32BIT_TARGET) (default features)..."
+	$(CARGO_COMMAND) test --target $(TESTS_32BIT_TARGET) --tests
+	@echo "[$@]: Running tests on $(TESTS_32BIT_TARGET) (no default features)..."
+	$(CARGO_COMMAND) test --target $(TESTS_32BIT_TARGET) --no-default-features --tests
+
+# Runs `tests/32bit` in `DOCKER_32BIT_IMAGE` as the host user, so files written to the
+# mounted repo stay owned by you. The cargo home and target dir live under the
+# gitignored `local/docker-32bit/` and are reused between runs. The repo is not mounted at
+# `/src`: trybuild rewrites the crate dir to `$DIR` in compiler output, and `/src` also
+# occurs in the toolchain's `lib/rustlib/src/rust` path, which breaks the UI goldens.
+tests/32bit/docker: docker/status
+	@echo [$@]: Building $(DOCKER_32BIT_IMAGE) image...
+	$(DOCKER_COMMAND) build -t $(DOCKER_32BIT_IMAGE) docker/i686
+	mkdir -p local/docker-32bit/cargo local/docker-32bit/target
+	$(DOCKER_COMMAND) run --rm --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/workspace/cached" -w /workspace/cached \
+		-e HOME=/tmp \
+		-e CARGO_HOME=/workspace/cached/local/docker-32bit/cargo \
+		-e CARGO_TARGET_DIR=/workspace/cached/local/docker-32bit/target \
+		$(DOCKER_32BIT_IMAGE) make tests/32bit
 
 ################################################################################
 # Starts a Redis server using `DOCKER_COMMAND`

@@ -102,6 +102,55 @@ jobs:
     - run: make clean/docker
       name: Cleaning Docker services
 
+  test-32bit:
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v6
+
+    # `rust-src` is for the trybuild golden that pins a standard-library snippet, see the
+    # `build` job.
+    - uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: rust-src
+        targets: i686-unknown-linux-gnu
+
+    # `criterion`'s `alloca` dev-dependency compiles C for the test target, which needs
+    # the 32-bit libc headers.
+    - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      name: Installing 32-bit C toolchain
+
+    - name: Cache cargo dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-cargo-dir
+      with:
+        path: ~/.cargo
+        key: ${{ runner.os }}-test-32bit-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-test-32bit-${{ env.cache-name }}-
+          ${{ runner.os }}-test-32bit-
+
+    - name: Cache target dir
+      uses: actions/cache@v4
+      env:
+        cache-name: cache-target-dir
+      with:
+        path: ./target
+        key: ${{ runner.os }}-test-32bit-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-test-32bit-${{ env.cache-name }}-
+          ${{ runner.os }}-test-32bit-
+
+    # Store internals (struct layout, which hash bits hashbrown reads) depend on pointer
+    # width, see #330. `make tests/32bit/docker` runs the same target locally.
+    - run: make tests/32bit
+      name: 'Running `make tests/32bit`'
+
   nightly-routing:
 
     runs-on: ubuntu-latest
