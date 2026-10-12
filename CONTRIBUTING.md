@@ -40,6 +40,9 @@ make ci
 make help
 # Run all tests across all feature combinations
 make tests
+# Run the tests on 32-bit (i686) in Docker; `make tests/32bit` runs them natively
+# with `rustup target add i686-unknown-linux-gnu` and gcc-multilib installed
+make tests/32bit/docker
 # Run all examples
 make examples
 # Sync README.md from src/lib.rs

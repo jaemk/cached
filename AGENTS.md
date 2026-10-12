@@ -296,6 +296,13 @@ Or use the Makefile (auto-starts Docker):
 make tests
 ```
 
+### 32-bit tests
+Struct layout and the hash bits hashbrown reads depend on pointer width (see #330). Run the suite on `i686-unknown-linux-gnu` with:
+```bash
+make tests/32bit/docker   # in a container, no local setup
+make tests/32bit          # natively: needs `rustup target add i686-unknown-linux-gnu` and gcc-multilib
+```
+
 ### Trybuild golden files
 The `tests/ui/` directory contains compile-fail tests with `.stderr` golden files. When type names or error messages change, regenerate them with:
 ```bash

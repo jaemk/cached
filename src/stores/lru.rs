@@ -407,8 +407,9 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> LruCache<K, V, S> {
     /// [`pop_raw`](Self::pop_raw) for callers that already hold the key's hash.
     ///
     /// `hash` MUST be `self.hash(k)` (i.e. produced by this cache's own hash builder for
-    /// this key); passing any other value makes the lookup miss and the entry is left in
-    /// place. Use this when a caller has computed the hash for an earlier probe on the
+    /// this key). Passing any other value may miss or may still find and remove the entry
+    /// for `k` (which bits hashbrown reads depends on the target); either way the store and
+    /// the LRU order stay consistent, since the probe still compares keys. Use this when a caller has computed the hash for an earlier probe on the
     /// same key -- it skips only the re-hash, the `K: Eq` bucket probe still runs.
     pub(super) fn pop_raw_with_hash<Q>(&mut self, hash: u64, k: &Q) -> Option<(K, V)>
     where
@@ -2871,28 +2872,42 @@ mod tests {
     }
 
     #[test]
-    fn pop_raw_with_hash_wrong_hash_misses_and_leaves_the_entry() {
-        // Documented misuse contract: `hash` MUST be `self.hash(k)`. Flipping the top
-        // bit changes hashbrown's control tag deterministically, so the probe cannot
-        // match -- the lookup misses and the entry stays put.
-        let mut c: LruCache<u32, u32> = LruCache::new(4);
-        c.cache_set(1, 10);
-        c.cache_set(2, 20);
-        c.cache_set(3, 30);
-        let before = c.key_order();
+    fn pop_raw_with_hash_wrong_hash_leaves_the_cache_consistent() {
+        // Documented misuse contract: `hash` MUST be `self.hash(k)`. A wrong hash may
+        // miss or may still find the entry, depending on which hash bits hashbrown reads
+        // for the probe position and control tag on this target (only the low 32 on
+        // 32-bit, see #330). The test asserts only what holds everywhere: the result is
+        // a miss or the entry for `k`, and the store and LRU order stay consistent.
+        let fresh = || {
+            let mut c: LruCache<u32, u32> = LruCache::new(4);
+            c.cache_set(1, 10);
+            c.cache_set(2, 20);
+            c.cache_set(3, 30);
+            c
+        };
+        let before = fresh().key_order();
 
-        let wrong = c.hash(&2u32) ^ (1u64 << 63);
-        assert_eq!(
-            c.pop_raw_with_hash(wrong, &2u32),
-            None,
-            "a hash that is not self.hash(k) must silently miss"
-        );
-        assert_eq!(c.cache_size(), 3);
-        assert_eq!(c.key_order(), before);
-        assert_eq!(c.cache_peek(&2), Some(&20));
-        assert_store_and_order_agree(&c);
+        for bit in 0..64 {
+            let mut c = fresh();
+            let wrong = c.hash(&2u32) ^ (1u64 << bit);
+            match c.pop_raw_with_hash(wrong, &2u32) {
+                None => {
+                    assert_eq!(c.cache_size(), 3, "bit {bit}");
+                    assert_eq!(c.key_order(), before, "bit {bit}");
+                    assert_eq!(c.cache_peek(&2), Some(&20), "bit {bit}");
+                }
+                Some(kv) => {
+                    assert_eq!(kv, (2, 20), "bit {bit}");
+                    assert_eq!(c.cache_size(), 2, "bit {bit}");
+                    assert_eq!(c.key_order(), vec![3, 1], "bit {bit}");
+                    assert_eq!(c.cache_peek(&2), None, "bit {bit}");
+                }
+            }
+            assert_store_and_order_agree(&c);
+        }
 
-        // The correct hash still finds it, and the miss left no damage behind.
+        // The correct hash always finds it.
+        let mut c = fresh();
         let right = c.hash(&2u32);
         assert_eq!(c.pop_raw_with_hash(right, &2u32), Some((2, 20)));
         assert_eq!(c.key_order(), vec![3, 1]);

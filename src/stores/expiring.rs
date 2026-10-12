@@ -1607,37 +1607,29 @@ mod tests {
 
     #[test]
     fn struct_holds_hashmap_directly_not_an_unbound_cache() {
-        // `ExpiringCache` used to wrap a full `UnboundCache` (HashMap + two
-        // `StripedCounter`s, each a `Box<[Slot]>` fat-pointer field, plus a dead
-        // `on_evict` field) purely for `cache_clear` / `cache_reset` / `cache_size`
-        // / `cache_reset_metrics`, while every read/write bypassed it entirely.
-        // Now the struct holds a `HashMap` directly (plus an `initial_capacity`
-        // hint for `cache_reset`'s shrink behavior).
+        // `ExpiringCache` used to wrap a full `UnboundCache` purely for
+        // `cache_clear` / `cache_reset` / `cache_size` / `cache_reset_metrics`,
+        // while every read/write bypassed it entirely. Now the struct holds a
+        // `HashMap` directly (plus an `initial_capacity` hint for `cache_reset`'s
+        // shrink behavior).
         //
-        // The prior version of this test hard-coded the expected byte size of
-        // `Option<usize>` / `AtomicU64` / `Option<Arc<dyn Fn>>` and a padding
-        // slack constant. `#[repr(Rust)]` layout (padding, niche optimization,
-        // field reordering) is not guaranteed by the language, so that arithmetic
-        // could drift on a different toolchain or target and flake without any
-        // real regression. Comparing directly against the sibling `UnboundCache`
-        // struct (same K/V, built in the same compilation) sidesteps all of that:
-        // whatever the concrete field layout is on a given target, `ExpiringCache`
-        // holding its own bare `HashMap` + `initial_capacity` + 3x `AtomicU64` +
-        // `on_evict` is strictly smaller than `UnboundCache` holding a `HashMap` +
-        // 2x `StripedCounter` + `initial_capacity` + `on_evict` (one extra
-        // `AtomicU64` costs less than a second `StripedCounter`). If `ExpiringCache`
-        // ever again embeds an `UnboundCache` (directly or via a wrapper), its size
-        // becomes `UnboundCache`'s size *plus* its own extra fields, which flips
-        // this comparison and fails the assertion on any target.
-        let expiring = std::mem::size_of::<ExpiringCache<u8, ExpiredU8>>();
-        let unbound = std::mem::size_of::<crate::UnboundCache<u8, ExpiredU8>>();
-        assert!(
-            expiring < unbound,
-            "ExpiringCache ({expiring} bytes) must be smaller than UnboundCache \
-             ({unbound} bytes) for the same K/V types; equal-or-larger implies \
-             ExpiringCache is once again wrapping a full UnboundCache instead of \
-             holding a bare HashMap directly"
-        );
+        // This is checked at compile time rather than by comparing
+        // `size_of` against `UnboundCache`: struct layout depends on the target
+        // (e.g. a `Box<[Slot]>` is the same size as an `AtomicU64` on 32-bit,
+        // see #330). The exhaustive destructure fails to compile if a field is
+        // added (e.g. an embedded `UnboundCache`), and the type ascription fails
+        // if `store` stops being a bare `HashMap`. Adding a field to
+        // `ExpiringCache` means updating this pattern.
+        let c: ExpiringCache<u8, ExpiredU8> = ExpiringCache::builder().build().unwrap();
+        let ExpiringCache {
+            store,
+            initial_capacity: _,
+            hits: _,
+            misses: _,
+            evictions: _,
+            on_evict: _,
+        } = c;
+        let _: HashMap<u8, ExpiredU8, DefaultHashBuilder> = store;
     }
 
     #[test]
