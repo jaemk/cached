@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-10-18
+
 ### Changed
 
 - Raise the minimum `redis` version to 1.2.3, the first release on `lru` 0.18. Earlier 1.x
@@ -11,7 +13,7 @@
 ### Added
 
 - CI runs `cargo audit` against the RustSec advisory database on every push and pull request,
-  and weekly against freshly resolved dependencies.
+  and weekly so new advisories surface without a code change.
 
 ## [4.0.2] - 2026-10-12
 
