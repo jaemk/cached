@@ -1,6 +1,6 @@
 [package]
 name = "cached"
-version = "4.0.2"
+version = "4.0.3"
 authors = ["James Kominick <james@kominick.com>"]
 description = "Generic cache implementations and simplified function memoization"
 repository = "https://github.com/jaemk/cached"
@@ -116,7 +116,7 @@ optional = true
 
 
 [dependencies.redis]
-version = "1.0"
+version = "1.2.3"
 features = ["r2d2"]
 optional = true
 

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-10-18
+
+### Changed
+
+- Raise the minimum `redis` version to 1.2.3, the first release on `lru` 0.18. Earlier 1.x
+  releases depend on `lru` 0.16, which is affected by RUSTSEC-2026-0253 (use-after-free in
+  `LruCache::pop()` when a key's `Drop` panics), fixed in `lru` 0.18.2.
+
+### Added
+
+- CI runs `cargo audit` against the RustSec advisory database on every push and pull request,
+  and weekly so new advisories surface without a code change.
+
 ## [4.0.2] - 2026-10-12
 
 ### Fixed

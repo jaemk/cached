@@ -1,0 +1,44 @@
+name: audit
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  # Weekly, so a new advisory against an unchanged tree still surfaces.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-audit:
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: dtolnay/rust-toolchain@1.96.0
+
+    # Pinned for the same reason as cargo-readme in build.yml: a tool upgrade should be a
+    # deliberate change, not something that turns this job red on its own.
+    - run: cargo install cargo-audit --version 0.22.2 --locked
+
+    # Cargo.lock is not committed, so resolve it here. The lockfile covers every optional
+    # dependency regardless of features, so this audits the redis and redb trees too. Each
+    # run resolves the latest semver-compatible versions, which is what a downstream
+    # `cargo update` would pick.
+    - run: cargo generate-lockfile
+
+    # Fails on vulnerabilities. Unmaintained and unsound advisories print as warnings.
+    - run: cargo audit
+      name: 'Running `cargo audit`'
