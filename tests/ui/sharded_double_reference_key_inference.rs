@@ -2,7 +2,7 @@
 // fix (`specs/design/0055`, Pitfalls). Making the inherent lookups generic over `Q` at all is what
 // causes it, so it survives the `BorrowedKeyRouting` -> `ShardHasher<Q>` route change unchanged.
 //
-// `CHANGELOG.md`, the crate-root docs and `README.md` all quote this exact diagnostic
+// `CHANGELOG.md` and the `stores` module docs both quote this exact diagnostic
 // (``the trait bound `String: Borrow<&String>` is not satisfied``) as the thing a 3.1.x caller
 // will see, and `tests/sharded_generic_helper_bounds.rs::lookup_all` pins only the WORKING form
 // (`cache.get(k)`). This golden pins the failing form, so the documented migration text cannot

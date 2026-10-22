@@ -1,6 +1,6 @@
 // The plain-call twin of `sharded_helper_missing_borrowed_bound.rs`, and the golden behind the one
-// migration claim in the crate-level "Custom shard hashers" blockquote (`src/lib.rs`, and the
-// byte-identical paragraph in `README.md`) that nothing else pins: with only
+// migration claim in the "Custom shard hashers" blockquote of the `stores` module docs
+// (`src/stores/mod.rs`) that nothing else pins: with only
 // `H: ShardHasher<String>` in scope, `c.get("a")` fails as an E0308 argument mismatch
 // (`expected &String, found &str`) rather than as a missing-impl error, "because `Q` collapses to
 // the key type before any bound is checked".
