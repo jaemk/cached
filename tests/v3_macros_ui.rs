@@ -146,7 +146,7 @@ fn compile_fail_v3_macros() {
     // The same helper written the way a caller actually writes it, without the turbofish: with one
     // `ShardHasher` bound in scope, `Q` collapses to `String` before any bound is checked and the
     // plain `c.get("a")` fails as an E0308 argument mismatch (`expected &String, found &str`), NOT
-    // as a missing bound. The crate docs and `README.md` quote that exact wording as the migration
+    // as a missing bound. The `stores` module docs quote that exact wording as the migration
     // text for an under-bounded helper; this golden is what keeps that quote honest, and the
     // turbofished sibling above is only a fixture device for pinning the `on_unimplemented` text.
     t.compile_fail("tests/ui/sharded_helper_missing_borrowed_bound_no_turbofish.rs");
@@ -158,11 +158,11 @@ fn compile_fail_v3_macros() {
     // The generic helper that names `H` but under-bounds `K`/`V`: the inherent `get` lives in an
     // `impl` block requiring `K: Hash + Eq + Clone` and returns `V` by value, so a helper bounded
     // only on `H: ShardHasher<K>` fails at its own definition with E0599 (no method named `get`)
-    // rather than with anything about the hasher. The crate docs quote that E0599 as the thing to
+    // rather than with anything about the hasher. The `stores` module docs quote that E0599 as the thing to
     // read as a bounds list; this golden is what keeps that quote honest.
     t.compile_fail("tests/ui/sharded_helper_missing_key_bounds.rs");
     // Break class 2 (`cache.get(&k)` with `k: &K` inferring `Q = &K`), which 0055 deliberately
-    // does not fix. `CHANGELOG.md`, the crate docs and `README.md` all quote this diagnostic
+    // does not fix. `CHANGELOG.md` and the `stores` module docs both quote this diagnostic
     // verbatim as the migration text; this golden is what keeps that quote honest.
     t.compile_fail("tests/ui/sharded_double_reference_key_inference.rs");
     // Item 9: `#[cached]`-only attributes rejected on other macros

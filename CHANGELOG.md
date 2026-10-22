@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Rewrite the README and crate-root docs around a short example, a table of contents, and
+  task-oriented sections. The store reference (method naming, store comparison, sharding,
+  behavioral guarantees, inspection APIs, per-value expiry) moves to the `stores` module docs,
+  and the full macro attribute reference and requirements move to the `macros` module docs. No
+  API change.
+
 ## [4.0.3] - 2026-10-18
 
 ### Changed
