@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.4] - 2026-10-22
+
 ### Changed
 
 - Rewrite the README and crate-root docs around a short example, a table of contents, and
