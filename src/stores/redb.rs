@@ -779,8 +779,9 @@ where
 pub struct RedbCacheStats {
     /// Every stored entry, expired and undecodable included.
     pub entries: usize,
-    /// Decodable entries past the TTL in effect at the call (TTL changes are retroactive).
-    /// Always 0 when no TTL is set.
+    /// Decodable entries whose age has reached the TTL in effect at the call (the same
+    /// `age >= ttl` rule as `cache_get`; TTL changes are retroactive). Always 0 when no TTL
+    /// is set.
     pub expired: usize,
     /// Entries whose stored bytes fail to decode (a `cache_get` would self-heal or reject
     /// them).

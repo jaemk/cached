@@ -56,7 +56,7 @@ inserting or removing a field reinterprets every stored entry and must bump `DIS
 
 `scan_stats()` (and `async_scan_stats()` under `async`) scans the whole table under one read
 transaction and returns a `RedbCacheStats`: `entries` (every stored row), `expired` (decodable
-entries past the current TTL, 0 with no TTL), `undecodable`, and the `oldest`/`newest`
+entries whose age is >= the current TTL, 0 with no TTL), `undecodable`, and the `oldest`/`newest`
 `created_at`. It never writes: no self-heal, no eviction, no refresh, and undecodable entries are
 counted rather than surfaced as errors in both deserialization modes. `cache_size()` stays
 `Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).

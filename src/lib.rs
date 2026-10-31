@@ -1405,7 +1405,8 @@ pub struct CacheMetrics {
     /// Current number of entries in the cache.
     ///
     /// `None` means the count is unknown or unavailable for this store (e.g. redis/redb,
-    /// whose `cache_size` returns `Ok(None)`); `Some(n)` is the exact live entry count.
+    /// whose `cache_size` returns `Ok(None)`; for redb, `RedbCache::scan_stats()` counts on
+    /// demand); `Some(n)` is the exact live entry count.
     pub entry_count: Option<usize>,
     /// Maximum capacity, if bounded.
     pub capacity: Option<usize>,
