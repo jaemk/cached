@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `RedbCache::scan_stats()` (and `async_scan_stats()` under `async`) scans the whole table under
+  one read transaction and returns a `RedbCacheStats`: the entry count, how many are expired or
+  undecodable, and the oldest and newest `created_at`. It never writes, and undecodable entries
+  are counted rather than returned as errors. `cache_size()` still returns `Ok(None)` (#336).
+
 ## [4.0.4] - 2026-10-22
 
 ### Changed
