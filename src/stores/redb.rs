@@ -754,9 +754,11 @@ where
     /// This is an O(n) read of the whole table and is never run implicitly;
     /// [`cache_size`](ConcurrentCacheBase::cache_size) stays `Ok(None)`. The scan runs
     /// under a single read transaction, so it sees one consistent snapshot and does not
-    /// block or wait on writers. It never writes: undecodable entries are counted, not
-    /// self-healed, and expired entries are counted, not removed. In strict-deserialization
-    /// mode an undecodable entry is still counted rather than returned as an error.
+    /// block or wait on writers. While it runs, redb cannot reuse pages freed by concurrent
+    /// writes, so a long scan under heavy writes can grow the file. It never writes:
+    /// undecodable entries are counted, not self-healed, and expired entries are counted,
+    /// not removed. In strict-deserialization mode an undecodable entry is still counted
+    /// rather than returned as an error.
     ///
     /// `expired` is measured against the TTL current at the call and one `SystemTime::now()`
     /// snapshot. With [`refresh_on_hit`](RedbCacheBuilder::refresh_on_hit) enabled, an
@@ -769,14 +771,16 @@ where
 
 /// Result of [`RedbCache::scan_stats`].
 ///
-/// `#[non_exhaustive]`: fields may be added in a minor release, so it cannot be built or
-/// destructured exhaustively outside the crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// `#[non_exhaustive]`: fields may be added in a minor release, so it cannot be built with a
+/// struct literal or destructured exhaustively outside the crate. To build one (e.g. in a
+/// test), start from [`Default`] and assign the fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct RedbCacheStats {
     /// Every stored entry, expired and undecodable included.
     pub entries: usize,
-    /// Decodable entries past the configured TTL. Always 0 when no TTL is set.
+    /// Decodable entries past the TTL in effect at the call (TTL changes are retroactive).
+    /// Always 0 when no TTL is set.
     pub expired: usize,
     /// Entries whose stored bytes fail to decode (a `cache_get` would self-heal or reject
     /// them).

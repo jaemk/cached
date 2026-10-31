@@ -18,7 +18,7 @@ An inherent, opt-in scan on `RedbCache`, with an async counterpart:
 
 ```rust
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RedbCacheStats {
     pub entries: usize,
     pub expired: usize,
@@ -46,6 +46,8 @@ impl<K, V> RedbCache<K, V> {
   cheaper, but then `undecodable` would not mean "an entry `cache_get` would self-heal or reject":
   a value whose bytes no longer match `V` would count as healthy. Decoding with `V` keeps the count
   consistent with `cache_get` and `remove_expired_entries`.
+- **No `Copy`.** `#[non_exhaustive]` leaves room for new fields in a minor release; deriving
+  `Copy` would rule out any non-`Copy` field later. Matches `CacheMetrics`.
 - **`entries` counts every stored row**, expired and undecodable included. `oldest`/`newest` are
   the min/max `created_at` over decodable entries, expired included. With `refresh_on_hit`
   enabled, `created_at` is the last write or refresh, not the original insert.
