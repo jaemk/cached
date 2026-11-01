@@ -17,8 +17,8 @@ holds an exclusive lock on the file.
 An inherent, opt-in scan on `RedbCache`, with an async counterpart:
 
 ```rust
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct RedbCacheStats {
     pub entries: usize,
     pub expired: usize,
@@ -35,9 +35,11 @@ impl<K, V> RedbCache<K, V> {
 
 - **One read transaction, no writes.** The scan is a single MVCC read, so it never blocks or is
   blocked by a writer and the result is a consistent point-in-time view of the table. It never
-  opens a write transaction: no self-heal, no expiry eviction, no refresh.
-- **One time snapshot.** `expired` is computed against one `SystemTime::now()` taken before the
-  scan, the same rule `remove_expired_entries` follows, and against the TTL current at the call
+  opens a write transaction: no self-heal, no expiry eviction, no refresh. The cost of the open
+  snapshot is that redb cannot reuse pages freed by concurrent writes until the scan ends, so a
+  long scan under heavy writes can grow the file.
+- **One time snapshot.** `expired` (`age >= ttl`) is computed against one `SystemTime::now()`
+  taken before the scan, the same rule `remove_expired_entries` follows, and against the TTL current at the call
   (TTL is retroactive, see `ConcurrentCacheTtl::set_ttl`). With no TTL, `expired` is 0.
 - **Undecodable entries are counted in both modes.** `strict_deserialization` governs reads that
   return a value; a diagnostic scan reports corruption rather than aborting on it, so it never
