@@ -769,7 +769,7 @@ where
     }
 }
 
-/// Result of [`RedbCache::scan_stats`].
+/// Result of [`RedbCache::scan_stats`] (and `async_scan_stats` under the `async` feature).
 ///
 /// `#[non_exhaustive]`: fields may be added in a minor release, so it cannot be built with a
 /// struct literal or destructured exhaustively outside the crate. To build one (e.g. in a
@@ -792,7 +792,7 @@ pub struct RedbCacheStats {
     pub newest: Option<SystemTime>,
 }
 
-/// Async counterparts of the blocking `RedbCache` maintenance methods.
+/// Async counterparts of the blocking `RedbCache` maintenance and inspection methods.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 impl<K, V> RedbCache<K, V>
