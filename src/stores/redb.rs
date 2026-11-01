@@ -751,10 +751,10 @@ where
     /// Scan every stored entry and return a [`RedbCacheStats`]: the entry count, how many
     /// are expired or undecodable, and the oldest and newest `created_at`.
     ///
-    /// This is an O(n) read of the whole table and is never run implicitly;
-    /// [`cache_size`](ConcurrentCacheBase::cache_size) stays `Ok(None)`. The scan runs
-    /// under a single read transaction, so it sees one consistent snapshot and does not
-    /// block or wait on writers. While it runs, redb cannot reuse pages freed by concurrent
+    /// This is an O(n) read of the whole table that deserializes every stored `V`, and is
+    /// never run implicitly; [`cache_size`](ConcurrentCacheBase::cache_size) stays
+    /// `Ok(None)`. The scan runs under a single read transaction, so it sees one consistent
+    /// snapshot and does not block or wait on writers. While it runs, redb cannot reuse pages freed by concurrent
     /// writes, so a long scan under heavy writes can grow the file. It never writes:
     /// undecodable entries are counted, not self-healed, and expired entries are counted,
     /// not removed. In strict-deserialization mode an undecodable entry is still counted

@@ -82,6 +82,13 @@ fn main() {
     cache.flush().unwrap(); // one durable commit persisting the cheap writes above
     println!("flushed 3 cheap writes to disk in a single durable commit");
 
+    // `cache_size()` is `Ok(None)` for redb; `scan_stats()` is the explicit O(n) count.
+    let stats = cache.scan_stats().unwrap();
+    println!(
+        "{} entries, oldest {:?}, newest {:?}",
+        stats.entries, stats.oldest, stats.newest
+    );
+
     // No `map_error` needed: ExampleError: From<RedbCacheError> handles conversion.
     print!("call without map_error (From<RedbCacheError>) ...");
     io::stdout().flush().unwrap();
