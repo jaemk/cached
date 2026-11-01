@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-10-31
+
 ### Added
 
 - `RedbCache::scan_stats()` (and `async_scan_stats()` under `async`) scans the whole table under

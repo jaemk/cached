@@ -71,5 +71,5 @@ returns fixed-size aggregates rather than the entries themselves.
 
 ## Notes
 
-- Additive: a new struct and two inherent methods. Ships in a minor release.
+- Additive: a new struct and two inherent methods. Ships in 4.1.0.
 - Related: REDB-6 (frozen format), 0029 (self-healing default), 0039 (declined sharded iteration).
