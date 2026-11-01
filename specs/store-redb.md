@@ -29,7 +29,7 @@ Implements the concurrent trait family (`ConcurrentCacheBase`, `ConcurrentCached
 `ConcurrentCachedAsync`, `ConcurrentCacheTtl`, `SerializeCached`, `SerializeCachedAsync`).
 `ConcurrentCacheEvict` is intentionally not implemented; expired-entry sweeping is the fallible
 inherent `remove_expired_entries()`. `disk_path()` ships (returns the resolved database path
-after build).
+after build). `scan_stats()` is the opt-in O(n) counterpart to `cache_size()` (see REDB-7).
 Builder-side resolved-path introspection and a configurable temp-dir fallback remain open
 ([design/0025-redb-disk-path-introspection.md](design/0025-redb-disk-path-introspection.md)). See
 [traits-concurrent.md](traits-concurrent.md).
@@ -51,3 +51,12 @@ then `created_at` and the field names are not on the wire. Field order is part o
 on-disk layout, alongside the version in the file name and the redb table name: reordering,
 inserting or removing a field reinterprets every stored entry and must bump `DISK_FILE_VERSION`.
 `tests/frozen_format_golden.rs` pins the serialized bytes (no server required).
+
+## REDB-7
+
+`scan_stats()` (and `async_scan_stats()` under `async`) scans the whole table under one read
+transaction and returns a `RedbCacheStats`: `entries` (every stored row), `expired` (decodable
+entries whose age is >= the current TTL, 0 with no TTL), `undecodable`, and the `oldest`/`newest`
+`created_at`. It never writes: no self-heal, no eviction, no refresh, and undecodable entries are
+counted rather than surfaced as errors in both deserialization modes. `cache_size()` stays
+`Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).

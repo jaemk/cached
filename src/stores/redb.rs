@@ -747,9 +747,52 @@ where
     pub fn flush(&self) -> Result<(), RedbCacheError> {
         redb_flush(&self.connection)
     }
+
+    /// Scan every stored entry and return a [`RedbCacheStats`]: the entry count, how many
+    /// are expired or undecodable, and the oldest and newest `created_at`.
+    ///
+    /// This is an O(n) read of the whole table that deserializes every stored `V`, and is
+    /// never run implicitly; [`cache_size`](ConcurrentCacheBase::cache_size) stays
+    /// `Ok(None)`. The scan runs under a single read transaction, so it sees one consistent
+    /// snapshot and does not block or wait on writers. While it runs, redb cannot reuse pages freed by concurrent
+    /// writes, so a long scan under heavy writes can grow the file. It never writes:
+    /// undecodable entries are counted, not self-healed, and expired entries are counted,
+    /// not removed. In strict-deserialization mode an undecodable entry is still counted
+    /// rather than returned as an error.
+    ///
+    /// `expired` is measured against the TTL current at the call and one `SystemTime::now()`
+    /// snapshot. With [`refresh_on_hit`](RedbCacheBuilder::refresh_on_hit) enabled, an
+    /// entry's `created_at` is its last write or refresh, so `oldest` / `newest` are the
+    /// least / most recently written or refreshed entries.
+    pub fn scan_stats(&self) -> Result<RedbCacheStats, RedbCacheError> {
+        scan_stats_impl::<V>(&self.connection, *self.ttl.lock())
+    }
 }
 
-/// Async counterparts of the blocking `RedbCache` maintenance methods.
+/// Result of [`RedbCache::scan_stats`] (and `async_scan_stats` under the `async` feature).
+///
+/// `#[non_exhaustive]`: fields may be added in a minor release, so it cannot be built with a
+/// struct literal or destructured exhaustively outside the crate. To build one (e.g. in a
+/// test), start from [`Default`] and assign the fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct RedbCacheStats {
+    /// Every stored entry, expired and undecodable included.
+    pub entries: usize,
+    /// Decodable entries whose age has reached the TTL in effect at the call (the same
+    /// `age >= ttl` rule as `cache_get`; TTL changes are retroactive). Always 0 when no TTL
+    /// is set.
+    pub expired: usize,
+    /// Entries whose stored bytes fail to decode (a `cache_get` would self-heal or reject
+    /// them).
+    pub undecodable: usize,
+    /// The earliest `created_at` among decodable entries, expired included.
+    pub oldest: Option<SystemTime>,
+    /// The latest `created_at` among decodable entries, expired included.
+    pub newest: Option<SystemTime>,
+}
+
+/// Async counterparts of the blocking `RedbCache` maintenance and inspection methods.
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 impl<K, V> RedbCache<K, V>
@@ -776,6 +819,14 @@ where
             remove_expired_entries_impl::<V>(&connection, ttl, strict, durable)
         })
         .await
+    }
+
+    /// Async counterpart of [`scan_stats`](RedbCache::scan_stats): runs the O(n) scan on a
+    /// background thread (via the [`blocking`] crate) so it does not stall the async runtime.
+    pub async fn async_scan_stats(&self) -> Result<RedbCacheStats, RedbCacheError> {
+        let connection = self.connection.clone();
+        let ttl = *self.ttl.lock();
+        blocking::unblock(move || scan_stats_impl::<V>(&connection, ttl)).await
     }
 }
 
@@ -1404,6 +1455,45 @@ where
     }
     wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(removed)
+}
+
+/// Shared implementation of [`RedbCache::scan_stats`] and the async
+/// `RedbCache::async_scan_stats`. Read-only: one read txn, no write txn, so a
+/// corrupt or expired entry is only counted, never healed or removed.
+fn scan_stats_impl<V>(
+    connection: &Database,
+    ttl: Option<Duration>,
+) -> Result<RedbCacheStats, RedbCacheError>
+where
+    V: DeserializeOwned,
+{
+    // One time snapshot for the whole scan, same rule as `remove_expired_entries_impl`.
+    let now = SystemTime::now();
+    let mut stats = RedbCacheStats::default();
+
+    let rtxn = connection.begin_read().map_err(RedbCacheError::storage)?;
+    let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
+    for item in table.iter().map_err(RedbCacheError::storage)? {
+        let (_, value) = item.map_err(RedbCacheError::storage)?;
+        stats.entries += 1;
+        // Decode the whole entry, `V` included, so `undecodable` matches what
+        // `cache_get` would self-heal or reject.
+        let Ok(cached) = rmp_serde::from_slice::<CachedDiskValue<V>>(value.value()) else {
+            stats.undecodable += 1;
+            continue;
+        };
+        if ttl.is_some_and(|ttl| {
+            now.duration_since(cached.created_at)
+                .unwrap_or(Duration::from_secs(0))
+                >= ttl
+        }) {
+            stats.expired += 1;
+        }
+        let created_at = cached.created_at;
+        stats.oldest = Some(stats.oldest.map_or(created_at, |t| t.min(created_at)));
+        stats.newest = Some(stats.newest.map_or(created_at, |t| t.max(created_at)));
+    }
+    Ok(stats)
 }
 
 /// Behavior on a corrupt stored value (one whose bytes fail to deserialize):
@@ -3448,6 +3538,173 @@ mod tests {
             cache.async_cache_get(&TEST_KEY).await.unwrap(),
             Some(TEST_VAL)
         );
+    }
+
+    /// Plant an entry with a fixed `created_at` so `scan_stats` results do not
+    /// depend on timing.
+    fn raw_insert_at(cache: &RedbCache<u32, u32>, key: &str, value: u32, created_at: SystemTime) {
+        let stored = CachedDiskValue { value, created_at };
+        raw_insert(
+            cache,
+            key,
+            rmp_serde::to_vec(&stored).expect("error serializing fixture"),
+        );
+    }
+
+    #[test]
+    fn scan_stats_on_empty_cache_is_all_zero() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("scan-stats-empty")
+            .disk_dir(tmp_dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        assert_eq!(cache.scan_stats().unwrap(), RedbCacheStats::default());
+    }
+
+    #[test]
+    fn scan_stats_reports_count_and_oldest_newest() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("scan-stats-count")
+            .disk_dir(tmp_dir.path())
+            .build()
+            .unwrap();
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let t3 = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000);
+        // Inserted out of order so the result cannot come from key order.
+        raw_insert_at(&cache, "a", 1, t2);
+        raw_insert_at(&cache, "b", 2, t3);
+        raw_insert_at(&cache, "c", 3, t1);
+
+        let stats = cache.scan_stats().unwrap();
+        assert_eq!(stats.entries, 3);
+        assert_eq!(stats.expired, 0, "no ttl, so nothing is expired");
+        assert_eq!(stats.undecodable, 0);
+        assert_eq!(stats.oldest, Some(t1));
+        assert_eq!(stats.newest, Some(t3));
+    }
+
+    #[test]
+    fn scan_stats_counts_expired_against_current_ttl() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("scan-stats-expired")
+            .disk_dir(tmp_dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(120);
+        raw_insert_at(&cache, "old", 1, old);
+        raw_insert_at(&cache, "fresh", 2, now);
+
+        let stats = cache.scan_stats().unwrap();
+        assert_eq!(stats.entries, 2);
+        assert_eq!(stats.expired, 1);
+        // Expired entries still count toward oldest/newest.
+        assert_eq!(stats.oldest, Some(old));
+        assert_eq!(stats.newest, Some(now));
+
+        // TTL is retroactive: raising it revives the old entry.
+        cache.set_ttl(Duration::from_secs(300));
+        assert_eq!(cache.scan_stats().unwrap().expired, 0);
+
+        cache.set_ttl(Duration::from_secs(60));
+        cache.unset_ttl();
+        assert_eq!(cache.scan_stats().unwrap().expired, 0);
+    }
+
+    #[test]
+    fn scan_stats_counts_undecodable_without_removing_in_both_modes() {
+        for strict in [false, true] {
+            let tmp_dir = temp_dir!();
+            let cache: RedbCache<u32, u32> = RedbCache::builder("scan-stats-undecodable")
+                .disk_dir(tmp_dir.path())
+                .ttl(Duration::from_secs(60))
+                .strict_deserialization(strict)
+                .build()
+                .unwrap();
+            let t = SystemTime::now();
+            raw_insert_at(&cache, "ok", 1, t);
+            // Not MessagePack at all.
+            raw_insert(&cache, "garbage", vec![0xc1, 0xc1, 0xc1]);
+            // Valid MessagePack with a valid `created_at`, but the value is not a `u32`:
+            // `cache_get` would reject it, so the scan must too.
+            let wrong_type = CachedDiskValue {
+                value: "not a u32".to_string(),
+                created_at: SystemTime::UNIX_EPOCH,
+            };
+            raw_insert(
+                &cache,
+                "wrong-type",
+                rmp_serde::to_vec(&wrong_type).unwrap(),
+            );
+
+            let stats = cache
+                .scan_stats()
+                .unwrap_or_else(|e| panic!("strict={strict}: scan must not error: {e}"));
+            assert_eq!(stats.entries, 3, "strict={strict}");
+            assert_eq!(stats.undecodable, 2, "strict={strict}");
+            assert_eq!(
+                stats.expired, 0,
+                "strict={strict}: undecodable is not expired"
+            );
+            assert_eq!(stats.oldest, Some(t), "strict={strict}");
+            assert_eq!(stats.newest, Some(t), "strict={strict}");
+            assert!(raw_get(&cache, "garbage").is_some(), "strict={strict}");
+            assert!(raw_get(&cache, "wrong-type").is_some(), "strict={strict}");
+        }
+    }
+
+    /// The scan must not refresh, evict, or heal anything, even with
+    /// `refresh_on_hit` on and expired/corrupt entries present.
+    #[test]
+    fn scan_stats_does_not_write() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("scan-stats-read-only")
+            .disk_dir(tmp_dir.path())
+            .ttl(Duration::from_secs(60))
+            .refresh_on_hit(true)
+            .build()
+            .unwrap();
+        let now = SystemTime::now();
+        raw_insert_at(&cache, "fresh", 1, now);
+        raw_insert_at(&cache, "old", 2, now - Duration::from_secs(120));
+        raw_insert(&cache, "garbage", vec![0xc1, 0xc1, 0xc1]);
+        let before: Vec<_> = ["fresh", "old", "garbage"]
+            .iter()
+            .map(|k| raw_get(&cache, k))
+            .collect();
+
+        cache.scan_stats().unwrap();
+
+        let after: Vec<_> = ["fresh", "old", "garbage"]
+            .iter()
+            .map(|k| raw_get(&cache, k))
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_scan_stats_matches_scan_stats() {
+        let tmp_dir = temp_dir!();
+        let cache: RedbCache<u32, u32> = RedbCache::builder("scan-stats-async")
+            .disk_dir(tmp_dir.path())
+            .ttl(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let now = SystemTime::now();
+        raw_insert_at(&cache, "fresh", 1, now);
+        raw_insert_at(&cache, "old", 2, now - Duration::from_secs(120));
+        raw_insert(&cache, "garbage", vec![0xc1, 0xc1, 0xc1]);
+
+        let stats = cache.async_scan_stats().await.unwrap();
+        assert_eq!(stats.entries, 3);
+        assert_eq!(stats.expired, 1);
+        assert_eq!(stats.undecodable, 1);
+        assert_eq!(stats, cache.scan_stats().unwrap());
     }
 
     /// Prove runtime-agnosticism: run async RedbCache operations under

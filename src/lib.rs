@@ -415,7 +415,9 @@ pub use stores::{
 };
 #[cfg(feature = "redb_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
-pub use stores::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
+pub use stores::{
+    RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError, RedbCacheStats,
+};
 
 pub mod claim;
 mod lru_list;
@@ -1403,7 +1405,8 @@ pub struct CacheMetrics {
     /// Current number of entries in the cache.
     ///
     /// `None` means the count is unknown or unavailable for this store (e.g. redis/redb,
-    /// whose `cache_size` returns `Ok(None)`); `Some(n)` is the exact live entry count.
+    /// whose `cache_size` returns `Ok(None)`; for redb, `RedbCache::scan_stats()` counts on
+    /// demand); `Some(n)` is the exact live entry count.
     pub entry_count: Option<usize>,
     /// Maximum capacity, if bounded.
     pub capacity: Option<usize>,
@@ -2367,9 +2370,9 @@ pub trait ConcurrentCacheBase {
     /// server-side `DBSIZE`/`SCAN` over a shared keyspace, not just this cache's entries) and
     /// `RedbCache` (an `O(n)` scan of the backing table). Those stores return `Ok(None)` rather
     /// than pay that cost implicitly. For `RedisCache` / `AsyncRedisCache` you can query the server
-    /// directly if you need a count; `RedbCache` holds an exclusive lock on its file and exposes no
-    /// live database handle (`RedbCache::disk_path()` gives the file location for offline inspection,
-    /// but the database cannot be opened by a second instance while the cache is live).
+    /// directly if you need a count; for `RedbCache` call `RedbCache::scan_stats()`, an explicit
+    /// full scan that also reports expired and undecodable entries and the oldest/newest write
+    /// time.
     ///
     /// This is the concurrent analogue of [`Cached::cache_size`], widened to
     /// `Result<Option<usize>, _>` because concurrent stores may be fallible and may not know

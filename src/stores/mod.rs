@@ -1069,7 +1069,9 @@ impl<V: Clone> Clone for TimedEntry<V> {
 
 #[cfg(feature = "redb_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
-pub use crate::stores::redb::{RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError};
+pub use crate::stores::redb::{
+    RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError, RedbCacheStats,
+};
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
 pub use crate::stores::redis::{

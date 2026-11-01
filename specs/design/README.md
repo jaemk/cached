@@ -85,3 +85,4 @@ the item stays here for history.
 | [0053](0053-refresh-claim-guard.md) | A first-class refresh-claim guard | Implemented |
 | [0054](0054-stale-pr-issue-triage.md) | Triage of stale PRs and issues | Partly implemented |
 | [0055](0055-shard-hasher-q-over-borrowed-key-routing.md) | `ShardHasher<Q>` bounds replace `BorrowedKeyRouting` | Implemented |
+| [0056](0056-redb-scan-stats.md) | `RedbCache::scan_stats`: an explicit full-table scan | Implemented |

@@ -13,7 +13,8 @@ a `hit_ratio() -> Option<f64>` method.
 ## METRIC-2
 
 A field is `None` when the store cannot report it: `entry_count` is `None` for stores that cannot
-count (e.g. redis, redb); `evictions` is `None` for stores that never evict (e.g.
+count cheaply (e.g. redis, redb; redb offers the opt-in O(n) `scan_stats()`, see
+[store-redb.md](store-redb.md) REDB-7); `evictions` is `None` for stores that never evict (e.g.
 `UnboundCache`); `capacity` is `None` for unbounded stores.
 
 ## METRIC-3
