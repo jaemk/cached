@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-11-03
+
+### Fixed
+
+- Document the store re-exports inline at the crate root with `#[doc(inline)]`, so
+  `cached::LruCache`, `cached::ShardedLruCache`, `cached::RedbCache`, and the other stores,
+  builders, and errors get pages at `cached/struct.<Name>.html`. The "Choosing a store" table and
+  other docs.rs links to those paths previously 404'd. No API change.
+
 ## [4.1.0] - 2026-10-31
 
 ### Added
