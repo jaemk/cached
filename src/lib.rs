@@ -382,6 +382,7 @@ use std::future::Future;
         feature = "redis_tokio_rustls",
     )))
 )]
+#[doc(inline)]
 pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 
 // A capability-only feature (`redis_async_cache` / `redis_connection_manager`) enabled without a
@@ -390,6 +391,11 @@ pub use stores::{AsyncRedisCache, AsyncRedisCacheBuilder};
 // in the dependency, which compiles before `cached`, so a `compile_error!` here could not
 // preempt it. The requirement is documented on each capability feature in Cargo.toml: pair it
 // with a `redis_tokio*` or `redis_smol*` runtime feature.
+//
+// `doc(inline)` documents the stores at the crate root (`cached/struct.LruCache.html`), where
+// users import them and where the README's "Choosing a store" links point. Without it, `stores`
+// being a public module makes rustdoc list these as plain re-exports with no root-level pages.
+#[doc(inline)]
 pub use stores::{
     BuildError, CacheEvict, CacheValue, ConcurrentCacheEvict, DefaultHashBuilder,
     DefaultShardHasher, Expires, ExpiringCache, ExpiringCacheBuilder, ExpiringLruCache,
@@ -400,14 +406,17 @@ pub use stores::{
 };
 #[cfg(feature = "redis_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis_store")))]
+#[doc(inline)]
 pub use stores::{
     ConnectionString, RedisCache, RedisCacheBuildError, RedisCacheBuilder, RedisCacheError,
 };
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+#[doc(inline)]
 pub use stores::{HasEvict, NoEvict};
 #[cfg(feature = "time_stores")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time_stores")))]
+#[doc(inline)]
 pub use stores::{
     LruTtlCache, LruTtlCacheBuilder, ShardedLruTtlCache, ShardedLruTtlCacheBuilder,
     ShardedTtlCache, ShardedTtlCacheBuilder, TtlCache, TtlCacheBuilder, TtlSortedCache,
@@ -415,6 +424,7 @@ pub use stores::{
 };
 #[cfg(feature = "redb_store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redb_store")))]
+#[doc(inline)]
 pub use stores::{
     RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError, RedbCacheStats,
 };
