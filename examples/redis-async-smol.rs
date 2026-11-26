@@ -1,8 +1,7 @@
 /*
-Async Redis cache (`AsyncRedisCache`, async-std runtime): `#[concurrent_cached]`
+Async Redis cache (`AsyncRedisCache`, smol runtime): `#[concurrent_cached]`
 with a custom `create` block and cache priming. Uses `redis_smol_native_tls` for the Redis
-connection (smol is the async executor that async-std is built on). The
-connection string is read from `CACHED_REDIS_CONNECTION_STRING`.
+connection. The connection string is read from `CACHED_REDIS_CONNECTION_STRING`.
 
 See also `redis-async-tokio` for the same example on the Tokio runtime.
 
@@ -11,21 +10,21 @@ only, you can enable `redis/smol-comp` directly instead.
 
 Note: cached's `async` feature (pulled in transitively here) only adds the pure-Rust
 `async-lock` dependency for its internal async primitives; it does not pull in Tokio.
-All async execution is driven by async-std/smol.
+All async execution is driven by smol.
 
 Start redis if you don't already have one:
     docker run --rm --name async-cached-redis-example -p 6379:6379 -d redis
 Run:
     CACHED_REDIS_CONNECTION_STRING=redis://127.0.0.1:6379 \
-        cargo run --example redis-async-async-std --features "redis_smol_native_tls,proc_macro"
+        cargo run --example redis-async-smol --features "redis_smol_native_tls,proc_macro"
 Cleanup:
     docker rm -f async-cached-redis-example
 */
 
-use async_std::task::sleep;
 use cached::AsyncRedisCache;
 use cached::macros::concurrent_cached;
 use cached::time::Duration;
+use smol::Timer;
 use std::io;
 use std::io::Write;
 use std::sync::LazyLock;
@@ -42,11 +41,11 @@ enum ExampleError {
 #[concurrent_cached(
     redis = true,
     ttl_secs = 30,
-    cache_prefix_block = r##"{ "cache-redis-async-std-example-1" }"##,
+    cache_prefix_block = r##"{ "cache-redis-async-smol-example-1" }"##,
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##
 )]
 async fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
-    sleep(Duration::from_secs(secs)).await;
+    Timer::after(Duration::from_secs(secs)).await;
     Ok(())
 }
 
@@ -54,7 +53,7 @@ async fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder("cache_redis_async_std_example_cached_sleep_secs")
+        AsyncRedisCache::builder("cache_redis_async_smol_example_cached_sleep_secs")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .build()
@@ -63,7 +62,7 @@ async fn cached_sleep_secs(secs: u64) -> Result<(), ExampleError> {
     } "##
 )]
 async fn async_cached_sleep_secs(secs: u64) -> Result<String, ExampleError> {
-    sleep(Duration::from_secs(secs)).await;
+    Timer::after(Duration::from_secs(secs)).await;
     Ok(secs.to_string())
 }
 
@@ -84,7 +83,7 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     map_error = r##"|e| ExampleError::RedisError(format!("{:?}", e))"##,
     ty = "cached::AsyncRedisCache<u64, String>",
     create = r##" {
-        AsyncRedisCache::builder("cache_redis_async_std_example_cached_sleep_secs_config")
+        AsyncRedisCache::builder("cache_redis_async_smol_example_cached_sleep_secs_config")
             .ttl(Duration::from_secs(1))
             .refresh_on_hit(true)
             .connection_string(&CONFIG.conn_str)
@@ -94,12 +93,15 @@ static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
     } "##
 )]
 async fn async_cached_sleep_secs_config(secs: u64) -> Result<String, ExampleError> {
-    sleep(Duration::from_secs(secs)).await;
+    Timer::after(Duration::from_secs(secs)).await;
     Ok(secs.to_string())
 }
 
-#[async_std::main]
-async fn main() {
+fn main() {
+    smol::block_on(run());
+}
+
+async fn run() {
     print!("1. first call with a 2 seconds sleep...");
     io::stdout().flush().unwrap();
     cached_sleep_secs(2).await.unwrap();

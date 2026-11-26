@@ -18,6 +18,9 @@
   and no redb type is part of the public API. Note that redb 5 changed its file-locking
   protocol: processes running cached 4.1.1 or earlier must not open the same cache file at the
   same time as a process on this version.
+- Replace the discontinued `async-std` dev-dependency (RUSTSEC-2025-0052) with `smol`. The
+  `async_std` and `redis-async-async-std` examples are now `smol` and `redis-async-smol`.
+  No library change.
 
 ## [4.1.1] - 2026-11-03
 
