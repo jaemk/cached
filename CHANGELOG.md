@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- CI runs the build workflow (MSRV check, test matrix, 32-bit, nightly jobs) weekly as well as on
+  push and pull request, so a dependency release that breaks the build surfaces without a code
+  change.
+
 ### Changed
 
 - Raise the MSRV to 1.95. `redis_store` pulls `scheduled-thread-pool` (via `redis` and `r2d2`),
