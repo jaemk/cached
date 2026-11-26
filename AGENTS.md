@@ -422,6 +422,7 @@ directions, indexed in `specs/design/README.md`.
 | `benches/cache_benches.rs` | Cache benchmarks (`make bench`) |
 | `bin/` | Release helper scripts (`check-versions.sh`, `publish.sh`, `tag-release.sh`) |
 | `src/lib.rs` | Main library entry point + doc comments (source of truth for README) |
+| `src/traits.rs` | Cache trait definitions (`Cached`, `ConcurrentCached`, capability traits), glob-re-exported at the crate root |
 | `src/claim.rs` | `ClaimRegistry`/`Claim` single-flight guard (`cached::claim`, also in the prelude) |
 | `src/stores/` | Cache store implementations |
 | `src/macros.rs` | Proc macro re-export module (`cached::macros`) |

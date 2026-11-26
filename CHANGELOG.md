@@ -28,6 +28,9 @@
 - Split `src/stores/redis.rs` and `src/stores/redb.rs` into `redis/` and `redb/` module
   directories: the async redis store and the unit-test modules move into their own files. No
   code change.
+- Move the cache trait definitions from `src/lib.rs` into a private `traits` module,
+  glob-re-exported at the crate root. Paths (`cached::Cached`, ...) and docs.rs pages are
+  unchanged. No code change.
 
 ## [4.1.1] - 2026-11-03
 
