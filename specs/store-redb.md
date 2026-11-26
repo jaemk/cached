@@ -60,3 +60,14 @@ entries whose age is >= the current TTL, 0 with no TTL), `undecodable`, and the 
 `created_at`. It never writes: no self-heal, no eviction, no refresh, and undecodable entries are
 counted rather than surfaced as errors in both deserialization modes. `cache_size()` stays
 `Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).
+
+## REDB-8
+
+`redb_store` depends on redb 5. Cache files written under redb 4 (cached 4.1.1 and earlier) open
+and read back unchanged: the table is `&str -> &[u8]`, so redb 5's incompatible `Option` value
+encoding does not apply, and no `DISK_FILE_VERSION` bump is needed.
+`tests/fixtures/redb4_fixture_v3.redb` is a file written by cached 4.1.1 on redb 4.6, and
+`tests/frozen_format_golden.rs` opens it with the current redb. redb types stay out of the public
+API: `RedbCacheError`/`RedbCacheBuildError` box their sources (REDB-5), so the redb major version
+is not part of cached's semver surface. redb 5 changed its file-locking protocol, so two processes
+on different redb majors must not open the same cache file at the same time.

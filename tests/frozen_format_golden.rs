@@ -23,7 +23,7 @@ and skip cleanly when `CACHED_REDIS_CONNECTION_STRING` is unset.
 #[cfg(feature = "redb_store")]
 mod redb_value_layout {
     use cached::{ConcurrentCached, RedbCache};
-    use redb::{Database, ReadableDatabase, TableDefinition};
+    use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
     use tempfile::TempDir;
 
     /// The redb table name is part of the frozen on-disk format, so the test
@@ -86,6 +86,33 @@ mod redb_value_layout {
         assert!(
             secs <= now && now - secs < 600,
             "the second field must be the write timestamp: got {secs}, now {now}"
+        );
+    }
+
+    /// A cache file written by `cached` 4.1.1 on redb 4.6 still opens and reads back
+    /// on the current redb. `tests/fixtures/redb4_fixture_v3.redb` holds one entry,
+    /// `"k" -> "hi"`, with no ttl. The fixture is copied into a temp dir because opening
+    /// a `RedbCache` takes a write lock on the file.
+    #[test]
+    fn file_written_by_redb_4_reads_back() {
+        let dir = TempDir::new().expect("temp dir");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/redb4_fixture_v3.redb"
+            ),
+            dir.path().join("redb4_fixture_v3.redb"),
+        )
+        .expect("copy the redb 4 fixture");
+
+        let cache: RedbCache<String, String> = RedbCache::builder("redb4_fixture")
+            .disk_dir(dir.path())
+            .build()
+            .expect("a redb 4 cache file must open");
+        assert_eq!(
+            cache.cache_get(&"k".to_string()).expect("cache_get"),
+            Some("hi".to_string()),
+            "the entry written under redb 4 must read back"
         );
     }
 

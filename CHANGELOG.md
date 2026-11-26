@@ -14,6 +14,10 @@
   and its 0.2.8 release depends on `parking_lot` 0.13, which requires Rust 1.95. It declares no
   `rust-version` of its own, so cargo's MSRV-aware resolver still selects it on older toolchains
   and the build fails. Non-redis builds are unaffected in practice.
+- Upgrade `redb` to 5. Existing cache files written under redb 4 open and read back unchanged,
+  and no redb type is part of the public API. Note that redb 5 changed its file-locking
+  protocol: processes running cached 4.1.1 or earlier must not open the same cache file at the
+  same time as a process on this version.
 
 ## [4.1.1] - 2026-11-03
 
