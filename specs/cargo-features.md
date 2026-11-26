@@ -30,7 +30,7 @@ build otherwise). Orthogonal runtime x TLS axes are an open direction
 ## FEAT-4
 
 Disk: `redb_store` (disk-backed cache via `redb`; see [store-redb.md](store-redb.md)). The crate
-MSRV is **1.92** (raised from 1.89; see [FEAT-6](#feat-6)).
+MSRV is **1.95** (see [FEAT-6](#feat-6)).
 
 ## FEAT-5
 
@@ -42,7 +42,7 @@ on it. `redis_store` and `redb_store` pull `dep:serde` / `dep:rmp-serde` directl
 
 ## FEAT-6
 
-MSRV is **1.92** (raised from 1.89). The `async_core` feature (and `async`, which enables it)
+MSRV was **1.92** (raised from 1.89; raised again to 1.95 by [FEAT-9](#feat-9)). The `async_core` feature (and `async`, which enables it)
 does not compile before 1.92: the two RPIT default bodies on `CachedGetOrSetAsync`
 (`async_cache_get_or_set_with`, `async_cache_try_get_or_set_with`) hit a borrowck limitation that
 rustc itself attributes to [rust-lang/rust#100013](https://github.com/rust-lang/rust/issues/100013),
@@ -77,3 +77,13 @@ missing-feature errors naming `redb_store` and the redis runtime features respec
 corresponding Cargo feature isn't enabled. The macro-side implementation is documented in
 [macro-concurrent-cached.md](macro-concurrent-cached.md); see the decision record at
 `specs/design/0042`.
+
+## FEAT-9
+
+MSRV is **1.95** (raised from 1.92). The floor is set by `redis_store`: `redis` and `r2d2` pull
+`scheduled-thread-pool`, whose 0.2.8 release depends on `parking_lot` 0.13, and `parking_lot`
+0.13 (with `lock_api` 0.5 and `parking_lot_core` 0.10) declares `rust-version = "1.95"`.
+`scheduled-thread-pool` 0.2.8 itself declares no `rust-version`, so cargo's MSRV-aware resolver
+selects it on older toolchains and the build then fails. Non-redis feature sets still build on
+1.92 (the [FEAT-6](#feat-6) floor), but `rust-version` is a single crate-level value, so it
+moves for every feature set. The CI MSRV job is pinned to 1.95.

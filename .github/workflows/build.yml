@@ -20,7 +20,7 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
-    - uses: dtolnay/rust-toolchain@1.92.0
+    - uses: dtolnay/rust-toolchain@1.95.0
 
     - name: Cache cargo dir
       uses: actions/cache@v4
@@ -47,7 +47,7 @@ jobs:
           ${{ runner.os }}-
 
     - run: cargo check --all-features
-      name: 'Checking MSRV (1.92.0) builds with --all-features'
+      name: 'Checking MSRV (1.95.0) builds with --all-features'
 
   build:
 
