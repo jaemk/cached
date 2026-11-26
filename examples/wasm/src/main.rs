@@ -8,48 +8,49 @@ Build:
     cd examples/wasm && cargo build --target=wasm32-unknown-unknown
 */
 
-use chrono::{DateTime, Utc};
-use reqwasm::http::Request;
+use gloo_net::http::Request;
 use yew::prelude::*;
 
 use cached::TtlCache;
 use cached::macros::cached;
 
-const URL: &'static str = "https://echo.zuplo.io/";
+const URL: &str = "https://echo.zuplo.io/";
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct State {
     content: Option<String>,
-    date: DateTime<Utc>,
+    date: String,
 }
 
-#[function_component(App)]
+fn now() -> String {
+    js_sys::Date::new_0().to_iso_string().into()
+}
+
+#[component(App)]
 fn app() -> Html {
     let state = use_state(|| State {
         content: None,
-        date: Utc::now(),
+        date: now(),
     });
     let onclick = {
         let state = state.clone();
-        let closure = move |_| {
+        Callback::from(move |_| {
+            let state = state.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let content = fetch("Body content".to_owned()).await;
-                let date = Utc::now();
-                state.set(State { content, date });
+                state.set(State {
+                    content,
+                    date: now(),
+                });
             })
-        };
-        Callback::once(closure)
+        })
     };
     html! {
         <>
-            <button onclick = {onclick}>{"Fetch Content"}</button><br/>
-            <span>{"Last clicked: "}{state.date}</span><br/>
+            <button {onclick}>{"Fetch Content"}</button><br/>
+            <span>{"Last clicked: "}{state.date.clone()}</span><br/>
             <div>
-                {if let Some(response) = (*state).content.clone() {
-                    response
-                } else {
-                    "Click the button".to_owned()
-                }}
+                {state.content.clone().unwrap_or_else(|| "Click the button".to_owned())}
             </div>
         </>
     }
@@ -63,6 +64,7 @@ fn app() -> Html {
 async fn fetch(body: String) -> Option<String> {
     Request::post(URL)
         .body(body)
+        .ok()?
         .send()
         .await
         .ok()?
@@ -72,5 +74,5 @@ async fn fetch(body: String) -> Option<String> {
 }
 
 fn main() {
-    yew::start_app::<App>();
+    yew::Renderer::<App>::new().render();
 }
