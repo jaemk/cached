@@ -108,3 +108,15 @@ The concurrent-only attribute redirect (0013) covers `shards`, `durable`, `disk_
 now names the store the attribute configures and gives the `#[concurrent_cached]` spelling,
 instead of darling's "Unknown field: `shards`". Same on `#[once]`. See
 [design/0013-macro-store-attribute-placement.md](design/0013-macro-store-attribute-placement.md).
+
+## CACHED-11
+
+`#[cached_skip]` on a parameter leaves it out of the default cache key. The marker is stripped
+from every generated signature; the parameter is still passed to the body and kept on
+`{fn}_no_cache` / `{fn}_prime_cache`, and needs no `Clone`/`ToOwned`/`Hash` impl. It is a
+compile error, spanned at the marker, with `convert` (a custom key is built only from
+`convert`), on `self`, or with arguments (`#[cached_skip(..)]`). It does not lift the generic
+guard (CACHED-1). Shared with `#[concurrent_cached]`, see
+[macro-concurrent-cached.md](macro-concurrent-cached.md) CONC-9; rejected on `#[once]`, see
+[macro-once.md](macro-once.md) ONCE-9. See
+[design/0051-cached-skip-parameter.md](design/0051-cached-skip-parameter.md).

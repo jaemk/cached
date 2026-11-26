@@ -33,8 +33,8 @@ use proc_macro::TokenStream;
 ///   works and is equivalent.
 ///
 ///   If instead you use a dedicated flag argument (e.g. `refresh: bool`), you must exclude it from
-///   the cache key with `key` / `convert`:
-///   `#[cached(key = "u64", convert = "{ id }", force_refresh = { refresh })] fn fetch(id: u64, refresh: bool)`.
+///   the cache key with `#[cached_skip]` (or `key` / `convert`):
+///   `#[cached(force_refresh = { refresh })] fn fetch(id: u64, #[cached_skip] refresh: bool)`.
 ///   This is not optional. With the default key the flag is part of the key, so the two call shapes hit
 ///   different entries: a `refresh = true` call bypasses the read, recomputes, and stores under the
 ///   `(id, true)` key, while ordinary `refresh = false` calls read the `(id, false)` key. The forced
@@ -142,6 +142,14 @@ use proc_macro::TokenStream;
 ///   `{fn}_prime_cache` companions independently of the cached function's own visibility.
 ///   Accepts any Rust visibility expression (e.g. `"pub"`, `"pub(crate)"`, `"pub(super)"`, or `""` for
 ///   private). When not specified, the companions inherit the cached function's visibility.
+///
+/// # Parameter attributes
+/// - `#[cached_skip]`: leave a parameter out of the default cache key, e.g.
+///   `fn fetch(id: u64, #[cached_skip] client: &Client)` keys on `id` alone. The parameter is still
+///   passed to the function body, and `{fn}_no_cache` / `{fn}_prime_cache` still take it. Calls that
+///   differ only in skipped arguments share one cache entry, so skip only arguments that do not
+///   change the result. A skipped parameter needs no `Clone`/`ToOwned`/`Hash` impl. Not allowed
+///   with `convert` (a custom key is built only from `convert`), on `self`, or on `#[once]`.
 ///
 /// ## Note
 /// The `ty` and `key` attributes must be in a `String`
@@ -304,7 +312,8 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// **Clone requirement:** When no `key` or `convert` attribute is specified, function arguments
 /// are cloned to form the cache key tuple, so all argument types must implement `Clone`.
-/// Use `key` + `convert` to map to an explicit key type and avoid the clone if needed.
+/// Mark an argument `#[cached_skip]` to leave it out of the key, or use `key` + `convert` to map
+/// to an explicit key type and avoid the clone if needed.
 ///
 /// # Attributes
 /// - `map_error`: (optional; usable only with `redis`/`disk` and custom `ty`/`create` stores;
@@ -350,7 +359,7 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   `force_refresh = { id == 0 }`. The legacy quoted form `force_refresh = "{ id == 0 }"` also works.
 ///   When it evaluates to `true`, any cached value is bypassed and the function body is re-run and
 ///   re-cached. If instead you use a dedicated flag argument (e.g. `refresh: bool`), you must exclude
-///   it from the cache key with `key` / `convert`. This is not optional. With the default key the flag
+///   it from the cache key with `#[cached_skip]` (or `key` / `convert`). This is not optional. With the default key the flag
 ///   is part of the key, so the two call shapes hit different entries: a `refresh = true` call bypasses
 ///   the read, recomputes, and stores under the `(id, true)` key, while ordinary `refresh = false`
 ///   calls read the `(id, false)` key. The forced recompute therefore lands in an entry that normal
@@ -466,6 +475,14 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   `{fn}_prime_cache` companions independently of the cached function's own visibility.
 ///   Accepts any Rust visibility expression (e.g. `"pub"`, `"pub(crate)"`, `"pub(super)"`, or `""` for
 ///   private). When not specified, the companions inherit the cached function's visibility.
+///
+/// # Parameter attributes
+/// - `#[cached_skip]`: leave a parameter out of the default cache key, e.g.
+///   `fn fetch(id: u64, #[cached_skip] client: &Client)` keys on `id` alone. The parameter is still
+///   passed to the function body, and `{fn}_no_cache` / `{fn}_prime_cache` still take it. Calls that
+///   differ only in skipped arguments share one cache entry, so skip only arguments that do not
+///   change the result. A skipped parameter needs no `Clone`/`ToOwned`/`Hash` impl. Not allowed
+///   with `convert` (a custom key is built only from `convert`), on `self`, or on `#[once]`.
 ///
 /// ## Note
 /// The `ty` and `key` attributes must be in a `String`

@@ -381,6 +381,65 @@ pub(super) fn get_mut_signature(signature: Signature) -> Signature {
     signature_no_muts
 }
 
+/// Removes every `#[cached_skip]` marker from `signature`'s parameters and
+/// returns, per non-receiver parameter (aligned with `get_input_names` /
+/// `get_input_types`), its marker if it had one.
+///
+/// Attribute macros cannot register helper attributes, so a marker left on a
+/// parameter of the expanded code would fail to resolve. Call this before
+/// `signature` (or its `inputs`) is cloned anywhere.
+///
+/// Errors on a marker with arguments (`#[cached_skip(...)]`) and on a marker on
+/// the receiver, which is never part of the key.
+pub(super) fn strip_cached_skip(
+    signature: &mut Signature,
+) -> Result<Vec<Option<Attribute>>, syn::Error> {
+    fn take_skip(attrs: &mut Vec<Attribute>) -> Result<Option<Attribute>, syn::Error> {
+        let mut skip = None;
+        for attr in attrs.iter() {
+            if attr.path().is_ident("cached_skip") {
+                if !matches!(attr.meta, syn::Meta::Path(_)) {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "`#[cached_skip]` takes no arguments",
+                    ));
+                }
+                skip.get_or_insert_with(|| attr.clone());
+            }
+        }
+        attrs.retain(|attr| !attr.path().is_ident("cached_skip"));
+        Ok(skip)
+    }
+
+    let mut skips = Vec::new();
+    for inp in signature.inputs.iter_mut() {
+        match inp {
+            FnArg::Receiver(receiver) => {
+                if let Some(attr) = take_skip(&mut receiver.attrs)? {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "`#[cached_skip]` has no effect on `self`: the receiver is never part \
+                         of the cache key",
+                    ));
+                }
+            }
+            FnArg::Typed(pat_type) => skips.push(take_skip(&mut pat_type.attrs)?),
+        }
+    }
+    Ok(skips)
+}
+
+/// Keeps only the elements of `items` whose parameter is not marked
+/// `#[cached_skip]` (`skips` as returned by `strip_cached_skip`).
+pub(super) fn without_skipped<T: Clone>(items: &[T], skips: &[Option<Attribute>]) -> Vec<T> {
+    items
+        .iter()
+        .zip(skips)
+        .filter(|(_, skip)| skip.is_none())
+        .map(|(item, _)| item.clone())
+        .collect()
+}
+
 pub(super) fn match_pattern_type(pat_type: &&PatType) -> Box<Pat> {
     match &pat_type.pat.deref() {
         Pat::Ident(pat_ident) => {

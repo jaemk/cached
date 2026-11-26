@@ -151,8 +151,15 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
     // pull out the parts of the input
     let mut attributes = input.attrs;
     let visibility = input.vis;
-    let signature = input.sig;
+    let mut signature = input.sig;
     let body = input.block;
+
+    // Strip `#[cached_skip]` before anything clones the signature; it is
+    // rejected below, with `key`/`convert` (0051).
+    let skips = match strip_cached_skip(&mut signature) {
+        Ok(skips) => skips,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
     // Forward attributes written between the macro and the `fn` to every
     // generated item so cfg-gating stays in lockstep and lint suppression
@@ -400,6 +407,15 @@ pub fn once(args: TokenStream, input: TokenStream) -> TokenStream {
             fn_ident.span(),
             "`convert` is not supported on `#[once]`; \
              `#[once]` stores a single value for all arguments and has no per-call cache key to convert",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if let Some(attr) = skips.iter().flatten().next() {
+        return syn::Error::new_spanned(
+            attr,
+            "`#[cached_skip]` is not supported on `#[once]`; \
+             `#[once]` stores a single value for all arguments and has no per-call cache key",
         )
         .to_compile_error()
         .into();

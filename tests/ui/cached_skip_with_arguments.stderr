@@ -1,0 +1,5 @@
+error: `#[cached_skip]` takes no arguments
+ --> tests/ui/cached_skip_with_arguments.rs:5:15
+  |
+5 | fn f(id: u32, #[cached_skip(always)] tag: String) -> u32 {
+  |               ^^^^^^^^^^^^^^^^^^^^^^

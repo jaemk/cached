@@ -58,3 +58,9 @@ redirect covers `shards`, `durable`, `disk_dir`, and `cache_prefix_block`. Both 
 `#[cached]`, see [macro-cached.md](macro-cached.md) CACHED-9 and CACHED-10. The G1 guard
 (ONCE-1) inspects only the function's own generics, so it cannot see an `impl` parameter that
 the value type names.
+
+## ONCE-9
+
+`#[cached_skip]` on a parameter is a compile error spanned at the marker: `#[once]` stores a
+single value and has no per-call key. See [macro-cached.md](macro-cached.md) CACHED-11 and
+[design/0051-cached-skip-parameter.md](design/0051-cached-skip-parameter.md).

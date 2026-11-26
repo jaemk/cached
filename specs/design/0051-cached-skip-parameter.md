@@ -1,6 +1,20 @@
 # 0051 - `#[cached_skip]`: exclude a parameter from the generated cache key
 
-Status: Not implemented
+Status: Implemented
+
+## Outcome
+
+Landed as designed: `strip_cached_skip` in `helpers.rs` strips the marker right after
+`let mut signature = input.sig;` in each macro and returns a per-parameter mask, and the key is
+built from separately filtered `key_input_tys` / `key_input_names`. Two choices the record left
+open:
+
+- A marker on the receiver is a hard error (redundant: the receiver is never keyed), not a no-op.
+- A marker with arguments (`#[cached_skip(..)]`, `#[cached_skip = ..]`) is a hard error.
+
+The `key`/`convert` rejection fires whenever `key` or `convert` is set, which covers the
+`ty` + `convert` arm too. Errors are spanned over the whole attribute. Coverage is in
+`tests/cached_skip.rs` (runtime and trybuild cases).
 
 ## Current state
 
