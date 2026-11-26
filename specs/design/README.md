@@ -38,7 +38,7 @@ the item stays here for history.
 | [0006](0006-macro-quoted-attributes.md) | Retire quoted-string macro attrs | Not implemented (declined) |
 | [0007](0007-unbound-evictions-counter.md) | `ShardedUnboundCache` evictions counter | Not implemented (declined) |
 | [0008](0008-method-name-deduplication.md) | Collapse dual method names via extension trait | Implemented |
-| [0009](0009-cached-get-shared-receiver.md) | `Cached::get` taking `&self` | Needs research |
+| [0009](0009-cached-get-shared-receiver.md) | `Cached::get` taking `&self` | Declined |
 | [0010](0010-read-optimized-sharded-lru.md) | Read-optimized sharded LRU variant | Needs research |
 | [0011](0011-redis-serialization-codec.md) | Redis -> MessagePack; pluggable codec | MessagePack implemented; codec needs research |
 | [0012](0012-concurrent-metrics-trait.md) | Expose sharded metrics through a trait | Implemented |
@@ -86,3 +86,5 @@ the item stays here for history.
 | [0054](0054-stale-pr-issue-triage.md) | Triage of stale PRs and issues | Partly implemented |
 | [0055](0055-shard-hasher-q-over-borrowed-key-routing.md) | `ShardHasher<Q>` bounds replace `BorrowedKeyRouting` | Implemented |
 | [0056](0056-redb-scan-stats.md) | `RedbCache::scan_stats`: an explicit full-table scan | Implemented |
+| [0057](0057-io-store-value-compression.md) | Opt-in value compression for the IO stores | Not implemented |
+| [0058](0058-adaptive-replacement-cache.md) | Adaptive replacement cache (ARC) store | Not implemented (declined) |
