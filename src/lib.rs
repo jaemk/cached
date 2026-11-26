@@ -361,7 +361,7 @@ use std::future::Future;
 // and its async plumbing are present. The capability-only features (`redis_async_cache`,
 // `redis_connection_manager`) are deliberately NOT in this list: they add a redis capability but
 // no runtime, so on their own they cannot compile `AsyncRedisCache` (redis-rs needs a `*-comp`).
-// This exact expression is repeated at the `async_redis` module gate (src/stores/redis.rs) and
+// This exact expression is repeated at the `async_redis` module gate (src/stores/redis/mod.rs) and
 // the stores re-export (src/stores/mod.rs); keep the three in sync.
 #[cfg(any(
     feature = "redis_smol",

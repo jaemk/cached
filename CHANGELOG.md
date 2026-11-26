@@ -25,6 +25,9 @@
   drop `chrono` (unmaintained, RUSTSEC-2026-0543) in favor of `js_sys::Date`. No library change.
 - Upgrade `darling` to 0.24 and `syn` to 3 in `cached_proc_macro`. Attribute errors from darling
   now read "Unknown value: `...`" instead of "Unknown literal value `...`" (same span).
+- Split `src/stores/redis.rs` and `src/stores/redb.rs` into `redis/` and `redb/` module
+  directories: the async redis store and the unit-test modules move into their own files. No
+  code change.
 
 ## [4.1.1] - 2026-11-03
 
