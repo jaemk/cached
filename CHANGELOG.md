@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Raise the MSRV to 1.95. `redis_store` pulls `scheduled-thread-pool` (via `redis` and `r2d2`),
+  and its 0.2.8 release depends on `parking_lot` 0.13, which requires Rust 1.95. It declares no
+  `rust-version` of its own, so cargo's MSRV-aware resolver still selects it on older toolchains
+  and the build fails. Non-redis builds are unaffected in practice.
+
 ## [4.1.1] - 2026-11-03
 
 ### Fixed

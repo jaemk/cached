@@ -284,7 +284,7 @@ See [`examples/expires_per_key.rs`](https://github.com/jaemk/cached/blob/master/
 
 ## Requirements
 
-- Rust 1.92 or later.
+- Rust 1.95 or later.
 - Arguments must be `Hash + Eq + Clone`, or supply `key` and `convert` to build a key that is.
   Floats are the common case that needs `convert`, e.g. `convert = { format!("{x:.6}") }`.
 - Return values must be `Clone`; they are cloned on every hit. Return `Arc<T>` when `T` is
