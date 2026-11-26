@@ -31,6 +31,8 @@
 - Move the cache trait definitions from `src/lib.rs` into a private `traits` module,
   glob-re-exported at the crate root. Paths (`cached::Cached`, ...) and docs.rs pages are
   unchanged. No code change.
+- Upgrade `parking_lot` to 0.13 (dev-dependency `serial_test` to 4). The `parking_lot` lock
+  types only appear in macro-internal paths, so this is not a public API change.
 
 ## [4.1.1] - 2026-11-03
 

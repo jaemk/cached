@@ -92,7 +92,7 @@ default-features = false
 features = ["inline-more"]
 
 [dependencies.parking_lot]
-version = "0.12.5"
+version = "0.13"
 
 [dependencies.thiserror]
 version = "2"
@@ -172,7 +172,7 @@ features = ["macros", "time", "sync", "parking_lot", "rt", "rt-multi-thread"]
 version = "2"
 
 [dev-dependencies.serial_test]
-version = "3"
+version = "4"
 
 # Only for `examples/moka_custom_store.rs`, which demonstrates wrapping a
 # third-party concurrent cache in `ConcurrentCached`. Deliberately a
