@@ -119,6 +119,7 @@ fn lookup(id: u64) -> Row {
 | `refresh = true` | Reset an entry's TTL on every hit |
 | `expires = true` | Each value decides its own expiry (see [Per-value expiry](#per-value-expiry)) |
 | `key = "Type", convert = { expr }` | Build the cache key from the arguments yourself |
+| `#[cached_skip]` on a parameter | Leave that argument out of the cache key |
 | `sync_writes = "by_key"` | Concurrent first calls for the same key run the body once |
 | `result_fallback = true` | On `Err`, return the last cached `Ok` value |
 | `name = "NAME"` | Name of the generated cache static (defaults to the function name in caps) |
@@ -317,6 +318,7 @@ See [`examples/expires_per_key.rs`](https://github.com/jaemk/cached/blob/master/
 
 - Rust 1.95 or later.
 - Arguments must be `Hash + Eq + Clone`, or supply `key` and `convert` to build a key that is.
+  An argument marked `#[cached_skip]` is left out of the key and has no such requirement.
   Floats are the common case that needs `convert`, e.g. `convert = { format!("{x:.6}") }`.
 - Return values must be `Clone`; they are cloned on every hit. Return `Arc<T>` when `T` is
   expensive to clone.

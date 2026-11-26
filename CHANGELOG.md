@@ -7,6 +7,10 @@
 - CI runs the build workflow (MSRV check, test matrix, 32-bit, nightly jobs) weekly as well as on
   push and pull request, so a dependency release that breaks the build surfaces without a code
   change.
+- `#[cached_skip]` parameter marker for `#[cached]` and `#[concurrent_cached]`: leaves the
+  argument out of the default cache key while still passing it to the body and companions, e.g.
+  `fn fetch(id: u64, #[cached_skip] client: &Client)`. A compile error with `key`/`convert`, on
+  `self`, and on `#[once]` (#188).
 
 ### Changed
 

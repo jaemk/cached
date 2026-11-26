@@ -88,3 +88,9 @@ value's own `Expires::is_expired`. See
 
 `in_impl = true` requires a non-generic enclosing `impl`; the guard cannot see the `impl`
 header. Shared with `#[cached]`, see [macro-cached.md](macro-cached.md) CACHED-9.
+
+## CONC-9
+
+`#[cached_skip]` on a parameter leaves it out of the default cache key, with the same stripping
+and rejections as `#[cached]`, see [macro-cached.md](macro-cached.md) CACHED-11. See
+[design/0051-cached-skip-parameter.md](design/0051-cached-skip-parameter.md).

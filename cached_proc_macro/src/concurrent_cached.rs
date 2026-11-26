@@ -224,8 +224,26 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     // pull out the parts of the input
     let mut attributes = input.attrs;
     let visibility = input.vis;
-    let signature = input.sig;
+    let mut signature = input.sig;
     let body = input.block;
+
+    // Strip `#[cached_skip]` before anything clones the signature, so no copy of
+    // the marker reaches the expanded code (0051).
+    let skips = match strip_cached_skip(&mut signature) {
+        Ok(skips) => skips,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    if let Some(attr) = skips.iter().flatten().next()
+        && (args.key.is_some() || args.convert.is_some())
+    {
+        return syn::Error::new_spanned(
+            attr,
+            "`#[cached_skip]` cannot be combined with `key`/`convert`: a custom key is \
+             built only from `convert`, so leave the parameter out of `convert` instead",
+        )
+        .to_compile_error()
+        .into();
+    }
 
     // Forward attributes written between the macro and the `fn` to every
     // generated item so cfg-gating stays in lockstep and lint suppression
@@ -481,9 +499,11 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     }
 
-    let input_tys = get_input_types(&inputs);
-
+    // `input_names` also forwards the call to the origin fn, so it keeps every
+    // parameter; only the key inputs drop `#[cached_skip]` ones.
     let input_names = get_input_names(&inputs);
+    let key_input_tys = without_skipped(&get_input_types(&inputs), &skips);
+    let key_input_names = without_skipped(&input_names, &skips);
 
     // pull out the output type
     let output_ty = match &output {
@@ -758,11 +778,16 @@ pub fn concurrent_cached(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     let cache_name = cache_ident.to_string();
 
-    let (cache_key_ty, key_convert_block) =
-        match make_cache_key_type(&args.key, &args.convert, &args.ty, input_tys, &input_names) {
-            Ok(key) => key,
-            Err(error) => return error.to_compile_error().into(),
-        };
+    let (cache_key_ty, key_convert_block) = match make_cache_key_type(
+        &args.key,
+        &args.convert,
+        &args.ty,
+        key_input_tys,
+        &key_input_names,
+    ) {
+        Ok(key) => key,
+        Err(error) => return error.to_compile_error().into(),
+    };
 
     // `has_ttl` / `ttl_duration` were resolved above (from `ttl` expr, `ttl_secs`,
     // or `ttl_millis`). `has_ttl` drives store selection and the `result_fallback`

@@ -1,0 +1,5 @@
+error: `#[cached_skip]` cannot be combined with `key`/`convert`: a custom key is built only from `convert`, so leave the parameter out of `convert` instead
+ --> tests/ui/concurrent_cached_skip_with_key_convert.rs:5:15
+  |
+5 | fn f(id: u32, #[cached_skip] tag: String) -> u32 {
+  |               ^^^^^^^^^^^^^^

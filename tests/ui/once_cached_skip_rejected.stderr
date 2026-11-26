@@ -1,0 +1,5 @@
+error: `#[cached_skip]` is not supported on `#[once]`; `#[once]` stores a single value for all arguments and has no per-call cache key
+ --> tests/ui/once_cached_skip_rejected.rs:5:15
+  |
+5 | fn f(id: u32, #[cached_skip] tag: String) -> u32 {
+  |               ^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: `#[cached_skip]` has no effect on `self`: the receiver is never part of the cache key
+ --> tests/ui/cached_skip_on_receiver.rs:8:10
+  |
+8 |     fn f(#[cached_skip] &self, id: u32) -> u32 {
+  |          ^^^^^^^^^^^^^^

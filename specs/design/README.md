@@ -80,7 +80,7 @@ the item stays here for history.
 | [0048](0048-ttl-overflow-vs-clamp.md) | Extreme TTL: overflow to never-expires vs clamp to a real deadline | Partly implemented |
 | [0049](0049-pin-cargo-readme.md) | Pin the cargo-readme version CI installs | Implemented |
 | [0050](0050-capability-traits-for-inherent-only-ops.md) | Capability traits for `set_max_size` and `cache_clear_with_on_evict` | Implemented |
-| [0051](0051-cached-skip-parameter.md) | Exclude a parameter from the generated cache key | Not implemented |
+| [0051](0051-cached-skip-parameter.md) | Exclude a parameter from the generated cache key | Implemented |
 | [0052](0052-sharded-borrowed-key-lookups.md) | Borrowed-key lookups on the sharded inherent methods | Superseded by 0055 |
 | [0053](0053-refresh-claim-guard.md) | A first-class refresh-claim guard | Implemented |
 | [0054](0054-stale-pr-issue-triage.md) | Triage of stale PRs and issues | Partly implemented |
