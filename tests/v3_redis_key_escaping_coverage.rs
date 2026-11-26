@@ -1,8 +1,8 @@
 //! Independent certification coverage for the redis key-escaping rewrite in
-//! `src/stores/redis.rs` (`escape_key_field` / `canonical_namespace` /
+//! `src/stores/redis/mod.rs` (`escape_key_field` / `canonical_namespace` /
 //! `join_key_fields`, shared by `generate_redis_key` and `clear_match_pattern`).
 //!
-//! `src/stores/redis.rs`'s own `#[cfg(test)]` modules and `tests/frozen_format_golden.rs`
+//! The `src/stores/redis/` unit-test modules and `tests/frozen_format_golden.rs`
 //! already cover: the escaped key layout, triple-injectivity, `clear_match_pattern`
 //! agreement with `generate_redis_key`, and a handful of live `RedisCache` (sync)
 //! `cache_clear` scoping cases through `unescape_glob`/pattern-comparison helpers

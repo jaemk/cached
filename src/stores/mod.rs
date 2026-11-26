@@ -1103,7 +1103,7 @@ pub use sharded::{
 };
 
 // Canonical `AsyncRedisCache` availability gate (kept in sync with src/lib.rs and
-// src/stores/redis.rs): a redis async runtime feature must be enabled. The six runtime features
+// src/stores/redis/mod.rs): a redis async runtime feature must be enabled. The six runtime features
 // each imply `redis_store` + `async`; the capability-only features are excluded (no runtime).
 #[cfg(any(
     feature = "redis_smol",

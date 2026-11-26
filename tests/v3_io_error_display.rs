@@ -380,7 +380,7 @@ mod redis_tests {
     ///
     /// Real failure path: `cache_set` with a TTL so large that, once converted
     /// to a millisecond expiry, the server's own `mstime() + ms` overflow check
-    /// rejects the `PSETEX` (documented on `ttl_millis` in `src/stores/redis.rs`).
+    /// rejects the `PSETEX` (documented on `ttl_millis` in `src/stores/redis/mod.rs`).
     /// Requires a live redis server (`CACHED_REDIS_CONNECTION_STRING`, matching
     /// the other live-redis tests in this repo); skips cleanly if unset.
     #[test]
