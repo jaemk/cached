@@ -1,25 +1,25 @@
 /*
-Async memoization on the async-std runtime: `#[cached]` / `#[once]` on
+Async memoization on the smol runtime: `#[cached]` / `#[once]` on
 `async fn`s (including `ttl_secs`). Demonstrates the proc macros are
-runtime-agnostic (the `async` feature; async-std runs `main`).
+runtime-agnostic (the `async` feature; `smol::block_on` runs `main`).
 
 Run:
-    cargo run --example async_std --features "async,proc_macro"
+    cargo run --example smol --features "async,proc_macro"
 */
 
-use async_std::task::sleep;
 use cached::macros::cached;
 use cached::macros::once;
 use cached::time::Duration;
+use smol::Timer;
 
 async fn sleep_secs(secs: u64) {
-    sleep(Duration::from_secs(secs)).await;
+    Timer::after(Duration::from_secs(secs)).await;
 }
 
 /// should only sleep the first time it's called
 #[cached]
 async fn cached_sleep_secs(secs: u64) {
-    sleep(Duration::from_secs(secs)).await;
+    Timer::after(Duration::from_secs(secs)).await;
 }
 
 /// should only cache the result for a second, and only when
@@ -84,8 +84,11 @@ async fn only_cached_once_per_second_sync_writes(s: String) -> Vec<String> {
     vec![s]
 }
 
-#[async_std::main]
-async fn main() {
+fn main() {
+    smol::block_on(run());
+}
+
+async fn run() {
     let a = only_cached_a_second("a".to_string()).await.unwrap();
     let b = only_cached_a_second("b".to_string()).await.unwrap();
     assert_eq!(a, b);
@@ -183,9 +186,9 @@ async fn main() {
     assert_eq!(vec!["b".to_string()], b);
 
     println!("cached once per second synchronized writes");
-    let a = async_std::task::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
+    let a = smol::spawn(only_cached_once_per_second_sync_writes("a".to_string()));
     sleep_secs(1).await;
-    let b = async_std::task::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
+    let b = smol::spawn(only_cached_once_per_second_sync_writes("b".to_string()));
     assert_eq!(a.await, b.await);
 
     println!("done!");

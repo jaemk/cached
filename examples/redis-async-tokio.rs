@@ -3,7 +3,7 @@ Async Redis cache (`AsyncRedisCache`, Tokio runtime): `#[concurrent_cached]` wit
 custom `create` block and cache priming. The connection string is read from
 `CACHED_REDIS_CONNECTION_STRING`.
 
-See also `redis-async-async-std` for the same example on the async-std runtime.
+See also `redis-async-smol` for the same example on the smol runtime.
 
 Start redis if you don't already have one:
     docker run --rm --name async-cached-redis-example -p 6379:6379 -d redis

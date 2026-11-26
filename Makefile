@@ -10,8 +10,7 @@
 # List with all basic examples. An example is considered basic if it can be
 # run using `cargo run --example=$EXAMPLE` and run standalone. All features are
 # **enabled**
-CACHED_BASIC_EXAMPLES = async_std \
-                        basic \
+CACHED_BASIC_EXAMPLES = basic \
                         expires_per_key \
                         kitchen_sink \
                         refresh_before_expiry \
@@ -21,6 +20,7 @@ CACHED_BASIC_EXAMPLES = async_std \
                         tokio \
                         sharded \
                         sharded_expiring \
+                        smol \
                         moka_custom_store \
                         expiring_sized_cache \
                         disk \
@@ -29,7 +29,7 @@ CACHED_BASIC_EXAMPLES = async_std \
 # goal
 CACHED_REDIS_EXAMPLES = redis \
                         redis-async-tokio \
-                        redis-async-async-std \
+                        redis-async-smol \
                         redis-client-side-cache-tokio
 # Custom commands. NOTE: You'll need to specify the goal manually. See
 # `examples/cargo/wasm` for an example
@@ -133,7 +133,7 @@ help: ## List all supported Make targets
 			examples/redis) desc="Run all Redis-backed examples" ;; \
 			examples/basic/*) desc="Run basic example '$${target#examples/basic/}' with all features" ;; \
 			examples/cargo/*) desc="Build cargo example '$${target#examples/cargo/}'" ;; \
-			examples/redis/redis-async-async-std) desc="Run async-std Redis example with redis_smol and proc_macro features" ;; \
+			examples/redis/redis-async-smol) desc="Run smol Redis example with redis_smol and proc_macro features" ;; \
 			examples/redis/*) desc="Run Redis example '$${target#examples/redis/}' with all features" ;; \
 			tests) desc="Run the full test matrix" ;; \
 			tests/no-default) desc="Run tests with no default features" ;; \
@@ -216,16 +216,16 @@ examples/cargo/wasm:
 	@echo [$@]: Building example $*...
 	cd examples/wasm ; $(CARGO_COMMAND) build --target=wasm32-unknown-unknown
 
-# async-std + smol redis example: run with explicit features only to avoid
+# smol redis example: run with explicit features only to avoid
 # mixing tokio and smol runtimes that --all-features would enable together.
-examples/redis/redis-async-async-std: docker/redis
-	@echo [$@]: Running example redis-async-async-std...
-	$(CARGO_COMMAND) run --example redis-async-async-std --features "redis_smol_native_tls,proc_macro"
+examples/redis/redis-async-smol: docker/redis
+	@echo [$@]: Running example redis-async-smol...
+	$(CARGO_COMMAND) run --example redis-async-smol --features "redis_smol_native_tls,proc_macro"
 
 # Static pattern rule for the same .PHONY reason as the basic examples above.
-# redis-async-async-std is excluded: it has its own explicit rule with a narrower
+# redis-async-smol is excluded: it has its own explicit rule with a narrower
 # feature set (smol), and a second recipe from this rule would conflict.
-$(filter-out examples/redis/redis-async-async-std,$(CACHED_REDIS_EXAMPLE_TARGETS)): examples/redis/%: docker/redis
+$(filter-out examples/redis/redis-async-smol,$(CACHED_REDIS_EXAMPLE_TARGETS)): examples/redis/%: docker/redis
 	@echo [$@]: Running example $*...
 	$(CARGO_COMMAND) run --example $* --all-features
 
