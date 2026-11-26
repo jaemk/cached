@@ -1,4 +1,4 @@
-error: Unknown literal value `spinlock`
+error: Unknown value: `spinlock`
  --> tests/ui/cached_sync_lock_unknown.rs:3:22
   |
 3 | #[cached(sync_lock = "spinlock")]

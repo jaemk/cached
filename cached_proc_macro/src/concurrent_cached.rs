@@ -168,13 +168,10 @@ fn check_create_conflicts(
 
 fn reject_cached_only_attrs(attr_args: &[NestedMeta]) -> Result<(), syn::Error> {
     for arg in attr_args {
-        let Some(meta) = (match arg {
-            NestedMeta::Meta(meta) => Some(meta),
-            NestedMeta::Lit(_) => None,
-        }) else {
+        let Some((path, span)) = named_attr(arg) else {
             continue;
         };
-        let Some(ident) = meta.path().get_ident().map(ToString::to_string) else {
+        let Some(ident) = path.get_ident().map(ToString::to_string) else {
             continue;
         };
         let message = match ident.as_str() {
@@ -200,7 +197,7 @@ fn reject_cached_only_attrs(attr_args: &[NestedMeta]) -> Result<(), syn::Error> 
             _ => None,
         };
         if let Some(message) = message {
-            return Err(syn::Error::new(meta.span(), message));
+            return Err(syn::Error::new(span, message));
         }
     }
     Ok(())
