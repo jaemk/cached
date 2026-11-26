@@ -21,6 +21,8 @@
 - Replace the discontinued `async-std` dev-dependency (RUSTSEC-2025-0052) with `smol`. The
   `async_std` and `redis-async-async-std` examples are now `smol` and `redis-async-smol`.
   No library change.
+- Update the wasm example to `yew` 0.23, replace the deprecated `reqwasm` with `gloo-net`, and
+  drop `chrono` (unmaintained, RUSTSEC-2026-0543) in favor of `js_sys::Date`. No library change.
 
 ## [4.1.1] - 2026-11-03
 
