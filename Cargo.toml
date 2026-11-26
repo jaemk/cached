@@ -12,7 +12,7 @@ license = "MIT"
 edition = "2024"
 rust-version = "1.95"
 # Internal dev tooling and process docs that should not ship in the published crate.
-exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "specs/", "local/", ".cursorrules", "AGENTS.md", "CLAUDE.md", "Makefile"]
+exclude = [".agents/", ".claude/", ".github/", "bin/", "docs/dev/", "specs/", "local/", "tests/fixtures/", ".cursorrules", "AGENTS.md", "CLAUDE.md", "Makefile"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -121,7 +121,7 @@ features = ["r2d2"]
 optional = true
 
 [dependencies.redb]
-version = "4"
+version = "5"
 optional = true
 
 [dependencies.rmp-serde]
