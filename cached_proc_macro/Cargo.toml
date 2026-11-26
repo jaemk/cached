@@ -19,7 +19,7 @@ proc-macro = true
 
 [dependencies]
 quote = "1.0.6"
-darling = "0.20.8"
+darling = "0.24"
 proc-macro2 = "1.0.49"
-syn = "2.0.52"
+syn = "3"
 proc-macro-crate = "3"

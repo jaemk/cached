@@ -14,6 +14,22 @@ use syn::{
     Type, parse_quote, parse_str,
 };
 
+/// Path and span of a named entry in the macro's raw attribute list, or `None` for a
+/// bare literal.
+///
+/// `name = <rhs>` parses as `NestedMeta::Meta` when `<rhs>` is an expression and as
+/// `NestedMeta::NameValueInvalidExpr` when it is not (e.g. `disk_dir = pub(crate)`).
+/// Both name an attribute, so lookups by name must see both: otherwise a
+/// non-expression right-hand side would hide the attribute from the targeted
+/// rejections and span lookups below.
+pub(super) fn named_attr(arg: &NestedMeta) -> Option<(&syn::Path, Span)> {
+    match arg {
+        NestedMeta::Meta(meta) => Some((meta.path(), meta.span())),
+        NestedMeta::NameValueInvalidExpr(name_value) => Some((&name_value.path, name_value.span())),
+        NestedMeta::Lit(_) => None,
+    }
+}
+
 /// Scan the raw attribute arguments for `#[cached]` and `#[once]` and reject
 /// any that are only valid on `#[concurrent_cached]` with a clear message
 /// directing the user to the correct macro. This runs before `FromMeta::from_list`
@@ -33,13 +49,10 @@ pub(super) fn reject_concurrent_only_attrs(
     attr_args: &[NestedMeta],
 ) -> Result<(), syn::Error> {
     for arg in attr_args {
-        let Some(meta) = (match arg {
-            NestedMeta::Meta(meta) => Some(meta),
-            NestedMeta::Lit(_) => None,
-        }) else {
+        let Some((path, span)) = named_attr(arg) else {
             continue;
         };
-        let Some(ident) = meta.path().get_ident().map(ToString::to_string) else {
+        let Some(ident) = path.get_ident().map(ToString::to_string) else {
             continue;
         };
         let message = match ident.as_str() {
@@ -82,7 +95,7 @@ pub(super) fn reject_concurrent_only_attrs(
             _ => None,
         };
         if let Some(message) = message {
-            return Err(syn::Error::new(meta.span(), message));
+            return Err(syn::Error::new(span, message));
         }
     }
     Ok(())
@@ -104,16 +117,12 @@ pub(super) fn reject_concurrent_only_attrs(
 pub(super) fn last_named_attr_span(attr_args: &[NestedMeta], names: &[&str]) -> Option<Span> {
     attr_args
         .iter()
-        .filter_map(|arg| match arg {
-            NestedMeta::Meta(meta) => Some(meta),
-            NestedMeta::Lit(_) => None,
-        })
-        .rfind(|meta| {
-            meta.path()
-                .get_ident()
+        .filter_map(named_attr)
+        .rfind(|(path, _)| {
+            path.get_ident()
                 .is_some_and(|ident| names.iter().any(|name| ident == name))
         })
-        .map(Spanned::span)
+        .map(|(_, span)| span)
 }
 
 /// Span covering the macro attribute itself (`#[cached(...)]`), for attribute

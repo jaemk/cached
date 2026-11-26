@@ -23,6 +23,8 @@
   No library change.
 - Update the wasm example to `yew` 0.23, replace the deprecated `reqwasm` with `gloo-net`, and
   drop `chrono` (unmaintained, RUSTSEC-2026-0543) in favor of `js_sys::Date`. No library change.
+- Upgrade `darling` to 0.24 and `syn` to 3 in `cached_proc_macro`. Attribute errors from darling
+  now read "Unknown value: `...`" instead of "Unknown literal value `...`" (same span).
 
 ## [4.1.1] - 2026-11-03
 
