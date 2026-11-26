@@ -5,6 +5,12 @@ on:
     branches: [ master ]
   pull_request:
     branches: [ master ]
+  # Weekly, so dependency releases that break the build (an MSRV bump in a transitive
+  # dependency, an API change in a semver-compatible release) surface against an unchanged
+  # tree. Cargo.lock is not committed, so every run resolves the latest compatible versions.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
