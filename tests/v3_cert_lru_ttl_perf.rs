@@ -1200,7 +1200,7 @@ async fn async_try_get_or_set_with_counts_a_miss_when_the_factory_fails() {
 // (`cache_try_get_or_set_with` / `async_cache_try_get_or_set_with`), which is a
 // provided default that delegates straight to the `_mut` method
 // (`Cached::cache_try_get_or_set_with`, `CachedGetOrSetAsync::async_cache_try_get_or_set_with`
-// in src/lib.rs). `LruTtlCache` itself only implements the `_mut` variants
+// in src/traits.rs). `LruTtlCache` itself only implements the `_mut` variants
 // (src/stores/lru_ttl.rs:778 sync, :1118 async), so calling the `_mut` methods
 // below exercises the exact code the store owns, with no indirection through a
 // default method that a future change could alter independently. Same
