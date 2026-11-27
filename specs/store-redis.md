@@ -77,8 +77,9 @@ With `compression_zstd`, `RedisCacheBuilder` and `AsyncRedisCacheBuilder` can op
 writes using `.compression(Compression::Zstd { level })`. The default is uncompressed
 writes. Both stores recognize zstd frames independently of the write setting and retain
 raw MessagePack and legacy JSON reads. The decompressed-size limit applies only to frames.
-Synchronous writes prepare the value before checking out a pooled connection. On reads,
-decompression allocation failures report a deserialization error without evicting the entry in
-either mode.
+Synchronous operations prepare new values and decode returned values outside the pooled
+connection checkout. A read that needs to self-heal checks out a connection for the conditional
+delete. On reads, decompression allocation failures report a deserialization error without
+evicting the entry in either mode.
 Upgrade every reader with the feature before enabling compressed writes on a shared Redis
 namespace. See [design 0057](design/0057-io-store-value-compression.md).

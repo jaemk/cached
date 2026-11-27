@@ -1149,7 +1149,6 @@ where
     V: Serialize + DeserializeOwned,
 {
     fn cache_get(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
         let key_str = self.generate_key(key);
 
@@ -1163,7 +1162,10 @@ where
             }
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        let res: (Option<Vec<u8>>,) = {
+            let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+            pipe.query(&mut *conn).map_err(RedisCacheError::redis)?
+        };
         match res.0 {
             None => Ok(None),
             Some(bytes) => match deserialize_cached_redis_value(&bytes, self.compression) {
@@ -1177,6 +1179,7 @@ where
                     // if its current value still equals the corrupt `bytes` we
                     // read; a concurrent valid `SET`/`PSETEX` in between is left
                     // untouched instead of being clobbered by an unconditional DEL.
+                    let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
                     let _: i64 = SELF_HEAL_CONDITIONAL_DEL
                         .key(&key_str)
                         .arg(&bytes)
@@ -1232,13 +1235,15 @@ where
     /// - **Strict (`strict_deserialization(true)`):** the corrupt entry is still removed
     ///   and the method returns `Err(RedisCacheError::CacheDeserialization { .. })`.
     fn cache_remove(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
         let key_str = self.generate_key(key);
 
         pipe.get(&key_str);
         pipe.del::<String>(key_str).ignore();
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        let res: (Option<Vec<u8>>,) = {
+            let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+            pipe.query(&mut *conn).map_err(RedisCacheError::redis)?
+        };
         match res.0 {
             None => Ok(None),
             Some(bytes) => match deserialize_cached_redis_value(&bytes, self.compression) {

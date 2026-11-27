@@ -64,8 +64,8 @@ is enabled by `compression_zstd`.
   undecodable. Default self-healing deletes those entries, and strict mode reports an error.
   Redb uses an exclusive file lock, so this matters most for Redis deployments.
 - **Synchronous Redis pooling.** Serialize and compress new values before checking out a
-  connection. Return the connection after the write response before decoding the displaced
-  value.
+  connection. Return the connection after fetching or removing the value and before decoding it.
+  A read that needs to self-heal acquires a connection for the conditional delete.
 - **CPU on async executors.** Async Redis runs compression on the caller's executor.
   Async redb runs compression on its blocking pool.
 - `RedbCache::scan_stats` (0056) decompresses each framed entry while scanning its table.
