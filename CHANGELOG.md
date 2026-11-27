@@ -14,10 +14,9 @@
 
 ### Changed
 
-- Raise the MSRV to 1.95. `redis_store` pulls `scheduled-thread-pool` (via `redis` and `r2d2`),
-  and its 0.2.8 release depends on `parking_lot` 0.13, which requires Rust 1.95. It declares no
-  `rust-version` of its own, so cargo's MSRV-aware resolver still selects it on older toolchains
-  and the build fails. Non-redis builds are unaffected in practice.
+- Raise the MSRV to 1.95, required by `parking_lot` 0.13 (a direct dependency, and pulled by
+  `redis_store` through `scheduled-thread-pool` 0.2.8, which declares no `rust-version`, so
+  cargo's MSRV-aware resolver selects it on older toolchains and the build fails).
 - Upgrade `redb` to 5. Existing cache files written under redb 4 open and read back unchanged,
   and no redb type is part of the public API. Note that redb 5 changed its file-locking
   protocol: processes running cached 4.1.1 or earlier must not open the same cache file at the
