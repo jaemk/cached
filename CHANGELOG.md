@@ -18,7 +18,8 @@
   context and output allocation failures are reported as serialization errors. Decoding
   reports frames above the reader's limit and buffer allocation failures as deserialization
   errors and preserves entries on reads and sweeps. Redb lookups reuse the decoded value when
-  a refresh or expiry check finds the same stored bytes.
+  a refresh or expiry check finds the same stored bytes. CI covers standalone redb and
+  Smol-only Redis compression builds.
 
 ### Changed
 

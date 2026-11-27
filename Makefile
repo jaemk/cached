@@ -157,7 +157,7 @@ help: ## List all supported Make targets
 			tests/redis-capability-requires-runtime) desc="Assert capability-only redis features fail without a runtime" ;; \
 			tests/redis-tokio) desc="Run async Redis Tokio tests" ;; \
 			tests/all-features) desc="Run tests with all features enabled" ;; \
-			tests/io-compression) desc="Check I/O value compatibility across builds with and without zstd" ;; \
+			tests/io-compression) desc="Test I/O compression across builds and standalone stores" ;; \
 			tests/32bit) desc="Run tests on i686 (needs the rustup target and gcc-multilib)" ;; \
 			tests/32bit/docker) desc="Run tests/32bit in a Docker container" ;; \
 			docker/status) desc="Check whether the Docker engine is available" ;; \
@@ -337,9 +337,12 @@ tests/all-features: | docker/redis
 	@echo "[$@]: Running tests (all features)..."
 	$(CARGO_COMMAND) test --all-features -- --nocapture
 
-# Keep one database and Redis prefix across separate feature builds.
 tests/io-compression: | docker/redis
+	@echo "[$@]: Testing compression with standalone redb and Smol-only Redis..."
+	$(CARGO_COMMAND) test --no-default-features --features redb_store,compression_zstd --lib compression_
+	$(CARGO_COMMAND) test --no-default-features --features redis_smol,compression_zstd --lib compression_
 	@echo "[$@]: Checking I/O compression compatibility across feature builds..."
+	# Keep one database and Redis prefix across the following builds.
 	@set -eu; \
 	  CACHED_COMPRESSION_TEST_DIR=$$(mktemp -d); export CACHED_COMPRESSION_TEST_DIR; \
 	  trap 'rm -rf -- "$$CACHED_COMPRESSION_TEST_DIR"' EXIT; \

@@ -80,5 +80,6 @@ is enabled by `compression_zstd`.
 - CI runs `make tests/io-compression` across builds with and without zstd support. Sync and
   async writers share a Redis namespace and a redb file across the builds. Readers verify raw
   and framed values. The zstd build checks that a reader with a lower limit preserves entries
-  it cannot decode. The build without zstd checks strict errors and self-healing.
+  it cannot decode. The build without zstd checks strict errors and self-healing. The target
+  also runs compression tests with standalone redb and with Redis using only Smol transport.
 - Related: 0011 (codec), 0029 (self-healing), 0031 (redis read gate), REDIS-7, REDB-6.
