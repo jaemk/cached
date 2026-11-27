@@ -281,7 +281,7 @@ where
     /// When `false` (the default), a corrupt or undecodable cached value on the
     /// `async_cache_get` path is self-healed: the entry is deleted and the call
     /// returns `Ok(None)`. When `true`, a deserialization failure on the read
-    /// path returns `Err(RedisCacheError::CacheDeserialization { .. })`.
+    /// path returns `Err(RedisCacheError::CacheDeserialization { .. })` and preserves the entry.
     ///
     /// Reads report decompression allocation failures and frames above the configured limit
     /// as errors in either mode, preserving the entry.
@@ -997,8 +997,8 @@ where
     /// Does not read back the previous value, so the write is a single
     /// round-trip (no GET).
     ///
-    /// Serialization happens eagerly (before the returned future is awaited) so
-    /// the borrowed `&V` is never held across the `.await`, keeping the `V: Send`
+    /// Serialization and compression happen when this method constructs its future.
+    /// The future owns the encoded value, keeping the `V: Send`
     /// (not `Sync`) bound consistent with `async_cache_set`.
     fn async_cache_set_ref(
         &self,

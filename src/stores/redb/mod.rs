@@ -267,8 +267,9 @@ where
         self
     }
 
-    /// Enable compression for new writes. With the `compression_zstd` feature,
-    /// reads accept compressed entries even when this setting is omitted.
+    /// Enable compression for writes, including the write performed on a TTL refresh.
+    /// With the `compression_zstd` feature, reads accept compressed entries even when this
+    /// setting is omitted.
     #[cfg(feature = "compression_zstd")]
     #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
     pub fn compression(mut self, compression: Compression) -> Self {
@@ -1583,8 +1584,10 @@ where
 ///
 /// In the default mode (`strict_deserialization = false`), `cache_get` self-heals: the
 /// undecodable entry is deleted and `Ok(None)` is returned (a transparent miss). In strict
-/// mode (`strict_deserialization = true`), `cache_get` and `remove_expired_entries` surface
-/// [`RedbCacheError::CacheDeserialization`] instead. In both modes, `cache_set`,
+/// mode (`strict_deserialization = true`), `cache_get` and `remove_expired_entries` report
+/// [`RedbCacheError::CacheDeserialization`] and preserve the entry. Both modes also report
+/// decompression allocation failures and frames above the configured limit, preserving the entry.
+/// In both modes, `cache_set`,
 /// `cache_remove`, and `cache_remove_entry` succeed — they write/remove the entry regardless
 /// and report the undecodable previous value as `Ok(None)` (a write that took effect is never
 /// reported as an error). The same holds for the `ConcurrentCachedAsync` impl.

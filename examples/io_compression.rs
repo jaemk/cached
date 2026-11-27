@@ -1,4 +1,4 @@
-//! Run with `cargo run --example io_compression --features redb_store,compression_zstd`.
+//! Run with `cargo run --example io_compression --no-default-features --features redb_store,compression_zstd`.
 //! RedisCacheBuilder and AsyncRedisCacheBuilder expose the same compression settings.
 
 use cached::prelude::*;
@@ -21,8 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache.cache_set_ref(&2, &small)?;
     }
 
-    // The Cargo feature lets this reader open both formats. New writes are raw
-    // because this builder has no compression algorithm configured.
+    // The build still has zstd support, so this reader can reopen both formats.
+    // Leaving the algorithm unset makes future writes raw.
     let cache = RedbCache::<u64, String>::builder("reports")
         .disk_dir(dir.path())
         .build()?;

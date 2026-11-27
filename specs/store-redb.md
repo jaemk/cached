@@ -7,9 +7,10 @@ cache name positionally; the on-disk directory (`disk_dir`) is optional with a u
 
 ## REDB-1
 
-Entries persist to a redb database file on disk. Values are serialized; reads that fail to
-deserialize are treated as a miss (self-healing default), consistent with
-[design/0029-self-healing-deserialization-default.md](design/0029-self-healing-deserialization-default.md).
+Entries persist to a redb database file on disk. Lookups self-heal corrupt or
+schema-incompatible entries by default. Strict lookups return a deserialization error and
+preserve them. See [design 0029](design/0029-self-healing-deserialization-default.md) and the
+compression exceptions in [REDB-9](#redb-9).
 
 ## REDB-2
 
@@ -82,5 +83,6 @@ mixed raw and compressed entries under the existing file layout. Reads, expiry s
 stats scans return a deserialization error for a frame above the reader's limit or a decompression
 allocation failure in either mode. The entry is preserved and a failed sweep leaves its
 transaction uncommitted. Disabling compressed writes on reopen still permits reading old frames
-if the feature is compiled in. Compressor context and output buffer allocation failures
-return serialization errors before writing the value. See [design 0057](design/0057-io-store-value-compression.md).
+if the feature is compiled in. Refresh-on-hit re-encodes the value using the current builder's
+compression settings. Compressor context and output buffer allocation failures return serialization
+errors before writing the value. See [design 0057](design/0057-io-store-value-compression.md).

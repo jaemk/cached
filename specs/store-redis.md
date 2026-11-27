@@ -8,9 +8,10 @@ shared `&self` and are builder-only (required connection fields).
 
 Values are serialized with MessagePack; see
 [design/0011-redis-serialization-codec.md](design/0011-redis-serialization-codec.md) (a pluggable
-codec remains a research direction). Deserialization is self-healing by default: an entry that
-fails to decode is treated as a miss rather than an error, per
-[design/0029-self-healing-deserialization-default.md](design/0029-self-healing-deserialization-default.md).
+codec remains a research direction). Lookups self-heal corrupt or schema-incompatible entries
+by default. Strict lookups return a deserialization error and preserve them. See
+[design 0029](design/0029-self-healing-deserialization-default.md) and the compression
+exceptions in [REDIS-8](#redis-8).
 Backward-read compatibility is version-gated per
 [design/0031-redis-backward-read-version-gate.md](design/0031-redis-backward-read-version-gate.md).
 

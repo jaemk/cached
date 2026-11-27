@@ -52,5 +52,7 @@ With `compression_zstd`, all three I/O store builders accept
 `.compression(Compression::Zstd { level })` to enable compression for writes,
 `.min_compress_size(bytes)` to set the write threshold (default 256 bytes), and
 `.max_decompressed_size(bytes)` to bound frame decompression (default 64 MiB).
+Both sizes count the serialized envelope in bytes. The decompression limit also caps which
+envelopes the same builder will compress. Values above that limit are written raw.
 See [REDIS-8](store-redis.md#redis-8), [REDB-9](store-redb.md#redb-9), and
 [design 0057](design/0057-io-store-value-compression.md).

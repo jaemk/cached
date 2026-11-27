@@ -567,8 +567,7 @@ where
     /// function to recompute and overwrite.
     ///
     /// When `true`, a deserialization failure on the read path returns
-    /// `Err(RedisCacheError::CacheDeserialization { .. })` immediately, matching
-    /// the behavior of versions prior to 3.0.
+    /// `Err(RedisCacheError::CacheDeserialization { .. })` and preserves the entry.
     ///
     /// Reads report decompression allocation failures and frames above the configured limit
     /// as errors in either mode, preserving the entry.

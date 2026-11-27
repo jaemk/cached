@@ -60,16 +60,19 @@ is enabled by `compression_zstd`.
 ## Caveats
 
 - **Mixed-version fleets.** Upgrade every Redis reader with `compression_zstd` before
-  enabling compressed writes. An older build or a build without the feature treats frames as
-  undecodable. Default self-healing deletes those entries, and strict mode reports an error.
-  Redb uses an exclusive file lock, so this matters most for Redis deployments.
+  enabling compressed writes. A build without the feature treats frames as undecodable.
+  Default self-healing deletes those entries, and strict lookups report an error and preserve
+  them. Before removing the feature, turn off compressed writes everywhere and keep feature
+  support until existing frames expire or are removed. The same rule applies when reopening an
+  existing redb file with a build that lacks zstd.
 - **Synchronous Redis pooling.** Serialize and compress new values before checking out a
   connection. Return the connection after fetching or removing the value and before decoding it.
   A read that needs to self-heal acquires a connection for the conditional delete.
-- **CPU on async executors.** Async Redis runs compression on the caller's executor.
-  Async redb runs compression on its blocking pool.
+- **CPU on async executors.** Async Redis does codec work on the calling thread. Its
+  borrowed write compresses eagerly when `async_cache_set_ref` constructs the future.
+  Async redb runs compression and decompression on its blocking pool.
 - redb refresh and lookup-triggered expiry reuse the decoded value when the stored bytes
-  match the read snapshot. `RedbCache::scan_stats` (0056) decompresses each framed entry
+  match the read snapshot. Refresh rewrites the value using the current compression settings. `RedbCache::scan_stats` (0056) decompresses each framed entry
   while scanning its table.
 
 ## Notes
