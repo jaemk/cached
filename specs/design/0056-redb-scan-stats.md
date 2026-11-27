@@ -42,8 +42,9 @@ impl<K, V> RedbCache<K, V> {
   taken before the scan, the same rule `remove_expired_entries` follows, and against the TTL current at the call
   (TTL is retroactive, see `ConcurrentCacheTtl::set_ttl`). With no TTL, `expired` is 0.
 - **Undecodable entries are counted in both modes.** `strict_deserialization` governs reads that
-  return a value; a diagnostic scan reports corruption rather than aborting on it, so it never
-  returns `CacheDeserialization` and never deletes the entry.
+  return a value. A diagnostic scan counts corrupt entries and leaves them intact. A
+  decompression allocation failure or a frame above the configured limit aborts the scan
+  with a `CacheDeserialization` error ([0057](0057-io-store-value-compression.md)).
 - **Decoded as `CachedDiskValue<V>`.** Decoding only `created_at` (an `IgnoredAny` value) would be
   cheaper, but then `undecodable` would not mean "an entry `cache_get` would self-heal or reject":
   a value whose bytes no longer match `V` would count as healthy. Decoding with `V` keeps the count

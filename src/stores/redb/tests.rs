@@ -2334,14 +2334,9 @@ fn compression_redb_frame_errors_follow_store_policy() {
     };
     let cache = builder().strict_deserialization(true).build().unwrap();
 
-    let oversized = zstd::bulk::compress(&[0; 513], 3).unwrap();
     let invalid_message_pack = zstd::bulk::compress(&[0xc1], 3).unwrap();
     let corrupt_frame = vec![0x28, 0xb5, 0x2f, 0xfd];
-    for (key, bytes) in [
-        (1, oversized),
-        (2, invalid_message_pack),
-        (3, corrupt_frame),
-    ] {
+    for (key, bytes) in [(1, invalid_message_pack), (2, corrupt_frame)] {
         raw_insert(&cache, &key.to_string(), bytes.clone());
         let error = cache.cache_get(&key).unwrap_err();
         assert!(
@@ -2349,7 +2344,7 @@ fn compression_redb_frame_errors_follow_store_policy() {
         );
         assert!(raw_get(&cache, &key.to_string()).is_some());
     }
-    assert_eq!(cache.scan_stats().unwrap().undecodable, 3);
+    assert_eq!(cache.scan_stats().unwrap().undecodable, 2);
     assert!(
         cache
             .remove_expired_entries()
@@ -2361,7 +2356,7 @@ fn compression_redb_frame_errors_follow_store_policy() {
     let cache = builder().build().unwrap();
     assert_eq!(cache.cache_get(&1).unwrap(), None);
     assert!(raw_get(&cache, "1").is_none());
-    assert_eq!(cache.remove_expired_entries().unwrap(), 2);
+    assert_eq!(cache.remove_expired_entries().unwrap(), 1);
     assert_eq!(cache.scan_stats().unwrap().entries, 0);
 }
 

@@ -59,14 +59,22 @@ fn decompress_zstd(bytes: &[u8], size: usize) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
-// The codec could not allocate resources to decode the value. This says nothing
-// about the stored bytes, so callers must not treat it as corruption.
-pub(super) fn is_decompression_allocation_failure(
-    error: &(dyn std::error::Error + 'static),
-) -> bool {
-    error
-        .downcast_ref::<io::Error>()
-        .is_some_and(|error| error.kind() == io::ErrorKind::OutOfMemory)
+#[derive(Debug, thiserror::Error)]
+#[error("zstd frame size {size} bytes exceeds decompression limit of {limit} bytes")]
+struct DecompressionLimitExceeded {
+    size: u64,
+    limit: usize,
+}
+
+// The reader's limit or available memory prevented decoding. Preserve the
+// entry for readers that can decode it.
+pub(super) fn should_preserve_on_decode_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.downcast_ref::<io::Error>().is_some_and(|error| {
+        error.kind() == io::ErrorKind::OutOfMemory
+            || error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<DecompressionLimitExceeded>())
+    })
 }
 
 impl IoValueCompression {
@@ -112,13 +120,14 @@ impl IoValueCompression {
                         "missing zstd frame content size",
                     )
                 })?;
+            let limit = self.settings.max_decompressed_size;
             let size = usize::try_from(size)
                 .ok()
-                .filter(|size| *size <= self.settings.max_decompressed_size)
+                .filter(|&size| size <= limit)
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "zstd frame exceeds decompression limit",
+                        DecompressionLimitExceeded { size, limit },
                     )
                 })?;
             #[cfg(test)]

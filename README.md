@@ -192,8 +192,9 @@ With the feature compiled in, stores read both raw values and zstd frames even w
 compressed writes are disabled. On shared Redis caches, deploy the feature to every reader
 before enabling compressed writes. A reader without support may treat frames as corrupt and
 delete them during self-healing. Keep the feature enabled while any compressed entries remain,
-and give all readers a limit large enough for every writer. Compression adds CPU work to
-writes, including on the calling executor for async Redis. See the runnable
+and give all readers a limit large enough for every writer. With the feature enabled, a reader
+whose limit is too low returns a deserialization error and preserves the entry. Compression adds
+CPU work to writes, including on the calling executor for async Redis. See the runnable
 [`io_compression` example](https://github.com/jaemk/cached/blob/master/examples/io_compression.rs).
 
 ## Using cache stores directly

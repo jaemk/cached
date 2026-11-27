@@ -36,10 +36,9 @@ Status: Implemented
   store can read everything it writes using its own limit.
 - **Bounded decompression.** Check the frame's declared content size before allocation.
   Decode into a buffer bounded by that size and reject frames with missing sizes or sizes
-  above the configured cap. Allocation and decoder setup failures become deserialization
-  errors. Reads surface these allocation errors in both deserialization modes and preserve
-  entries. redb expiry sweeps and statistics scans report these errors instead of treating
-  entries as corrupt. The cap applies to compressed entries only.
+  above the configured cap. Reads report a frame above the reader's cap or an allocation
+  failure as a deserialization error in both modes and preserve the entry. redb expiry sweeps
+  and statistics scans also report these errors. The cap applies to compressed entries only.
 - **Errors.** Compression failure on write is a `CacheSerialization` error, and decompression
   failure on read is a `CacheDeserialization` error, both with a boxed source so the codec
   crate does not enter the public API (the redb 5 pattern).
@@ -77,5 +76,6 @@ is enabled by `compression_zstd`.
   malformed frames, Redis legacy JSON, and redb refresh, reopen, and scans.
 - CI runs `make tests/io-compression` across builds with and without zstd support. Sync and
   async writers share a Redis namespace and a redb file across the builds. Readers verify raw
-  and framed values, including strict errors and self-healing in the build without zstd.
+  and framed values. The zstd build checks that a reader with a lower limit preserves entries
+  it cannot decode. The build without zstd checks strict errors and self-healing.
 - Related: 0011 (codec), 0029 (self-healing), 0031 (redis read gate), REDIS-7, REDB-6.

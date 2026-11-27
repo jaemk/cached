@@ -58,8 +58,8 @@ inserting or removing a field reinterprets every stored entry and must bump `DIS
 transaction and returns a `RedbCacheStats`: `entries` (every stored row), `expired` (decodable
 entries whose age is >= the current TTL, 0 with no TTL), `undecodable`, and the `oldest`/`newest`
 `created_at`. It never writes: no self-heal, no eviction, no refresh, and undecodable entries are
-counted rather than surfaced as errors in both deserialization modes. `cache_size()` stays
-`Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).
+counted in both deserialization modes. Decompression limits and allocation errors are handled
+as specified in [REDB-9](#redb-9). `cache_size()` stays `Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).
 
 ## REDB-8
 
@@ -76,8 +76,9 @@ on different redb majors must not open the same cache file at the same time.
 
 With `compression_zstd`, `RedbCacheBuilder::compression` can opt into zstd writes.
 Sync and async operations, including refresh, expiry sweeps, and statistics scans, read
-mixed raw and compressed entries under the existing file layout. Decompression allocation
-failures are reported by reads, expiry sweeps, and stats scans in both modes. A failed sweep
-leaves the transaction uncommitted. Disabling compressed
-writes on reopen still permits reading old frames if the feature is compiled in.
+mixed raw and compressed entries under the existing file layout. Reads, expiry sweeps, and
+stats scans return a deserialization error for a frame above the reader's limit or a decompression
+allocation failure in either mode. The entry is preserved and a failed sweep leaves its
+transaction uncommitted. Disabling compressed writes on reopen still permits reading old frames
+if the feature is compiled in.
 See [design 0057](design/0057-io-store-value-compression.md).

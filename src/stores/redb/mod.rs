@@ -1,8 +1,6 @@
 #[cfg(feature = "compression_zstd")]
 use crate::stores::Compression;
-use crate::stores::io_value_compression::{
-    IoValueCompression, is_decompression_allocation_failure,
-};
+use crate::stores::io_value_compression::{IoValueCompression, should_preserve_on_decode_error};
 use crate::time::Duration;
 use crate::time::SystemTime;
 use crate::{
@@ -256,7 +254,8 @@ where
     /// transaction, validly-expired entries removed earlier in that same pass are
     /// rolled back too — the store is left exactly as it was before the call.
     ///
-    /// Reads and sweeps surface decompression allocation failures in both modes.
+    /// Reads and sweeps surface decompression allocation failures and frames above the
+    /// configured limit as errors in both modes, preserving the entry.
     ///
     /// In **both** modes, the previous value displaced by `cache_set` is silently
     /// discarded when it cannot be decoded (the write itself succeeds and
@@ -288,6 +287,7 @@ where
 
     /// Maximum decompressed frame size in bytes (default: 64 MiB).
     /// Larger values are written raw, and this limit does not apply to raw reads.
+    /// A compressed entry above this reader's limit returns an error on lookup and stays cached.
     #[cfg(feature = "compression_zstd")]
     #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
     pub fn max_decompressed_size(mut self, size: usize) -> Self {
@@ -797,8 +797,8 @@ where
     /// writes, so a long scan under heavy writes can grow the file. It never writes:
     /// undecodable entries are counted, not self-healed, and expired entries are counted,
     /// not removed. In strict-deserialization mode an undecodable entry is still counted
-    /// rather than returned as an error. A decompression allocation failure aborts the scan
-    /// with an error.
+    /// rather than returned as an error. A decompression allocation failure or a frame
+    /// above the configured limit aborts the scan with an error.
     ///
     /// `expired` is measured against the TTL current at the call and one `SystemTime::now()`
     /// snapshot. With [`refresh_on_hit`](RedbCacheBuilder::refresh_on_hit) enabled, an
@@ -1085,7 +1085,7 @@ where
 
     let cached: CachedDiskValue<V> = match deserialize_disk_value::<V>(&raw_bytes, compression) {
         Ok(v) => v,
-        Err(e) if !strict && !is_decompression_allocation_failure(e.as_ref()) => {
+        Err(e) if !strict && !should_preserve_on_decode_error(e.as_ref()) => {
             // D2/C5: self-heal. The entry read under the (now-dropped) read txn
             // failed to decode. Do NOT blindly delete it: a concurrent
             // `cache_set` may have committed a valid value between our read txn
@@ -1112,7 +1112,7 @@ where
                         // A concurrent writer stored a valid value; keep it.
                         Ok(v) => Ok(Some(v)),
                         // Still corrupt under the write txn: evict it.
-                        Err(e) if !is_decompression_allocation_failure(e.as_ref()) => {
+                        Err(e) if !should_preserve_on_decode_error(e.as_ref()) => {
                             table.remove(key).map_err(RedbCacheError::storage)?;
                             Ok(None)
                         }
@@ -1182,7 +1182,7 @@ where
                 let current: CachedDiskValue<V> =
                     match deserialize_disk_value::<V>(&bytes, compression) {
                         Ok(v) => v,
-                        Err(e) if !strict && !is_decompression_allocation_failure(e.as_ref()) => {
+                        Err(e) if !strict && !should_preserve_on_decode_error(e.as_ref()) => {
                             // D2: corrupt under write txn — evict it. Table is
                             // dropped at end of this block; commit follows.
                             table.remove(key).map_err(RedbCacheError::storage)?;
@@ -1451,7 +1451,7 @@ where
                         expired_keys.push(key.value().to_string());
                     }
                 }
-                Err(e) if !strict && !is_decompression_allocation_failure(e.as_ref()) => {
+                Err(e) if !strict && !should_preserve_on_decode_error(e.as_ref()) => {
                     // D2: undecodable entry is treated as an eviction candidate.
                     expired_keys.push(key.value().to_string());
                 }
@@ -1505,7 +1505,7 @@ where
                             // else: entry was rewritten with a fresh timestamp by a
                             // concurrent writer; leave it in place.
                         }
-                        Err(e) if !strict && !is_decompression_allocation_failure(e.as_ref()) => {
+                        Err(e) if !strict && !should_preserve_on_decode_error(e.as_ref()) => {
                             // D2: corrupt under write txn too — evict it.
                             table
                                 .remove(key.as_str())
@@ -1549,7 +1549,7 @@ where
         let raw = value.value();
         let cached = match deserialize_disk_value::<V>(raw, compression) {
             Ok(cached) => cached,
-            Err(e) if is_decompression_allocation_failure(e.as_ref()) => {
+            Err(e) if should_preserve_on_decode_error(e.as_ref()) => {
                 return Err(RedbCacheError::deserialization(e, raw.to_vec()));
             }
             Err(_) => {

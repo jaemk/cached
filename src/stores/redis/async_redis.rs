@@ -283,7 +283,8 @@ where
     /// returns `Ok(None)`. When `true`, a deserialization failure on the read
     /// path returns `Err(RedisCacheError::CacheDeserialization { .. })`.
     ///
-    /// Reads report decompression allocation failures and preserve the entry in either mode.
+    /// Reads report decompression allocation failures and frames above the configured limit
+    /// as errors in either mode, preserving the entry.
     ///
     /// In **both** modes, the previous value displaced by `async_cache_set` is
     /// silently discarded when it cannot be decoded (the write itself succeeds
@@ -315,6 +316,7 @@ where
 
     /// Maximum decompressed frame size in bytes (default: 64 MiB).
     /// Larger values are written raw, and this limit does not apply to raw reads.
+    /// A compressed entry above this reader's limit returns an error on lookup and stays cached.
     #[cfg(feature = "compression_zstd")]
     #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
     pub fn max_decompressed_size(mut self, size: usize) -> Self {
@@ -806,9 +808,7 @@ where
             None => Ok(None),
             Some(bytes) => match super::deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
-                Err(e)
-                    if !self.strict_deserialization && !e.is_decompression_allocation_failure() =>
-                {
+                Err(e) if !self.strict_deserialization && !e.should_preserve_on_decode_error() => {
                     // Conditional self-heal delete (C6): only remove the key
                     // if its current value still equals the corrupt `bytes`
                     // we read, so a concurrent valid write is never clobbered.

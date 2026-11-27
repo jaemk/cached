@@ -79,7 +79,7 @@ writes. Both stores recognize zstd frames independently of the write setting and
 raw MessagePack and legacy JSON reads. The decompressed-size limit applies only to frames.
 Synchronous operations prepare new values and decode returned values outside the pooled
 connection checkout. A read that needs to self-heal checks out a connection for the conditional
-delete. On reads, decompression allocation failures report a deserialization error without
-evicting the entry in either mode.
+delete. On reads, a frame above the reader's limit or a decompression allocation failure
+returns a deserialization error and preserves the entry in either mode.
 Upgrade every reader with the feature before enabling compressed writes on a shared Redis
 namespace. See [design 0057](design/0057-io-store-value-compression.md).

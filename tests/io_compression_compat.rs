@@ -19,9 +19,19 @@ fn value(key: u32) -> String {
 
 impl Stores {
     async fn open(path: &Path, strict: bool, compress: bool) -> Self {
+        Self::open_with_limit(path, strict, compress, None).await
+    }
+
+    async fn open_with_limit(
+        path: &Path,
+        strict: bool,
+        compress: bool,
+        limit: Option<usize>,
+    ) -> Self {
         let prefix = path.file_name().unwrap().to_str().unwrap();
         let disk = RedbCache::builder("compression-compat")
             .disk_dir(path)
+            .ttl_secs(3600)
             .strict_deserialization(strict);
         let redis = RedisCache::builder(prefix)
             .ttl_secs(3600)
@@ -41,8 +51,18 @@ impl Stores {
         } else {
             (disk, redis, async_redis)
         };
+        #[cfg(feature = "compression_zstd")]
+        let (disk, redis, async_redis) = if let Some(limit) = limit {
+            (
+                disk.max_decompressed_size(limit),
+                redis.max_decompressed_size(limit),
+                async_redis.max_decompressed_size(limit),
+            )
+        } else {
+            (disk, redis, async_redis)
+        };
         #[cfg(not(feature = "compression_zstd"))]
-        assert!(!compress);
+        assert!(!compress && limit.is_none());
 
         Self {
             disk: disk.build().unwrap(),
@@ -74,7 +94,7 @@ impl Stores {
         );
     }
 
-    async fn assert_unsupported(&self, key: u32) {
+    async fn assert_decode_error(&self, key: u32) {
         assert!(self.disk.cache_get(&key).unwrap_err().is_deserialization());
         assert!(
             self.disk
@@ -118,6 +138,38 @@ async fn compression_compatibility() {
             writer.write_pair(7).await;
             writer.write_pair(9).await;
             drop(writer);
+            let limited = Stores::open_with_limit(path, false, false, Some(512)).await;
+            for key in 5..=8 {
+                limited.assert_decode_error(key).await;
+            }
+            for key in (1..=4).chain(9..=10) {
+                limited.assert_read(key, Some(value(key))).await;
+            }
+            assert!(limited.disk.scan_stats().unwrap_err().is_deserialization());
+            assert!(
+                limited
+                    .disk
+                    .async_scan_stats()
+                    .await
+                    .unwrap_err()
+                    .is_deserialization()
+            );
+            assert!(
+                limited
+                    .disk
+                    .remove_expired_entries()
+                    .unwrap_err()
+                    .is_deserialization()
+            );
+            assert!(
+                limited
+                    .disk
+                    .async_remove_expired_entries()
+                    .await
+                    .unwrap_err()
+                    .is_deserialization()
+            );
+            drop(limited);
             for compress in [false, true] {
                 let reader = Stores::open(path, true, compress).await;
                 for key in 1..=10 {
@@ -133,7 +185,7 @@ async fn compression_compatibility() {
             // The second reader for each backend also reports the frame as
             // undecodable, proving the first strict read preserved the entry.
             for key in 5..=8 {
-                strict.assert_unsupported(key).await;
+                strict.assert_decode_error(key).await;
             }
             drop(strict);
 
