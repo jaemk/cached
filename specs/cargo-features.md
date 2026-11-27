@@ -80,10 +80,9 @@ corresponding Cargo feature isn't enabled. The macro-side implementation is docu
 
 ## FEAT-9
 
-MSRV is **1.95** (raised from 1.92). The floor is set by `redis_store`: `redis` and `r2d2` pull
-`scheduled-thread-pool`, whose 0.2.8 release depends on `parking_lot` 0.13, and `parking_lot`
-0.13 (with `lock_api` 0.5 and `parking_lot_core` 0.10) declares `rust-version = "1.95"`.
-`scheduled-thread-pool` 0.2.8 itself declares no `rust-version`, so cargo's MSRV-aware resolver
-selects it on older toolchains and the build then fails. Non-redis feature sets still build on
-1.92 (the [FEAT-6](#feat-6) floor), but `rust-version` is a single crate-level value, so it
-moves for every feature set. The CI MSRV job is pinned to 1.95.
+MSRV is **1.95** (raised from 1.92). The floor is set by `parking_lot` 0.13 (with `lock_api` 0.5
+and `parking_lot_core` 0.10), which declares `rust-version = "1.95"`. It is a direct dependency
+of every feature set. `redis_store` also pulls it through `scheduled-thread-pool` 0.2.8 (via
+`redis` and `r2d2`), which declares no `rust-version`, so cargo's MSRV-aware resolver selects it
+on older toolchains; that alone forced the raise before the direct dependency moved to 0.13.
+The CI MSRV job is pinned to 1.95.
