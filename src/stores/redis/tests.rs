@@ -569,3 +569,42 @@ fn compression_redis_mixed_values_and_frame_errors() {
     assert!(read_bytes("4", &mut conn).is_none());
     raw.cache_clear().unwrap();
 }
+
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redis_writes_leave_the_connection_idle_during_serialization() {
+    use crate::SerializeCached;
+
+    #[derive(serde::Deserialize)]
+    #[serde(transparent)]
+    struct Value {
+        text: String,
+        #[serde(skip)]
+        pool: Option<r2d2::Pool<redis::Client>>,
+    }
+
+    impl serde::Serialize for Value {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let pool = self.pool.as_ref().unwrap();
+            let _lease = pool.try_get().ok_or_else(|| {
+                serde::ser::Error::custom("serialization held the only Redis connection")
+            })?;
+            serializer.serialize_str(&self.text)
+        }
+    }
+
+    let cache = RedisCache::<u32, Value>::builder(format!("{}:compression-pool", now_millis()))
+        .compression(Compression::Zstd { level: 3 })
+        .connection_pool_max_size(1)
+        .ttl_secs(60)
+        .build()
+        .unwrap();
+    let value = || Value {
+        text: "content".repeat(512),
+        pool: Some(cache.pool.clone()),
+    };
+    assert!(cache.cache_set(1, value()).unwrap().is_none());
+    cache.cache_set_ref(&2, &value()).unwrap();
+    assert_eq!(cache.cache_remove(&1).unwrap().unwrap().text, value().text);
+    assert_eq!(cache.cache_remove(&2).unwrap().unwrap().text, value().text);
+}

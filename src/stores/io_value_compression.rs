@@ -42,6 +42,21 @@ pub(super) struct IoValueCompression {
 #[cfg(feature = "compression_zstd")]
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+#[cfg(feature = "compression_zstd")]
+fn decompress_zstd(bytes: &[u8], size: usize) -> io::Result<Vec<u8>> {
+    use zstd::zstd_safe::{DCtx, get_error_name};
+
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(size)
+        .map_err(|_| io::ErrorKind::OutOfMemory)?;
+    DCtx::try_create()
+        .ok_or(io::ErrorKind::OutOfMemory)?
+        .decompress(&mut decoded, bytes)
+        .map_err(|code| io::Error::new(io::ErrorKind::InvalidData, get_error_name(code)))?;
+    Ok(decoded)
+}
+
 impl IoValueCompression {
     #[cfg(feature = "compression_zstd")]
     pub(super) fn set_algorithm(&mut self, algorithm: Compression) {
@@ -94,7 +109,7 @@ impl IoValueCompression {
                         "zstd frame exceeds decompression limit",
                     )
                 })?;
-            return zstd::bulk::decompress(bytes, size).map(Cow::Owned);
+            return decompress_zstd(bytes, size).map(Cow::Owned);
         }
         Ok(Cow::Borrowed(bytes))
     }
@@ -130,6 +145,13 @@ mod tests {
         settings.set_max_decompressed_size(255);
         assert!(settings.decode(&frame).is_err());
         assert!(matches!(settings.decode(&bytes).unwrap(), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn decompression_reports_unrepresentable_buffer_capacity() {
+        let frame = zstd::bulk::compress(b"valid cache data", 3).unwrap();
+        let error = decompress_zstd(&frame, usize::MAX).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
     }
 
     #[test]

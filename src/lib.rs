@@ -199,7 +199,8 @@ complete programs, including explicit store construction with `ty` and `create`.
 
 Enable `compression_zstd` alongside your Redis or redb feature, then pass
 `Compression::Zstd { level: 3 }` to the store builder's `.compression(...)` method.
-The builder attempts compression starting at 256 serialized bytes and keeps a frame only
+Building this feature requires a C toolchain. The builder attempts compression starting at
+256 serialized bytes and keeps a frame only
 when it saves space. Adjust the threshold with `.min_compress_size(bytes)` and the
 64 MiB frame limit with `.max_decompressed_size(bytes)`. Values above the limit are written raw.
 

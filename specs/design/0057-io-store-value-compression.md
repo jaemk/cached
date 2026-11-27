@@ -36,7 +36,8 @@ Status: Implemented
   store can read everything it writes using its own limit.
 - **Bounded decompression.** Check the frame's declared content size before allocation.
   Decode into a buffer bounded by that size and reject frames with missing sizes or sizes
-  above the configured cap. The cap applies to compressed entries only.
+  above the configured cap. Allocation and decoder setup failures become deserialization
+  errors. The cap applies to compressed entries only.
 - **Errors.** Compression failure on write is a `CacheSerialization` error, and decompression
   failure on read is a `CacheDeserialization` error, both with a boxed source so the codec
   crate does not enter the public API (the redb 5 pattern).
@@ -60,6 +61,9 @@ is enabled by `compression_zstd`.
   enabling compressed writes. An older build or a build without the feature treats frames as
   undecodable. Default self-healing deletes those entries, and strict mode reports an error.
   Redb uses an exclusive file lock, so this matters most for Redis deployments.
+- **Synchronous Redis pooling.** Serialize and compress new values before checking out a
+  connection. Return the connection after the write response before decoding the displaced
+  value.
 - **CPU on async executors.** Async Redis runs compression on the caller's executor.
   Async redb runs compression on its blocking pool.
 - `RedbCache::scan_stats` (0056) decompresses each framed entry while scanning its table.

@@ -1180,14 +1180,13 @@ where
     }
 
     fn cache_set(&self, key: K, val: V) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+        let val = CachedRedisValue::new(val);
+        let serialized = serialize_cached_redis_value(&val, self.compression)?;
         let mut pipe = redis::pipe();
         let key_str = self.generate_key(&key);
 
         let ttl = *self.ttl.lock();
 
-        let val = CachedRedisValue::new(val);
-        let serialized = serialize_cached_redis_value(&val, self.compression)?;
         pipe.get(&key_str);
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
@@ -1197,7 +1196,10 @@ where
                 .ignore();
         }
 
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        let res: (Option<Vec<u8>>,) = {
+            let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+            pipe.query(&mut *conn).map_err(RedisCacheError::redis)?
+        };
         // REDIS-10: if the displaced previous value fails to decode, the new write
         // succeeded — return Ok(None) (garbage old value) rather than surfacing an error.
         Ok(res.0.and_then(|bytes| {
@@ -1340,13 +1342,11 @@ where
     /// not read back the previous value, so the write is a single round-trip
     /// (no GET). Call [`ConcurrentCached::cache_get`] first if you need the prior value.
     fn cache_set_ref(&self, key: &K, val: &V) -> Result<(), RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
-        let key_str = self.generate_key(key);
-
-        let ttl = *self.ttl.lock();
-
         let val = CachedRedisValueRef::new(val);
         let serialized = serialize_cached_redis_value(&val, self.compression)?;
+        let key_str = self.generate_key(key);
+        let ttl = *self.ttl.lock();
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
 
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
