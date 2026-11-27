@@ -39,7 +39,8 @@ Status: Implemented
   above the configured cap. Reads report a frame above the reader's cap or an allocation
   failure as a deserialization error in both modes and preserve the entry. redb expiry sweeps
   and statistics scans also report these errors. The cap applies to compressed entries only.
-- **Errors.** Compression failure on write is a `CacheSerialization` error, and decompression
+- **Errors.** Compression failure on write, including failure to allocate its output buffer
+  or encoder context, is a `CacheSerialization` error. Decompression
   failure on read is a `CacheDeserialization` error, both with a boxed source so the codec
   crate does not enter the public API (the redb 5 pattern).
 

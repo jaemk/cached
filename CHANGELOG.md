@@ -14,7 +14,8 @@
 - Opt-in zstd value compression for synchronous and async Redis and for redb. Enable
   `compression_zstd` and configure the store builder to compress new writes. Upgrade all
   readers of a shared Redis cache before enabling compression (#222). Synchronous Redis
-  operations compress and decompress values outside the pooled connection checkout. Decoding
+  operations compress and decompress values outside the pooled connection checkout. Encoder
+  context and output allocation failures are reported as serialization errors. Decoding
   reports frames above the reader's limit and buffer allocation failures as deserialization
   errors and preserves entries on reads and sweeps. Redb lookups reuse the decoded value when
   a refresh or expiry check finds the same stored bytes.
