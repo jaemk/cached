@@ -283,6 +283,8 @@ where
     /// returns `Ok(None)`. When `true`, a deserialization failure on the read
     /// path returns `Err(RedisCacheError::CacheDeserialization { .. })`.
     ///
+    /// Reads report decompression allocation failures and preserve the entry in either mode.
+    ///
     /// In **both** modes, the previous value displaced by `async_cache_set` is
     /// silently discarded when it cannot be decoded (the write itself succeeds
     /// and `Ok(None)` is returned): the setting governs reads, not the
@@ -804,7 +806,9 @@ where
             None => Ok(None),
             Some(bytes) => match super::deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
-                Err(e) if !self.strict_deserialization => {
+                Err(e)
+                    if !self.strict_deserialization && !e.is_decompression_allocation_failure() =>
+                {
                     // Conditional self-heal delete (C6): only remove the key
                     // if its current value still equals the corrupt `bytes`
                     // we read, so a concurrent valid write is never clobbered.
@@ -814,7 +818,6 @@ where
                         .invoke_async(&mut conn)
                         .await
                         .map_err(RedisCacheError::redis)?;
-                    let _ = e;
                     Ok(None)
                 }
                 Err(e) => Err(e),
@@ -1061,6 +1064,34 @@ mod tests {
     /// prefixes carry a separator, which the key layout escapes.
     fn raw_key(prefix: &str, key: &str) -> String {
         super::super::generate_redis_key(super::super::DEFAULT_NAMESPACE, prefix, key)
+    }
+
+    #[cfg(feature = "compression_zstd")]
+    #[tokio::test]
+    async fn compression_allocation_failure_preserves_async_redis_entry() {
+        let mut cache = AsyncRedisCache::<u32, String>::builder(format!(
+            "{}:async-compression-allocation",
+            now_millis()
+        ))
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .build()
+        .await
+        .unwrap();
+        let value = "repeated payload".repeat(256);
+        cache.async_cache_set(1, value.clone()).await.unwrap();
+
+        cache.compression.fail_decode_allocation = true;
+        assert!(
+            cache
+                .async_cache_get(&1)
+                .await
+                .unwrap_err()
+                .is_deserialization()
+        );
+        cache.compression.fail_decode_allocation = false;
+
+        assert_eq!(cache.async_cache_remove(&1).await.unwrap(), Some(value));
     }
 
     /// REDIS-8: async owned and borrowed writes share a format with synchronous Redis.

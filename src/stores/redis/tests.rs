@@ -608,3 +608,22 @@ fn compression_redis_writes_leave_the_connection_idle_during_serialization() {
     assert_eq!(cache.cache_remove(&1).unwrap().unwrap().text, value().text);
     assert_eq!(cache.cache_remove(&2).unwrap().unwrap().text, value().text);
 }
+
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_allocation_failure_preserves_redis_entry() {
+    let mut cache =
+        RedisCache::<u32, String>::builder(format!("{}:compression-allocation", now_millis()))
+            .compression(Compression::Zstd { level: 3 })
+            .ttl_secs(60)
+            .build()
+            .unwrap();
+    let value = "repeated payload".repeat(256);
+    cache.cache_set(1, value.clone()).unwrap();
+
+    cache.compression.fail_decode_allocation = true;
+    assert!(cache.cache_get(&1).unwrap_err().is_deserialization());
+    cache.compression.fail_decode_allocation = false;
+
+    assert_eq!(cache.cache_remove(&1).unwrap(), Some(value));
+}

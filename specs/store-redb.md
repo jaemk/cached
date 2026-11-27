@@ -76,6 +76,8 @@ on different redb majors must not open the same cache file at the same time.
 
 With `compression_zstd`, `RedbCacheBuilder::compression` can opt into zstd writes.
 Sync and async operations, including refresh, expiry sweeps, and statistics scans, read
-mixed raw and compressed entries under the existing file layout. Disabling compressed
+mixed raw and compressed entries under the existing file layout. Decompression allocation
+failures are reported by reads, expiry sweeps, and stats scans in both modes. A failed sweep
+leaves the transaction uncommitted. Disabling compressed
 writes on reopen still permits reading old frames if the feature is compiled in.
 See [design 0057](design/0057-io-store-value-compression.md).

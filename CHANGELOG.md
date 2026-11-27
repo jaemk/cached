@@ -15,7 +15,7 @@
   `compression_zstd` and configure the store builder to compress new writes. Upgrade all
   readers of a shared Redis cache before enabling compression (#222). Synchronous Redis writes
   compress values before checking out a connection, and decoding reports buffer allocation
-  failures through the store's deserialization error.
+  failures as deserialization errors while preserving entries on reads and sweeps.
 
 ### Changed
 

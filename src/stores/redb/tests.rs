@@ -2408,3 +2408,58 @@ async fn compression_redb_async_operations() {
         Some((1, large))
     );
 }
+
+#[cfg(all(feature = "compression_zstd", feature = "async"))]
+#[tokio::test]
+async fn compression_allocation_failure_preserves_redb_entries() {
+    use crate::ConcurrentCachedAsync;
+
+    let dir = temp_dir!();
+    let mut cache = RedbCache::<u32, String>::builder("compression-allocation")
+        .disk_dir(dir.path())
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .build()
+        .unwrap();
+    let value = "repeated payload".repeat(256);
+    for key in 1..=4 {
+        cache.cache_set(key, value.clone()).unwrap();
+    }
+
+    cache.compression.fail_decode_allocation = true;
+    assert!(cache.cache_get(&1).unwrap_err().is_deserialization());
+    assert!(
+        cache
+            .async_cache_get(&2)
+            .await
+            .unwrap_err()
+            .is_deserialization()
+    );
+    assert!(cache.scan_stats().unwrap_err().is_deserialization());
+    assert!(
+        cache
+            .async_scan_stats()
+            .await
+            .unwrap_err()
+            .is_deserialization()
+    );
+    assert!(
+        cache
+            .remove_expired_entries()
+            .unwrap_err()
+            .is_deserialization()
+    );
+    assert!(
+        cache
+            .async_remove_expired_entries()
+            .await
+            .unwrap_err()
+            .is_deserialization()
+    );
+    cache.compression.fail_decode_allocation = false;
+
+    assert_eq!(cache.scan_stats().unwrap().entries, 4);
+    for key in 1..=4 {
+        assert_eq!(cache.cache_get(&key).unwrap().as_ref(), Some(&value));
+    }
+}

@@ -1,6 +1,8 @@
 #[cfg(feature = "compression_zstd")]
 use crate::stores::Compression;
-use crate::stores::io_value_compression::IoValueCompression;
+use crate::stores::io_value_compression::{
+    IoValueCompression, is_decompression_allocation_failure,
+};
 use crate::time::Duration;
 use crate::{
     ConcurrentCacheBase, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached,
@@ -570,6 +572,8 @@ where
     /// `Err(RedisCacheError::CacheDeserialization { .. })` immediately, matching
     /// the behavior of versions prior to 3.0.
     ///
+    /// Reads report decompression allocation failures and preserve the entry in either mode.
+    ///
     /// In **both** modes, the previous value displaced by `cache_set` is silently
     /// discarded when it cannot be decoded (the write itself succeeds and
     /// `Ok(None)` is returned): the setting governs reads, not the best-effort
@@ -971,9 +975,14 @@ impl RedisCacheError {
             cached_value,
         }
     }
+    fn is_decompression_allocation_failure(&self) -> bool {
+        matches!(self, Self::CacheDeserialization { source, .. }
+            if is_decompression_allocation_failure(source.as_ref()))
+    }
+
     /// Returns `true` when this error is a deserialization failure.
     ///
-    /// Stable classifier for callers that need to distinguish corrupt-value errors
+    /// Stable classifier for callers that need to distinguish value-decoding errors
     /// from network/pool errors without downcast-inspecting the opaque `source`.
     #[must_use]
     pub fn is_deserialization(&self) -> bool {
@@ -1159,7 +1168,9 @@ where
             None => Ok(None),
             Some(bytes) => match deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
-                Err(e) if !self.strict_deserialization => {
+                Err(e)
+                    if !self.strict_deserialization && !e.is_decompression_allocation_failure() =>
+                {
                     // Self-heal: the stored bytes are corrupt or incompatible with V.
                     // Delete the entry so the caller can recompute on the next call.
                     // Use a conditional Lua delete (C6) that only removes the key
@@ -1171,7 +1182,6 @@ where
                         .arg(&bytes)
                         .invoke(&mut *conn)
                         .map_err(RedisCacheError::redis)?;
-                    let _ = e;
                     Ok(None)
                 }
                 Err(e) => Err(e),

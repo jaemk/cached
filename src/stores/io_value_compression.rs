@@ -37,6 +37,8 @@ impl Default for CompressionSettings {
 pub(super) struct IoValueCompression {
     #[cfg(feature = "compression_zstd")]
     settings: CompressionSettings,
+    #[cfg(all(test, feature = "compression_zstd"))]
+    pub(super) fail_decode_allocation: bool,
 }
 
 #[cfg(feature = "compression_zstd")]
@@ -55,6 +57,16 @@ fn decompress_zstd(bytes: &[u8], size: usize) -> io::Result<Vec<u8>> {
         .decompress(&mut decoded, bytes)
         .map_err(|code| io::Error::new(io::ErrorKind::InvalidData, get_error_name(code)))?;
     Ok(decoded)
+}
+
+// The codec could not allocate resources to decode the value. This says nothing
+// about the stored bytes, so callers must not treat it as corruption.
+pub(super) fn is_decompression_allocation_failure(
+    error: &(dyn std::error::Error + 'static),
+) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::OutOfMemory)
 }
 
 impl IoValueCompression {
@@ -109,6 +121,10 @@ impl IoValueCompression {
                         "zstd frame exceeds decompression limit",
                     )
                 })?;
+            #[cfg(test)]
+            if self.fail_decode_allocation {
+                return Err(io::ErrorKind::OutOfMemory.into());
+            }
             return decompress_zstd(bytes, size).map(Cow::Owned);
         }
         Ok(Cow::Borrowed(bytes))

@@ -37,7 +37,9 @@ Status: Implemented
 - **Bounded decompression.** Check the frame's declared content size before allocation.
   Decode into a buffer bounded by that size and reject frames with missing sizes or sizes
   above the configured cap. Allocation and decoder setup failures become deserialization
-  errors. The cap applies to compressed entries only.
+  errors. Reads surface these allocation errors in both deserialization modes and preserve
+  entries. redb expiry sweeps and statistics scans report these errors instead of treating
+  entries as corrupt. The cap applies to compressed entries only.
 - **Errors.** Compression failure on write is a `CacheSerialization` error, and decompression
   failure on read is a `CacheDeserialization` error, both with a boxed source so the codec
   crate does not enter the public API (the redb 5 pattern).
