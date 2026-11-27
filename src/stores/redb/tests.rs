@@ -2251,6 +2251,46 @@ mod unix_permissions {
     }
 }
 
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redb_refresh_decodes_unchanged_bytes_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, PartialEq, serde::Serialize)]
+    #[serde(transparent)]
+    struct Value(String);
+
+    impl<'de> serde::Deserialize<'de> for Value {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            DECODES.fetch_add(1, Ordering::Relaxed);
+            String::deserialize(deserializer).map(Self)
+        }
+    }
+
+    let dir = temp_dir!();
+    let cache = RedbCache::<u32, Value>::builder("compression-refresh-decodes")
+        .disk_dir(dir.path())
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+    let payload = "repeated payload".repeat(256);
+    let stored = CachedDiskValue {
+        value: Value(payload.clone()),
+        created_at: SystemTime::now() - Duration::from_secs(1),
+    };
+    let previous_bytes = serialize_disk_value(&stored, cache.compression).unwrap();
+    assert!(previous_bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
+    raw_insert(&cache, "1", previous_bytes.clone());
+
+    assert_eq!(cache.cache_get(&1).unwrap(), Some(Value(payload)));
+    assert_ne!(raw_get(&cache, "1").unwrap(), previous_bytes);
+    assert_eq!(DECODES.load(Ordering::Relaxed), 1);
+}
+
 /// REDB-9: mixed formats across reopen, borrowed writes, refresh, replacement and removal.
 #[cfg(feature = "compression_zstd")]
 #[test]

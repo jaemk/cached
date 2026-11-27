@@ -14,15 +14,15 @@ thread may have written a valid value for the same key via `cache_set`.
 Two paths handle this:
 
 **Expiry/refresh mutation path (`src/stores/redb.rs:942`):** re-reads the entry under the
-write transaction before acting. If the key is now absent or has a fresh value, the stale action
-is skipped. This was the original design.
+write transaction before acting. If the key is absent, the lookup returns a miss. If the
+bytes match the decoded snapshot, the lookup reuses that value. If the bytes differ, it
+decodes the current entry and uses that entry to decide whether to refresh or evict.
 
 **Self-heal path (`src/stores/redb.rs:866-911`, C5 fix):** previously deleted the key blindly
 under the write transaction without re-reading. A valid `cache_set` that committed between the
-read and the write was silently deleted. The fix aligns the self-heal path with the expiry path:
-re-read the bytes under the write transaction; only delete if the bytes are still corrupt (same
-raw bytes as the read txn observed). A concurrent valid write has different bytes, so it is
-preserved.
+read and the write was silently deleted. The self-heal path now re-reads and tries to decode the
+current entry under the write transaction. It removes an entry only when the current decode
+failure is eligible for self-healing.
 
 ## Design decisions recorded here
 
@@ -30,14 +30,12 @@ preserved.
 and the self-heal path now re-read before acting. This is the correct pattern for any
 read-then-conditional-write in a MVCC store.
 
-**The re-read compares raw bytes, not deserialized values.** Deserialization is skipped on the
-self-heal re-read; the bytes are compared directly. If the bytes differ, a concurrent writer has
-updated the entry and the self-heal is aborted. If the bytes are identical, the corruption is
-persistent and the delete proceeds.
+**The refresh and expiry re-read compares raw bytes.** Matching bytes allow the lookup to
+reuse its successfully decoded value. When self-healing finds a valid replacement, the lookup
+carries that value and its bytes forward to the TTL check.
 
-**A concurrent valid write is never lost.** The worst case after the fix is a spurious cache miss
-(the self-heal aborts and returns `Ok(None)` even though a valid entry now exists). The next
-`cache_get` will read the valid entry. Losing a valid write entirely was the bug being fixed.
+**A concurrent valid write is preserved.** The lookup applies TTL and refresh rules to the
+current entry after revalidation.
 
 **No additional lock beyond the write transaction.** redb's write transaction serializes all
 writers, so there is at most one write transaction open at a time. The re-read and delete under

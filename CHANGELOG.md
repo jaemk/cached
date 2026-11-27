@@ -16,7 +16,8 @@
   readers of a shared Redis cache before enabling compression (#222). Synchronous Redis
   operations compress and decompress values outside the pooled connection checkout. Decoding
   reports frames above the reader's limit and buffer allocation failures as deserialization
-  errors and preserves entries on reads and sweeps.
+  errors and preserves entries on reads and sweeps. Redb lookups reuse the decoded value when
+  a refresh or expiry check finds the same stored bytes.
 
 ### Changed
 

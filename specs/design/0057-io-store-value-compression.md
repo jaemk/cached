@@ -67,7 +67,9 @@ is enabled by `compression_zstd`.
   A read that needs to self-heal acquires a connection for the conditional delete.
 - **CPU on async executors.** Async Redis runs compression on the caller's executor.
   Async redb runs compression on its blocking pool.
-- `RedbCache::scan_stats` (0056) decompresses each framed entry while scanning its table.
+- redb refresh and lookup-triggered expiry reuse the decoded value when the stored bytes
+  match the read snapshot. `RedbCache::scan_stats` (0056) decompresses each framed entry
+  while scanning its table.
 
 ## Notes
 

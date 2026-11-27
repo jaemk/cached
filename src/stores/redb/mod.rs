@@ -1073,7 +1073,7 @@ where
     // Fast path: read the entry under a read transaction. For the common case
     // where no mutation is required (no TTL, or a fresh entry with refresh
     // disabled) we return immediately, keeping a single read txn with no write.
-    let raw_bytes: Vec<u8> = {
+    let mut raw_bytes: Vec<u8> = {
         let rtxn = connection.begin_read().map_err(RedbCacheError::storage)?;
         let table = rtxn.open_table(TABLE).map_err(RedbCacheError::storage)?;
         let Some(guard) = table.get(key).map_err(RedbCacheError::storage)? else {
@@ -1109,8 +1109,12 @@ where
                     // Entry vanished (concurrent remove/clear): nothing to heal.
                     None => Ok(None),
                     Some(bytes) => match deserialize_disk_value::<V>(&bytes, compression) {
-                        // A concurrent writer stored a valid value; keep it.
-                        Ok(v) => Ok(Some(v)),
+                        // Keep the bytes paired with the value we decoded so TTL
+                        // revalidation can compare against this newer snapshot.
+                        Ok(v) => {
+                            raw_bytes = bytes;
+                            Ok(Some(v))
+                        }
                         // Still corrupt under the write txn: evict it.
                         Err(e) if !should_preserve_on_decode_error(e.as_ref()) => {
                             table.remove(key).map_err(RedbCacheError::storage)?;
@@ -1179,7 +1183,10 @@ where
                 Ok(None)
             }
             Some(bytes) => {
-                let current: CachedDiskValue<V> =
+                // Only a different stored entry needs another decode.
+                let current = if bytes == raw_bytes {
+                    cached
+                } else {
                     match deserialize_disk_value::<V>(&bytes, compression) {
                         Ok(v) => v,
                         Err(e) if !strict && !should_preserve_on_decode_error(e.as_ref()) => {
@@ -1194,7 +1201,8 @@ where
                             };
                         }
                         Err(e) => return Err(RedbCacheError::deserialization(e, bytes)),
-                    };
+                    }
+                };
 
                 let current_age = SystemTime::now()
                     .duration_since(current.created_at)

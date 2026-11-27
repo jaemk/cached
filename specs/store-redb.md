@@ -15,6 +15,8 @@ deserialize are treated as a miss (self-healing default), consistent with
 
 Refresh-on-hit re-validates inside the write transaction, per
 [design/0033-redb-revalidate-in-write-txn.md](design/0033-redb-revalidate-in-write-txn.md).
+Lookup reuses the decoded value when the stored bytes match the read snapshot and
+decodes newly written bytes when they differ.
 Amortizing the refresh-on-hit write-txn cost is an open direction
 ([design/0021-redb-refresh-on-hit-cost.md](design/0021-redb-refresh-on-hit-cost.md)).
 
