@@ -11,6 +11,9 @@ struct Stores {
 }
 
 fn value(key: u32) -> String {
+    if key >= 9 {
+        return format!("small value {key}");
+    }
     format!("{key}: {}", "repeated cache payload ".repeat(256))
 }
 
@@ -110,38 +113,49 @@ async fn compression_compatibility() {
         }
         "zstd-writers-and-readers" => {
             Stores::open(path, true, false).await.write_pair(3).await;
-            Stores::open(path, true, true).await.write_pair(5).await;
+            let writer = Stores::open(path, true, true).await;
+            writer.write_pair(5).await;
+            writer.write_pair(7).await;
+            writer.write_pair(9).await;
+            drop(writer);
             for compress in [false, true] {
                 let reader = Stores::open(path, true, compress).await;
-                for key in 1..=6 {
+                for key in 1..=10 {
                     reader.assert_read(key, Some(value(key))).await;
                 }
             }
         }
         "raw-reader" => {
             let strict = Stores::open(path, true, false).await;
-            for key in 1..=4 {
+            for key in (1..=4).chain(9..=10) {
                 strict.assert_read(key, Some(value(key))).await;
             }
             // The second reader for each backend also reports the frame as
             // undecodable, proving the first strict read preserved the entry.
-            for key in 5..=6 {
+            for key in 5..=8 {
                 strict.assert_unsupported(key).await;
             }
             drop(strict);
 
             let healing = Stores::open(path, false, false).await;
-            assert_eq!(healing.disk.cache_get(&5).unwrap(), None);
-            assert_eq!(healing.disk.async_cache_get(&6).await.unwrap(), None);
-            assert_eq!(healing.redis.cache_get(&5).unwrap(), None);
-            assert_eq!(healing.async_redis.async_cache_get(&6).await.unwrap(), None);
+            for key in 5..=6 {
+                assert_eq!(healing.disk.cache_get(&key).unwrap(), None);
+                assert_eq!(healing.redis.cache_get(&key).unwrap(), None);
+            }
+            for key in 7..=8 {
+                assert_eq!(healing.disk.async_cache_get(&key).await.unwrap(), None);
+                assert_eq!(
+                    healing.async_redis.async_cache_get(&key).await.unwrap(),
+                    None
+                );
+            }
             drop(healing);
 
             let strict = Stores::open(path, true, false).await;
-            for key in 5..=6 {
+            for key in 5..=8 {
                 strict.assert_read(key, None).await;
             }
-            for key in 1..=4 {
+            for key in (1..=4).chain(9..=10) {
                 strict.assert_read(key, Some(value(key))).await;
             }
             strict.redis.cache_clear().unwrap();
