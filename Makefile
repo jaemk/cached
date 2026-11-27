@@ -24,7 +24,8 @@ CACHED_BASIC_EXAMPLES = basic \
                         moka_custom_store \
                         expiring_sized_cache \
                         disk \
-                        disk_async
+                        disk_async \
+                        io_compression
 # Same as `CACHED_BASIC_EXAMPLES`, but these examples require the `docker/redis`
 # goal
 CACHED_REDIS_EXAMPLES = redis \
@@ -67,6 +68,7 @@ TEST_TARGETS = tests \
                tests/redis-capability-requires-runtime \
                tests/redis-tokio \
                tests/all-features \
+               tests/io-compression \
                tests/32bit \
                tests/32bit/docker
 
@@ -155,6 +157,7 @@ help: ## List all supported Make targets
 			tests/redis-capability-requires-runtime) desc="Assert capability-only redis features fail without a runtime" ;; \
 			tests/redis-tokio) desc="Run async Redis Tokio tests" ;; \
 			tests/all-features) desc="Run tests with all features enabled" ;; \
+			tests/io-compression) desc="Check I/O value compatibility across builds with and without zstd" ;; \
 			tests/32bit) desc="Run tests on i686 (needs the rustup target and gcc-multilib)" ;; \
 			tests/32bit/docker) desc="Run tests/32bit in a Docker container" ;; \
 			docker/status) desc="Check whether the Docker engine is available" ;; \
@@ -281,7 +284,7 @@ tests/disk-store-sync:
 # ordering on the aggregate below is not honored under parallel make. The
 # standalone `*-async-cache*`/`connection-manager` targets are compile-only
 # `cargo check`s and need no container.
-tests/redis: tests/redis-connection-manager tests/redis-async-cache tests/redis-async-cache-tokio tests/redis-async-cache-rustls tests/redis-store-standalone tests/redis-runtime-axes tests/redis-capability-requires-runtime tests/redis-store tests/redis-tokio tests/all-features
+tests/redis: tests/redis-connection-manager tests/redis-async-cache tests/redis-async-cache-tokio tests/redis-async-cache-rustls tests/redis-store-standalone tests/redis-runtime-axes tests/redis-capability-requires-runtime tests/redis-store tests/redis-tokio tests/all-features tests/io-compression
 
 tests/redis-store-standalone:
 	@echo "[$@]: Checking standalone redis_store feature compilation..."
@@ -333,6 +336,19 @@ tests/redis-tokio: | docker/redis
 tests/all-features: | docker/redis
 	@echo "[$@]: Running tests (all features)..."
 	$(CARGO_COMMAND) test --all-features -- --nocapture
+
+# Keep one database and Redis prefix across separate feature builds.
+tests/io-compression: | docker/redis
+	@echo "[$@]: Checking I/O compression compatibility across feature builds..."
+	@set -eu; \
+	  CACHED_COMPRESSION_TEST_DIR=$$(mktemp -d); export CACHED_COMPRESSION_TEST_DIR; \
+	  trap 'rm -rf -- "$$CACHED_COMPRESSION_TEST_DIR"' EXIT; \
+	  CACHED_COMPRESSION_TEST_PHASE=raw-writer \
+	    $(CARGO_COMMAND) test --no-default-features --features redb_store,redis_tokio --test io_compression_compat -- --ignored; \
+	  CACHED_COMPRESSION_TEST_PHASE=zstd-writers-and-readers \
+	    $(CARGO_COMMAND) test --all-features --test io_compression_compat -- --ignored; \
+	  CACHED_COMPRESSION_TEST_PHASE=raw-reader \
+	    $(CARGO_COMMAND) test --no-default-features --features redb_store,redis_tokio --test io_compression_compat -- --ignored
 
 # 32-bit run of the unit and integration tests. Store internals (struct layout, which
 # hash bits hashbrown reads) depend on pointer width, see #330. Needs the

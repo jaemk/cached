@@ -9,7 +9,7 @@ fn json_with_wrong_version_value_is_rejected() {
     // `version: 99` is not the known REDIS_VALUE_VERSION (Some(1)).
     // Before the fix, `json.get("version").is_some()` would have accepted this.
     let bytes = br#"{"value": "hello", "version": 99}"#.to_vec();
-    match deserialize_cached_redis_value::<String>(&bytes) {
+    match deserialize_cached_redis_value::<String>(&bytes, Default::default()) {
         Ok(_) => {
             panic!("JSON with an unexpected `version` value must not be accepted as a legacy entry")
         }
@@ -28,7 +28,7 @@ fn json_with_wrong_version_value_is_rejected() {
 #[test]
 fn json_with_null_version_is_rejected() {
     let bytes = br#"{"value": 42, "version": null}"#.to_vec();
-    match deserialize_cached_redis_value::<u64>(&bytes) {
+    match deserialize_cached_redis_value::<u64>(&bytes, Default::default()) {
         Ok(_) => panic!("JSON with version=null must not be accepted as a legacy entry"),
         Err(RedisCacheError::CacheDeserialization { .. }) => {}
         Err(other) => panic!("expected CacheDeserialization, got: {other:?}"),
@@ -42,7 +42,7 @@ fn json_with_null_version_is_rejected() {
 fn json_with_correct_version_one_is_accepted() {
     // `{"value": "ok", "version": 1}` is the pre-3.0 JSON format with the known version.
     let bytes = br#"{"value": "ok", "version": 1}"#.to_vec();
-    let result = deserialize_cached_redis_value::<String>(&bytes);
+    let result = deserialize_cached_redis_value::<String>(&bytes, Default::default());
     assert!(
         result.is_ok(),
         "JSON with version=1 must be accepted as a legacy entry"

@@ -62,7 +62,9 @@ file name as "the trybuild goldens", not "the macro goldens".
 
 #![cfg(feature = "proc_macro")]
 
+// These two tests share the generated trybuild manifest.
 #[test]
+#[serial_test::serial]
 fn compile_fail_v3_macros() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/concurrent_cached_custom_ty_requires_result.rs");
@@ -251,6 +253,7 @@ fn compile_fail_v3_macros() {
 /// `TRYBUILD=overwrite cargo test --features "proc_macro,time_stores"` and
 /// `TRYBUILD=overwrite cargo test --features "proc_macro,time_stores,async"`.
 #[test]
+#[serial_test::serial]
 fn compile_fail_backend_feature_guards() {
     let t = trybuild::TestCases::new();
     // `disk = true` without `redb_store`: names `redb_store`.

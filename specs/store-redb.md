@@ -71,3 +71,11 @@ encoding does not apply, and no `DISK_FILE_VERSION` bump is needed.
 API: `RedbCacheError`/`RedbCacheBuildError` box their sources (REDB-5), so the redb major version
 is not part of cached's semver surface. redb 5 changed its file-locking protocol, so two processes
 on different redb majors must not open the same cache file at the same time.
+
+## REDB-9
+
+With `compression_zstd`, `RedbCacheBuilder::compression` can opt into zstd writes.
+Sync and async operations, including refresh, expiry sweeps, and statistics scans, read
+mixed raw and compressed entries under the existing file layout. Disabling compressed
+writes on reopen still permits reading old frames if the feature is compiled in.
+See [design 0057](design/0057-io-store-value-compression.md).

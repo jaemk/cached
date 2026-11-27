@@ -11,6 +11,9 @@
   argument out of the default cache key while still passing it to the body and companions, e.g.
   `fn fetch(id: u64, #[cached_skip] client: &Client)`. A compile error with `key`/`convert`, on
   `self`, and on `#[once]` (#188).
+- Opt-in zstd value compression for synchronous and async Redis and for redb. Enable
+  `compression_zstd` and configure the store builder to compress new writes. Upgrade all
+  readers of a shared Redis cache before enabling compression (#222).
 
 ### Changed
 

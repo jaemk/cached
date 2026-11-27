@@ -74,6 +74,7 @@ redis_async_cache = ["redis_store", "async", "redis/cache-aio"]
 # pay for it. The `blocking::unblock` call sites are `#[cfg(feature = "async")]`,
 # so a sync-only `redb_store` build enables the dependency without invoking it.
 redb_store = ["dep:serde", "dep:rmp-serde", "dep:redb", "dep:directories", "dep:blocking"]
+compression_zstd = ["dep:zstd"]
 time_stores = []
 
 [dependencies.cached_proc_macro]
@@ -123,6 +124,11 @@ optional = true
 [dependencies.redb]
 version = "5"
 optional = true
+
+[dependencies.zstd]
+version = "0.13.3"
+optional = true
+default-features = false
 
 [dependencies.rmp-serde]
 version = "1.1"
@@ -264,3 +270,11 @@ required-features = ["proc_macro"]
 name = "cache_benches"
 harness = false
 required-features = ["time_stores", "proc_macro"]
+
+[[example]]
+name = "io_compression"
+required-features = ["redb_store", "compression_zstd"]
+
+[[test]]
+name = "io_compression_compat"
+required-features = ["redb_store", "redis_tokio"]

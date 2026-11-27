@@ -1,3 +1,6 @@
+#[cfg(feature = "compression_zstd")]
+use crate::stores::Compression;
+use crate::stores::io_value_compression::IoValueCompression;
 use crate::time::Duration;
 use crate::time::SystemTime;
 use crate::{
@@ -26,6 +29,7 @@ pub struct RedbCacheBuilder<K, V> {
     disk_dir: Option<PathBuf>,
     cache_name: Option<String>,
     strict_deserialization: bool,
+    compression: IoValueCompression,
     // fn-pointer phantom — see the rationale on `RedbCache::_phantom`; keeps the
     // type unconditionally `Send + Sync` regardless of `K`/`V`.
     _phantom: PhantomData<fn() -> (K, V)>,
@@ -137,6 +141,7 @@ where
             disk_dir: None,
             cache_name: None,
             strict_deserialization: false,
+            compression: IoValueCompression::default(),
             _phantom: Default::default(),
         }
     }
@@ -256,6 +261,33 @@ where
     #[must_use]
     pub fn strict_deserialization(mut self, strict: bool) -> Self {
         self.strict_deserialization = strict;
+        self
+    }
+
+    /// Enable compression for new writes. With the `compression_zstd` feature,
+    /// reads accept compressed entries even when this setting is omitted.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.compression.set_algorithm(compression);
+        self
+    }
+
+    /// Minimum serialized size in bytes to attempt compression (default: 256).
+    /// The store keeps compressed bytes only when they are smaller.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn min_compress_size(mut self, size: usize) -> Self {
+        self.compression.set_min_compress_size(size);
+        self
+    }
+
+    /// Maximum decompressed frame size in bytes (default: 64 MiB).
+    /// Larger values are written raw, and this limit does not apply to raw reads.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn max_decompressed_size(mut self, size: usize) -> Self {
+        self.compression.set_max_decompressed_size(size);
         self
     }
 
@@ -424,6 +456,7 @@ where
             disk_path,
             connection: Arc::new(db),
             strict_deserialization: self.strict_deserialization,
+            compression: self.compression,
             _phantom: self._phantom,
         })
     }
@@ -670,6 +703,7 @@ pub struct RedbCache<K, V> {
     disk_path: PathBuf,
     connection: Arc<Database>,
     strict_deserialization: bool,
+    compression: IoValueCompression,
     // `RedbCache`/`RedbCacheBuilder` own no live `K`/`V` (values are serialized
     // to disk; `K`/`V` only appear in method signatures). Use a fn-pointer
     // phantom so the type is unconditionally `Send + Sync` and does not impose
@@ -730,6 +764,7 @@ where
             *self.ttl.lock(),
             self.strict_deserialization,
             self.durable,
+            self.compression,
         )
     }
 
@@ -751,8 +786,8 @@ where
     /// Scan every stored entry and return a [`RedbCacheStats`]: the entry count, how many
     /// are expired or undecodable, and the oldest and newest `created_at`.
     ///
-    /// This is an O(n) read of the whole table that deserializes every stored `V`, and is
-    /// never run implicitly; [`cache_size`](ConcurrentCacheBase::cache_size) stays
+    /// This is an O(n) read of the whole table that decompresses framed entries and
+    /// deserializes every stored `V`. It never runs implicitly; [`cache_size`](ConcurrentCacheBase::cache_size) stays
     /// `Ok(None)`. The scan runs under a single read transaction, so it sees one consistent
     /// snapshot and does not block or wait on writers. While it runs, redb cannot reuse pages freed by concurrent
     /// writes, so a long scan under heavy writes can grow the file. It never writes:
@@ -765,7 +800,7 @@ where
     /// entry's `created_at` is its last write or refresh, so `oldest` / `newest` are the
     /// least / most recently written or refreshed entries.
     pub fn scan_stats(&self) -> Result<RedbCacheStats, RedbCacheError> {
-        scan_stats_impl::<V>(&self.connection, *self.ttl.lock())
+        scan_stats_impl::<V>(&self.connection, *self.ttl.lock(), self.compression)
     }
 }
 
@@ -812,11 +847,12 @@ where
     /// so it does not stall the async runtime. Returns the number of entries removed.
     pub async fn async_remove_expired_entries(&self) -> Result<usize, RedbCacheError> {
         let connection = self.connection.clone();
+        let compression = self.compression;
         let ttl = *self.ttl.lock();
         let strict = self.strict_deserialization;
         let durable = self.durable;
         blocking::unblock(move || {
-            remove_expired_entries_impl::<V>(&connection, ttl, strict, durable)
+            remove_expired_entries_impl::<V>(&connection, ttl, strict, durable, compression)
         })
         .await
     }
@@ -825,8 +861,9 @@ where
     /// background thread (via the [`blocking`] crate) so it does not stall the async runtime.
     pub async fn async_scan_stats(&self) -> Result<RedbCacheStats, RedbCacheError> {
         let connection = self.connection.clone();
+        let compression = self.compression;
         let ttl = *self.ttl.lock();
-        blocking::unblock(move || scan_stats_impl::<V>(&connection, ttl)).await
+        blocking::unblock(move || scan_stats_impl::<V>(&connection, ttl, compression)).await
     }
 }
 
@@ -905,11 +942,11 @@ impl RedbCacheError {
         }
     }
     pub(crate) fn deserialization(
-        e: impl std::error::Error + Send + Sync + 'static,
+        e: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
         cached_value: Vec<u8>,
     ) -> Self {
         Self::CacheDeserialization {
-            source: Box::new(e),
+            source: e.into(),
             cached_value,
         }
     }
@@ -976,6 +1013,31 @@ impl<'a, V> CachedDiskValueRef<'a, V> {
 // default durable (`Durability::Immediate`) commit, `false` uses
 // `Durability::None` (deferred fsync). This is applied to every write txn.
 
+fn serialize_disk_value(
+    value: &impl Serialize,
+    compression: IoValueCompression,
+) -> Result<Vec<u8>, RedbCacheError> {
+    let bytes = rmp_serde::to_vec(value).map_err(RedbCacheError::serialization)?;
+    compress_disk_value(bytes, compression)
+}
+
+fn compress_disk_value(
+    bytes: Vec<u8>,
+    compression: IoValueCompression,
+) -> Result<Vec<u8>, RedbCacheError> {
+    compression
+        .encode(bytes)
+        .map_err(RedbCacheError::serialization)
+}
+
+fn deserialize_disk_value<V: DeserializeOwned>(
+    bytes: &[u8],
+    compression: IoValueCompression,
+) -> Result<CachedDiskValue<V>, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    let decoded = compression.decode(bytes)?;
+    Ok(rmp_serde::from_slice(&decoded)?)
+}
+
 /// Begin a write txn with the durability implied by `durable`.
 /// Durability is set on the fresh transaction (it only needs to be set before the
 /// eventual `commit`); callers then open the table and commit.
@@ -998,6 +1060,7 @@ fn disk_cache_get<V>(
     refresh: bool,
     durable: bool,
     strict: bool,
+    compression: IoValueCompression,
 ) -> Result<Option<V>, RedbCacheError>
 where
     V: Serialize + DeserializeOwned,
@@ -1015,7 +1078,7 @@ where
         guard.value().to_vec()
     };
 
-    let cached: CachedDiskValue<V> = match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_bytes) {
+    let cached: CachedDiskValue<V> = match deserialize_disk_value::<V>(&raw_bytes, compression) {
         Ok(v) => v,
         Err(e) if !strict => {
             // D2/C5: self-heal. The entry read under the (now-dropped) read txn
@@ -1040,7 +1103,7 @@ where
                 match current_bytes {
                     // Entry vanished (concurrent remove/clear): nothing to heal.
                     None => Ok(None),
-                    Some(bytes) => match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                    Some(bytes) => match deserialize_disk_value::<V>(&bytes, compression) {
                         // A concurrent writer stored a valid value; keep it.
                         Ok(v) => Ok(Some(v)),
                         // Still corrupt under the write txn: evict it.
@@ -1112,7 +1175,7 @@ where
             }
             Some(bytes) => {
                 let current: CachedDiskValue<V> =
-                    match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                    match deserialize_disk_value::<V>(&bytes, compression) {
                         Ok(v) => v,
                         Err(e) if !strict => {
                             // D2: corrupt under write txn — evict it. Table is
@@ -1141,8 +1204,7 @@ where
                     if refresh {
                         let mut refreshed = current;
                         refreshed.refresh_created_at();
-                        let serialized =
-                            rmp_serde::to_vec(&refreshed).map_err(RedbCacheError::serialization)?;
+                        let serialized = serialize_disk_value(&refreshed, compression)?;
                         table
                             .insert(key, serialized.as_slice())
                             .map_err(RedbCacheError::storage)?;
@@ -1169,6 +1231,7 @@ fn disk_cache_set<V>(
     serialized: Vec<u8>,
     ttl: Option<Duration>,
     durable: bool,
+    compression: IoValueCompression,
 ) -> Result<Option<V>, RedbCacheError>
 where
     V: DeserializeOwned,
@@ -1195,7 +1258,7 @@ where
     // this filter only decides what the caller is handed back. Same shape as
     // `disk_cache_remove`, which filters the removed entry identically.
     Ok(previous_bytes
-        .and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok())
+        .and_then(|bytes| deserialize_disk_value::<V>(&bytes, compression).ok())
         .filter(|cached| {
             ttl.is_none_or(|ttl| {
                 SystemTime::now()
@@ -1233,6 +1296,7 @@ fn disk_cache_remove<V>(
     key: &str,
     ttl: Option<Duration>,
     durable: bool,
+    compression: IoValueCompression,
 ) -> Result<Option<V>, RedbCacheError>
 where
     V: DeserializeOwned,
@@ -1251,7 +1315,7 @@ where
     wtxn.commit().map_err(RedbCacheError::storage)?;
 
     let removed =
-        removed_bytes.and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok());
+        removed_bytes.and_then(|bytes| deserialize_disk_value::<V>(&bytes, compression).ok());
     let result = if let Some(cached) = removed {
         if let Some(ttl) = ttl {
             if SystemTime::now()
@@ -1277,6 +1341,7 @@ fn disk_cache_remove_entry<V>(
     connection: &Database,
     key: &str,
     durable: bool,
+    compression: IoValueCompression,
 ) -> Result<Option<V>, RedbCacheError>
 where
     V: DeserializeOwned,
@@ -1294,7 +1359,7 @@ where
     };
     wtxn.commit().map_err(RedbCacheError::storage)?;
     Ok(removed_bytes
-        .and_then(|bytes| rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes).ok())
+        .and_then(|bytes| deserialize_disk_value::<V>(&bytes, compression).ok())
         .map(|cached| cached.value))
 }
 
@@ -1347,6 +1412,7 @@ fn remove_expired_entries_impl<V>(
     ttl: Option<Duration>,
     strict: bool,
     durable: bool,
+    compression: IoValueCompression,
 ) -> Result<usize, RedbCacheError>
 where
     V: Serialize + DeserializeOwned,
@@ -1371,8 +1437,7 @@ where
         for item in table.iter().map_err(RedbCacheError::storage)? {
             let (key, value) = item.map_err(RedbCacheError::storage)?;
             let raw = value.value();
-            let raw_vec = raw.to_vec();
-            match rmp_serde::from_slice::<CachedDiskValue<V>>(&raw_vec) {
+            match deserialize_disk_value::<V>(raw, compression) {
                 Ok(cached) => {
                     if now
                         .duration_since(cached.created_at)
@@ -1388,7 +1453,7 @@ where
                     let _ = e;
                 }
                 Err(e) => {
-                    return Err(RedbCacheError::deserialization(e, raw_vec));
+                    return Err(RedbCacheError::deserialization(e, raw.to_vec()));
                 }
             }
         }
@@ -1422,7 +1487,7 @@ where
                     // Already removed by a concurrent operation; skip.
                 }
                 Some(bytes) => {
-                    match rmp_serde::from_slice::<CachedDiskValue<V>>(&bytes) {
+                    match deserialize_disk_value::<V>(&bytes, compression) {
                         Ok(entry) => {
                             if now
                                 .duration_since(entry.created_at)
@@ -1463,6 +1528,7 @@ where
 fn scan_stats_impl<V>(
     connection: &Database,
     ttl: Option<Duration>,
+    compression: IoValueCompression,
 ) -> Result<RedbCacheStats, RedbCacheError>
 where
     V: DeserializeOwned,
@@ -1478,7 +1544,7 @@ where
         stats.entries += 1;
         // Decode the whole entry, `V` included, so `undecodable` matches what
         // `cache_get` would self-heal or reject.
-        let Ok(cached) = rmp_serde::from_slice::<CachedDiskValue<V>>(value.value()) else {
+        let Ok(cached) = deserialize_disk_value::<V>(value.value(), compression) else {
             stats.undecodable += 1;
             continue;
         };
@@ -1573,6 +1639,7 @@ where
             refresh,
             self.durable,
             self.strict_deserialization,
+            self.compression,
         )
     }
 
@@ -1583,25 +1650,36 @@ where
     /// disk either way.
     fn cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
         let ttl = *self.ttl.lock();
-        let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))
-            .map_err(RedbCacheError::serialization)?;
+        let serialized = serialize_disk_value(&CachedDiskValue::new(value), self.compression)?;
         disk_cache_set(
             &self.connection,
             &key.to_string(),
             serialized,
             ttl,
             self.durable,
+            self.compression,
         )
     }
 
     fn cache_remove(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let ttl = *self.ttl.lock();
-        disk_cache_remove(&self.connection, &key.to_string(), ttl, self.durable)
+        disk_cache_remove(
+            &self.connection,
+            &key.to_string(),
+            ttl,
+            self.durable,
+            self.compression,
+        )
     }
 
     fn cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
-        disk_cache_remove_entry(&self.connection, &key.to_string(), self.durable)
-            .map(|opt| opt.map(|v| (key.clone(), v)))
+        disk_cache_remove_entry(
+            &self.connection,
+            &key.to_string(),
+            self.durable,
+            self.compression,
+        )
+        .map(|opt| opt.map(|v| (key.clone(), v)))
     }
 
     fn cache_delete(&self, key: &K) -> Result<bool, RedbCacheError> {
@@ -1661,8 +1739,7 @@ where
     /// taking ownership of `value` and does not read back the previous value.
     /// Call [`ConcurrentCached::cache_get`] first if you need the prior value.
     fn cache_set_ref(&self, key: &K, value: &V) -> Result<(), RedbCacheError> {
-        let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
-            .map_err(RedbCacheError::serialization)?;
+        let serialized = serialize_disk_value(&CachedDiskValueRef::new(value), self.compression)?;
         disk_cache_set_no_return(&self.connection, &key.to_string(), serialized, self.durable)
     }
 }
@@ -1675,7 +1752,7 @@ where
 ///
 /// Values need only be `Send`, **not `Sync`**: they are serialized before the
 /// work moves onto the blocking pool, so no `V` is held across the `.await`
-/// (only the owned serialized bytes).
+/// (only the owned serialized bytes). Compression runs on the blocking pool.
 /// Keys keep `Send + Sync` (the `&K` is borrowed across the await), consistent
 /// with the `RedisCache`/`AsyncRedisCache` async stores.
 ///
@@ -1693,6 +1770,7 @@ where
 {
     async fn async_cache_get(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
+        let compression = self.compression;
         let key = key.to_string();
         let (ttl, refresh, durable, strict) = (
             *self.ttl.lock(),
@@ -1701,7 +1779,15 @@ where
             self.strict_deserialization,
         );
         blocking::unblock(move || {
-            disk_cache_get::<V>(&connection, &key, ttl, refresh, durable, strict)
+            disk_cache_get::<V>(
+                &connection,
+                &key,
+                ttl,
+                refresh,
+                durable,
+                strict,
+                compression,
+            )
         })
         .await
     }
@@ -1710,28 +1796,38 @@ where
     /// **live** value, filtering an already-expired displaced entry to `None`.
     async fn async_cache_set(&self, key: K, value: V) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
+        let compression = self.compression;
         let key = key.to_string();
         let (ttl, durable) = (*self.ttl.lock(), self.durable);
         let serialized = rmp_serde::to_vec(&CachedDiskValue::new(value))
             .map_err(RedbCacheError::serialization)?;
-        blocking::unblock(move || disk_cache_set::<V>(&connection, &key, serialized, ttl, durable))
-            .await
+        blocking::unblock(move || {
+            let serialized = compress_disk_value(serialized, compression)?;
+            disk_cache_set::<V>(&connection, &key, serialized, ttl, durable, compression)
+        })
+        .await
     }
 
     async fn async_cache_remove(&self, key: &K) -> Result<Option<V>, RedbCacheError> {
         let connection = self.connection.clone();
+        let compression = self.compression;
         let key = key.to_string();
         let (ttl, durable) = (*self.ttl.lock(), self.durable);
-        blocking::unblock(move || disk_cache_remove::<V>(&connection, &key, ttl, durable)).await
+        blocking::unblock(move || {
+            disk_cache_remove::<V>(&connection, &key, ttl, durable, compression)
+        })
+        .await
     }
 
     async fn async_cache_remove_entry(&self, key: &K) -> Result<Option<(K, V)>, Self::Error> {
         let connection = self.connection.clone();
+        let compression = self.compression;
         let key_str = key.to_string();
         let durable = self.durable;
-        let v: Option<V> =
-            blocking::unblock(move || disk_cache_remove_entry::<V>(&connection, &key_str, durable))
-                .await?;
+        let v: Option<V> = blocking::unblock(move || {
+            disk_cache_remove_entry::<V>(&connection, &key_str, durable, compression)
+        })
+        .await?;
         Ok(v.map(|v| (key.clone(), v)))
     }
 
@@ -1796,12 +1892,14 @@ where
         let connection = self.connection.clone();
         let key = key.to_string();
         let durable = self.durable;
+        let compression = self.compression;
         // Serialize eagerly; defer any error into the future.
         let serialized = rmp_serde::to_vec(&CachedDiskValueRef::new(value))
             .map_err(RedbCacheError::serialization);
         async move {
             let serialized = serialized?;
             blocking::unblock(move || {
+                let serialized = compress_disk_value(serialized, compression)?;
                 disk_cache_set_no_return(&connection, &key, serialized, durable)
             })
             .await

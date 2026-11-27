@@ -195,6 +195,35 @@ See [`examples/redis-async-tokio.rs`](https://github.com/jaemk/cached/blob/maste
 and [`examples/disk.rs`](https://github.com/jaemk/cached/blob/master/examples/disk.rs) for
 complete programs, including explicit store construction with `ty` and `create`.
 
+### Compressing stored values
+
+Enable `compression_zstd` alongside your Redis or redb feature, then pass
+`Compression::Zstd { level: 3 }` to the store builder's `.compression(...)` method.
+The builder attempts compression starting at 256 serialized bytes and keeps a frame only
+when it saves space. Adjust the threshold with `.min_compress_size(bytes)` and the
+64 MiB frame limit with `.max_decompressed_size(bytes)`. Values above the limit are written raw.
+
+```rust,no_run
+# #[cfg(all(feature = "redis_store", feature = "compression_zstd"))]
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+use cached::{Compression, RedisCache};
+
+let reports = RedisCache::<u64, String>::builder("reports")
+    .compression(Compression::Zstd { level: 3 })
+    .build()?;
+# let _ = reports;
+# Ok(())
+# }
+```
+
+With the feature compiled in, stores read both raw values and zstd frames even when
+compressed writes are disabled. On shared Redis caches, deploy the feature to every reader
+before enabling compressed writes. A reader without support may treat frames as corrupt and
+delete them during self-healing. Keep the feature enabled while any compressed entries remain,
+and give all readers a limit large enough for every writer. Compression adds CPU work to
+writes, including on the calling executor for async Redis. See the runnable
+[`io_compression` example](https://github.com/jaemk/cached/blob/master/examples/io_compression.rs).
+
 ## Using cache stores directly
 
 Every store the macros use is also a plain type. Import the store and the
@@ -313,6 +342,7 @@ See [`examples/expires_per_key.rs`](https://github.com/jaemk/cached/blob/master/
 | `redis_connection_manager` | | Auto-reconnecting Redis connections (pair with a runtime feature) |
 | `redis_async_cache` | | Redis client-side caching over RESP3 (pair with a runtime feature) |
 | `redb_store` | | Disk store backed by `redb` |
+| `compression_zstd` | | Opt-in zstd value compression for Redis and redb |
 
 ## Requirements
 
@@ -430,6 +460,13 @@ pub use stores::{
 pub use stores::{
     RedbCache, RedbCacheBuildError, RedbCacheBuilder, RedbCacheError, RedbCacheStats,
 };
+
+#[cfg(all(
+    feature = "compression_zstd",
+    any(feature = "redb_store", feature = "redis_store")
+))]
+#[doc(inline)]
+pub use stores::Compression;
 
 pub mod claim;
 mod lru_list;

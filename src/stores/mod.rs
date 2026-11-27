@@ -734,6 +734,14 @@ fn thread_stripe() -> usize {
 #[cfg(feature = "async_core")]
 use {super::CachedGetOrSetAsync, std::future::Future};
 
+#[cfg(any(feature = "redb_store", feature = "redis_store"))]
+mod io_value_compression;
+#[cfg(all(
+    feature = "compression_zstd",
+    any(feature = "redb_store", feature = "redis_store")
+))]
+pub use io_value_compression::Compression;
+
 mod expiring;
 mod expiring_lru;
 mod lru;

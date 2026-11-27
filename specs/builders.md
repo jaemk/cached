@@ -45,3 +45,12 @@ and the per-setter errors (`SetMaxSizeError`, `SetTtlError`) are re-exported at 
 [store-ttl.md](store-ttl.md) TTL-4) gains `.ttl_secs(u64)` and `.ttl_millis(u64)` alongside its
 existing `.ttl(Duration)`, matching the whole-cache TTL setters already on `TtlCacheBuilder`,
 `TtlSortedCacheBuilder`, and `ShardedLruTtlCacheBuilder`. See [store-ttl.md](store-ttl.md) TTL-9.
+
+## BUILD-6
+
+With `compression_zstd`, all three I/O store builders accept
+`.compression(Compression::Zstd { level })` to enable compression for writes,
+`.min_compress_size(bytes)` to set the write threshold (default 256 bytes), and
+`.max_decompressed_size(bytes)` to bound frame decompression (default 64 MiB).
+See [REDIS-8](store-redis.md#redis-8), [REDB-9](store-redb.md#redb-9), and
+[design 0057](design/0057-io-store-value-compression.md).

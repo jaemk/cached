@@ -70,3 +70,12 @@ through `rmp_serde::to_vec`, never `to_vec_named`, so an entry is a positional 2
 `value` then `version` and the field names are not on the wire. Field order is part of the frozen
 3.x layout: reordering, inserting or removing a field reinterprets every stored entry and must
 bump the embedded version. `tests/frozen_format_golden.rs` pins the serialized bytes.
+
+## REDIS-8
+
+With `compression_zstd`, `RedisCacheBuilder` and `AsyncRedisCacheBuilder` can opt into zstd
+writes using `.compression(Compression::Zstd { level })`. The default is uncompressed
+writes. Both stores recognize zstd frames independently of the write setting and retain
+raw MessagePack and legacy JSON reads. The decompressed-size limit applies only to frames.
+Upgrade every reader with the feature before enabling compressed writes on a shared Redis
+namespace. See [design 0057](design/0057-io-store-value-compression.md).

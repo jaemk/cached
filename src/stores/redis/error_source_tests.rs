@@ -211,7 +211,8 @@ fn deserialize_helper_reads_msgpack() {
 
     let bytes = rmp_serde::to_vec(&CachedRedisValue::new(7u64)).expect("serialize");
     let recovered: CachedRedisValue<u64> =
-        deserialize_cached_redis_value(&bytes).expect("msgpack must deserialize");
+        deserialize_cached_redis_value(&bytes, Default::default())
+            .expect("msgpack must deserialize");
     assert_eq!(recovered.value, 7u64);
     assert_eq!(recovered.version, Some(1));
 }
@@ -232,7 +233,8 @@ fn deserialize_helper_reads_legacy_json() {
     assert!(rmp_serde::from_slice::<CachedRedisValue<String>>(&json).is_err());
 
     let recovered: CachedRedisValue<String> =
-        deserialize_cached_redis_value(&json).expect("legacy JSON must deserialize");
+        deserialize_cached_redis_value(&json, Default::default())
+            .expect("legacy JSON must deserialize");
     assert_eq!(recovered.value, "legacy");
     assert_eq!(recovered.version, Some(1));
 }
@@ -246,7 +248,7 @@ fn deserialize_helper_rejects_json_without_version() {
 
     // `{"value": 1}` parses as JSON but has no `version` key.
     let bytes = br#"{"value": 1}"#.to_vec();
-    match deserialize_cached_redis_value::<u64>(&bytes) {
+    match deserialize_cached_redis_value::<u64>(&bytes, Default::default()) {
         Ok(_) => panic!("JSON without a version key must not be accepted"),
         Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
             assert_eq!(cached_value, bytes, "raw bytes must be preserved");
@@ -263,7 +265,7 @@ fn deserialize_helper_corrupt_bytes_preserve_value() {
 
     // 0xc1 is an unused/reserved msgpack byte and is not valid JSON either.
     let bytes: Vec<u8> = vec![0xc1, 0x00, 0xff];
-    match deserialize_cached_redis_value::<u64>(&bytes) {
+    match deserialize_cached_redis_value::<u64>(&bytes, Default::default()) {
         Ok(_) => panic!("corrupt bytes must not deserialize"),
         Err(RedisCacheError::CacheDeserialization { cached_value, .. }) => {
             assert_eq!(
