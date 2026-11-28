@@ -2250,3 +2250,251 @@ mod unix_permissions {
         );
     }
 }
+
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redb_refresh_decodes_unchanged_bytes_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, PartialEq, serde::Serialize)]
+    #[serde(transparent)]
+    struct Value(String);
+
+    impl<'de> serde::Deserialize<'de> for Value {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            DECODES.fetch_add(1, Ordering::Relaxed);
+            String::deserialize(deserializer).map(Self)
+        }
+    }
+
+    let dir = temp_dir!();
+    let cache = RedbCache::<u32, Value>::builder("compression-refresh-decodes")
+        .disk_dir(dir.path())
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+    let payload = "repeated payload".repeat(256);
+    let stored = CachedDiskValue {
+        value: Value(payload.clone()),
+        created_at: SystemTime::now() - Duration::from_secs(1),
+    };
+    let previous_bytes = serialize_disk_value(&stored, cache.compression).unwrap();
+    assert!(previous_bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
+    raw_insert(&cache, "1", previous_bytes.clone());
+
+    assert_eq!(cache.cache_get(&1).unwrap(), Some(Value(payload)));
+    assert_ne!(raw_get(&cache, "1").unwrap(), previous_bytes);
+    assert_eq!(DECODES.load(Ordering::Relaxed), 1);
+}
+
+/// REDB-9: mixed formats across reopen, borrowed writes, refresh, replacement and removal.
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redb_round_trip_and_maintenance() {
+    use crate::SerializeCached;
+
+    let dir = temp_dir!();
+    let builder = || RedbCache::<u32, String>::builder("compression").disk_dir(dir.path());
+    let large = "repeated payload".repeat(256);
+    let small = String::from("small");
+
+    let cache = builder()
+        .compression(Compression::Zstd { level: 3 })
+        .min_compress_size(256)
+        .max_decompressed_size(8192)
+        .ttl_secs(60)
+        .refresh_on_hit(true)
+        .build()
+        .unwrap();
+
+    cache.cache_set_ref(&1, &large).unwrap();
+    cache.cache_set_ref(&2, &small).unwrap();
+    let frame = raw_get(&cache, "1").unwrap();
+    assert!(frame.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
+    assert!(frame.len() < large.len());
+    assert_eq!(raw_get(&cache, "2").unwrap()[0], 0x92);
+    assert_eq!(cache.cache_get(&1).unwrap().as_ref(), Some(&large));
+    assert!(
+        raw_get(&cache, "1")
+            .unwrap()
+            .starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    );
+    assert_eq!(
+        cache.cache_set(1, large.clone()).unwrap().as_ref(),
+        Some(&large)
+    );
+    assert_eq!(cache.cache_remove(&1).unwrap().as_ref(), Some(&large));
+    cache.cache_set(1, large.clone()).unwrap();
+
+    let old = CachedDiskValue {
+        value: large.clone(),
+        created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+    };
+    raw_insert(
+        &cache,
+        "3",
+        serialize_disk_value(&old, cache.compression).unwrap(),
+    );
+    assert!(
+        raw_get(&cache, "3")
+            .unwrap()
+            .starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    );
+    let stats = cache.scan_stats().unwrap();
+    assert_eq!((stats.entries, stats.expired, stats.undecodable), (3, 1, 0));
+    assert_eq!(cache.remove_expired_entries().unwrap(), 1);
+    assert!(raw_get(&cache, "3").is_none());
+    raw_insert(
+        &cache,
+        "3",
+        serialize_disk_value(&old, cache.compression).unwrap(),
+    );
+    assert_eq!(cache.cache_get(&3).unwrap(), None);
+    assert!(raw_get(&cache, "3").is_none());
+    drop(cache);
+
+    let cache = builder().build().unwrap();
+    assert_eq!(cache.cache_get(&2).unwrap(), Some(small));
+    assert_eq!(cache.cache_remove_entry(&1).unwrap(), Some((1, large)));
+}
+
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redb_frame_errors_follow_store_policy() {
+    let dir = temp_dir!();
+    let builder = || {
+        RedbCache::<u32, String>::builder("compression-errors")
+            .disk_dir(dir.path())
+            .ttl_secs(60)
+            .max_decompressed_size(512)
+    };
+    let cache = builder().strict_deserialization(true).build().unwrap();
+
+    let invalid_message_pack = zstd::bulk::compress(&[0xc1], 3).unwrap();
+    let corrupt_frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+    for (key, bytes) in [(1, invalid_message_pack), (2, corrupt_frame)] {
+        raw_insert(&cache, &key.to_string(), bytes.clone());
+        let error = cache.cache_get(&key).unwrap_err();
+        assert!(
+            matches!(error, RedbCacheError::CacheDeserialization { cached_value, .. } if cached_value == bytes)
+        );
+        assert!(raw_get(&cache, &key.to_string()).is_some());
+    }
+    assert_eq!(cache.scan_stats().unwrap().undecodable, 2);
+    assert!(
+        cache
+            .remove_expired_entries()
+            .unwrap_err()
+            .is_deserialization()
+    );
+    drop(cache);
+
+    let cache = builder().build().unwrap();
+    assert_eq!(cache.cache_get(&1).unwrap(), None);
+    assert!(raw_get(&cache, "1").is_none());
+    assert_eq!(cache.remove_expired_entries().unwrap(), 1);
+    assert_eq!(cache.scan_stats().unwrap().entries, 0);
+}
+
+#[cfg(all(feature = "compression_zstd", feature = "async"))]
+#[tokio::test]
+async fn compression_redb_async_operations() {
+    use crate::{ConcurrentCachedAsync, SerializeCachedAsync};
+
+    let dir = temp_dir!();
+    let cache = RedbCache::<u32, String>::builder("compression-async")
+        .disk_dir(dir.path())
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .build()
+        .unwrap();
+    let large = "async payload".repeat(256);
+    cache.async_cache_set_ref(&1, &large).await.unwrap();
+    assert!(
+        raw_get(&cache, "1")
+            .unwrap()
+            .starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    );
+    assert_eq!(
+        cache
+            .async_cache_set(1, large.clone())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&large)
+    );
+    assert_eq!(
+        cache.async_cache_get(&1).await.unwrap().as_ref(),
+        Some(&large)
+    );
+    assert_eq!(cache.async_scan_stats().await.unwrap().undecodable, 0);
+    assert_eq!(cache.async_remove_expired_entries().await.unwrap(), 0);
+    assert_eq!(
+        cache.async_cache_remove(&1).await.unwrap().as_ref(),
+        Some(&large)
+    );
+    cache.async_cache_set(1, large.clone()).await.unwrap();
+    assert_eq!(
+        cache.async_cache_remove_entry(&1).await.unwrap(),
+        Some((1, large))
+    );
+}
+
+#[cfg(all(feature = "compression_zstd", feature = "async"))]
+#[tokio::test]
+async fn compression_allocation_failure_preserves_redb_entries() {
+    use crate::ConcurrentCachedAsync;
+
+    let dir = temp_dir!();
+    let mut cache = RedbCache::<u32, String>::builder("compression-allocation")
+        .disk_dir(dir.path())
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .build()
+        .unwrap();
+    let value = "repeated payload".repeat(256);
+    for key in 1..=4 {
+        cache.cache_set(key, value.clone()).unwrap();
+    }
+
+    cache.compression.fail_decode_allocation = true;
+    assert!(cache.cache_get(&1).unwrap_err().is_deserialization());
+    assert!(
+        cache
+            .async_cache_get(&2)
+            .await
+            .unwrap_err()
+            .is_deserialization()
+    );
+    assert!(cache.scan_stats().unwrap_err().is_deserialization());
+    assert!(
+        cache
+            .async_scan_stats()
+            .await
+            .unwrap_err()
+            .is_deserialization()
+    );
+    assert!(
+        cache
+            .remove_expired_entries()
+            .unwrap_err()
+            .is_deserialization()
+    );
+    assert!(
+        cache
+            .async_remove_expired_entries()
+            .await
+            .unwrap_err()
+            .is_deserialization()
+    );
+    cache.compression.fail_decode_allocation = false;
+
+    assert_eq!(cache.scan_stats().unwrap().entries, 4);
+    for key in 1..=4 {
+        assert_eq!(cache.cache_get(&key).unwrap().as_ref(), Some(&value));
+    }
+}

@@ -86,5 +86,5 @@ the item stays here for history.
 | [0054](0054-stale-pr-issue-triage.md) | Triage of stale PRs and issues | Partly implemented |
 | [0055](0055-shard-hasher-q-over-borrowed-key-routing.md) | `ShardHasher<Q>` bounds replace `BorrowedKeyRouting` | Implemented |
 | [0056](0056-redb-scan-stats.md) | `RedbCache::scan_stats`: an explicit full-table scan | Implemented |
-| [0057](0057-io-store-value-compression.md) | Opt-in value compression for the IO stores | Not implemented |
+| [0057](0057-io-store-value-compression.md) | Opt-in value compression for the IO stores | Implemented |
 | [0058](0058-adaptive-replacement-cache.md) | Adaptive replacement cache (ARC) store | Not implemented (declined) |

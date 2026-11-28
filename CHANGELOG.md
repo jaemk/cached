@@ -11,6 +11,16 @@
   argument out of the default cache key while still passing it to the body and companions, e.g.
   `fn fetch(id: u64, #[cached_skip] client: &Client)`. A compile error with `key`/`convert`, on
   `self`, and on `#[once]` (#188).
+- Opt-in zstd value compression for synchronous and async Redis and for redb. Enable
+  `compression_zstd` and configure the store builder to compress new writes. Upgrade all
+  readers of a shared Redis cache before enabling compression. Keep zstd support until existing
+  frames are gone when rolling back (#222). Synchronous Redis
+  operations compress and decompress values outside the pooled connection checkout. Encoder
+  context and output allocation failures are reported as serialization errors. Decoding
+  reports frames above the reader's limit and buffer allocation failures as deserialization
+  errors and preserves entries on reads and sweeps. Redb lookups reuse the decoded value when
+  a refresh or expiry check finds the same stored bytes. CI covers standalone redb and
+  Smol-only Redis compression builds.
 
 ### Changed
 

@@ -389,6 +389,7 @@ Invoke these via `/skill-name` in Claude Code or by name in agent prompts:
 | `redis_connection_manager` | Redis connection-manager support (no TLS; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
 | `redis_async_cache` | Redis client-side caching over RESP3 for async caches (TLS-agnostic; add `redis_tokio_native_tls` or `redis_tokio_rustls` for TLS) |
 | `redb_store` | Disk-backed cache via `redb` |
+| `compression_zstd` | Opt-in zstd value compression for Redis and redb |
 
 ---
 

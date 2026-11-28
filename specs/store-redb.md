@@ -7,14 +7,17 @@ cache name positionally; the on-disk directory (`disk_dir`) is optional with a u
 
 ## REDB-1
 
-Entries persist to a redb database file on disk. Values are serialized; reads that fail to
-deserialize are treated as a miss (self-healing default), consistent with
-[design/0029-self-healing-deserialization-default.md](design/0029-self-healing-deserialization-default.md).
+Entries persist to a redb database file on disk. Lookups self-heal corrupt or
+schema-incompatible entries by default. Strict lookups return a deserialization error and
+preserve them. See [design 0029](design/0029-self-healing-deserialization-default.md) and the
+compression exceptions in [REDB-9](#redb-9).
 
 ## REDB-2
 
 Refresh-on-hit re-validates inside the write transaction, per
 [design/0033-redb-revalidate-in-write-txn.md](design/0033-redb-revalidate-in-write-txn.md).
+Lookup reuses the decoded value when the stored bytes match the read snapshot and
+decodes newly written bytes when they differ.
 Amortizing the refresh-on-hit write-txn cost is an open direction
 ([design/0021-redb-refresh-on-hit-cost.md](design/0021-redb-refresh-on-hit-cost.md)).
 
@@ -58,8 +61,8 @@ inserting or removing a field reinterprets every stored entry and must bump `DIS
 transaction and returns a `RedbCacheStats`: `entries` (every stored row), `expired` (decodable
 entries whose age is >= the current TTL, 0 with no TTL), `undecodable`, and the `oldest`/`newest`
 `created_at`. It never writes: no self-heal, no eviction, no refresh, and undecodable entries are
-counted rather than surfaced as errors in both deserialization modes. `cache_size()` stays
-`Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).
+counted in both deserialization modes. Decompression limits and allocation errors are handled
+as specified in [REDB-9](#redb-9). `cache_size()` stays `Ok(None)`. See [design/0056-redb-scan-stats.md](design/0056-redb-scan-stats.md).
 
 ## REDB-8
 
@@ -71,3 +74,15 @@ encoding does not apply, and no `DISK_FILE_VERSION` bump is needed.
 API: `RedbCacheError`/`RedbCacheBuildError` box their sources (REDB-5), so the redb major version
 is not part of cached's semver surface. redb 5 changed its file-locking protocol, so two processes
 on different redb majors must not open the same cache file at the same time.
+
+## REDB-9
+
+With `compression_zstd`, `RedbCacheBuilder::compression` can opt into zstd writes.
+Sync and async operations, including refresh, expiry sweeps, and statistics scans, read
+mixed raw and compressed entries under the existing file layout. Reads, expiry sweeps, and
+stats scans return a deserialization error for a frame above the reader's limit or a decompression
+allocation failure in either mode. The entry is preserved and a failed sweep leaves its
+transaction uncommitted. Disabling compressed writes on reopen still permits reading old frames
+if the feature is compiled in. Refresh-on-hit re-encodes the value using the current builder's
+compression settings. Compressor context and output buffer allocation failures return serialization
+errors before writing the value. See [design 0057](design/0057-io-store-value-compression.md).

@@ -1,3 +1,6 @@
+#[cfg(feature = "compression_zstd")]
+use crate::stores::Compression;
+use crate::stores::io_value_compression::{IoValueCompression, should_preserve_on_decode_error};
 use crate::time::Duration;
 use crate::{
     ConcurrentCacheBase, ConcurrentCacheRefreshOnHit, ConcurrentCacheTtl, ConcurrentCached,
@@ -36,6 +39,7 @@ pub struct RedisCacheBuilder<K, V> {
     pool_idle_timeout: Option<Duration>,
     pool_connection_timeout: Option<Duration>,
     strict_deserialization: bool,
+    compression: IoValueCompression,
     // fn-pointer phantom — see the rationale on `RedisCache::_phantom`.
     _phantom: PhantomData<fn() -> (K, V)>,
 }
@@ -426,6 +430,7 @@ where
             pool_idle_timeout: None,
             pool_connection_timeout: None,
             strict_deserialization: false,
+            compression: IoValueCompression::default(),
             _phantom: PhantomData,
         }
     }
@@ -562,8 +567,10 @@ where
     /// function to recompute and overwrite.
     ///
     /// When `true`, a deserialization failure on the read path returns
-    /// `Err(RedisCacheError::CacheDeserialization { .. })` immediately, matching
-    /// the behavior of versions prior to 3.0.
+    /// `Err(RedisCacheError::CacheDeserialization { .. })` and preserves the entry.
+    ///
+    /// Reads report decompression allocation failures and frames above the configured limit
+    /// as errors in either mode, preserving the entry.
     ///
     /// In **both** modes, the previous value displaced by `cache_set` is silently
     /// discarded when it cannot be decoded (the write itself succeeds and
@@ -572,6 +579,34 @@ where
     #[must_use]
     pub fn strict_deserialization(mut self, strict: bool) -> Self {
         self.strict_deserialization = strict;
+        self
+    }
+
+    /// Enable compression for new writes. With the `compression_zstd` feature,
+    /// reads accept compressed entries even when this setting is omitted.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.compression.set_algorithm(compression);
+        self
+    }
+
+    /// Minimum serialized size in bytes to attempt compression (default: 256).
+    /// The store keeps compressed bytes only when they are smaller.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn min_compress_size(mut self, size: usize) -> Self {
+        self.compression.set_min_compress_size(size);
+        self
+    }
+
+    /// Maximum decompressed frame size in bytes (default: 64 MiB).
+    /// Larger values are written raw, and this limit does not apply to raw reads.
+    /// A compressed entry above this reader's limit returns an error on lookup and stays cached.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn max_decompressed_size(mut self, size: usize) -> Self {
+        self.compression.set_max_decompressed_size(size);
         self
     }
 
@@ -709,6 +744,7 @@ where
             namespace: self.namespace,
             prefix: self.prefix.unwrap_or_default(),
             strict_deserialization: self.strict_deserialization,
+            compression: self.compression,
             _phantom: PhantomData,
         })
     }
@@ -754,6 +790,7 @@ pub struct RedisCache<K, V> {
     connection_string: ConnectionString,
     pool: r2d2::Pool<redis::Client>,
     strict_deserialization: bool,
+    compression: IoValueCompression,
     // `RedisCache` owns no live `K`/`V` — values are serialized to Redis and
     // `K`/`V` appear only in method signatures. Use a fn-pointer phantom so the
     // type is unconditionally `Send + Sync` regardless of whether `K`/`V` are
@@ -789,6 +826,7 @@ impl<K, V> Clone for RedisCache<K, V> {
             connection_string: self.connection_string.clone(),
             pool: self.pool.clone(),
             strict_deserialization: self.strict_deserialization,
+            compression: self.compression,
             _phantom: PhantomData,
         }
     }
@@ -922,20 +960,28 @@ impl RedisCacheError {
             source: Box::new(e),
         }
     }
-    pub(crate) fn serialization(e: rmp_serde::encode::Error) -> Self {
+    pub(crate) fn serialization(e: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::CacheSerialization {
             source: Box::new(e),
         }
     }
-    pub(crate) fn deserialization(e: rmp_serde::decode::Error, cached_value: Vec<u8>) -> Self {
+    pub(crate) fn deserialization(
+        e: impl std::error::Error + Send + Sync + 'static,
+        cached_value: Vec<u8>,
+    ) -> Self {
         Self::CacheDeserialization {
             source: Box::new(e),
             cached_value,
         }
     }
+    fn should_preserve_on_decode_error(&self) -> bool {
+        matches!(self, Self::CacheDeserialization { source, .. }
+            if should_preserve_on_decode_error(source.as_ref()))
+    }
+
     /// Returns `true` when this error is a deserialization failure.
     ///
-    /// Stable classifier for callers that need to distinguish corrupt-value errors
+    /// Stable classifier for callers that need to distinguish value-decoding errors
     /// from network/pool errors without downcast-inspecting the opaque `source`.
     #[must_use]
     pub fn is_deserialization(&self) -> bool {
@@ -994,25 +1040,36 @@ impl<'a, V> CachedRedisValueRef<'a, V> {
     }
 }
 
+fn serialize_cached_redis_value(
+    value: &impl serde::Serialize,
+    compression: IoValueCompression,
+) -> Result<Vec<u8>, RedisCacheError> {
+    let bytes = rmp_serde::to_vec(value).map_err(RedisCacheError::serialization)?;
+    compression
+        .encode(bytes)
+        .map_err(RedisCacheError::serialization)
+}
+
 /// Deserialize a stored [`CachedRedisValue`] from its raw Redis bytes, reading
 /// both the current MessagePack format and the pre-3.0 JSON format.
 ///
 /// Single source of truth for every value-deserialize site (sync and async) so
 /// the backward-read behavior cannot drift between them.
 ///
-/// Logic:
-/// 1. Try MessagePack (`rmp_serde`) — the format written since 3.0.
-/// 2. On failure, attempt the legacy pre-3.0 JSON encoding: parse the bytes as a
-///    generic JSON value and, only if it carries a `version` key (the shape this
-///    store always wrote), deserialize it into a [`CachedRedisValue`]. This
-///    transparently reads entries written by cached 2.x.
-/// 3. If neither path succeeds, return
-///    [`RedisCacheError::CacheDeserialization`] preserving the *original*
-///    MessagePack error as `source` and the raw bytes in `cached_value`.
+/// A zstd frame is unpacked before MessagePack decoding when compression support
+/// is compiled in. A frame error preserves the original bytes for the store's error
+/// policy. If MessagePack fails, attempt the legacy pre-3.0 JSON encoding: parse the bytes as a
+/// generic JSON value and require the known version before deserializing it into
+/// a [`CachedRedisValue`]. If both formats fail, preserve the MessagePack error
+/// as the source of [`RedisCacheError::CacheDeserialization`].
 fn deserialize_cached_redis_value<V: serde::de::DeserializeOwned>(
     bytes: &[u8],
+    compression: IoValueCompression,
 ) -> Result<CachedRedisValue<V>, RedisCacheError> {
-    match rmp_serde::from_slice::<CachedRedisValue<V>>(bytes) {
+    let decoded = compression
+        .decode(bytes)
+        .map_err(|e| RedisCacheError::deserialization(e, bytes.to_vec()))?;
+    match rmp_serde::from_slice::<CachedRedisValue<V>>(&decoded) {
         Ok(v) => Ok(v),
         Err(msgpack_err) => {
             // Fall back to the pre-3.0 JSON format. Only treat the bytes as the
@@ -1091,7 +1148,6 @@ where
     V: Serialize + DeserializeOwned,
 {
     fn cache_get(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
         let key_str = self.generate_key(key);
 
@@ -1105,24 +1161,27 @@ where
             }
         }
         // ugh: https://github.com/mitsuhiko/redis-rs/pull/388#issuecomment-910919137
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        let res: (Option<Vec<u8>>,) = {
+            let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+            pipe.query(&mut *conn).map_err(RedisCacheError::redis)?
+        };
         match res.0 {
             None => Ok(None),
-            Some(bytes) => match deserialize_cached_redis_value(&bytes) {
+            Some(bytes) => match deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
-                Err(e) if !self.strict_deserialization => {
+                Err(e) if !self.strict_deserialization && !e.should_preserve_on_decode_error() => {
                     // Self-heal: the stored bytes are corrupt or incompatible with V.
                     // Delete the entry so the caller can recompute on the next call.
                     // Use a conditional Lua delete (C6) that only removes the key
                     // if its current value still equals the corrupt `bytes` we
                     // read; a concurrent valid `SET`/`PSETEX` in between is left
                     // untouched instead of being clobbered by an unconditional DEL.
+                    let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
                     let _: i64 = SELF_HEAL_CONDITIONAL_DEL
                         .key(&key_str)
                         .arg(&bytes)
                         .invoke(&mut *conn)
                         .map_err(RedisCacheError::redis)?;
-                    let _ = e;
                     Ok(None)
                 }
                 Err(e) => Err(e),
@@ -1131,14 +1190,13 @@ where
     }
 
     fn cache_set(&self, key: K, val: V) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+        let val = CachedRedisValue::new(val);
+        let serialized = serialize_cached_redis_value(&val, self.compression)?;
         let mut pipe = redis::pipe();
         let key_str = self.generate_key(&key);
 
         let ttl = *self.ttl.lock();
 
-        let val = CachedRedisValue::new(val);
-        let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
         pipe.get(&key_str);
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
@@ -1148,11 +1206,14 @@ where
                 .ignore();
         }
 
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        let res: (Option<Vec<u8>>,) = {
+            let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+            pipe.query(&mut *conn).map_err(RedisCacheError::redis)?
+        };
         // REDIS-10: if the displaced previous value fails to decode, the new write
         // succeeded — return Ok(None) (garbage old value) rather than surfacing an error.
         Ok(res.0.and_then(|bytes| {
-            deserialize_cached_redis_value::<V>(&bytes)
+            deserialize_cached_redis_value::<V>(&bytes, self.compression)
                 .ok()
                 .map(|v| v.value)
         }))
@@ -1171,16 +1232,18 @@ where
     /// - **Strict (`strict_deserialization(true)`):** the corrupt entry is still removed
     ///   and the method returns `Err(RedisCacheError::CacheDeserialization { .. })`.
     fn cache_remove(&self, key: &K) -> Result<Option<V>, RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
         let mut pipe = redis::pipe();
         let key_str = self.generate_key(key);
 
         pipe.get(&key_str);
         pipe.del::<String>(key_str).ignore();
-        let res: (Option<Vec<u8>>,) = pipe.query(&mut *conn).map_err(RedisCacheError::redis)?;
+        let res: (Option<Vec<u8>>,) = {
+            let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
+            pipe.query(&mut *conn).map_err(RedisCacheError::redis)?
+        };
         match res.0 {
             None => Ok(None),
-            Some(bytes) => match deserialize_cached_redis_value(&bytes) {
+            Some(bytes) => match deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
                 Err(_) if !self.strict_deserialization => Ok(None),
                 Err(e) => Err(e),
@@ -1291,13 +1354,11 @@ where
     /// not read back the previous value, so the write is a single round-trip
     /// (no GET). Call [`ConcurrentCached::cache_get`] first if you need the prior value.
     fn cache_set_ref(&self, key: &K, val: &V) -> Result<(), RedisCacheError> {
-        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
-        let key_str = self.generate_key(key);
-
-        let ttl = *self.ttl.lock();
-
         let val = CachedRedisValueRef::new(val);
-        let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
+        let serialized = serialize_cached_redis_value(&val, self.compression)?;
+        let key_str = self.generate_key(key);
+        let ttl = *self.ttl.lock();
+        let mut conn = self.pool.get().map_err(RedisCacheError::pool_err)?;
 
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).

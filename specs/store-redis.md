@@ -8,9 +8,10 @@ shared `&self` and are builder-only (required connection fields).
 
 Values are serialized with MessagePack; see
 [design/0011-redis-serialization-codec.md](design/0011-redis-serialization-codec.md) (a pluggable
-codec remains a research direction). Deserialization is self-healing by default: an entry that
-fails to decode is treated as a miss rather than an error, per
-[design/0029-self-healing-deserialization-default.md](design/0029-self-healing-deserialization-default.md).
+codec remains a research direction). Lookups self-heal corrupt or schema-incompatible entries
+by default. Strict lookups return a deserialization error and preserve them. See
+[design 0029](design/0029-self-healing-deserialization-default.md) and the compression
+exceptions in [REDIS-8](#redis-8).
 Backward-read compatibility is version-gated per
 [design/0031-redis-backward-read-version-gate.md](design/0031-redis-backward-read-version-gate.md).
 
@@ -70,3 +71,17 @@ through `rmp_serde::to_vec`, never `to_vec_named`, so an entry is a positional 2
 `value` then `version` and the field names are not on the wire. Field order is part of the frozen
 3.x layout: reordering, inserting or removing a field reinterprets every stored entry and must
 bump the embedded version. `tests/frozen_format_golden.rs` pins the serialized bytes.
+
+## REDIS-8
+
+With `compression_zstd`, `RedisCacheBuilder` and `AsyncRedisCacheBuilder` can opt into zstd
+writes using `.compression(Compression::Zstd { level })`. The default is uncompressed
+writes. Both stores recognize zstd frames independently of the write setting and retain
+raw MessagePack and legacy JSON reads. The decompressed-size limit applies only to frames.
+Synchronous operations prepare new values and decode returned values outside the pooled
+connection checkout. A read that needs to self-heal checks out a connection for the conditional
+delete. On reads, a frame above the reader's limit or a decompression allocation failure
+returns a deserialization error and preserves the entry in either mode. Compressor context
+and output buffer allocation failures return serialization errors before writing the value.
+Upgrade every reader with the feature before enabling compressed writes on a shared Redis
+namespace. See [design 0057](design/0057-io-store-value-compression.md).

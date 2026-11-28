@@ -1,3 +1,6 @@
+#[cfg(feature = "compression_zstd")]
+use crate::stores::Compression;
+use crate::stores::io_value_compression::IoValueCompression;
 use crate::time::Duration;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,6 +105,7 @@ pub struct AsyncRedisCacheBuilder<K, V> {
     prefix: Option<String>,
     connection_string: Option<String>,
     strict_deserialization: bool,
+    compression: IoValueCompression,
     #[cfg(feature = "redis_async_cache")]
     client_side_caching: bool,
     // Per-cache opt-in to the auto-reconnecting connection manager. Only
@@ -145,6 +149,7 @@ where
             prefix: None,
             connection_string: None,
             strict_deserialization: false,
+            compression: IoValueCompression::default(),
             #[cfg(feature = "redis_async_cache")]
             client_side_caching: false,
             #[cfg(feature = "redis_connection_manager")]
@@ -276,7 +281,10 @@ where
     /// When `false` (the default), a corrupt or undecodable cached value on the
     /// `async_cache_get` path is self-healed: the entry is deleted and the call
     /// returns `Ok(None)`. When `true`, a deserialization failure on the read
-    /// path returns `Err(RedisCacheError::CacheDeserialization { .. })`.
+    /// path returns `Err(RedisCacheError::CacheDeserialization { .. })` and preserves the entry.
+    ///
+    /// Reads report decompression allocation failures and frames above the configured limit
+    /// as errors in either mode, preserving the entry.
     ///
     /// In **both** modes, the previous value displaced by `async_cache_set` is
     /// silently discarded when it cannot be decoded (the write itself succeeds
@@ -285,6 +293,34 @@ where
     #[must_use]
     pub fn strict_deserialization(mut self, strict: bool) -> Self {
         self.strict_deserialization = strict;
+        self
+    }
+
+    /// Enable compression for new writes. With the `compression_zstd` feature,
+    /// reads accept compressed entries even when this setting is omitted.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.compression.set_algorithm(compression);
+        self
+    }
+
+    /// Minimum serialized size in bytes to attempt compression (default: 256).
+    /// The store keeps compressed bytes only when they are smaller.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn min_compress_size(mut self, size: usize) -> Self {
+        self.compression.set_min_compress_size(size);
+        self
+    }
+
+    /// Maximum decompressed frame size in bytes (default: 64 MiB).
+    /// Larger values are written raw, and this limit does not apply to raw reads.
+    /// A compressed entry above this reader's limit returns an error on lookup and stays cached.
+    #[cfg(feature = "compression_zstd")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression_zstd")))]
+    pub fn max_decompressed_size(mut self, size: usize) -> Self {
+        self.compression.set_max_decompressed_size(size);
         self
     }
 
@@ -555,6 +591,7 @@ where
             namespace: self.namespace,
             prefix: self.prefix.unwrap_or_default(),
             strict_deserialization: self.strict_deserialization,
+            compression: self.compression,
             _phantom: PhantomData,
         })
     }
@@ -602,6 +639,7 @@ pub struct AsyncRedisCache<K, V> {
     // `connection_manager` flag; defaults to `Multiplexed` (2.x behavior).
     connection: AsyncRedisConnection,
     strict_deserialization: bool,
+    compression: IoValueCompression,
     // `AsyncRedisCache` owns no live `K`/`V` — see the rationale on
     // `RedisCache::_phantom`. Same fn-pointer phantom so a `Send`-but-`!Sync`
     // `V` (e.g. one containing a `Cell`) is usable, and the macro-emitted
@@ -635,6 +673,7 @@ impl<K, V> Clone for AsyncRedisCache<K, V> {
             connection_string: self.connection_string.clone(),
             connection: self.connection.clone(),
             strict_deserialization: self.strict_deserialization,
+            compression: self.compression,
             _phantom: PhantomData,
         }
     }
@@ -767,9 +806,9 @@ where
             .map_err(RedisCacheError::redis)?;
         match res.0 {
             None => Ok(None),
-            Some(bytes) => match super::deserialize_cached_redis_value(&bytes) {
+            Some(bytes) => match super::deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
-                Err(e) if !self.strict_deserialization => {
+                Err(e) if !self.strict_deserialization && !e.should_preserve_on_decode_error() => {
                     // Conditional self-heal delete (C6): only remove the key
                     // if its current value still equals the corrupt `bytes`
                     // we read, so a concurrent valid write is never clobbered.
@@ -779,7 +818,6 @@ where
                         .invoke_async(&mut conn)
                         .await
                         .map_err(RedisCacheError::redis)?;
-                    let _ = e;
                     Ok(None)
                 }
                 Err(e) => Err(e),
@@ -796,7 +834,7 @@ where
         let ttl = *self.ttl.lock();
 
         let val = CachedRedisValue::new(val);
-        let serialized = rmp_serde::to_vec(&val).map_err(RedisCacheError::serialization)?;
+        let serialized = super::serialize_cached_redis_value(&val, self.compression)?;
         pipe.get(&key_str);
         if ttl.is_zero() {
             // Disabled TTL: write the key without expiry (plain `SET`).
@@ -812,7 +850,7 @@ where
             .map_err(RedisCacheError::redis)?;
         // REDIS-10: if the displaced previous value fails to decode, return Ok(None).
         Ok(res.0.and_then(|bytes| {
-            super::deserialize_cached_redis_value::<V>(&bytes)
+            super::deserialize_cached_redis_value::<V>(&bytes, self.compression)
                 .ok()
                 .map(|v| v.value)
         }))
@@ -843,7 +881,7 @@ where
             .map_err(RedisCacheError::redis)?;
         match res.0 {
             None => Ok(None),
-            Some(bytes) => match super::deserialize_cached_redis_value(&bytes) {
+            Some(bytes) => match super::deserialize_cached_redis_value(&bytes, self.compression) {
                 Ok(v) => Ok(Some(v.value)),
                 Err(_) if !self.strict_deserialization => Ok(None),
                 Err(e) => Err(e),
@@ -959,8 +997,8 @@ where
     /// Does not read back the previous value, so the write is a single
     /// round-trip (no GET).
     ///
-    /// Serialization happens eagerly (before the returned future is awaited) so
-    /// the borrowed `&V` is never held across the `.await`, keeping the `V: Send`
+    /// Serialization and compression happen when this method constructs its future.
+    /// The future owns the encoded value, keeping the `V: Send`
     /// (not `Sync`) bound consistent with `async_cache_set`.
     fn async_cache_set_ref(
         &self,
@@ -978,8 +1016,8 @@ where
         } else {
             super::ttl_millis(ttl).map(Some)
         };
-        let serialized = rmp_serde::to_vec(&CachedRedisValueRef::new(val))
-            .map_err(RedisCacheError::serialization);
+        let serialized =
+            super::serialize_cached_redis_value(&CachedRedisValueRef::new(val), self.compression);
         async move {
             let serialized: Vec<u8> = serialized?;
             let ttl_ms = ttl_ms?;
@@ -1026,6 +1064,117 @@ mod tests {
     /// prefixes carry a separator, which the key layout escapes.
     fn raw_key(prefix: &str, key: &str) -> String {
         super::super::generate_redis_key(super::super::DEFAULT_NAMESPACE, prefix, key)
+    }
+
+    #[cfg(feature = "compression_zstd")]
+    #[tokio::test]
+    async fn compression_allocation_failure_preserves_async_redis_entry() {
+        let mut cache = AsyncRedisCache::<u32, String>::builder(format!(
+            "{}:async-compression-allocation",
+            now_millis()
+        ))
+        .compression(Compression::Zstd { level: 3 })
+        .ttl_secs(60)
+        .build()
+        .await
+        .unwrap();
+        let value = "repeated payload".repeat(256);
+        cache.async_cache_set(1, value.clone()).await.unwrap();
+
+        cache.compression.fail_decode_allocation = true;
+        assert!(
+            cache
+                .async_cache_get(&1)
+                .await
+                .unwrap_err()
+                .is_deserialization()
+        );
+        cache.compression.fail_decode_allocation = false;
+
+        assert_eq!(cache.async_cache_remove(&1).await.unwrap(), Some(value));
+    }
+
+    /// REDIS-8: async owned and borrowed writes share a format with synchronous Redis.
+    #[cfg(feature = "compression_zstd")]
+    #[tokio::test]
+    async fn compression_async_redis_round_trip() {
+        use crate::{ConcurrentCached, RedisCache, SerializeCachedAsync};
+
+        let url = "redis://127.0.0.1:6399";
+        let prefix = format!("{}:async-compression", now_millis());
+        let sync = RedisCache::<u32, String>::builder(&prefix)
+            .connection_string(url)
+            .build()
+            .unwrap();
+        let cache = AsyncRedisCache::<u32, String>::builder(&prefix)
+            .connection_string(url)
+            .compression(Compression::Zstd { level: 3 })
+            .min_compress_size(32)
+            .max_decompressed_size(8192)
+            .build()
+            .await
+            .unwrap()
+            .clone();
+        let large = "async payload".repeat(256);
+        let small = String::from("small");
+
+        sync.cache_set(1, small.clone()).unwrap();
+        assert_eq!(
+            cache.async_cache_get(&1).await.unwrap(),
+            Some(small.clone())
+        );
+        assert_eq!(
+            cache.async_cache_set(1, large.clone()).await.unwrap(),
+            Some(small)
+        );
+        assert_eq!(sync.cache_get(&1).unwrap().as_ref(), Some(&large));
+        let mut conn = redis::Client::open(url).unwrap().get_connection().unwrap();
+        let frame: Vec<u8> = redis::cmd("GET")
+            .arg(raw_key(&prefix, "1"))
+            .query(&mut conn)
+            .unwrap();
+        assert!(frame.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
+        assert_eq!(
+            cache
+                .async_cache_set(1, large.clone())
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&large)
+        );
+        cache.async_cache_set_ref(&2, &large).await.unwrap();
+        assert_eq!(
+            cache.async_cache_remove(&2).await.unwrap().as_ref(),
+            Some(&large)
+        );
+        assert_eq!(
+            cache.async_cache_remove_entry(&1).await.unwrap(),
+            Some((1, large))
+        );
+
+        let bad = b"\x28\xb5\x2f\xfd";
+        let raw = raw_key(&prefix, "3");
+        let _: () = redis::cmd("SET")
+            .arg(&raw)
+            .arg(bad.as_slice())
+            .query(&mut conn)
+            .unwrap();
+        let strict = AsyncRedisCache::<u32, String>::builder(&prefix)
+            .connection_string(url)
+            .strict_deserialization(true)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            strict
+                .async_cache_get(&3)
+                .await
+                .unwrap_err()
+                .is_deserialization()
+        );
+        assert_eq!(cache.async_cache_get(&3).await.unwrap(), None);
+        let exists: bool = redis::cmd("EXISTS").arg(&raw).query(&mut conn).unwrap();
+        assert!(!exists);
     }
 
     // No Redis server needed -- verifies the empty-prefix guard in async `build()`.

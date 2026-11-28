@@ -86,3 +86,9 @@ of every feature set. `redis_store` also pulls it through `scheduled-thread-pool
 `redis` and `r2d2`), which declares no `rust-version`, so cargo's MSRV-aware resolver selects it
 on older toolchains; that alone forced the raise before the direct dependency moved to 0.13.
 The CI MSRV job is pinned to 1.95.
+
+## FEAT-10
+
+`compression_zstd` enables opt-in zstd value compression for the Redis and redb stores.
+It is off by default and does not select either backend. See
+[design 0057](design/0057-io-store-value-compression.md).

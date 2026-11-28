@@ -497,3 +497,147 @@ fn cache_remove_entry_corrupt_strict_mode_returns_error_and_key_is_gone() {
         "key must be deleted even when strict cache_remove_entry errors"
     );
 }
+
+/// REDIS-8: both Redis formats survive enabling and disabling compressed writes.
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redis_mixed_values_and_frame_errors() {
+    use crate::SerializeCached;
+
+    let url = "redis://127.0.0.1:6399";
+    let mut conn = redis::Client::open(url).unwrap().get_connection().unwrap();
+    let prefix = format!("{}:compression", now_millis());
+    let builder = || RedisCache::<u32, String>::builder(&prefix).connection_string(url);
+    let raw = builder().build().unwrap();
+    let compressed = builder()
+        .compression(Compression::Zstd { level: 3 })
+        .min_compress_size(256)
+        .max_decompressed_size(8192)
+        .build()
+        .unwrap()
+        .clone();
+    let strict = builder()
+        .strict_deserialization(true)
+        .max_decompressed_size(512)
+        .build()
+        .unwrap();
+    let large = "repeated payload".repeat(256);
+    let small = String::from("small");
+
+    raw.cache_set(1, large.clone()).unwrap();
+    assert_eq!(compressed.cache_get(&1).unwrap().as_ref(), Some(&large));
+    compressed.cache_set_ref(&1, &large).unwrap();
+    compressed.cache_set(2, small.clone()).unwrap();
+
+    let read_bytes = |key, conn: &mut redis::Connection| -> Option<Vec<u8>> {
+        redis::cmd("GET")
+            .arg(raw_key(&prefix, key))
+            .query(conn)
+            .unwrap()
+    };
+    let frame = read_bytes("1", &mut conn).unwrap();
+    assert!(frame.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
+    assert!(frame.len() < large.len());
+    assert_eq!(read_bytes("2", &mut conn).unwrap()[0], 0x92);
+    assert_eq!(raw.cache_get(&1).unwrap().as_ref(), Some(&large));
+    assert_eq!(raw.cache_get(&2).unwrap(), Some(small.clone()));
+    assert!(matches!(
+        strict.cache_get(&1).unwrap_err(),
+        RedisCacheError::CacheDeserialization { cached_value, .. } if cached_value == frame
+    ));
+    assert_eq!(read_bytes("1", &mut conn).unwrap(), frame);
+    assert_eq!(
+        compressed.cache_set(1, large.clone()).unwrap().as_ref(),
+        Some(&large)
+    );
+    assert_eq!(raw.cache_remove_entry(&1).unwrap(), Some((1, large)));
+
+    let legacy = br#"{"value":"legacy","version":1}"#;
+    let bad = [0x28, 0xb5, 0x2f, 0xfd];
+    for (key, bytes) in [("3", legacy.as_slice()), ("4", bad.as_slice())] {
+        let _: () = redis::cmd("SET")
+            .arg(raw_key(&prefix, key))
+            .arg(bytes)
+            .query(&mut conn)
+            .unwrap();
+    }
+    assert_eq!(
+        compressed.cache_remove(&3).unwrap().as_deref(),
+        Some("legacy")
+    );
+    assert_eq!(compressed.cache_get(&4).unwrap(), None);
+    assert!(read_bytes("4", &mut conn).is_none());
+    raw.cache_clear().unwrap();
+}
+
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_redis_leaves_the_connection_idle_during_encoding_and_decoding() {
+    use crate::SerializeCached;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static POOL: RefCell<Option<r2d2::Pool<redis::Client>>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Value(String);
+
+    fn checkout() -> Option<r2d2::PooledConnection<redis::Client>> {
+        POOL.with(|pool| pool.borrow().as_ref().unwrap().try_get())
+    }
+
+    impl serde::Serialize for Value {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let _lease = checkout().ok_or_else(|| {
+                serde::ser::Error::custom("serialization held the only Redis connection")
+            })?;
+            serializer.serialize_str(&self.0)
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for Value {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let _lease = checkout().ok_or_else(|| {
+                serde::de::Error::custom("deserialization held the only Redis connection")
+            })?;
+            String::deserialize(deserializer).map(Self)
+        }
+    }
+
+    let cache = RedisCache::<u32, Value>::builder(format!("{}:compression-pool", now_millis()))
+        .compression(Compression::Zstd { level: 3 })
+        .connection_pool_max_size(1)
+        .strict_deserialization(true)
+        .ttl_secs(60)
+        .build()
+        .unwrap();
+    POOL.with(|pool| pool.replace(Some(cache.pool.clone())));
+    let value = || Value("content".repeat(512));
+    assert!(cache.cache_set(1, value()).unwrap().is_none());
+    cache.cache_set_ref(&2, &value()).unwrap();
+    assert_eq!(cache.cache_get(&1).unwrap(), Some(value()));
+    assert_eq!(cache.cache_set(1, value()).unwrap(), Some(value()));
+    assert_eq!(cache.cache_remove(&1).unwrap(), Some(value()));
+    assert_eq!(cache.cache_remove(&2).unwrap(), Some(value()));
+    POOL.with(|pool| pool.take());
+}
+
+#[cfg(feature = "compression_zstd")]
+#[test]
+fn compression_allocation_failure_preserves_redis_entry() {
+    let mut cache =
+        RedisCache::<u32, String>::builder(format!("{}:compression-allocation", now_millis()))
+            .compression(Compression::Zstd { level: 3 })
+            .ttl_secs(60)
+            .build()
+            .unwrap();
+    let value = "repeated payload".repeat(256);
+    cache.cache_set(1, value.clone()).unwrap();
+
+    cache.compression.fail_decode_allocation = true;
+    assert!(cache.cache_get(&1).unwrap_err().is_deserialization());
+    cache.compression.fail_decode_allocation = false;
+
+    assert_eq!(cache.cache_remove(&1).unwrap(), Some(value));
+}
