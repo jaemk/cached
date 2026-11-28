@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [4.2.0 / cached_proc_macro 3.1.0 / cached_proc_macro_types 3.1.0]
+
+See the [4.1.1 to 4.2.0 migration guide](docs/migrations/4.1.1-to-4.2.0.md) for the
+compression rollout and the Rust and redb upgrade requirements.
+
 ### Added
 
 - CI runs the build workflow (MSRV check, test matrix, 32-bit, nightly jobs) weekly as well as on
